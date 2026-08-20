@@ -984,62 +984,163 @@ If Codex does not map cleanly to an existing RAH boundary, document the mismatch
 
 ---
 
-## Task 020 — Implement `rah-runtime-codex` adapter skeleton
+## Task 020 — Establish the Codex app-server process boundary
 
 ### Goal
 
-Create compilation-level adapter structure only after Task 019.
+Implement the private process and protocol foundation for `rah-runtime-codex` in
+accordance with ADR-0005 and `docs/CODEX_INTEGRATION_SPIKE.md`.
 
-Only this crate may import Codex crates.
-
-Create translation modules such as:
+The adapter must use:
 
 ```text
-request.rs
-events.rs
-tools.rs
+version-pinned codex executable
+ -> codex app-server subprocess
+ -> stdio JSON-RPC
+ -> private protocol translation
+ -> RAH-owned interfaces
+```
+
+Create narrowly scoped private modules such as:
+
+```text
 errors.rs
+process.rs
+protocol.rs
+transport.rs
 runtime.rs
 ```
 
-No Codex type may cross the crate's public boundary.
+Required behavior:
+
+- own the app-server child process, stdin writer, stdout reader, stderr capture,
+  request correlation, shutdown, and abnormal-exit handling;
+- perform the `initialize` request and `initialized` notification handshake;
+- verify the Codex executable reports the exact supported version before starting
+  a session;
+- verify the installed app-server schema is compatible with the captured schema
+  contract for the required v0.1 methods and payloads;
+- expose typed adapter errors for executable discovery, version mismatch, schema
+  mismatch, process startup/exit, malformed framing, JSON-RPC errors, and protocol
+  violations;
+- provide a private transport seam that deterministic tests can replace with a
+  fake subprocess transport.
+
+The version and schema checks must not require network access. Captured JSON and
+schema fixtures must identify the Codex version from which they were generated.
+
+### Hard constraints
+
+- Do not add dependencies on `codex-core`, `codex-protocol`,
+  `codex-app-server`, or any other Codex Rust crate.
+- Do not vendor Codex source or generated Rust implementation code.
+- All app-server DTOs, JSON-RPC identifiers, child-process types, and Codex thread
+  identifiers remain private to `rah-runtime-codex`.
+- No Codex type may cross the crate's public boundary.
+- Do not implement `ModelBackend` for `CodexRuntime`.
+- Do not implement Codex-owned shell, file-change, or MCP execution.
+- Do not accept approval requests automatically.
 
 ---
 
-## Task 021 — Map Codex events to `AgentEvent`
+## Task 021 — Implement the restricted `CodexRuntime` lifecycle
 
 ### Goal
 
-Translate Codex runtime events into stable RAH events.
+Implement the ADR-0005 restricted `AgentRuntime` behavior over the private
+app-server transport created in Task 020.
 
-Unknown/new Codex events must not crash the adapter.
+The v0.1 lifecycle is limited to:
 
-Choose one explicit behavior:
+```text
+initialize / initialized
+thread/start
+turn/start
+thread/resume
+agent-message streaming
+turn completion
+turn/interrupt
+```
 
-- map to a neutral metadata event if available; or
-- ignore with tracing; or
-- return a defined adapter error when semantically required.
+Required behavior:
 
-Document the choice.
+- `AgentRuntime::start` creates a Codex thread with `thread/start`, starts its
+  initial turn with `turn/start`, and translates the accepted RAH input without
+  exposing Codex request types;
+- `AgentRuntime::resume` resolves the existing private ID mapping and issues
+  `thread/resume`; it must not invent new input or silently start a new turn;
+- streamed `item/agentMessage/delta` notifications map to stable RAH model/output
+  events using adapter-owned correlation identifiers;
+- successful, interrupted, and failed `turn/completed` notifications map to the
+  appropriate terminal RAH event or typed adapter error;
+- `AgentRuntime::cancel` resolves the active turn, sends `turn/interrupt`, and
+  confirms cancellation from the terminal turn notification;
+- RAH `SessionId` values remain independent from Codex thread IDs, with the
+  mapping owned privately by the adapter;
+- event streams and child-process tasks have explicit lifecycle ownership and do
+  not detach when handles are dropped;
+- unknown additive notifications are ignored with tracing unless ignoring them
+  would lose lifecycle, request-correlation, or security semantics, in which case
+  the adapter returns a typed protocol error.
 
-Tests should use fixtures/mocks when possible rather than live model calls.
+### Restricted capability behavior
+
+Codex command-execution, file-change, and MCP items are unsupported unless a
+future architecture decision provides mediation through:
+
+```text
+ToolCall -> ToolRegistry -> policy -> Sandbox -> Tool -> ToolOutput
+```
+
+Post-execution Codex events must never be translated into
+`AgentEvent::ToolRequested`, `AgentEvent::ToolStarted`, or
+`AgentEvent::ToolFinished` in a way that implies RAH authorized or executed them.
+
+Interactive Codex approvals are unsupported. Approval requests must fail safely
+or receive an explicit denial through private adapter behavior; they must never be
+accepted automatically. Do not add an approval-response method to a RAH public
+trait during this task.
+
+Tests must use the fake subprocess transport and captured JSON fixtures rather
+than a live Codex process or model.
 
 ---
 
-## Task 022 — Codex conformance test
+## Task 022 — Validate the restricted Codex adapter deterministically
 
 ### Goal
 
-Run the same logical runtime conformance behavior against:
+Add deterministic adapter and runtime tests using a fake subprocess transport and
+captured JSON fixtures from the pinned Codex app-server schema.
+
+At minimum, cover:
+
+- successful version and required-schema compatibility checks;
+- version mismatch and missing/incompatible schema elements;
+- initialize/initialized handshake ordering;
+- JSON-RPC request correlation and malformed response handling;
+- `thread/start` plus `turn/start` request flow;
+- RAH `SessionId` to Codex thread-ID mapping without ID leakage;
+- `thread/resume` for known sessions and rejection of unknown sessions;
+- ordered agent-message deltas and successful turn completion;
+- failed and interrupted turn completion;
+- `turn/interrupt` cancellation and cancellation races with completion;
+- child startup failure, unexpected exit, stderr retention, and owned shutdown;
+- unknown-notification tolerance;
+- safe rejection of Codex command, file-change, MCP, and approval requests;
+- proof that post-execution Codex tool events do not produce RAH tool lifecycle
+  events.
+
+Run the applicable `AgentRuntime` conformance behavior against:
 
 ```text
 MinimalTestRuntime
-CodexRuntime
+CodexRuntime backed by the fake app-server transport
 ```
 
-Where live model access would make the test nondeterministic, isolate translation tests and mark external integration tests separately.
-
-The default test suite must not require paid API access.
+The default test suite must not require the Codex executable, network access, paid
+API access, credentials, or a real model. Any optional live Codex smoke test must
+be separately gated and is not evidence for the deterministic contract tests.
 
 ---
 
@@ -1062,7 +1163,9 @@ The helpers must test observable RAH behavior, not implementation-private state.
 
 They must not require network access, paid APIs, or a real LLM.
 
-CodexRuntime may use adapter/fixture tests where live upstream execution cannot be deterministic.
+`CodexRuntime` conformance must use the fake subprocess transport and captured JSON
+fixtures. Capability-specific assertions must preserve its ADR-0005 restrictions;
+the helpers must not require Codex-owned tool execution or interactive approvals.
 
 ---
 
@@ -1076,9 +1179,16 @@ Verify architectural invariants mechanically where practical.
 
 At minimum:
 
-- search dependencies to ensure only `rah-runtime-codex` references Codex;
+- fail if any Cargo manifest depends on `codex-core`, `codex-protocol`,
+  `codex-app-server`, or another Codex Rust crate;
+- ensure app-server process/protocol references and captured Codex fixtures are
+  confined to `rah-runtime-codex`;
+- ensure no Codex protocol, thread-ID, process, or transport type crosses a public
+  RAH boundary;
 - ensure `rah-protocol` has no RAH dependency;
-- ensure core crates have no provider SDK dependency.
+- ensure core crates have no provider SDK dependency;
+- retain tests proving Codex post-execution tool items cannot be reported as RAH
+  authorized tool lifecycle events.
 
 Document the check in CI or a script.
 
@@ -1110,6 +1220,24 @@ CLI
 
 Verify emitted events and final exit status.
 
+Also add a deterministic restricted-Codex end-to-end test that exercises
+`CodexRuntime` through a fake app-server subprocess or fake subprocess transport.
+It must cover the real adapter sequence:
+
+```text
+version/schema compatibility
+ -> initialize / initialized
+ -> thread/start
+ -> turn/start
+ -> streamed agent-message delta
+ -> turn/completed
+```
+
+The restricted-Codex path must also exercise `thread/resume`, RAH/Codex ID mapping,
+and cancellation through `turn/interrupt`. It must not invoke Codex-owned shell,
+file-change, or MCP execution and must not require a real Codex executable, model,
+credentials, or network access.
+
 ---
 
 ## Task 025 — v0.1 documentation
@@ -1121,6 +1249,7 @@ README.md
 docs/ARCHITECTURE.md
 docs/SECURITY.md
 docs/CODEX_INTEGRATION_SPIKE.md
+docs/adr/0005-codex-app-server-runtime.md
 ```
 
 README must clearly state:
@@ -1128,9 +1257,24 @@ README must clearly state:
 - RAH is not an inference engine;
 - RAH is provider-agnostic;
 - Codex integration is optional/adapted;
+- Codex v0.1 integration uses a version-pinned `codex app-server` subprocess over
+  stdio JSON-RPC rather than Codex Rust crates;
+- executable version and app-server schema compatibility are checked before use;
+- `CodexRuntime` is an `AgentRuntime`, not a `ModelBackend`;
+- the first `CodexRuntime` supports only handshake, thread start/resume, turn
+  start/completion, agent-message streaming, cancellation, private session-ID
+  mapping, process ownership, typed failures, and unknown-notification tolerance;
+- Codex-owned shell execution, file modification, MCP execution, and interactive
+  approval acceptance are unsupported in the first restricted runtime;
 - v0.1 limitations;
 - how to run tests;
-- how to run the mock/demo path.
+- how to run the mock/demo path;
+- how deterministic Codex adapter tests use fake subprocess transport and captured
+  JSON fixtures without live model access.
+
+`docs/CODEX_INTEGRATION_SPIKE.md` remains the authoritative Task 019 research
+record. Documentation must not rewrite it to imply that direct Codex Rust crate
+reuse, selective vendoring, or using `CodexRuntime` as `ModelBackend` is supported.
 
 ---
 

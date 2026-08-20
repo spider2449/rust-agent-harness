@@ -552,7 +552,35 @@ Suggested next task:
 None.
 ```
 
-Do not automatically start the next task unless explicitly instructed.
+AUTONOMOUS EXECUTION MODE
+
+When instructed to execute the RAH v0.1 implementation plan,
+continue through sequential tasks autonomously.
+
+For each task:
+
+1. inspect
+2. implement
+3. test
+4. self-review
+5. validate architecture
+6. inspect git diff/status
+7. commit if clean
+8. continue to the next task
+
+Do not require human approval between normal tasks.
+
+STOP immediately if:
+
+- an accepted ADR must change;
+- a stable architecture boundary must change;
+- Codex types would leak outside rah-runtime-codex;
+- a provider-specific dependency would enter RAH core;
+- security must be weakened;
+- a task requires destructive Git operations;
+- required tests cannot pass without changing architecture;
+- requirements are materially contradictory;
+- implementation would exceed the authorized phase.
 
 ---
 
