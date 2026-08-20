@@ -222,7 +222,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "rah-model",
  "rah-protocol",
+ "rah-tools",
+ "serde_json",
  "thiserror",
 ]
 

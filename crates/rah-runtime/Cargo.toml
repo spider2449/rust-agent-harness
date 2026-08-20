@@ -6,5 +6,10 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
+rah-model = { path = "../rah-model" }
 rah-protocol = { path = "../rah-protocol" }
+rah-tools = { path = "../rah-tools" }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

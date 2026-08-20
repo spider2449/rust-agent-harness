@@ -7,6 +7,10 @@ use futures::Stream;
 use rah_protocol::{AgentEvent, AgentRequest, SessionId};
 use thiserror::Error;
 
+mod minimal;
+
+pub use minimal::MinimalTestRuntime;
+
 /// Error returned by an agent runtime operation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum AgentError {
