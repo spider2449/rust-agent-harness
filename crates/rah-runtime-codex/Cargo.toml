@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+async-stream.workspace = true
+futures.workspace = true
 rah-protocol = { path = "../rah-protocol" }
 rah-runtime = { path = "../rah-runtime" }
 serde.workspace = true

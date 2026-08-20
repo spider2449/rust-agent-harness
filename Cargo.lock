@@ -457,7 +457,9 @@ dependencies = [
 name = "rah-runtime-codex"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "futures",
  "rah-protocol",
  "rah-runtime",
  "serde",

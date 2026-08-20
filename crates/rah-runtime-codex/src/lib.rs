@@ -7,6 +7,9 @@ mod protocol;
 mod runtime;
 mod transport;
 
+#[cfg(test)]
+mod test_support;
+
 pub use errors::CodexAdapterError;
 pub use runtime::CodexRuntime;
 
