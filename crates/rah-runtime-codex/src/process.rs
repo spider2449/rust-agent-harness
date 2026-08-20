@@ -148,13 +148,18 @@ async fn verify_version(executable: &Path) -> Result<(), CodexAdapterError> {
             source,
         })?;
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !output.status.success() || actual != SUPPORTED_CODEX_VERSION {
-        return Err(CodexAdapterError::VersionMismatch {
+    check_version(output.status.success(), actual)
+}
+
+fn check_version(success: bool, actual: String) -> Result<(), CodexAdapterError> {
+    if success && actual == SUPPORTED_CODEX_VERSION {
+        Ok(())
+    } else {
+        Err(CodexAdapterError::VersionMismatch {
             expected: SUPPORTED_CODEX_VERSION,
             actual,
-        });
+        })
     }
-    Ok(())
 }
 
 async fn verify_schema(executable: &Path) -> Result<(), CodexAdapterError> {
@@ -188,13 +193,7 @@ fn verify_schema_files(root: &Path, contract: &SchemaContract) -> Result<(), Cod
         let value: Value = std::fs::read_to_string(&path)
             .map_err(schema_error)
             .and_then(|text| serde_json::from_str(&text).map_err(schema_error))?;
-        let required = value.get("required").and_then(Value::as_array);
-        for field in &file.required {
-            let present = required.is_some_and(|items| items.iter().any(|item| item == field));
-            if !present {
-                missing.push(format!("{} required field `{field}`", file.path));
-            }
-        }
+        collect_missing_fields(file, &value, &mut missing);
     }
     if missing.is_empty() {
         Ok(())
@@ -202,6 +201,16 @@ fn verify_schema_files(root: &Path, contract: &SchemaContract) -> Result<(), Cod
         Err(CodexAdapterError::SchemaMismatch {
             missing: missing.join(", "),
         })
+    }
+}
+
+fn collect_missing_fields(file: &SchemaFile, value: &Value, missing: &mut Vec<String>) {
+    let required = value.get("required").and_then(Value::as_array);
+    for field in &file.required {
+        let present = required.is_some_and(|items| items.iter().any(|item| item == field));
+        if !present {
+            missing.push(format!("{} required field `{field}`", file.path));
+        }
     }
 }
 
@@ -238,5 +247,54 @@ impl Drop for ProcessTransport {
         if let Some(stderr_task) = self.stderr_task.take() {
             stderr_task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use crate::{CodexAdapterError, SUPPORTED_CODEX_VERSION};
+
+    use super::{ProcessTransport, SchemaFile, check_version, collect_missing_fields};
+
+    #[test]
+    fn exact_version_is_required() {
+        assert!(check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).is_ok());
+        assert!(matches!(
+            check_version(true, "codex-cli 0.149.0".to_owned()),
+            Err(CodexAdapterError::VersionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn schema_contract_detects_missing_payload_fields() {
+        let file = SchemaFile {
+            path: "v2/TurnStartParams.json".to_owned(),
+            required: vec!["threadId".to_owned(), "input".to_owned()],
+        };
+        let mut missing = Vec::new();
+        collect_missing_fields(
+            &file,
+            &json!({ "required": ["threadId", "input"] }),
+            &mut missing,
+        );
+        assert!(missing.is_empty());
+        collect_missing_fields(&file, &json!({ "required": ["threadId"] }), &mut missing);
+        assert_eq!(missing, ["v2/TurnStartParams.json required field `input`"]);
+    }
+
+    #[tokio::test]
+    async fn missing_executable_is_a_discovery_error() {
+        let result = ProcessTransport::start(Path::new(
+            "definitely-missing-rah-codex-executable-for-test",
+        ))
+        .await;
+        assert!(matches!(
+            result,
+            Err(CodexAdapterError::ExecutableDiscovery { .. })
+        ));
     }
 }

@@ -187,11 +187,17 @@ async fn run_connection(
                         let _ = events.send(ConnectionEvent::Fault {
                             message: format!("response ID {id} has no pending request"),
                         });
+                        break;
                     }
                 }
                 Ok(Incoming::ErrorResponse { id, code, message }) => {
                     if let Some(reply) = pending.remove(&id) {
                         let _ = reply.send(Err(CodexAdapterError::JsonRpc { code, message }));
+                    } else {
+                        let _ = events.send(ConnectionEvent::Fault {
+                            message: format!("error response ID {id} has no pending request"),
+                        });
+                        break;
                     }
                 }
                 Ok(Incoming::Notification { method, params }) => {
@@ -207,6 +213,11 @@ async fn run_connection(
                 }
                 Err(error) => {
                     broadcast_fault(&events, &error);
+                    if let Some(id) = pending.keys().next().copied()
+                        && let Some(reply) = pending.remove(&id)
+                    {
+                        let _ = reply.send(Err(error));
+                    }
                     break;
                 }
             }

@@ -8,6 +8,8 @@ mod runtime;
 mod transport;
 
 #[cfg(test)]
+mod runtime_tests;
+#[cfg(test)]
 mod test_support;
 
 pub use errors::CodexAdapterError;

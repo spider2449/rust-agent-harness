@@ -62,6 +62,22 @@ impl FakePeer {
             .send(Ok(json!({ "method": method, "params": params })))
             .expect("fake incoming channel");
     }
+
+    pub(crate) fn send(&self, message: Value) {
+        self.incoming
+            .send(Ok(message))
+            .expect("fake incoming channel");
+    }
+
+    pub(crate) fn fail(&self, error: CodexAdapterError) {
+        self.incoming
+            .send(Err(error))
+            .expect("fake incoming channel");
+    }
+
+    pub(crate) async fn next_sent(&mut self) -> Value {
+        self.sent.recv().await.expect("outbound message")
+    }
 }
 
 #[async_trait]
