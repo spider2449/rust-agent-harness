@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 rah-protocol = { path = "../rah-protocol" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

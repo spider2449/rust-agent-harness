@@ -6,6 +6,10 @@ use async_trait::async_trait;
 use rah_protocol::{ToolCall, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use thiserror::Error;
 
+mod echo;
+
+pub use echo::EchoTool;
+
 /// Neutral execution context supplied by the runtime to a tool.
 #[derive(Clone, Debug, Default)]
 pub struct ToolContext {}

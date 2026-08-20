@@ -239,6 +239,7 @@ dependencies = [
  "async-trait",
  "futures",
  "rah-protocol",
+ "serde_json",
  "thiserror",
 ]
 
