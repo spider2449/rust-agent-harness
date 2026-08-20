@@ -8,10 +8,69 @@ use rah_runtime::{AgentHandle, AgentRuntime};
 use serde_json::{Value, json};
 
 use crate::{
-    CodexAdapterError,
+    CodexAdapterError, SUPPORTED_CODEX_VERSION,
+    process::{check_version, validate_captured_contract},
     runtime::CodexRuntime,
     test_support::{FakePeer, fake_transport},
 };
+
+#[tokio::test]
+async fn restricted_codex_end_to_end_covers_compatibility_resume_and_cancel() {
+    check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).expect("pinned version");
+    validate_captured_contract().expect("captured schema contract");
+    let (runtime, mut peer) = connected_runtime().await;
+
+    let first = start_turn(&runtime, &mut peer).await;
+    let first_session = first.session_id().clone();
+    peer.notify(
+        "item/agentMessage/delta",
+        json!({
+            "threadId": "private-thread",
+            "turnId": "private-turn",
+            "itemId": "message",
+            "delta": "end-to-end"
+        }),
+    );
+    peer.notify("turn/completed", terminal("completed"));
+    let events = first.into_events().collect::<Vec<_>>().await;
+    assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
+    assert!(
+        !serde_json::to_string(&events)
+            .expect("serialize events")
+            .contains("private-thread")
+    );
+
+    let resuming = {
+        let runtime = Arc::clone(&runtime);
+        let session_id = first_session.clone();
+        tokio::spawn(async move { runtime.resume(session_id).await })
+    };
+    peer.respond(
+        "thread/resume",
+        json!({ "thread": { "id": "private-thread" } }),
+    )
+    .await;
+    let resumed = resuming.await.expect("resume task").expect("resume handle");
+    assert_eq!(resumed.session_id(), &first_session);
+    drop(resumed);
+
+    let second = start_turn(&runtime, &mut peer).await;
+    let cancelling = {
+        let runtime = Arc::clone(&runtime);
+        let session_id = second.session_id().clone();
+        tokio::spawn(async move { runtime.cancel(session_id).await })
+    };
+    peer.respond("turn/interrupt", json!({})).await;
+    peer.notify("turn/completed", terminal("interrupted"));
+    cancelling
+        .await
+        .expect("cancel task")
+        .expect("confirmed cancellation");
+    let events = second.into_events().collect::<Vec<_>>().await;
+    assert!(matches!(events.last(), Some(AgentEvent::Cancelled { .. })));
+
+    runtime.shutdown().await.expect("shutdown");
+}
 
 async fn connected_runtime() -> (Arc<CodexRuntime>, FakePeer) {
     let (transport, mut peer) = fake_transport();

@@ -21,6 +21,7 @@ type ActiveSessions = Arc<Mutex<HashMap<SessionId, CancellationToken>>>;
 pub struct MinimalTestRuntime {
     backend: Arc<dyn ModelBackend>,
     tools: Arc<ToolRegistry>,
+    allowed_permissions: Vec<PermissionLevel>,
     active_sessions: ActiveSessions,
 }
 
@@ -31,8 +32,18 @@ impl MinimalTestRuntime {
         Self {
             backend,
             tools,
+            allowed_permissions: vec![PermissionLevel::None],
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Adds one permission level explicitly authorized by the host test setup.
+    #[must_use]
+    pub fn with_permission(mut self, permission: PermissionLevel) -> Self {
+        if !self.allowed_permissions.contains(&permission) {
+            self.allowed_permissions.push(permission);
+        }
+        self
     }
 
     fn active_sessions(&self) -> MutexGuard<'_, HashMap<SessionId, CancellationToken>> {
@@ -49,6 +60,7 @@ impl MinimalTestRuntime {
     ) -> AgentEventStream {
         let backend = Arc::clone(&self.backend);
         let tools = Arc::clone(&self.tools);
+        let allowed_permissions = self.allowed_permissions.clone();
         let session_guard = SessionGuard {
             session_id: session_id.clone(),
             active_sessions: Arc::clone(&self.active_sessions),
@@ -204,7 +216,7 @@ impl MinimalTestRuntime {
                                 );
                                 return;
                             };
-                            if tool.definition().permission != PermissionLevel::None {
+                            if !allowed_permissions.contains(&tool.definition().permission) {
                                 tracing::warn!(
                                     target: "rah",
                                     session_id = %session_id,

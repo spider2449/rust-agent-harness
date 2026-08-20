@@ -18,8 +18,37 @@ fn tools_lists_deterministic_registry() {
     let output = rah().arg("tools").output().expect("rah should launch");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "echo\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "echo\nfs.read\n");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn run_reads_workspace_manifest_through_fs_tool() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("CLI crate is nested under workspace/crates");
+    let output = rah()
+        .current_dir(workspace)
+        .env("RUST_LOG", "rah=debug")
+        .args([
+            "run",
+            "read Cargo.toml and report the workspace package information",
+        ])
+        .output()
+        .expect("rah should launch");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "workspace version 0.1.0, edition 2024\n"
+    );
+    assert!(stderr.contains("tool_name=fs.read"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("tool execution finished"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

@@ -1,15 +1,15 @@
-use std::{io::Write, process::ExitCode, sync::Arc};
+use std::{env, io::Write, path::Path, process::ExitCode, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use rah_model::{MockBackend, ModelEvent};
 use rah_protocol::{
-    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId, ToolCall,
-    ToolCallId, ToolInput, ToolName,
+    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
+    RequestId, ToolCall, ToolCallId, ToolInput, ToolName,
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
-use rah_tools::{EchoTool, ToolRegistry};
+use rah_tools::{EchoTool, FsReadTool, ToolRegistry};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -65,25 +65,36 @@ async fn execute(cli: Cli) -> Result<()> {
 }
 
 async fn run_prompt(prompt: String) -> Result<()> {
+    let read_workspace = prompt == "read Cargo.toml and report the workspace package information";
+    let tool_name = if read_workspace { "fs.read" } else { "echo" };
+    let tool_input = if read_workspace {
+        json!({"path": "Cargo.toml"})
+    } else {
+        json!({"text": prompt.clone()})
+    };
+    let final_text = if read_workspace {
+        "workspace version 0.1.0, edition 2024".to_owned()
+    } else {
+        prompt.clone()
+    };
     let backend = Arc::new(MockBackend::new(vec![
         vec![
             Ok(ModelEvent::ToolCall {
                 call: ToolCall {
                     id: ToolCallId::new(),
-                    name: ToolName::new("echo"),
-                    input: ToolInput(json!({"text": prompt.clone()})),
+                    name: ToolName::new(tool_name),
+                    input: ToolInput(tool_input),
                 },
             }),
             Ok(ModelEvent::Completed),
         ],
         vec![
-            Ok(ModelEvent::TextDelta {
-                text: prompt.clone(),
-            }),
+            Ok(ModelEvent::TextDelta { text: final_text }),
             Ok(ModelEvent::Completed),
         ],
     ]));
-    let runtime = MinimalTestRuntime::new(backend, Arc::new(tool_registry()?));
+    let runtime = MinimalTestRuntime::new(backend, Arc::new(tool_registry(env::current_dir()?)?))
+        .with_permission(PermissionLevel::Read);
     let handle = runtime
         .start(AgentRequest {
             request_id: RequestId::new(),
@@ -129,14 +140,14 @@ async fn run_prompt(prompt: String) -> Result<()> {
 }
 
 fn list_tools() -> Result<()> {
-    for definition in tool_registry()?.definitions() {
+    for definition in tool_registry(env::current_dir()?)?.definitions() {
         println!("{}", definition.name);
     }
     Ok(())
 }
 
 fn doctor() -> Result<()> {
-    let registry = tool_registry()?;
+    let registry = tool_registry(env::current_dir()?)?;
     if registry.definitions().is_empty() {
         bail!("deterministic runtime has no registered tools");
     }
@@ -144,10 +155,16 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
-fn tool_registry() -> Result<ToolRegistry> {
+fn tool_registry(workspace_root: impl AsRef<Path>) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     registry
         .register(Arc::new(EchoTool::new()))
         .context("failed to register echo tool")?;
+    registry
+        .register(Arc::new(
+            FsReadTool::new(workspace_root, 1024 * 1024)
+                .context("failed to configure fs.read workspace")?,
+        ))
+        .context("failed to register fs.read tool")?;
     Ok(registry)
 }

@@ -151,7 +151,7 @@ async fn verify_version(executable: &Path) -> Result<(), CodexAdapterError> {
     check_version(output.status.success(), actual)
 }
 
-fn check_version(success: bool, actual: String) -> Result<(), CodexAdapterError> {
+pub(crate) fn check_version(success: bool, actual: String) -> Result<(), CodexAdapterError> {
     if success && actual == SUPPORTED_CODEX_VERSION {
         Ok(())
     } else {
@@ -162,13 +162,27 @@ fn check_version(success: bool, actual: String) -> Result<(), CodexAdapterError>
     }
 }
 
-async fn verify_schema(executable: &Path) -> Result<(), CodexAdapterError> {
+pub(crate) fn validate_captured_contract() -> Result<(), CodexAdapterError> {
     let contract: SchemaContract = serde_json::from_str(CONTRACT_JSON).map_err(schema_error)?;
     if contract.codex_version != SUPPORTED_CODEX_VERSION {
         return Err(schema_error(
             "captured contract version does not match adapter pin",
         ));
     }
+    if contract.required_files.is_empty()
+        || contract
+            .required_files
+            .iter()
+            .any(|file| file.path.is_empty() || file.required.is_empty())
+    {
+        return Err(schema_error("captured schema contract is incomplete"));
+    }
+    Ok(())
+}
+
+async fn verify_schema(executable: &Path) -> Result<(), CodexAdapterError> {
+    validate_captured_contract()?;
+    let contract: SchemaContract = serde_json::from_str(CONTRACT_JSON).map_err(schema_error)?;
     let directory = schema_temp_dir();
     std::fs::create_dir(&directory).map_err(schema_error)?;
     let output = Command::new(executable)
