@@ -7,6 +7,10 @@ use futures::Stream;
 use rah_protocol::{Message, ModelRequestId, ToolCall, ToolDefinition};
 use thiserror::Error;
 
+mod mock;
+
+pub use mock::MockBackend;
+
 /// A provider-neutral request sent to a model backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRequest {
