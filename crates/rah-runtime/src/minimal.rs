@@ -57,18 +57,32 @@ impl MinimalTestRuntime {
         Box::pin(async_stream::stream! {
             let _session_guard = session_guard;
             let mut messages = request.input.messages;
+            let request_id = request.request_id;
+            tracing::info!(
+                target: "rah",
+                session_id = %session_id,
+                request_id = %request_id,
+                "agent session started"
+            );
             yield AgentEvent::Started {
                 session_id: session_id.clone(),
-                request_id: request.request_id,
+                request_id: request_id.clone(),
             };
 
             'agent: loop {
                 if cancellation.is_cancelled() {
-                    yield cancelled(&session_id);
+                    yield cancelled(&session_id, &request_id);
                     return;
                 }
 
                 let model_request_id = ModelRequestId::new();
+                tracing::debug!(
+                    target: "rah",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    model_request_id = %model_request_id,
+                    "model request started"
+                );
                 yield AgentEvent::ModelRequestStarted {
                     session_id: session_id.clone(),
                     model_request_id: model_request_id.clone(),
@@ -82,7 +96,7 @@ impl MinimalTestRuntime {
                 let model_result = tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        yield cancelled(&session_id);
+                        yield cancelled(&session_id, &request_id);
                         return;
                     }
                     result = backend.complete(model_request) => result,
@@ -90,7 +104,19 @@ impl MinimalTestRuntime {
                 let mut model_stream = match model_result {
                     Ok(stream) => stream,
                     Err(error) => {
-                        yield failed(&session_id, AgentErrorCode::Model, error.to_string());
+                        tracing::error!(
+                            target: "rah",
+                            session_id = %session_id,
+                            request_id = %request_id,
+                            model_request_id = %model_request_id,
+                            error = %error,
+                            "model request failed"
+                        );
+                        yield failed(
+                            &session_id,
+                            AgentErrorCode::Model,
+                            error.to_string(),
+                        );
                         return;
                     }
                 };
@@ -101,7 +127,7 @@ impl MinimalTestRuntime {
                     let next_event = tokio::select! {
                         biased;
                         () = cancellation.cancelled() => {
-                            yield cancelled(&session_id);
+                            yield cancelled(&session_id, &request_id);
                             return;
                         }
                         event = model_stream.next() => event,
@@ -112,13 +138,33 @@ impl MinimalTestRuntime {
                     let model_event = match model_event {
                         Ok(event) => event,
                         Err(error) => {
-                            yield failed(&session_id, AgentErrorCode::Model, error.to_string());
+                            tracing::error!(
+                                target: "rah",
+                                session_id = %session_id,
+                                request_id = %request_id,
+                                model_request_id = %model_request_id,
+                                error = %error,
+                                "model event stream failed"
+                            );
+                            yield failed(
+                                &session_id,
+                                AgentErrorCode::Model,
+                                error.to_string(),
+                            );
                             return;
                         }
                     };
 
                     match model_event {
                         ModelEvent::TextDelta { text } => {
+                            tracing::trace!(
+                                target: "rah",
+                                session_id = %session_id,
+                                request_id = %request_id,
+                                model_request_id = %model_request_id,
+                                delta_bytes = text.len(),
+                                "model text received"
+                            );
                             final_text.push_str(&text);
                             yield AgentEvent::ModelDelta {
                                 session_id: session_id.clone(),
@@ -128,11 +174,29 @@ impl MinimalTestRuntime {
                         }
                         ModelEvent::ToolCall { call } => {
                             requested_tool = true;
+                            tracing::debug!(
+                                target: "rah",
+                                session_id = %session_id,
+                                request_id = %request_id,
+                                model_request_id = %model_request_id,
+                                tool_call_id = %call.id,
+                                tool_name = %call.name,
+                                "tool requested"
+                            );
                             yield AgentEvent::ToolRequested {
                                 session_id: session_id.clone(),
                                 tool_call: call.clone(),
                             };
                             let Some(tool) = tools.get(&call.name) else {
+                                tracing::error!(
+                                    target: "rah",
+                                    session_id = %session_id,
+                                    request_id = %request_id,
+                                    model_request_id = %model_request_id,
+                                    tool_call_id = %call.id,
+                                    tool_name = %call.name,
+                                    "requested tool is not registered"
+                                );
                                 yield failed(
                                     &session_id,
                                     AgentErrorCode::Tool,
@@ -141,6 +205,15 @@ impl MinimalTestRuntime {
                                 return;
                             };
                             if tool.definition().permission != PermissionLevel::None {
+                                tracing::warn!(
+                                    target: "rah",
+                                    session_id = %session_id,
+                                    request_id = %request_id,
+                                    model_request_id = %model_request_id,
+                                    tool_call_id = %call.id,
+                                    tool_name = %call.name,
+                                    "tool permission denied"
+                                );
                                 yield failed(
                                     &session_id,
                                     AgentErrorCode::PermissionDenied,
@@ -152,6 +225,15 @@ impl MinimalTestRuntime {
                                 return;
                             }
 
+                            tracing::debug!(
+                                target: "rah",
+                                session_id = %session_id,
+                                request_id = %request_id,
+                                model_request_id = %model_request_id,
+                                tool_call_id = %call.id,
+                                tool_name = %call.name,
+                                "tool execution started"
+                            );
                             yield AgentEvent::ToolStarted {
                                 session_id: session_id.clone(),
                                 tool_call_id: call.id.clone(),
@@ -159,7 +241,7 @@ impl MinimalTestRuntime {
                             let tool_result = tokio::select! {
                                 biased;
                                 () = cancellation.cancelled() => {
-                                    yield cancelled(&session_id);
+                                    yield cancelled(&session_id, &request_id);
                                     return;
                                 }
                                 result = tools.execute(call.clone(), ToolContext::default()) => result,
@@ -167,6 +249,16 @@ impl MinimalTestRuntime {
                             let output = match tool_result {
                                 Ok(output) => output,
                                 Err(error) => {
+                                    tracing::error!(
+                                        target: "rah",
+                                        session_id = %session_id,
+                                        request_id = %request_id,
+                                        model_request_id = %model_request_id,
+                                        tool_call_id = %call.id,
+                                        tool_name = %call.name,
+                                        error = %error,
+                                        "tool execution failed"
+                                    );
                                     yield failed(
                                         &session_id,
                                         AgentErrorCode::Tool,
@@ -175,6 +267,16 @@ impl MinimalTestRuntime {
                                     return;
                                 }
                             };
+                            tracing::debug!(
+                                target: "rah",
+                                session_id = %session_id,
+                                request_id = %request_id,
+                                model_request_id = %model_request_id,
+                                tool_call_id = %call.id,
+                                tool_name = %call.name,
+                                is_error = output.is_error,
+                                "tool execution finished"
+                            );
                             yield AgentEvent::ToolFinished {
                                 session_id: session_id.clone(),
                                 tool_call_id: call.id,
@@ -193,10 +295,16 @@ impl MinimalTestRuntime {
                     continue 'agent;
                 }
                 if cancellation.is_cancelled() {
-                    yield cancelled(&session_id);
+                    yield cancelled(&session_id, &request_id);
                     return;
                 }
 
+                tracing::info!(
+                    target: "rah",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "agent session completed"
+                );
                 yield AgentEvent::Completed {
                     session_id: session_id.clone(),
                     output: AgentOutput {
@@ -232,6 +340,11 @@ impl AgentRuntime for MinimalTestRuntime {
         let Some(cancellation) = cancellation else {
             return Err(AgentError::SessionNotFound { session_id });
         };
+        tracing::debug!(
+            target: "rah",
+            session_id = %session_id,
+            "agent cancellation requested"
+        );
         cancellation.cancel();
         Ok(())
     }
@@ -251,7 +364,13 @@ impl Drop for SessionGuard {
     }
 }
 
-fn cancelled(session_id: &SessionId) -> AgentEvent {
+fn cancelled(session_id: &SessionId, request_id: &rah_protocol::RequestId) -> AgentEvent {
+    tracing::info!(
+        target: "rah",
+        session_id = %session_id,
+        request_id = %request_id,
+        "agent session cancelled"
+    );
     AgentEvent::Cancelled {
         session_id: session_id.clone(),
     }

@@ -17,3 +17,4 @@ rah-runtime = { path = "../rah-runtime" }
 rah-tools = { path = "../rah-tools" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+tracing-subscriber.workspace = true

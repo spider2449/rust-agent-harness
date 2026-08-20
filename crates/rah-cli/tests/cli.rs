@@ -42,3 +42,23 @@ fn invalid_command_writes_stderr_and_fails() {
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
 }
+
+#[test]
+fn debug_logging_contains_runtime_correlation_fields() {
+    let output = rah()
+        .env("RUST_LOG", "rah=debug")
+        .args(["run", "trace me"])
+        .output()
+        .expect("rah should launch");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success());
+    assert!(
+        stderr.contains("session_id="),
+        "expected tracing on stderr; stdout: {}; stderr: {stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(stderr.contains("request_id="));
+    assert!(stderr.contains("model_request_id="));
+    assert!(stderr.contains("tool_call_id="));
+}

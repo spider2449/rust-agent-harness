@@ -13,6 +13,7 @@ rah-tools = { path = "../rah-tools" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

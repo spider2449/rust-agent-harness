@@ -11,6 +11,7 @@ use rah_protocol::{
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
 use rah_tools::{EchoTool, ToolRegistry};
 use serde_json::json;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "rah", version, about = "Rust Agent Harness")]
@@ -34,13 +35,25 @@ enum Command {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    match execute(Cli::parse()).await {
+    match run_application().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+async fn run_application() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("rah=warn")),
+        )
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
+    execute(Cli::parse()).await
 }
 
 async fn execute(cli: Cli) -> Result<()> {
