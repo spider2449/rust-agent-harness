@@ -1,0 +1,6 @@
+[package]
+name = "rah-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

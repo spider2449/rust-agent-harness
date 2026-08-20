@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/rah-cli",
+    "crates/rah-core",
+    "crates/rah-model",
+    "crates/rah-protocol",
+    "crates/rah-runtime",
+    "crates/rah-runtime-codex",
+    "crates/rah-sandbox",
+    "crates/rah-session",
+    "crates/rah-tools",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

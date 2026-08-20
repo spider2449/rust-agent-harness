@@ -1,0 +1,6 @@
+[package]
+name = "rah-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
