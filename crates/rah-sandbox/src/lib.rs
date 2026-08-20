@@ -5,6 +5,10 @@ use std::{path::PathBuf, time::Duration};
 use async_trait::async_trait;
 use thiserror::Error;
 
+mod workspace;
+
+pub use workspace::{WorkspacePathError, WorkspacePolicy};
+
 /// Authority available to a sandboxed command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxPolicy {
