@@ -5,9 +5,10 @@ use crate::CodexAdapterError;
 pub(crate) const INITIALIZE: &str = "initialize";
 pub(crate) const INITIALIZED: &str = "initialized";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Incoming {
     Response { id: u64, result: Value },
+    ErrorResponse { id: u64, code: i64, message: String },
     Notification { method: String, params: Value },
     Request { id: Value, method: String },
 }
@@ -20,13 +21,21 @@ pub(crate) fn notification(method: &str, params: Value) -> Value {
     json!({ "method": method, "params": params })
 }
 
+pub(crate) fn error_response(id: Value, code: i64, message: &str) -> Value {
+    json!({ "id": id, "error": { "code": code, "message": message } })
+}
+
 pub(crate) fn parse(value: Value) -> Result<Incoming, CodexAdapterError> {
     let object = value
         .as_object()
         .ok_or_else(|| violation("message must be a JSON object"))?;
     if let Some(id) = object.get("id") {
         if let Some(error) = object.get("error") {
-            return Err(CodexAdapterError::JsonRpc {
+            let id = id
+                .as_u64()
+                .ok_or_else(|| violation("response ID must be an unsigned integer"))?;
+            return Ok(Incoming::ErrorResponse {
+                id,
                 code: error.get("code").and_then(Value::as_i64).unwrap_or(-1),
                 message: error
                     .get("message")
