@@ -4,3 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+rah-protocol = { path = "../rah-protocol" }
+rah-runtime = { path = "../rah-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync"] }
+tracing.workspace = true
