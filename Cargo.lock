@@ -273,6 +273,11 @@ dependencies = [
 [[package]]
 name = "rah-session"
 version = "0.1.0"
+dependencies = [
+ "rah-protocol",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rah-tools"
