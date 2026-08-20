@@ -8,9 +8,11 @@ use thiserror::Error;
 
 mod echo;
 mod fs_read;
+mod shell_exec;
 
 pub use echo::EchoTool;
 pub use fs_read::FsReadTool;
+pub use shell_exec::ShellExecTool;
 
 /// Neutral execution context supplied by the runtime to a tool.
 #[derive(Clone, Debug, Default)]

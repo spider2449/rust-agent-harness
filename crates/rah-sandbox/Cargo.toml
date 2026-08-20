@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "time"] }
 
 [dev-dependencies]
 futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

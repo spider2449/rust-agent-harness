@@ -5,8 +5,10 @@ use std::{path::PathBuf, time::Duration};
 use async_trait::async_trait;
 use thiserror::Error;
 
+mod process;
 mod workspace;
 
+pub use process::ProcessSandbox;
 pub use workspace::{WorkspacePathError, WorkspacePolicy};
 
 /// Authority available to a sandboxed command.
