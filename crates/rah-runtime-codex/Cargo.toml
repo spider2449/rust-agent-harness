@@ -12,5 +12,5 @@ rah-runtime = { path = "../rah-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "process", "rt", "sync"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true

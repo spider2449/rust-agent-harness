@@ -5,6 +5,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(windows)]
+use std::io;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -42,9 +45,10 @@ pub(crate) struct ProcessTransport {
 
 impl ProcessTransport {
     pub(crate) async fn start(executable: &Path) -> Result<Self, CodexAdapterError> {
-        verify_version(executable).await?;
-        verify_schema(executable).await?;
-        let mut child = Command::new(executable)
+        let executable = resolve_executable(executable)?;
+        verify_version(&executable).await?;
+        verify_schema(&executable).await?;
+        let mut child = Command::new(&executable)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -52,21 +56,21 @@ impl ProcessTransport {
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| CodexAdapterError::ProcessStartup {
-                path: executable.to_path_buf(),
+                path: executable.clone(),
                 source,
             })?;
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| startup_pipe(executable, "stdin"))?;
+            .ok_or_else(|| startup_pipe(&executable, "stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| startup_pipe(executable, "stdout"))?;
+            .ok_or_else(|| startup_pipe(&executable, "stdout"))?;
         let stderr_pipe = child
             .stderr
             .take()
-            .ok_or_else(|| startup_pipe(executable, "stderr"))?;
+            .ok_or_else(|| startup_pipe(&executable, "stderr"))?;
         let stderr = Arc::new(Mutex::new(String::new()));
         let captured = Arc::clone(&stderr);
         let stderr_task = tokio::spawn(async move {
@@ -90,6 +94,146 @@ impl ProcessTransport {
             stderr,
             stderr_task: Some(stderr_task),
         })
+    }
+}
+
+fn resolve_executable(executable: &Path) -> Result<PathBuf, CodexAdapterError> {
+    #[cfg(windows)]
+    {
+        resolve_windows_executable(executable, std::env::var_os("PATH").as_deref())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(executable.to_path_buf())
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_executable(
+    executable: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, CodexAdapterError> {
+    let has_directory = executable.is_absolute()
+        || executable
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if has_directory {
+        return resolve_windows_candidate(executable)
+            .ok_or_else(|| executable_not_found(executable));
+    }
+
+    let directories = path.into_iter().flat_map(std::env::split_paths);
+    for directory in directories {
+        if executable.extension().is_some() {
+            if let Some(resolved) = resolve_windows_candidate(&directory.join(executable)) {
+                return Ok(resolved);
+            }
+            continue;
+        }
+        for extension in ["exe", "cmd", "ps1"] {
+            if let Some(resolved) =
+                resolve_windows_candidate(&directory.join(executable).with_extension(extension))
+            {
+                return Ok(resolved);
+            }
+        }
+    }
+
+    Err(executable_not_found(executable))
+}
+
+#[cfg(windows)]
+fn resolve_windows_candidate(candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_file() {
+        return None;
+    }
+    match candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("exe") => canonical_file(candidate),
+        Some("cmd" | "ps1") if candidate.file_stem() == Some(std::ffi::OsStr::new("codex")) => {
+            resolve_npm_codex_binary(candidate)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn resolve_npm_codex_binary(launcher: &Path) -> Option<PathBuf> {
+    let launcher_directory = launcher.parent()?;
+    let mut node_modules_roots = vec![launcher_directory.join("node_modules")];
+    if launcher_directory.file_name() == Some(std::ffi::OsStr::new(".bin"))
+        && let Some(node_modules) = launcher_directory.parent()
+    {
+        node_modules_roots.push(node_modules.to_path_buf());
+    }
+    let (platform_package, target) = match std::env::consts::ARCH {
+        "x86_64" => ("codex-win32-x64", "x86_64-pc-windows-msvc"),
+        "aarch64" => ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
+        _ => return None,
+    };
+
+    for node_modules in node_modules_roots {
+        let package_root = node_modules.join("@openai").join("codex");
+        let mut package_roots = vec![package_root.clone()];
+        if let Ok(canonical) = package_root.canonicalize()
+            && canonical != package_root
+        {
+            package_roots.push(canonical);
+        }
+        for root in package_roots {
+            let nested_package = root
+                .join("node_modules")
+                .join("@openai")
+                .join(platform_package);
+            if let Some(binary) = codex_binary_in_package(&nested_package, target) {
+                return Some(binary);
+            }
+            if let Some(binary) = canonical_file(
+                &root
+                    .join("vendor")
+                    .join(target)
+                    .join("bin")
+                    .join("codex.exe"),
+            ) {
+                return Some(binary);
+            }
+        }
+        let hoisted_package = node_modules.join("@openai").join(platform_package);
+        if let Some(binary) = codex_binary_in_package(&hoisted_package, target) {
+            return Some(binary);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn codex_binary_in_package(package: &Path, target: &str) -> Option<PathBuf> {
+    canonical_file(
+        &package
+            .join("vendor")
+            .join(target)
+            .join("bin")
+            .join("codex.exe"),
+    )
+}
+
+#[cfg(windows)]
+fn canonical_file(path: &Path) -> Option<PathBuf> {
+    path.is_file().then(|| path.canonicalize().ok()).flatten()
+}
+
+#[cfg(windows)]
+fn executable_not_found(executable: &Path) -> CodexAdapterError {
+    CodexAdapterError::ExecutableDiscovery {
+        path: executable.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::NotFound,
+            "no directly executable Codex binary was found",
+        ),
     }
 }
 
@@ -274,6 +418,9 @@ mod tests {
 
     use super::{ProcessTransport, SchemaFile, check_version, collect_missing_fields};
 
+    #[cfg(windows)]
+    use super::resolve_windows_executable;
+
     #[test]
     fn exact_version_is_required() {
         assert!(check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).is_ok());
@@ -310,5 +457,120 @@ mod tests {
             result,
             Err(CodexAdapterError::ExecutableDiscovery { .. })
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_direct_windows_executable_from_path() {
+        let fixture = WindowsDiscoveryFixture::new("direct");
+        let executable = fixture.root.join("codex.exe");
+        std::fs::write(&executable, b"fixture").expect("write direct executable");
+
+        let resolved =
+            resolve_windows_executable(Path::new("codex"), Some(fixture.root.as_os_str()))
+                .expect("resolve direct executable");
+
+        assert_eq!(
+            resolved,
+            executable.canonicalize().expect("canonical executable")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_global_npm_cmd_launcher_to_native_executable() {
+        let fixture = WindowsDiscoveryFixture::new("global-npm");
+        std::fs::write(fixture.root.join("codex.cmd"), b"@echo off").expect("write npm launcher");
+        let executable = fixture
+            .root
+            .join("node_modules/@openai/codex/node_modules/@openai")
+            .join(windows_platform_package())
+            .join("vendor")
+            .join(windows_target())
+            .join("bin/codex.exe");
+        std::fs::create_dir_all(executable.parent().expect("binary parent"))
+            .expect("create npm package layout");
+        std::fs::write(&executable, b"fixture").expect("write native executable");
+
+        let resolved =
+            resolve_windows_executable(Path::new("codex"), Some(fixture.root.as_os_str()))
+                .expect("resolve npm launcher");
+
+        assert_eq!(
+            resolved,
+            executable.canonicalize().expect("canonical executable")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_local_npm_powershell_launcher_to_hoisted_executable() {
+        let fixture = WindowsDiscoveryFixture::new("local-npm");
+        let launcher_directory = fixture.root.join("node_modules/.bin");
+        std::fs::create_dir_all(&launcher_directory).expect("create launcher directory");
+        std::fs::write(launcher_directory.join("codex.ps1"), b"# fixture")
+            .expect("write npm launcher");
+        let executable = fixture
+            .root
+            .join("node_modules/@openai")
+            .join(windows_platform_package())
+            .join("vendor")
+            .join(windows_target())
+            .join("bin/codex.exe");
+        std::fs::create_dir_all(executable.parent().expect("binary parent"))
+            .expect("create npm package layout");
+        std::fs::write(&executable, b"fixture").expect("write native executable");
+
+        let resolved =
+            resolve_windows_executable(Path::new("codex"), Some(launcher_directory.as_os_str()))
+                .expect("resolve npm launcher");
+
+        assert_eq!(
+            resolved,
+            executable.canonicalize().expect("canonical executable")
+        );
+    }
+
+    #[cfg(windows)]
+    fn windows_platform_package() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => "codex-win32-x64",
+            "aarch64" => "codex-win32-arm64",
+            architecture => panic!("unsupported test architecture: {architecture}"),
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_target() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => "x86_64-pc-windows-msvc",
+            "aarch64" => "aarch64-pc-windows-msvc",
+            architecture => panic!("unsupported test architecture: {architecture}"),
+        }
+    }
+
+    #[cfg(windows)]
+    struct WindowsDiscoveryFixture {
+        root: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl WindowsDiscoveryFixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rah-codex-discovery-{name}-{}-{}",
+                std::process::id(),
+                super::SCHEMA_PROBE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).expect("create discovery fixture");
+            Self { root }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for WindowsDiscoveryFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).expect("remove discovery fixture");
+        }
     }
 }

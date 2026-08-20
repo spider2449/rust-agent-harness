@@ -68,6 +68,29 @@ cargo run -p rah-cli -- doctor
 The manifest-report command dispatches `fs.read` through `ToolRegistry`, an
 explicit host `Read` permission, and the workspace path policy.
 
+## Run the opt-in live Codex smoke test
+
+The `rah-runtime-codex` example is an opt-in live integration check. It requires
+an installed compatible Codex CLI, configured model access, and may use network
+or paid API resources. It is excluded from the normal deterministic `cargo test`
+validation and does not enable Codex-owned tools or approvals.
+
+```powershell
+cargo run -p rah-runtime-codex --example live_smoke -- "Reply with exactly: RAH_CODEX_SMOKE_OK"
+```
+
+To exercise live cancellation through `AgentRuntime::cancel` and Codex
+`turn/interrupt`, run:
+
+```powershell
+cargo run -p rah-runtime-codex --example live_cancel_smoke
+```
+
+The example uses `codex` from `PATH` by default. Set `RAH_CODEX_EXECUTABLE` to an
+explicit executable path when needed. On Windows, the adapter resolves standard
+npm `codex.cmd` and `codex.ps1` launchers to their packaged native executable
+without invoking a command shell.
+
 ## Validate
 
 ```powershell
