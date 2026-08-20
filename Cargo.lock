@@ -274,9 +274,12 @@ dependencies = [
 name = "rah-session"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "rah-protocol",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

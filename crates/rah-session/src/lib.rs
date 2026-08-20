@@ -6,6 +6,10 @@ use rah_protocol::{Message, SessionId, ToolOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod store;
+
+pub use store::{MemorySessionStore, SessionStore, SessionStoreError};
+
 /// Durable state associated with one agent session.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Session {
