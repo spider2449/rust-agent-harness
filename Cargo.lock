@@ -219,6 +219,12 @@ dependencies = [
 [[package]]
 name = "rah-runtime"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rah-protocol",
+ "thiserror",
+]
 
 [[package]]
 name = "rah-runtime-codex"
