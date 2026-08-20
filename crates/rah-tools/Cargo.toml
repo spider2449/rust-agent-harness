@@ -4,3 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+rah-protocol = { path = "../rah-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
