@@ -1,131 +1,214 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
+use futures::StreamExt;
 use rah_model::{GenerationOptions, ModelBackend, ModelEvent, ModelRequest};
 use rah_protocol::{
-    AgentEvent, AgentOutput, AgentRequest, Message, MessageRole, ModelRequestId, PermissionLevel,
-    SessionId, ToolContent, ToolOutput,
+    AgentErrorCode, AgentEvent, AgentOutput, AgentRequest, Message, MessageRole, ModelRequestId,
+    PermissionLevel, SessionId, ToolContent, ToolOutput,
 };
 use rah_tools::{ToolContext, ToolRegistry};
+use tokio_util::sync::CancellationToken;
 
-use crate::{AgentError, AgentHandle, AgentRuntime};
+use crate::{AgentError, AgentEventStream, AgentHandle, AgentRuntime};
+
+type ActiveSessions = Arc<Mutex<HashMap<SessionId, CancellationToken>>>;
 
 /// Minimal deterministic runtime for tests and examples.
 pub struct MinimalTestRuntime {
     backend: Arc<dyn ModelBackend>,
     tools: Arc<ToolRegistry>,
+    active_sessions: ActiveSessions,
 }
 
 impl MinimalTestRuntime {
     /// Creates a runtime from RAH-owned model and tool abstractions.
     #[must_use]
     pub fn new(backend: Arc<dyn ModelBackend>, tools: Arc<ToolRegistry>) -> Self {
-        Self { backend, tools }
+        Self {
+            backend,
+            tools,
+            active_sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    async fn run(
+    fn active_sessions(&self) -> MutexGuard<'_, HashMap<SessionId, CancellationToken>> {
+        self.active_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn event_stream(
         &self,
         request: AgentRequest,
         session_id: SessionId,
-    ) -> Result<Vec<AgentEvent>, AgentError> {
-        let mut events = vec![AgentEvent::Started {
+        cancellation: CancellationToken,
+    ) -> AgentEventStream {
+        let backend = Arc::clone(&self.backend);
+        let tools = Arc::clone(&self.tools);
+        let session_guard = SessionGuard {
             session_id: session_id.clone(),
-            request_id: request.request_id,
-        }];
-        let mut messages = request.input.messages;
+            active_sessions: Arc::clone(&self.active_sessions),
+        };
 
-        loop {
-            let model_request_id = ModelRequestId::new();
-            events.push(AgentEvent::ModelRequestStarted {
+        Box::pin(async_stream::stream! {
+            let _session_guard = session_guard;
+            let mut messages = request.input.messages;
+            yield AgentEvent::Started {
                 session_id: session_id.clone(),
-                model_request_id: model_request_id.clone(),
-            });
-            let model_request = ModelRequest {
-                id: model_request_id.clone(),
-                messages: messages.clone(),
-                tools: self.tools.definitions(),
-                options: GenerationOptions::default(),
+                request_id: request.request_id,
             };
-            let mut model_stream = self
-                .backend
-                .complete(model_request)
-                .await
-                .map_err(model_error)?;
-            let mut requested_tool = false;
-            let mut final_text = String::new();
 
-            while let Some(model_event) = model_stream.next().await {
-                match model_event.map_err(model_error)? {
-                    ModelEvent::TextDelta { text } => {
-                        final_text.push_str(&text);
-                        events.push(AgentEvent::ModelDelta {
-                            session_id: session_id.clone(),
-                            model_request_id: model_request_id.clone(),
-                            delta: text,
-                        });
+            'agent: loop {
+                if cancellation.is_cancelled() {
+                    yield cancelled(&session_id);
+                    return;
+                }
+
+                let model_request_id = ModelRequestId::new();
+                yield AgentEvent::ModelRequestStarted {
+                    session_id: session_id.clone(),
+                    model_request_id: model_request_id.clone(),
+                };
+                let model_request = ModelRequest {
+                    id: model_request_id.clone(),
+                    messages: messages.clone(),
+                    tools: tools.definitions(),
+                    options: GenerationOptions::default(),
+                };
+                let model_result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        yield cancelled(&session_id);
+                        return;
                     }
-                    ModelEvent::ToolCall { call } => {
-                        requested_tool = true;
-                        events.push(AgentEvent::ToolRequested {
-                            session_id: session_id.clone(),
-                            tool_call: call.clone(),
-                        });
-                        let definition = self
-                            .tools
-                            .get(&call.name)
-                            .ok_or_else(|| AgentError::Runtime {
-                                message: format!("tool `{}` is not registered", call.name),
-                            })?
-                            .definition();
-                        if definition.permission != PermissionLevel::None {
-                            return Err(AgentError::Runtime {
-                                message: format!(
-                                    "minimal test runtime cannot authorize tool `{}`",
-                                    call.name
-                                ),
+                    result = backend.complete(model_request) => result,
+                };
+                let mut model_stream = match model_result {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        yield failed(&session_id, AgentErrorCode::Model, error.to_string());
+                        return;
+                    }
+                };
+                let mut requested_tool = false;
+                let mut final_text = String::new();
+
+                loop {
+                    let next_event = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => {
+                            yield cancelled(&session_id);
+                            return;
+                        }
+                        event = model_stream.next() => event,
+                    };
+                    let Some(model_event) = next_event else {
+                        break;
+                    };
+                    let model_event = match model_event {
+                        Ok(event) => event,
+                        Err(error) => {
+                            yield failed(&session_id, AgentErrorCode::Model, error.to_string());
+                            return;
+                        }
+                    };
+
+                    match model_event {
+                        ModelEvent::TextDelta { text } => {
+                            final_text.push_str(&text);
+                            yield AgentEvent::ModelDelta {
+                                session_id: session_id.clone(),
+                                model_request_id: model_request_id.clone(),
+                                delta: text,
+                            };
+                        }
+                        ModelEvent::ToolCall { call } => {
+                            requested_tool = true;
+                            yield AgentEvent::ToolRequested {
+                                session_id: session_id.clone(),
+                                tool_call: call.clone(),
+                            };
+                            let Some(tool) = tools.get(&call.name) else {
+                                yield failed(
+                                    &session_id,
+                                    AgentErrorCode::Tool,
+                                    format!("tool `{}` is not registered", call.name),
+                                );
+                                return;
+                            };
+                            if tool.definition().permission != PermissionLevel::None {
+                                yield failed(
+                                    &session_id,
+                                    AgentErrorCode::PermissionDenied,
+                                    format!(
+                                        "minimal test runtime cannot authorize tool `{}`",
+                                        call.name
+                                    ),
+                                );
+                                return;
+                            }
+
+                            yield AgentEvent::ToolStarted {
+                                session_id: session_id.clone(),
+                                tool_call_id: call.id.clone(),
+                            };
+                            let tool_result = tokio::select! {
+                                biased;
+                                () = cancellation.cancelled() => {
+                                    yield cancelled(&session_id);
+                                    return;
+                                }
+                                result = tools.execute(call.clone(), ToolContext::default()) => result,
+                            };
+                            let output = match tool_result {
+                                Ok(output) => output,
+                                Err(error) => {
+                                    yield failed(
+                                        &session_id,
+                                        AgentErrorCode::Tool,
+                                        error.to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            yield AgentEvent::ToolFinished {
+                                session_id: session_id.clone(),
+                                tool_call_id: call.id,
+                                output: output.clone(),
+                            };
+                            messages.push(Message {
+                                role: MessageRole::Tool,
+                                content: tool_output_text(&output),
                             });
                         }
-
-                        events.push(AgentEvent::ToolStarted {
-                            session_id: session_id.clone(),
-                            tool_call_id: call.id.clone(),
-                        });
-                        let output = self
-                            .tools
-                            .execute(call.clone(), ToolContext::default())
-                            .await
-                            .map_err(|error| AgentError::Runtime {
-                                message: error.to_string(),
-                            })?;
-                        events.push(AgentEvent::ToolFinished {
-                            session_id: session_id.clone(),
-                            tool_call_id: call.id,
-                            output: output.clone(),
-                        });
-                        messages.push(Message {
-                            role: MessageRole::Tool,
-                            content: tool_output_text(&output),
-                        });
+                        ModelEvent::Usage { .. } | ModelEvent::Completed => {}
                     }
-                    ModelEvent::Usage { .. } | ModelEvent::Completed => {}
                 }
-            }
 
-            if requested_tool {
-                continue;
-            }
+                if requested_tool {
+                    continue 'agent;
+                }
+                if cancellation.is_cancelled() {
+                    yield cancelled(&session_id);
+                    return;
+                }
 
-            let message = Message {
-                role: MessageRole::Assistant,
-                content: final_text,
-            };
-            events.push(AgentEvent::Completed {
-                session_id,
-                output: AgentOutput { message },
-            });
-            return Ok(events);
-        }
+                yield AgentEvent::Completed {
+                    session_id: session_id.clone(),
+                    output: AgentOutput {
+                        message: Message {
+                            role: MessageRole::Assistant,
+                            content: final_text,
+                        },
+                    },
+                };
+                return;
+            }
+        })
     }
 }
 
@@ -133,8 +216,11 @@ impl MinimalTestRuntime {
 impl AgentRuntime for MinimalTestRuntime {
     async fn start(&self, request: AgentRequest) -> Result<AgentHandle, AgentError> {
         let session_id = SessionId::new();
-        let events = self.run(request, session_id.clone()).await?;
-        Ok(AgentHandle::new(session_id, Box::pin(stream::iter(events))))
+        let cancellation = CancellationToken::new();
+        self.active_sessions()
+            .insert(session_id.clone(), cancellation.clone());
+        let events = self.event_stream(request, session_id.clone(), cancellation);
+        Ok(AgentHandle::new(session_id, events))
     }
 
     async fn resume(&self, session_id: SessionId) -> Result<AgentHandle, AgentError> {
@@ -142,13 +228,40 @@ impl AgentRuntime for MinimalTestRuntime {
     }
 
     async fn cancel(&self, session_id: SessionId) -> Result<(), AgentError> {
-        Err(AgentError::SessionNotFound { session_id })
+        let cancellation = self.active_sessions().get(&session_id).cloned();
+        let Some(cancellation) = cancellation else {
+            return Err(AgentError::SessionNotFound { session_id });
+        };
+        cancellation.cancel();
+        Ok(())
     }
 }
 
-fn model_error(error: rah_model::ModelError) -> AgentError {
-    AgentError::Runtime {
-        message: error.to_string(),
+struct SessionGuard {
+    session_id: SessionId,
+    active_sessions: ActiveSessions,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.active_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session_id);
+    }
+}
+
+fn cancelled(session_id: &SessionId) -> AgentEvent {
+    AgentEvent::Cancelled {
+        session_id: session_id.clone(),
+    }
+}
+
+fn failed(session_id: &SessionId, code: AgentErrorCode, message: String) -> AgentEvent {
+    AgentEvent::Failed {
+        session_id: session_id.clone(),
+        code,
+        message,
     }
 }
 

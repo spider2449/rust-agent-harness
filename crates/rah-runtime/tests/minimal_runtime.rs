@@ -1,14 +1,19 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use futures::{StreamExt, executor::block_on};
-use rah_model::{MockBackend, ModelEvent};
+use async_trait::async_trait;
+use futures::{StreamExt, executor::block_on, future};
+use rah_model::{MockBackend, ModelBackend, ModelError, ModelEvent, ModelRequest, ModelStream};
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId, ToolCall,
-    ToolCallId, ToolInput, ToolName,
+    ToolCallId, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
-use rah_tools::{EchoTool, ToolRegistry};
+use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
+use tokio::sync::Notify;
 
 #[test]
 fn mock_model_drives_echo_tool_loop() {
@@ -69,4 +74,170 @@ fn mock_model_drives_echo_tool_loop() {
             })
         );
     });
+}
+
+struct BlockingBackend {
+    started: Arc<Notify>,
+}
+
+#[async_trait]
+impl ModelBackend for BlockingBackend {
+    async fn complete(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
+        self.started.notify_one();
+        future::pending().await
+    }
+}
+
+struct BlockingTool {
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for BlockingTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("test.block"),
+            description: "Waits until its execution future is cancelled.".to_owned(),
+            input_schema: json!({"type": "object"}),
+            permission: rah_protocol::PermissionLevel::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let _drop_marker = DropMarker(Arc::clone(&self.dropped));
+        self.started.notify_one();
+        future::pending().await
+    }
+}
+
+struct DropMarker(Arc<AtomicBool>);
+
+impl Drop for DropMarker {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn empty_request() -> AgentRequest {
+    AgentRequest {
+        request_id: RequestId::new(),
+        input: AgentInput {
+            messages: Vec::new(),
+        },
+        options: AgentOptions::default(),
+    }
+}
+
+fn assert_cancelled_without_completion(events: &[AgentEvent]) {
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Cancelled { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_unpolled_handle_releases_session() {
+    let backend = Arc::new(MockBackend::new(Vec::new()));
+    let runtime = MinimalTestRuntime::new(backend, Arc::new(ToolRegistry::new()));
+    let handle = runtime
+        .start(empty_request())
+        .await
+        .expect("runtime should start");
+    let session_id = handle.session_id().clone();
+
+    drop(handle);
+
+    let error = runtime
+        .cancel(session_id.clone())
+        .await
+        .expect_err("dropped session should not remain active");
+    assert_eq!(
+        error,
+        rah_runtime::AgentError::SessionNotFound { session_id }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_stops_running_model_operation() {
+    let started = Arc::new(Notify::new());
+    let runtime = MinimalTestRuntime::new(
+        Arc::new(BlockingBackend {
+            started: Arc::clone(&started),
+        }),
+        Arc::new(ToolRegistry::new()),
+    );
+    let handle = runtime
+        .start(empty_request())
+        .await
+        .expect("runtime should start");
+    let session_id = handle.session_id().clone();
+    let collector = tokio::spawn(handle.into_events().collect::<Vec<_>>());
+    started.notified().await;
+
+    runtime
+        .cancel(session_id)
+        .await
+        .expect("running session should cancel");
+    let events = collector.await.expect("event collector should finish");
+
+    assert_cancelled_without_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_drops_running_tool_future() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let call = ToolCall {
+        id: ToolCallId::new(),
+        name: ToolName::new("test.block"),
+        input: ToolInput(json!({})),
+    };
+    let backend = Arc::new(MockBackend::new(vec![vec![Ok(ModelEvent::ToolCall {
+        call,
+    })]]));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(BlockingTool {
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        }))
+        .expect("blocking tool should register");
+    let runtime = MinimalTestRuntime::new(backend, Arc::new(registry));
+    let handle = runtime
+        .start(empty_request())
+        .await
+        .expect("runtime should start");
+    let session_id = handle.session_id().clone();
+    let collector = tokio::spawn(handle.into_events().collect::<Vec<_>>());
+    started.notified().await;
+
+    runtime
+        .cancel(session_id)
+        .await
+        .expect("running session should cancel");
+    let events = collector.await.expect("event collector should finish");
+
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_cancelled_without_completion(&events);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+    );
 }

@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-stream.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 rah-model = { path = "../rah-model" }
 rah-protocol = { path = "../rah-protocol" }
 rah-tools = { path = "../rah-tools" }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
