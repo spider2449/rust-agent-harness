@@ -6,8 +6,11 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 rah-protocol = { path = "../rah-protocol" }
+rah-sandbox = { path = "../rah-sandbox" }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
 futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

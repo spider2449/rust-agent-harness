@@ -7,8 +7,10 @@ use rah_protocol::{ToolCall, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use thiserror::Error;
 
 mod echo;
+mod fs_read;
 
 pub use echo::EchoTool;
+pub use fs_read::FsReadTool;
 
 /// Neutral execution context supplied by the runtime to a tool.
 #[derive(Clone, Debug, Default)]
