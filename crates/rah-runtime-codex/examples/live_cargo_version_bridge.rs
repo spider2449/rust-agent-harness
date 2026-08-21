@@ -416,8 +416,8 @@ fn file_identity(path: &Path) -> Result<FileIdentity, String> {
     })
 }
 
+#[cfg(windows)]
 fn validate_native_cargo(path: &Path) -> Result<(), String> {
-    #[cfg(windows)]
     if !path
         .file_name()
         .and_then(|value| value.to_str())
@@ -425,6 +425,11 @@ fn validate_native_cargo(path: &Path) -> Result<(), String> {
     {
         return Err("Windows validation requires canonical native cargo.exe".to_owned());
     }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_native_cargo(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
