@@ -1,9 +1,12 @@
 use std::{
+    fs,
     future::pending,
+    path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -13,7 +16,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
-use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
+use rah_tools::{EchoTool, FsReadTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
@@ -56,6 +59,57 @@ struct LookupTool {
 struct MutablePermissionTool {
     permission: Arc<AtomicU8>,
     executions: Arc<AtomicUsize>,
+}
+
+struct CountingFsRead {
+    tool: FsReadTool,
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for CountingFsRead {
+    fn definition(&self) -> ToolDefinition {
+        self.tool.definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.tool.execute(input, context).await
+    }
+}
+
+static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should follow Unix epoch")
+            .as_nanos();
+        let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "rah-codex-fs-read-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("test directory should be created");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[async_trait]
@@ -207,6 +261,229 @@ async fn experimental_api_and_generic_tool_definitions_are_bridge_only() {
     assert_restrictions(&thread["params"]);
     finish_turn(&peer, "completed");
     let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn fs_read_is_advertised_by_private_alias_and_resolves_to_exact_rah_name() {
+    let workspace = TestDirectory::new();
+    fs::write(workspace.path().join("note.txt"), "workspace text")
+        .expect("workspace file should be written");
+    let (runtime, mut peer, _) = connected_bridge(
+        fs_read_registry(workspace.path(), 64, None),
+        vec![PermissionLevel::Read],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let advertised = &thread["params"]["dynamicTools"][0];
+    let alias = advertised["name"]
+        .as_str()
+        .expect("advertised alias should be a string");
+
+    assert_eq!(alias, "rah_tool_0");
+    assert_ne!(alias, "fs.read");
+    assert!(!alias.contains('.'));
+    assert!(
+        alias
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    );
+    assert_eq!(
+        advertised,
+        &json!({
+            "type": "function",
+            "name": "rah_tool_0",
+            "description": "Reads a UTF-8 text file within the configured workspace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            },
+            "deferLoading": false
+        })
+    );
+    assert!(advertised.get("permission").is_none());
+    assert_restrictions(&thread["params"]);
+
+    peer.send(tool_request(
+        json!(80),
+        "private-thread",
+        "private-turn",
+        "fs-read-success",
+        alias,
+        json!({"path": "note.txt"}),
+    ));
+    assert_eq!(
+        peer.next_sent().await["result"],
+        json!({
+            "contentItems": [{ "type": "inputText", "text": "workspace text" }],
+            "success": true
+        })
+    );
+    peer.notify("item/started", dynamic_item());
+    peer.notify("item/completed", dynamic_item());
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(tool_event_count(&events), 3);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRequested { tool_call, .. }
+            if tool_call.name == ToolName::new("fs.read")
+                && tool_call.input == ToolInput(json!({"path": "note.txt"}))
+    )));
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn fs_read_requires_explicit_read_permission() {
+    for (allowed, should_succeed) in [
+        (vec![PermissionLevel::None], false),
+        (vec![PermissionLevel::Read], true),
+    ] {
+        let workspace = TestDirectory::new();
+        fs::write(workspace.path().join("note.txt"), "allowed")
+            .expect("workspace file should be written");
+        let (runtime, mut peer, _) =
+            connected_bridge(fs_read_registry(workspace.path(), 64, None), allowed).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        peer.send(tool_request(
+            json!(81),
+            "private-thread",
+            "private-turn",
+            "permission",
+            "rah_tool_0",
+            json!({"path": "note.txt"}),
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], should_succeed);
+
+        let events = if should_succeed {
+            finish_turn(&peer, "completed");
+            handle.into_events().collect::<Vec<_>>().await
+        } else {
+            let collecting =
+                tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+            peer.respond("turn/interrupt", json!({})).await;
+            collecting.await.expect("event collector")
+        };
+        if should_succeed {
+            assert_eq!(tool_event_count(&events), 3);
+        } else {
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::Failed {
+                    code: rah_protocol::AgentErrorCode::PermissionDenied,
+                    ..
+                })
+            ));
+            assert_eq!(tool_event_count(&events), 1);
+        }
+        runtime.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
+async fn fs_read_preserves_workspace_input_binary_and_size_enforcement() {
+    let base = TestDirectory::new();
+    let workspace = base.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let outside = base.path().join("outside.txt");
+    fs::write(&outside, "outside").expect("outside file should be written");
+    fs::write(workspace.join("binary.dat"), [0, 1, 2]).expect("binary file should be written");
+    fs::write(workspace.join("invalid-utf8.dat"), [0xff])
+        .expect("invalid UTF-8 file should be written");
+    fs::write(workspace.join("large.txt"), "12345").expect("large file should be written");
+    let outside_absolute = outside.to_string_lossy().into_owned();
+
+    for (call_id, arguments) in [
+        ("parent-escape", json!({"path": "../outside.txt"})),
+        ("absolute-outside", json!({"path": outside_absolute})),
+        ("missing-input", json!({})),
+        ("missing-file", json!({"path": "missing.txt"})),
+        ("binary", json!({"path": "binary.dat"})),
+        ("invalid-utf8", json!({"path": "invalid-utf8.dat"})),
+        ("maximum-bytes", json!({"path": "large.txt"})),
+    ] {
+        let (runtime, mut peer, _) = connected_bridge(
+            fs_read_registry(&workspace, 4, None),
+            vec![PermissionLevel::Read],
+        )
+        .await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        peer.send(tool_request(
+            json!(82),
+            "private-thread",
+            "private-turn",
+            call_id,
+            "rah_tool_0",
+            arguments,
+        ));
+        assert_eq!(peer.next_sent().await["result"]["success"], false);
+        let collecting =
+            tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+        peer.respond("turn/interrupt", json!({})).await;
+        let events = collecting.await.expect("event collector");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Failed {
+                code: rah_protocol::AgentErrorCode::Tool,
+                ..
+            })
+        ));
+        assert_eq!(tool_event_count(&events), 2);
+        runtime.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
+async fn duplicate_and_wrong_route_fs_read_requests_execute_exactly_once() {
+    let workspace = TestDirectory::new();
+    fs::write(workspace.path().join("once.txt"), "once").expect("workspace file should be written");
+    let executions = Arc::new(AtomicUsize::new(0));
+    let (runtime, mut peer, _) = connected_bridge(
+        fs_read_registry(workspace.path(), 64, Some(Arc::clone(&executions))),
+        vec![PermissionLevel::Read],
+    )
+    .await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let arguments = json!({"path": "once.txt"});
+
+    for (request_id, thread, turn) in [
+        (json!(83), "wrong-thread", "private-turn"),
+        (json!(84), "private-thread", "wrong-turn"),
+    ] {
+        peer.send(tool_request(
+            request_id,
+            thread,
+            turn,
+            "wrong-route",
+            "rah_tool_0",
+            arguments.clone(),
+        ));
+        assert_eq!(peer.next_sent().await["error"]["code"], -32602);
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    for request_id in [json!(85), json!("duplicate-fs-read")] {
+        peer.send(tool_request(
+            request_id,
+            "private-thread",
+            "private-turn",
+            "same-fs-read",
+            "rah_tool_0",
+            arguments.clone(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(tool_event_count(&events), 3);
     runtime.shutdown().await.expect("shutdown");
 }
 
@@ -710,6 +987,22 @@ fn blocking_registry(
             dropped,
         }))
         .expect("register echo");
+    Arc::new(registry)
+}
+
+fn fs_read_registry(
+    workspace: &Path,
+    max_bytes: usize,
+    executions: Option<Arc<AtomicUsize>>,
+) -> Arc<ToolRegistry> {
+    let tool = FsReadTool::new(workspace, max_bytes).expect("workspace should be valid");
+    let mut registry = ToolRegistry::new();
+    match executions {
+        Some(executions) => registry
+            .register(Arc::new(CountingFsRead { tool, executions }))
+            .expect("register fs.read"),
+        None => registry.register(Arc::new(tool)).expect("register fs.read"),
+    }
     Arc::new(registry)
 }
 

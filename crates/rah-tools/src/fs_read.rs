@@ -196,6 +196,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn rejects_absolute_outside_workspace_read() {
+        let base = TestDirectory::new();
+        let workspace = base.0.join("workspace");
+        fs::create_dir(&workspace).expect("workspace should be created");
+        let outside = base.0.join("outside.txt");
+        fs::write(&outside, "outside").expect("file should be written");
+        let tool = FsReadTool::new(&workspace, 32).expect("workspace should be valid");
+
+        let error = tool
+            .execute(
+                ToolInput(json!({"path": outside.to_string_lossy()})),
+                ToolContext::default(),
+            )
+            .await
+            .expect_err("absolute outside read should fail");
+
+        assert!(matches!(error, ToolError::Execution { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_missing_and_non_string_path_input() {
+        let workspace = TestDirectory::new();
+        let tool = FsReadTool::new(&workspace.0, 32).expect("workspace should be valid");
+
+        for input in [json!({}), json!({"path": 7})] {
+            let error = tool
+                .execute(ToolInput(input), ToolContext::default())
+                .await
+                .expect_err("invalid path input should fail");
+
+            assert_eq!(
+                error,
+                ToolError::InvalidInput {
+                    message: "`path` must be a string".to_owned()
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn rejects_file_larger_than_limit() {
         let workspace = TestDirectory::new();
         fs::write(workspace.0.join("large.txt"), "12345").expect("file should be written");
@@ -235,6 +275,28 @@ mod tests {
             error,
             ToolError::Execution {
                 message: "file appears to be binary".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_non_utf8_text_without_binary_marker() {
+        let workspace = TestDirectory::new();
+        fs::write(workspace.0.join("invalid-utf8.dat"), [0xff]).expect("file should be written");
+        let tool = FsReadTool::new(&workspace.0, 32).expect("workspace should be valid");
+
+        let error = tool
+            .execute(
+                ToolInput(json!({"path": "invalid-utf8.dat"})),
+                ToolContext::default(),
+            )
+            .await
+            .expect_err("invalid UTF-8 should fail");
+
+        assert_eq!(
+            error,
+            ToolError::Execution {
+                message: "file is not valid UTF-8 text".to_owned()
             }
         );
     }
