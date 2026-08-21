@@ -60,6 +60,31 @@ shell execution remains disabled for model use. Because Execute can convey broad
 ambient host authority in principle, each additional capability requires its
 own host-owned policy and explicit registration.
 
+`host.git.status` is a second capability-specific Execute tool. It means
+"status of this host-authorized repository," not generic Git: trusted host
+setup supplies an absolute native Git executable and one absolute repository
+root, and the capability canonicalizes and records the root plus its `.git`
+directory-or-file identity. Both repository and executable identities are
+revalidated immediately before direct execution of exactly `status
+--porcelain=v1`; model input cannot select Git arguments, cwd, paths,
+environment, or timeout. Arbitrary Git commands and generic shell execution
+remain unavailable.
+
+The child environment is cleared. System and global Git configuration are
+disabled, prompting and optional locks are disabled, and fixed command-scope
+configuration disables fsmonitor and the untracked cache. Repository-local
+configuration still exists as repository authority, though relevant fsmonitor
+behavior is overridden. Includes and other repository-local settings may still
+influence status semantics. Git ownership `safe.directory` checks remain
+enabled; the capability does not inherit user configuration to bypass them, so
+a host-selected repository that fails the ownership check fails closed. Status
+is read-oriented but not claimed to be side-effect-free, and repository
+metadata, working-tree content, and configuration remain untrusted process
+inputs. No network operation is requested, but process supervision provides
+neither filesystem nor network isolation. Repository and executable
+revalidation also retain the documented TOCTOU limitation between final checks
+and spawn.
+
 ## MCP process boundary
 
 `rah-tools-mcp` directly launches an explicitly configured local MCP executable

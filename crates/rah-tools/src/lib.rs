@@ -10,6 +10,7 @@ mod cargo_version;
 mod echo;
 mod external_permissions;
 mod fs_read;
+mod git_status;
 mod host_execute;
 mod shell_exec;
 
@@ -19,6 +20,7 @@ pub use external_permissions::{
     ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy,
 };
 pub use fs_read::FsReadTool;
+pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use shell_exec::ShellExecTool;
 

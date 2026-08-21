@@ -25,6 +25,16 @@ fn run() -> Result<u8, String> {
             println!("cargo 0.0.0 (RAH deterministic fixture)");
             Ok(0)
         }
+        "status" => {
+            let format = args.next().ok_or("missing status format")?;
+            if format != "--porcelain=v1" {
+                return Err("unexpected status format".to_owned());
+            }
+            reject_extra(args)?;
+            audit_git_status()?;
+            print!(" M tracked.txt\n?? untracked.txt\n");
+            Ok(0)
+        }
         "echo" => {
             let text = args.next().ok_or("missing echo text")?;
             reject_extra(args)?;
@@ -177,6 +187,37 @@ fn run() -> Result<u8, String> {
         }
         _ => Err("unknown fixture operation".to_owned()),
     }
+}
+
+fn audit_git_status() -> Result<(), String> {
+    let cwd = fs::canonicalize(env::current_dir().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let count_file = cwd.join(".rah-git-status-count");
+    let audit_file = cwd.join(".rah-git-status-audit");
+    let count = fs::read_to_string(&count_file)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    fs::write(&count_file, count.to_string()).map_err(|error| error.to_string())?;
+    let mut byte = [0_u8; 1];
+    let stdin_bytes = io::stdin()
+        .read(&mut byte)
+        .map_err(|error| error.to_string())?;
+    let mut environment = env::vars_os()
+        .map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
+        .collect::<Vec<_>>();
+    environment.sort();
+    let executable = fs::canonicalize(env::current_exe().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let audit = format!(
+        "execution_count={count}\nexecutable={}\ncwd={}\nargv=status|--porcelain=v1\nstdin_bytes={stdin_bytes}\nprocess_in_job={}\nenvironment={}\n",
+        executable.display(),
+        cwd.display(),
+        process_in_job()?,
+        environment.join("|")
+    );
+    fs::write(audit_file, audit).map_err(|error| error.to_string())
 }
 
 fn reject_extra(mut args: impl Iterator<Item = String>) -> Result<(), String> {
