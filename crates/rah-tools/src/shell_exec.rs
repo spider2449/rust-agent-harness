@@ -8,6 +8,9 @@ use serde_json::{Map, Value, json};
 use crate::{Tool, ToolContext, ToolError};
 
 /// Direct subprocess tool routed through a configured sandbox implementation.
+///
+/// This generic tool accepts model-selected process details and is unsuitable
+/// for live model exposure without the host-owned policy required by ADR 0009.
 pub struct ShellExecTool {
     sandbox: Arc<dyn Sandbox>,
     policy: SandboxPolicy,

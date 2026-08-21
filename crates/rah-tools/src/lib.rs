@@ -9,6 +9,7 @@ use thiserror::Error;
 mod echo;
 mod external_permissions;
 mod fs_read;
+mod host_execute;
 mod shell_exec;
 
 pub use echo::EchoTool;
@@ -16,6 +17,7 @@ pub use external_permissions::{
     ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy,
 };
 pub use fs_read::FsReadTool;
+pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use shell_exec::ShellExecTool;
 
 /// Neutral execution context supplied by the runtime to a tool.

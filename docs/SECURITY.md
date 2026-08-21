@@ -35,6 +35,19 @@ outside-workspace paths, limits bytes, and rejects non-UTF-8/binary input.
 directory, captures stdout/stderr/exit status, and supports timeout through the
 sandbox abstraction. These controls are policy and process boundaries; RAH does
 not claim that path checks or process supervision provide strong OS isolation.
+Because `ShellExecTool` accepts model-selected process details, ADR 0009 leaves
+it unsuitable for live model exposure.
+
+The deterministic v0.3 Execute prototype instead uses a capability-specific
+`HostExecutionTool`. Its immutable `HostExecutionPolicy` selects one canonical
+native executable, renders exact or typed argv, fixes cwd beneath a canonical
+host root, clears and explicitly rebuilds the environment, closes stdin, fixes
+the timeout, and enforces bounded concurrent stdout/stderr reads. Execute
+permission remains a separate required runtime gate. Output overflow and timeout
+attempt termination and return bounded structured error results; neither means
+rollback. Windows uses best-effort Job Object ownership and Unix uses a
+best-effort process group. These mechanisms supervise processes but do not
+provide filesystem or network isolation.
 
 ## MCP process boundary
 

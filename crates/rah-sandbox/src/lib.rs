@@ -6,9 +6,13 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 mod process;
+mod supervised_process;
 mod workspace;
 
 pub use process::ProcessSandbox;
+pub use supervised_process::{
+    HostProcessOutput, HostProcessSpec, OutputLimits, OutputOverflow, execute_host_process,
+};
 pub use workspace::{WorkspacePathError, WorkspacePolicy};
 
 /// Authority available to a sandboxed command.

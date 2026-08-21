@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use futures::{StreamExt, executor::block_on, future};
 use rah_model::{MockBackend, ModelBackend, ModelError, ModelEvent, ModelRequest, ModelStream};
 use rah_protocol::{
-    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId, ToolCall,
-    ToolCallId, ToolDefinition, ToolInput, ToolName, ToolOutput,
+    AgentErrorCode, AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole,
+    PermissionLevel, RequestId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolInput,
+    ToolName, ToolOutput,
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
 use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
@@ -91,6 +92,34 @@ impl ModelBackend for BlockingBackend {
 struct BlockingTool {
     started: Arc<Notify>,
     dropped: Arc<AtomicBool>,
+}
+
+struct ExecuteProbe {
+    executed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for ExecuteProbe {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("process.test.probe"),
+            description: "Records one deterministic Execute dispatch.".to_owned(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+            permission: PermissionLevel::Execute,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executed.store(true, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ToolContent::Text("executed".to_owned())],
+            is_error: false,
+        })
+    }
 }
 
 #[async_trait]
@@ -239,5 +268,98 @@ async fn cancellation_drops_running_tool_future() {
         !events
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_permission_is_required_independently_of_registration() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let call = ToolCall {
+        id: ToolCallId::new(),
+        name: ToolName::new("process.test.probe"),
+        input: ToolInput(json!({})),
+    };
+    let backend = Arc::new(MockBackend::new(vec![vec![Ok(ModelEvent::ToolCall {
+        call,
+    })]]));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ExecuteProbe {
+            executed: Arc::clone(&executed),
+        }))
+        .expect("Execute probe should register");
+    let runtime = MinimalTestRuntime::new(backend, Arc::new(registry));
+
+    let events = runtime
+        .start(empty_request())
+        .await
+        .unwrap()
+        .into_events()
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Failed {
+            code: AgentErrorCode::PermissionDenied,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. }
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_must_explicitly_enable_execute_permission() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let call = ToolCall {
+        id: ToolCallId::new(),
+        name: ToolName::new("process.test.probe"),
+        input: ToolInput(json!({})),
+    };
+    let backend = Arc::new(MockBackend::new(vec![
+        vec![Ok(ModelEvent::ToolCall { call })],
+        vec![
+            Ok(ModelEvent::TextDelta {
+                text: "done".to_owned(),
+            }),
+            Ok(ModelEvent::Completed),
+        ],
+    ]));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ExecuteProbe {
+            executed: Arc::clone(&executed),
+        }))
+        .expect("Execute probe should register");
+    let runtime = MinimalTestRuntime::new(backend, Arc::new(registry))
+        .with_permission(PermissionLevel::Execute);
+
+    let events = runtime
+        .start(empty_request())
+        .await
+        .unwrap()
+        .into_events()
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Completed { .. }))
     );
 }

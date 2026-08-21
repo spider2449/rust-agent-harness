@@ -479,8 +479,10 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
+ "libc",
  "thiserror",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]
@@ -501,11 +503,13 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
+ "libc",
  "rah-protocol",
  "rah-sandbox",
  "serde_json",
  "thiserror",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]
