@@ -26,6 +26,44 @@ fn run() -> Result<u8, String> {
             print!("{text}");
             Ok(0)
         }
+        "audited-echo" => {
+            let audit_file = args.next().ok_or("missing audit file")?;
+            let count_file = args.next().ok_or("missing count file")?;
+            let text = args.next().ok_or("missing echo text")?;
+            reject_extra(args)?;
+            let count = fs::read_to_string(&count_file)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                + 1;
+            fs::write(&count_file, count.to_string()).map_err(|error| error.to_string())?;
+            let mut byte = [0_u8; 1];
+            let stdin_bytes = io::stdin()
+                .read(&mut byte)
+                .map_err(|error| error.to_string())?;
+            let mut environment = env::vars_os()
+                .map(|(name, value)| {
+                    format!("{}={}", name.to_string_lossy(), value.to_string_lossy())
+                })
+                .collect::<Vec<_>>();
+            environment.sort();
+            let executable =
+                fs::canonicalize(env::current_exe().map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            let cwd = fs::canonicalize(env::current_dir().map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            let audit = format!(
+                "execution_count={count}\npid={}\nexecutable={}\ncwd={}\ninput={text}\nstdin_bytes={stdin_bytes}\nprocess_in_job={}\nenvironment={}\n",
+                std::process::id(),
+                executable.display(),
+                cwd.display(),
+                process_in_job()?,
+                environment.join("|")
+            );
+            fs::write(audit_file, audit).map_err(|error| error.to_string())?;
+            print!("{text}");
+            Ok(0)
+        }
         "streams" => {
             let stdout_bytes = parse_usize(args.next(), "stdout byte count")?;
             let stderr_bytes = parse_usize(args.next(), "stderr byte count")?;
@@ -176,4 +214,33 @@ fn write_bytes(mut writer: impl Write, byte: u8, count: usize) -> Result<(), Str
         remaining -= length;
     }
     writer.flush().map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn process_in_job() -> Result<bool, String> {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn IsProcessInJob(
+            process_handle: *mut c_void,
+            job_handle: *mut c_void,
+            result: *mut i32,
+        ) -> i32;
+    }
+
+    let mut result = 0_i32;
+    let succeeded =
+        unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &raw mut result) };
+    if succeeded == 0 {
+        Err(io::Error::last_os_error().to_string())
+    } else {
+        Ok(result != 0)
+    }
+}
+
+#[cfg(not(windows))]
+fn process_in_job() -> Result<bool, String> {
+    Ok(false)
 }

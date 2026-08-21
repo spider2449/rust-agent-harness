@@ -115,6 +115,46 @@ async fn canonical_fixture_and_typed_literal_argument_are_enforced() {
 }
 
 #[tokio::test]
+async fn audited_echo_keeps_process_evidence_out_of_tool_output() {
+    let root = TestDirectory::new("audited-echo");
+    let audit_file = root.0.join("audit.txt");
+    let count_file = root.0.join("count.txt");
+    let policy = HostExecutionPolicy::new(
+        fixture(),
+        HostArgumentPolicy::Text {
+            prefix: vec![
+                "audited-echo".to_owned(),
+                audit_file.to_string_lossy().into_owned(),
+                count_file.to_string_lossy().into_owned(),
+            ],
+            max_bytes: 64 * 1024,
+        },
+        &root.0,
+        ".",
+    )
+    .expect("audited fixture policy should be valid");
+    let tool = HostExecutionTool::new(
+        "process.test.audited_echo",
+        "Echoes literal text and records host-only process evidence.",
+        policy,
+    );
+
+    let output = run(&tool, json!({"text": "AUDIT_OK"}))
+        .await
+        .expect("audited echo should run");
+    let content = json_content(&output);
+    assert_eq!(content["stdout"], "AUDIT_OK");
+    assert_eq!(content["stderr"], "");
+    assert!(!content.to_string().contains("execution_count"));
+
+    let audit = fs::read_to_string(audit_file).expect("host audit should exist");
+    assert!(audit.contains("execution_count=1\n"));
+    assert!(audit.contains("input=AUDIT_OK\n"));
+    assert!(audit.contains("stdin_bytes=0\n"));
+    assert_eq!(fs::read_to_string(count_file).unwrap(), "1");
+}
+
+#[tokio::test]
 async fn model_cannot_replace_program_argv_cwd_environment_or_timeout() {
     let root = TestDirectory::new("model-fields");
     let tool = text_tool(&root.0);
