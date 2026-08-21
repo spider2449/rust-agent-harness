@@ -6,12 +6,14 @@ use async_trait::async_trait;
 use rah_protocol::{ToolCall, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use thiserror::Error;
 
+mod cargo_version;
 mod echo;
 mod external_permissions;
 mod fs_read;
 mod host_execute;
 mod shell_exec;
 
+pub use cargo_version::{CARGO_VERSION_TOOL_NAME, CargoVersionTool};
 pub use echo::EchoTool;
 pub use external_permissions::{
     ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy,

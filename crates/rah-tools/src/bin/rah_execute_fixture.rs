@@ -20,6 +20,11 @@ fn run() -> Result<u8, String> {
     let mut args = env::args().skip(1);
     let operation = args.next().ok_or("missing fixture operation")?;
     match operation.as_str() {
+        "--version" => {
+            reject_extra(args)?;
+            println!("cargo 0.0.0 (RAH deterministic fixture)");
+            Ok(0)
+        }
         "echo" => {
             let text = args.next().ok_or("missing echo text")?;
             reject_extra(args)?;

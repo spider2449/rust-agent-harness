@@ -49,6 +49,17 @@ rollback. Windows uses best-effort Job Object ownership and Unix uses a
 best-effort process group. These mechanisms supervise processes but do not
 provide filesystem or network isolation.
 
+The first real host-owned Execute capability is `host.cargo.version`. The host
+constructs it with an absolute Cargo native executable and a non-sensitive
+working directory before registration. The policy canonicalizes and records the
+executable identity, revalidates it before every spawn, clears the environment,
+closes stdin, applies a five-second timeout and the ADR 0009 output limits, and
+supplies exactly `--version`. This narrow preauthorization does not authorize
+other Cargo commands or make Cargo generally available to a model. Generic
+shell execution remains disabled for model use. Because Execute can convey broad
+ambient host authority in principle, each additional capability requires its
+own host-owned policy and explicit registration.
+
 ## MCP process boundary
 
 `rah-tools-mcp` directly launches an explicitly configured local MCP executable
