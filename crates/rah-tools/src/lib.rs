@@ -7,10 +7,14 @@ use rah_protocol::{ToolCall, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use thiserror::Error;
 
 mod echo;
+mod external_permissions;
 mod fs_read;
 mod shell_exec;
 
 pub use echo::EchoTool;
+pub use external_permissions::{
+    ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy,
+};
 pub use fs_read::FsReadTool;
 pub use shell_exec::ShellExecTool;
 

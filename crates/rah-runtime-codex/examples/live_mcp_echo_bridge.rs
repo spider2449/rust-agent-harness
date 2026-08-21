@@ -79,7 +79,9 @@ async fn run() -> Result<(), String> {
 
     let adapter = McpAdapter::connect(
         McpServerConfig::stdio("test", &mcp_executable)
-            .map_err(|error| format!("invalid MCP server configuration: {error}"))?,
+            .map_err(|error| format!("invalid MCP server configuration: {error}"))?
+            .with_tool_permission("echo", PermissionLevel::None)
+            .map_err(|error| format!("invalid MCP tool permission configuration: {error}"))?,
     )
     .await
     .map_err(|error| format!("MCP connection failed: {error}"))?;

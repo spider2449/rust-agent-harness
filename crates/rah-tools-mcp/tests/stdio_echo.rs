@@ -15,6 +15,8 @@ fn server_program() -> PathBuf {
 fn config(call_timeout: Duration) -> McpServerConfig {
     McpServerConfig::stdio("test", server_program())
         .expect("test server configuration should be valid")
+        .with_tool_permission("echo", PermissionLevel::None)
+        .expect("echo permission should be configured once")
         .with_call_timeout(call_timeout)
 }
 
@@ -70,6 +72,110 @@ async fn initializes_then_discovers_and_maps_echo_definition() {
     );
 
     adapter.shutdown().await.expect("adapter should shut down");
+}
+
+#[tokio::test]
+async fn unconfigured_remote_tool_fails_closed_during_discovery() {
+    let configuration =
+        McpServerConfig::stdio("test", server_program()).expect("server config should be valid");
+
+    let error = match McpAdapter::connect(configuration).await {
+        Ok(adapter) => {
+            adapter.shutdown().await.expect("adapter should shut down");
+            panic!("an unconfigured remote tool must not become a RAH tool");
+        }
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("no explicit host permission"));
+}
+
+#[tokio::test]
+async fn discovered_tools_receive_distinct_host_permissions() {
+    let configuration = McpServerConfig::stdio("test", server_program())
+        .expect("server config should be valid")
+        .with_arg("--two-tools")
+        .with_tool_permission("echo", PermissionLevel::Read)
+        .expect("echo permission should be valid")
+        .with_tool_permission("write", PermissionLevel::Write)
+        .expect("write permission should be valid");
+    let adapter = McpAdapter::connect(configuration)
+        .await
+        .expect("both remote identities are explicitly configured");
+
+    let definitions = adapter
+        .tools()
+        .into_iter()
+        .map(|tool| tool.definition())
+        .collect::<Vec<_>>();
+    assert_eq!(definitions.len(), 2);
+    assert_eq!(definitions[0].name, ToolName::new("mcp.test.echo"));
+    assert_eq!(definitions[0].permission, PermissionLevel::Read);
+    assert_eq!(definitions[1].name, ToolName::new("mcp.test.write"));
+    assert_eq!(definitions[1].permission, PermissionLevel::Write);
+
+    adapter.shutdown().await.expect("adapter should shut down");
+}
+
+#[tokio::test]
+async fn mcp_metadata_cannot_override_host_permission() {
+    let configuration = McpServerConfig::stdio("test", server_program())
+        .expect("server config should be valid")
+        .with_tool_permission("echo", PermissionLevel::Execute)
+        .expect("host permission should be valid");
+    let adapter = McpAdapter::connect(configuration)
+        .await
+        .expect("echo adapter should connect");
+
+    assert_eq!(
+        adapter.tools()[0].definition().permission,
+        PermissionLevel::Execute
+    );
+
+    adapter.shutdown().await.expect("adapter should shut down");
+}
+
+#[test]
+fn duplicate_and_malformed_permission_configuration_fails_deterministically() {
+    let malformed = McpServerConfig::stdio("test", server_program())
+        .expect("server config should be valid")
+        .with_tool_permission("", PermissionLevel::None)
+        .expect_err("empty remote identity should fail");
+    assert_eq!(
+        malformed.to_string(),
+        "invalid MCP configuration: external tool identity must not be empty"
+    );
+
+    let duplicate = McpServerConfig::stdio("test", server_program())
+        .expect("server config should be valid")
+        .with_tool_permission("echo", PermissionLevel::None)
+        .expect("first assignment should succeed")
+        .with_tool_permission("echo", PermissionLevel::Read)
+        .expect_err("duplicate assignment should fail");
+    assert_eq!(
+        duplicate.to_string(),
+        "invalid MCP configuration: permission for external tool `echo` is configured more than once"
+    );
+}
+
+#[tokio::test]
+async fn partially_configured_discovery_does_not_create_implicit_none_tool() {
+    let configuration = McpServerConfig::stdio("test", server_program())
+        .expect("server config should be valid")
+        .with_arg("--two-tools")
+        .with_tool_permission("write", PermissionLevel::Write)
+        .expect("write permission should be valid");
+
+    let error = match McpAdapter::connect(configuration).await {
+        Ok(adapter) => {
+            adapter.shutdown().await.expect("adapter should shut down");
+            panic!("unconfigured echo must fail the entire discovery generation");
+        }
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("remote tool `echo`"));
+    assert!(!error.to_string().contains("PermissionLevel::None"));
 }
 
 #[tokio::test]

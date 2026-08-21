@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    env,
     io::{self, BufRead, Write},
 };
 
@@ -8,6 +9,7 @@ use serde_json::{Value, json};
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 fn main() {
+    let expose_two_tools = env::args().any(|arg| arg == "--two-tools");
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut initialized = false;
@@ -54,30 +56,45 @@ fn main() {
                     write_error(&mut stdout, id, -32002, "server was not initialized");
                     continue;
                 }
-                write_result(
-                    &mut stdout,
-                    id,
-                    json!({
-                        "tools": [{
-                            "name": "echo",
-                            "description": "Returns the supplied text unchanged.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                                "additionalProperties": false
-                            },
-                            "annotations": {
-                                "destructiveHint": true,
-                                "readOnlyHint": false
-                            }
-                        }]
-                    }),
-                );
+                let mut tools = vec![json!({
+                    "name": "echo",
+                    "description": "Returns the supplied text unchanged.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": false
+                    },
+                    "annotations": {
+                        "destructiveHint": true,
+                        "readOnlyHint": false,
+                        "permission": "none"
+                    }
+                })];
+                if expose_two_tools {
+                    tools.push(json!({
+                        "name": "write",
+                        "description": "Test-only second external capability.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                            "additionalProperties": false
+                        },
+                        "annotations": {
+                            "destructiveHint": false,
+                            "readOnlyHint": true,
+                            "permission": "none"
+                        }
+                    }));
+                }
+                write_result(&mut stdout, id, json!({"tools": tools}));
             }
             "tools/call" => {
                 let id = message["id"].clone();
-                if message["params"]["name"] != "echo" {
+                if message["params"]["name"] != "echo"
+                    && (!expose_two_tools || message["params"]["name"] != "write")
+                {
                     write_error(&mut stdout, id, -32602, "unknown tool");
                     continue;
                 }

@@ -12,7 +12,10 @@ use std::{
 
 use async_trait::async_trait;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
-use rah_tools::{Tool, ToolContext, ToolError};
+use rah_tools::{
+    ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy, Tool,
+    ToolContext, ToolError,
+};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
@@ -36,6 +39,7 @@ pub struct McpServerConfig {
     program: PathBuf,
     args: Vec<String>,
     call_timeout: Duration,
+    tool_permissions: ExternalToolPermissionPolicy,
 }
 
 impl McpServerConfig {
@@ -58,6 +62,7 @@ impl McpServerConfig {
             program,
             args: Vec::new(),
             call_timeout: Duration::from_secs(30),
+            tool_permissions: ExternalToolPermissionPolicy::new(),
         })
     }
 
@@ -73,6 +78,20 @@ impl McpServerConfig {
     pub fn with_call_timeout(mut self, call_timeout: Duration) -> Self {
         self.call_timeout = call_timeout;
         self
+    }
+
+    /// Assigns the trusted host permission for one remote MCP tool identity.
+    pub fn with_tool_permission(
+        mut self,
+        remote_tool_name: impl Into<String>,
+        permission: PermissionLevel,
+    ) -> Result<Self, McpAdapterError> {
+        let identity =
+            ExternalToolIdentity::new(remote_tool_name).map_err(permission_configuration_error)?;
+        self.tool_permissions
+            .assign(identity, permission)
+            .map_err(permission_configuration_error)?;
+        Ok(self)
     }
 }
 
@@ -161,7 +180,7 @@ impl McpAdapter {
             .request("tools/list", json!({}), STARTUP_TIMEOUT)
             .await
             .map_err(initialization_error)?;
-        let tools = map_tools(&config.server_id, listed, &client)?;
+        let tools = map_tools(&config.server_id, &config.tool_permissions, listed, &client)?;
 
         Ok(Self {
             client,
@@ -226,8 +245,15 @@ fn initialization_error(error: ClientError) -> McpAdapterError {
     }
 }
 
+fn permission_configuration_error(error: ExternalToolPermissionError) -> McpAdapterError {
+    McpAdapterError::InvalidConfiguration {
+        message: error.to_string(),
+    }
+}
+
 fn map_tools(
     server_id: &str,
+    tool_permissions: &ExternalToolPermissionPolicy,
     result: Value,
     client: &Client,
 ) -> Result<Vec<Arc<dyn Tool>>, McpAdapterError> {
@@ -250,6 +276,15 @@ fn map_tools(
                 message: "tools/list returned a duplicate tool name".to_owned(),
             });
         }
+        let remote_identity =
+            ExternalToolIdentity::new(remote_name).map_err(permission_configuration_error)?;
+        let permission = tool_permissions
+            .permission_for(&remote_identity)
+            .ok_or_else(|| McpAdapterError::Initialization {
+                message: format!(
+                    "remote tool `{remote_name}` has no explicit host permission assignment"
+                ),
+            })?;
         let input_schema = value
             .get("inputSchema")
             .filter(|schema| schema.is_object())
@@ -266,7 +301,7 @@ fn map_tools(
                 name: ToolName::new(format!("mcp.{server_id}.{remote_name}")),
                 description,
                 input_schema,
-                permission: PermissionLevel::None,
+                permission,
             },
             remote_name: remote_name.to_owned(),
             client: client.clone(),
