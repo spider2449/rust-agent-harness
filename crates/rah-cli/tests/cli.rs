@@ -42,7 +42,10 @@ fn run_reads_workspace_manifest_through_fs_tool() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "workspace version 0.1.0, edition 2024\n"
+        format!(
+            "workspace version {}, edition 2024\n",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     assert!(stderr.contains("tool_name=fs.read"), "stderr: {stderr}");
     assert!(

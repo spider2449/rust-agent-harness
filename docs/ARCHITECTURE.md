@@ -1,46 +1,78 @@
-# RAH v0.1 Architecture
+# RAH v0.2 Architecture
 
 ## Ownership boundaries
 
 RAH public boundaries use only RAH-owned neutral types. `rah-protocol` is the
 dependency-bottom crate and contains serializable identifiers, messages, events,
-tool descriptions, tool calls, and tool outputs. Provider and runtime adapters
-translate at their private edges.
-
-```text
-rah-protocol
-  ^       ^        ^         ^
-  |       |        |         |
-model   tools   session   sandbox
-  \       |        |        /
-   \      |        |       /
-          rah-runtime
-                ^
-                |
-       rah-runtime-codex
-                ^
-                |
-       codex app-server process
-```
+tool descriptions, calls, and outputs. Provider, runtime, MCP, and process-plugin
+adapters translate only at their private edges.
 
 `AgentRuntime`, `ModelBackend`, `Tool`, `ToolRegistry`, `SessionStore`, and
-`Sandbox` remain independent extension points. External tools must adapt into the
-same `Tool` and `ToolRegistry` path as built-in tools; plugins do not own runtime,
-policy, session, or sandbox internals.
+`Sandbox` remain independent extension points. No v0.2 work changes their
+architecture-defining public contracts.
+
+## Current crate topology
+
+Production RAH dependency edges are:
+
+```text
+rah-core                                  (no RAH dependencies)
+rah-sandbox                               (no RAH dependencies)
+
+rah-protocol                              (dependency bottom)
+  ^        ^          ^          ^
+  |        |          |          |
+model   session      tools     runtime
+                     ^  ^         ^
+                     |  |         |
+             tools-mcp  tools-plugin
+
+rah-tools   -> rah-protocol, rah-sandbox
+rah-runtime -> rah-model, rah-protocol, rah-tools
+rah-runtime-codex -> rah-protocol, rah-runtime, rah-tools
+rah-cli     -> rah-model, rah-protocol, rah-runtime, rah-tools
+```
+
+`rah-tools-mcp` and `rah-tools-plugin` each depend on `rah-protocol` and
+`rah-tools`. They do not depend on a runtime. `rah-runtime-codex` has no
+production dependency on either adapter crate and contains no MCP- or
+plugin-specific dispatch. Its manifest uses them only as dev dependencies for
+the opt-in examples and cross-boundary tests.
+
+## Tool convergence
+
+Every tool source converges before runtime dispatch:
+
+```text
+Built-in Tool -----------\
+MCP Tool -----------------+-> Tool -> ToolRegistry
+Process Plugin Tool ------/
+```
+
+The registry is unaware of transport or provider. It stores `Arc<dyn Tool>`,
+returns deterministic definition snapshots, rejects duplicate names, and
+dispatches parsed `ToolCall` values. Host composition selects adapters, assigns
+permissions, and registers their proxies.
+
+`ExternalToolIdentity` is opaque and provider-neutral. The host uses
+`ExternalToolPermissionPolicy` to assign a `PermissionLevel` to each discovered
+identity. Missing assignments fail closed before registration; server/plugin
+metadata cannot grant authority.
 
 ## Deterministic runtime
 
-`MinimalTestRuntime` proves the provider-neutral loop using `MockBackend`. A host
-may explicitly allow permission levels for this deterministic setup. The default
-allows only `PermissionLevel::None`; the manifest end-to-end demo explicitly adds
-`Read`, while `FsReadTool` separately enforces its configured workspace boundary.
+`MinimalTestRuntime` proves the provider-neutral loop using `MockBackend`. Its
+default host policy allows only `PermissionLevel::None`; the manifest demo
+explicitly adds `Read`, while `FsReadTool` independently enforces its configured
+workspace boundary.
 
-## Codex runtime adapter
+## Generic Codex Tool Bridge
 
-`rah-runtime-codex` owns five private layers:
+`rah-runtime-codex` owns these private layers:
 
 ```text
 CodexRuntime
+ -> optional generic RAH Tool Bridge
  -> session/thread/turn translation
  -> correlated connection actor
  -> private JSON-RPC parsing
@@ -48,33 +80,38 @@ CodexRuntime
  -> owned codex app-server child
 ```
 
-The executable must report `codex-cli 0.148.0`. The adapter generates the installed
-app-server schema locally and verifies the required initialize, thread, turn,
-message-delta, completion, resume, and interrupt payload fields against the
-captured contract before spawning a session process.
+The executable must report `codex-cli 0.148.0`. The adapter generates the
+installed app-server schema locally and verifies the required lifecycle fields;
+bridge mode additionally verifies the version-pinned experimental dynamic-tool
+contract.
 
-Each RAH `SessionId` is generated independently. The private map stores the Codex
-thread ID and active turn ID. `start` performs `thread/start` followed by
-`turn/start`; `resume` performs only `thread/resume` and never invents input or
-starts a new turn; `cancel` sends `turn/interrupt` and waits for an interrupted
-`turn/completed` notification.
+Bridge mode snapshots any host-supplied `ToolRegistry` for a new Codex thread.
+It advertises provider-private aliases where RAH tool names are not accepted by
+Codex, translates a valid request into the original RAH `ToolCall`, checks the
+host's allowed permission levels, dispatches through the registry, emits RAH
+tool lifecycle events, and returns the translated result. Dedupe, replay,
+cancellation, correlation, and call bounds remain adapter-private.
 
-One owned connection task serializes writes, correlates responses, broadcasts
-notifications, retains subprocess failures, and rejects server requests. Dropping
-an active turn stream queues an interrupt. Dropping the final connection owner
-aborts the connection task, which drops and terminates the child transport.
+The bridge does not know whether a registered tool is built-in, MCP-backed, or
+process-plugin-backed. Codex-owned shell, file, MCP, web, image, app, and approval
+capabilities remain disabled even in bridge mode.
 
-Unknown additive notifications are logged and ignored. Unknown correlation,
-malformed framing, unsafe server requests, or lifecycle ambiguity fail through a
-typed adapter error or terminal RAH failure event.
+## External process adapters
+
+`rah-tools-mcp` owns the pinned MCP `2025-06-18` stdio handshake, discovery,
+request correlation, timeout, cancellation, result conversion, child ownership,
+and immutable `mcp.<server>.<tool>` proxies.
+
+`rah-tools-plugin` owns RAH process-plugin protocol version `1`, identity and
+version validation, bounded NDJSON stdio, resource limits, process lifecycle,
+and immutable `plugin.<plugin>.<tool>` proxies. It is a focused adapter, not a
+general plugin manager, installer, marketplace, SDK, or dynamic-library ABI.
 
 ## Conformance and architecture gates
 
-Generic deterministic conformance helpers cover the observable contracts of
-`ModelBackend`, `Tool`, `SessionStore`, and `AgentRuntime`. Codex-specific contract
-tests use fake subprocess transport and captured JSON without exposing private IDs.
-
-The architecture test fails when forbidden Codex Rust dependencies appear, when
-provider dependencies enter core crates, when `rah-protocol` gains an upward RAH
-dependency, when app-server details escape the adapter, or when the tool-security
-regression evidence is removed.
+Generic deterministic conformance helpers cover observable `ModelBackend`,
+`Tool`, `SessionStore`, and `AgentRuntime` contracts. Adapter tests use local
+fixtures and fake Codex transport. Architecture gates prevent Codex Rust
+dependencies, provider dependencies in core crates, upward dependencies from
+`rah-protocol`, and escaped Codex implementation details. The production
+manifest keeps MCP and process-plugin adapters out of `rah-runtime-codex`.

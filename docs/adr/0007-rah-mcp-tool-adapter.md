@@ -19,7 +19,7 @@ or transport requires an explicit compatibility decision.
 RAH accepts Recommendation B with these rules:
 
 1. MCP-backed tools are ordinary RAH `Tool` implementations.
-2. MCP ownership lives in an isolated future `rah-tools-mcp` crate.
+2. MCP ownership lives in the isolated `rah-tools-mcp` crate.
 3. `rah-runtime-codex` must not know whether a `Tool` is MCP-backed.
 4. Codex-owned MCP remains disabled.
 5. `ToolRegistry` remains execution authority.

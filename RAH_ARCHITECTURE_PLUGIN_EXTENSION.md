@@ -1,7 +1,7 @@
 # RAH Architecture — Plugin Extension Point Addendum
 
-Status: v0.1 architecture constraint
-Scope: future extensibility, not v0.1 implementation
+Status: v0.1 architecture constraint realized by focused v0.2 adapter prototypes
+Scope: historical v0.1 design context and remaining general-platform extensibility
 
 ## 1. Plugin positioning
 
@@ -69,7 +69,7 @@ Plugins do not bypass policy or sandbox rules.
 
 Do not design v0.1 around dynamic Rust library loading (`.dll`, `.so`, `.dylib`).
 
-The preferred future plugin execution model is process isolation:
+The v0.2 process-plugin prototype uses the preferred process boundary:
 
 ```text
 RAH
@@ -77,11 +77,12 @@ RAH
   -> plugin
 ```
 
-Preferred transports may include:
+The implemented process-plugin prototype uses stdio JSON-RPC. Other future
+process-plugin transports may include:
 
-- stdio JSON-RPC;
-- MCP;
 - local socket / named pipe where justified.
+
+MCP uses its own RAH adapter and converges at the `Tool` boundary.
 
 This keeps plugins language-agnostic and avoids Rust ABI stability constraints.
 
@@ -131,15 +132,14 @@ The exact manifest schema is deferred.
 
 ## 5. Plugin lifecycle direction
 
-A future process plugin lifecycle may be:
+The focused v0.2 process-plugin lifecycle is:
 
 ```text
-discover
- -> load manifest
- -> validate
- -> permission check
+host configuration
  -> spawn
- -> handshake
+ -> handshake and validate identity
+ -> discover tools
+ -> permission check
  -> register tools
  -> execute tool calls
  -> shutdown
@@ -181,7 +181,8 @@ ToolCall
  -> ToolOutput
 ```
 
-Future plugin permissions should be explicit and least-privilege.
+Plugin permissions are explicit, host-owned, default-deny, and should remain
+least-privilege.
 
 The plugin process must not implicitly inherit full RAH authority.
 
@@ -223,9 +224,9 @@ In particular:
 3. Tool definitions must be serializable/provider-neutral.
 4. Permission checks must be outside individual tool implementations where practical.
 5. AgentRuntime must depend on tool abstractions, not concrete built-in tool types.
-6. MCP tools and future plugin tools must be able to enter through the same registry boundary.
+6. MCP tools and process-plugin tools enter through the same registry boundary.
 
-## 10. Future roadmap
+## 10. Historical future roadmap
 
 Deferred post-v0.1 work may include:
 
@@ -240,7 +241,10 @@ Task 032 Plugin lifecycle
 Task 033 Plugin conformance tests
 ```
 
-These tasks are reserved extension points, not authorization to implement them during v0.1.
+These were reserved v0.1 extension points, not authorization to implement them
+during v0.1. v0.2 now contains focused MCP and process-plugin adapter prototypes;
+a general `PluginManager`, manifest ecosystem, marketplace, installer, SDK, and
+additional transports remain deferred.
 
 ## 11. Architecture invariant summary
 
@@ -254,7 +258,7 @@ ToolRegistry
     |
     +-- Built-in Tool
     +-- MCP Tool
-    +-- Future Plugin Tool
+    +-- Process Plugin Tool
 ```
 
 And never:

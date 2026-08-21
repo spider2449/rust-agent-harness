@@ -73,7 +73,10 @@ async fn run_prompt(prompt: String) -> Result<()> {
         json!({"text": prompt.clone()})
     };
     let final_text = if read_workspace {
-        "workspace version 0.1.0, edition 2024".to_owned()
+        format!(
+            "workspace version {}, edition 2024",
+            env!("CARGO_PKG_VERSION")
+        )
     } else {
         prompt.clone()
     };

@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Context
 
-RAH needs built-in tools, MCP tools, and future plugins without creating incompatible extension models.
+RAH needs built-in tools, MCP tools, and process plugins without creating incompatible extension models.
 
 ## Decision
 
@@ -16,6 +16,6 @@ Plugins do not directly own AgentContext, Session, AgentRuntime, ModelBackend, p
 
 ## Consequences
 
-Built-in tools, MCP tools, and future process-plugin tools are interchangeable from the AgentRuntime perspective.
+Built-in tools, MCP tools, and process-plugin tools are interchangeable from the AgentRuntime perspective.
 
 A full general-purpose plugin platform is deferred.

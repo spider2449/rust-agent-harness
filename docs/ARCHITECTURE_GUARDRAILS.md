@@ -1,40 +1,49 @@
-# RAH v0.1 — Architecture Guardrails
+# RAH v0.2 — Architecture Guardrails
 
 Status: Required companion specification
 
 ## 1. Crate dependency matrix
 
-The intended dependency direction is:
+The current production dependency direction is:
 
 ```text
-rah-protocol
-    ^
-    |
-rah-core
-
 rah-model --------> rah-protocol
-rah-tools --------> rah-protocol
 rah-session ------> rah-protocol
-rah-sandbox ------> rah-protocol
+rah-tools --------> rah-protocol
+          \-------> rah-sandbox
 
-rah-runtime ------> rah-core
-             \----> rah-model
+rah-runtime ------> rah-model
              \----> rah-tools
-             \----> rah-session
-             \----> rah-sandbox
              \----> rah-protocol
 
 rah-runtime-codex -> rah-runtime
                   -> rah-protocol
-                  -> Codex crates
+                  -> rah-tools
 
-rah-cli ----------> RAH public API/runtime abstractions
+rah-tools-mcp ----> rah-tools
+              \---> rah-protocol
+
+rah-tools-plugin -> rah-tools
+                 -> rah-protocol
+
+rah-cli ----------> rah-model
+              \---> rah-protocol
+              \---> rah-runtime
+              \---> rah-tools
+
+rah-core and rah-sandbox have no production RAH-crate dependencies.
 ```
 
 Rules:
 
 - `rah-protocol` has no dependency on another RAH crate.
-- Codex dependencies exist only in `rah-runtime-codex`.
+- Codex integration details exist only in `rah-runtime-codex`; the workspace has
+  no production dependency on Codex Rust crates.
+- `rah-runtime-codex` has no production dependency on `rah-tools-mcp` or
+  `rah-tools-plugin`. Dev dependencies may compose those ordinary RAH tools in
+  examples and cross-boundary tests.
+- `rah-tools-mcp` and `rah-tools-plugin` depend toward `rah-tools` and
+  `rah-protocol`; neither adapter is a runtime dependency.
 - provider SDK dependencies must not enter core crates.
 - dependency cycles are forbidden.
 - new dependency edges require an explicit reason in the task completion report.
@@ -61,7 +70,7 @@ SessionStore
 Sandbox
 ```
 
-During v0.1 they are still pre-1.0 APIs, but Codex must not casually change their semantics or signatures.
+During v0.2 they are still pre-1.0 APIs, but Codex must not casually change their semantics or signatures.
 
 If a numbered task appears to require a material change to one of these interfaces, stop and report:
 
@@ -80,19 +89,20 @@ Experimental public APIs must be explicitly documented as experimental and must 
 
 ## 3. Protocol versioning
 
-RAH protocol-bearing components must have an explicit protocol version before external process/plugin/server interoperability is implemented.
+RAH protocol-bearing components must have an explicit protocol version for
+external process/plugin/server interoperability. Current v0.2 adapters pin MCP
+revision `2025-06-18` and RAH process-plugin protocol version `1`.
 
-Reserve:
+The dependency-bottom protocol crate exposes:
 
 ```rust
 pub const RAH_PROTOCOL_VERSION: u32 = 1;
 ```
 
-The exact location is chosen during the appropriate protocol task.
+External handshakes must negotiate or reject incompatible versions.
 
-Future external handshakes should be able to negotiate or reject incompatible versions.
-
-Do not create complex semantic-version negotiation in v0.1.
+Do not add complex semantic-version negotiation without an accepted architecture
+decision.
 
 ## 4. Conformance testing
 
