@@ -9,6 +9,7 @@ members = [
     "crates/rah-sandbox",
     "crates/rah-session",
     "crates/rah-tools",
+    "crates/rah-tools-mcp",
 ]
 resolver = "3"
 
