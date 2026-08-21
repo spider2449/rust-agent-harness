@@ -33,6 +33,10 @@ struct SchemaContract {
 struct SchemaFile {
     path: String,
     required: Vec<String>,
+    #[serde(default)]
+    properties: Vec<String>,
+    #[serde(default)]
+    experimental: bool,
 }
 
 pub(crate) struct ProcessTransport {
@@ -44,10 +48,13 @@ pub(crate) struct ProcessTransport {
 }
 
 impl ProcessTransport {
-    pub(crate) async fn start(executable: &Path) -> Result<Self, CodexAdapterError> {
+    pub(crate) async fn start(
+        executable: &Path,
+        experimental_api: bool,
+    ) -> Result<Self, CodexAdapterError> {
         let executable = resolve_executable(executable)?;
         verify_version(&executable).await?;
-        verify_schema(&executable).await?;
+        verify_schema(&executable, experimental_api).await?;
         let mut child = Command::new(&executable)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
@@ -314,23 +321,27 @@ pub(crate) fn validate_captured_contract() -> Result<(), CodexAdapterError> {
         ));
     }
     if contract.required_files.is_empty()
-        || contract
-            .required_files
-            .iter()
-            .any(|file| file.path.is_empty() || file.required.is_empty())
+        || contract.required_files.iter().any(|file| {
+            file.path.is_empty() || (file.required.is_empty() && file.properties.is_empty())
+        })
     {
         return Err(schema_error("captured schema contract is incomplete"));
     }
     Ok(())
 }
 
-async fn verify_schema(executable: &Path) -> Result<(), CodexAdapterError> {
+async fn verify_schema(executable: &Path, experimental_api: bool) -> Result<(), CodexAdapterError> {
     validate_captured_contract()?;
     let contract: SchemaContract = serde_json::from_str(CONTRACT_JSON).map_err(schema_error)?;
     let directory = schema_temp_dir();
     std::fs::create_dir(&directory).map_err(schema_error)?;
-    let output = Command::new(executable)
-        .args(["app-server", "generate-json-schema", "--out"])
+    let mut command = Command::new(executable);
+    command.args(["app-server", "generate-json-schema"]);
+    if experimental_api {
+        command.arg("--experimental");
+    }
+    let output = command
+        .arg("--out")
         .arg(&directory)
         .output()
         .await
@@ -339,14 +350,21 @@ async fn verify_schema(executable: &Path) -> Result<(), CodexAdapterError> {
         let _ = std::fs::remove_dir_all(&directory);
         return Err(schema_error(String::from_utf8_lossy(&output.stderr)));
     }
-    let result = verify_schema_files(&directory, &contract);
+    let result = verify_schema_files(&directory, &contract, experimental_api);
     let _ = std::fs::remove_dir_all(&directory);
     result
 }
 
-fn verify_schema_files(root: &Path, contract: &SchemaContract) -> Result<(), CodexAdapterError> {
+fn verify_schema_files(
+    root: &Path,
+    contract: &SchemaContract,
+    experimental_api: bool,
+) -> Result<(), CodexAdapterError> {
     let mut missing = Vec::new();
     for file in &contract.required_files {
+        if file.experimental && !experimental_api {
+            continue;
+        }
         let path = root.join(&file.path);
         let value: Value = std::fs::read_to_string(&path)
             .map_err(schema_error)
@@ -368,6 +386,12 @@ fn collect_missing_fields(file: &SchemaFile, value: &Value, missing: &mut Vec<St
         let present = required.is_some_and(|items| items.iter().any(|item| item == field));
         if !present {
             missing.push(format!("{} required field `{field}`", file.path));
+        }
+    }
+    let properties = value.get("properties").and_then(Value::as_object);
+    for field in &file.properties {
+        if properties.is_none_or(|properties| !properties.contains_key(field)) {
+            missing.push(format!("{} property `{field}`", file.path));
         }
     }
 }
@@ -435,6 +459,8 @@ mod tests {
         let file = SchemaFile {
             path: "v2/TurnStartParams.json".to_owned(),
             required: vec!["threadId".to_owned(), "input".to_owned()],
+            properties: Vec::new(),
+            experimental: false,
         };
         let mut missing = Vec::new();
         collect_missing_fields(
@@ -445,13 +471,33 @@ mod tests {
         assert!(missing.is_empty());
         collect_missing_fields(&file, &json!({ "required": ["threadId"] }), &mut missing);
         assert_eq!(missing, ["v2/TurnStartParams.json required field `input`"]);
+
+        let file = SchemaFile {
+            path: "v2/ThreadStartParams.json".to_owned(),
+            required: Vec::new(),
+            properties: vec!["dynamicTools".to_owned()],
+            experimental: true,
+        };
+        let mut missing = Vec::new();
+        collect_missing_fields(
+            &file,
+            &json!({"properties": {"dynamicTools": {}}}),
+            &mut missing,
+        );
+        assert!(missing.is_empty());
+        collect_missing_fields(&file, &json!({"properties": {}}), &mut missing);
+        assert_eq!(
+            missing,
+            ["v2/ThreadStartParams.json property `dynamicTools`"]
+        );
     }
 
     #[tokio::test]
     async fn missing_executable_is_a_discovery_error() {
-        let result = ProcessTransport::start(Path::new(
-            "definitely-missing-rah-codex-executable-for-test",
-        ))
+        let result = ProcessTransport::start(
+            Path::new("definitely-missing-rah-codex-executable-for-test"),
+            false,
+        )
         .await;
         assert!(matches!(
             result,

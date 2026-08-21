@@ -8,55 +8,170 @@ use async_trait::async_trait;
 use futures::Stream;
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentOutput, AgentRequest, Message, MessageRole, ModelRequestId,
-    SessionId,
+    PermissionLevel, SessionId,
 };
 use rah_runtime::{AgentError, AgentEventStream, AgentHandle, AgentRuntime};
+use rah_tools::ToolRegistry;
 use serde_json::{Value, json};
 use std::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
-use tokio::sync::broadcast;
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::JoinHandle,
+};
 
 use crate::{
     CodexAdapterError,
+    bridge::{
+        BridgeConfig, BridgeControl, ToolSnapshot, dynamic_tool_spec, echo_snapshot, run_bridge,
+    },
     connection::{AppServerConnection, ConnectionEvent},
     process::ProcessTransport,
     transport::AppServerTransport,
 };
 
 #[derive(Clone)]
-struct SessionRecord {
+pub(crate) struct SessionRecord {
+    pub(crate) thread_id: String,
+    pub(crate) active_turn: Option<String>,
+    pub(crate) bridge_tools: HashMap<String, ToolSnapshot>,
+}
+
+struct BridgeMode {
+    config: BridgeConfig,
+    controls: mpsc::UnboundedSender<BridgeControl>,
+    task: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct TurnRoute {
+    session_id: SessionId,
     thread_id: String,
-    active_turn: Option<String>,
+    turn_id: String,
+}
+
+impl Drop for BridgeMode {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
 }
 
 /// Restricted Codex app-server implementation of RAH's runtime contract.
 pub struct CodexRuntime {
     connection: Arc<AppServerConnection>,
     sessions: Arc<Mutex<HashMap<SessionId, SessionRecord>>>,
+    bridge: Option<BridgeMode>,
 }
 
 impl CodexRuntime {
     /// Starts and initializes a compatible Codex app-server executable.
     pub async fn connect(executable: impl AsRef<Path>) -> Result<Self, CodexAdapterError> {
-        let transport = ProcessTransport::start(executable.as_ref()).await?;
+        let transport = ProcessTransport::start(executable.as_ref(), false).await?;
         Self::from_transport(transport).await
+    }
+
+    /// Starts Codex in the experimental echo-only RAH Tool Bridge mode.
+    pub async fn connect_echo_bridge(
+        executable: impl AsRef<Path>,
+        registry: Arc<ToolRegistry>,
+    ) -> Result<Self, CodexAdapterError> {
+        let transport = ProcessTransport::start(executable.as_ref(), true).await?;
+        Self::from_transport_echo_bridge(transport, registry).await
     }
 
     pub(crate) async fn from_transport(
         transport: impl AppServerTransport,
     ) -> Result<Self, CodexAdapterError> {
+        Self::from_transport_mode(transport, None).await
+    }
+
+    pub(crate) async fn from_transport_echo_bridge(
+        transport: impl AppServerTransport,
+        registry: Arc<ToolRegistry>,
+    ) -> Result<Self, CodexAdapterError> {
+        let allowed_permissions = vec![PermissionLevel::None];
+        Self::from_transport_bridge(transport, registry, allowed_permissions).await
+    }
+
+    pub(crate) async fn from_transport_bridge(
+        transport: impl AppServerTransport,
+        registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
+    ) -> Result<Self, CodexAdapterError> {
+        echo_snapshot(&registry)?;
+        Self::from_transport_mode(
+            transport,
+            Some(BridgeConfig {
+                registry,
+                allowed_permissions: Arc::new(allowed_permissions),
+            }),
+        )
+        .await
+    }
+
+    async fn from_transport_mode(
+        transport: impl AppServerTransport,
+        bridge_config: Option<BridgeConfig>,
+    ) -> Result<Self, CodexAdapterError> {
+        let bridge_enabled = bridge_config.is_some();
+        let connection =
+            Arc::new(AppServerConnection::initialize(transport, bridge_enabled).await?);
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+        let bridge = if let Some(config) = bridge_config {
+            let requests = connection.take_server_requests().ok_or_else(|| {
+                CodexAdapterError::ProtocolViolation {
+                    message: "dynamic tool responder was already claimed".to_owned(),
+                }
+            })?;
+            let (controls, control_receiver) = mpsc::unbounded_channel();
+            let task = tokio::spawn(run_bridge(
+                Arc::clone(&connection),
+                Arc::clone(&sessions),
+                config.clone(),
+                requests,
+                control_receiver,
+            ));
+            Some(BridgeMode {
+                config,
+                controls,
+                task: Mutex::new(Some(task)),
+            })
+        } else {
+            None
+        };
         Ok(Self {
-            connection: Arc::new(AppServerConnection::initialize(transport).await?),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            connection,
+            sessions,
+            bridge,
         })
     }
 
     /// Stops the owned app-server transport and its lifecycle task.
     pub async fn shutdown(&self) -> Result<(), CodexAdapterError> {
-        self.connection.shutdown().await
+        self.connection.shutdown().await?;
+        let bridge_task = self.bridge.as_ref().and_then(|bridge| {
+            bridge
+                .task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        });
+        if let Some(task) = bridge_task {
+            task.await
+                .map_err(|error| CodexAdapterError::ProtocolViolation {
+                    message: format!("dynamic tool bridge task failed: {error}"),
+                })?;
+        }
+        Ok(())
     }
 
     fn sessions(&self) -> MutexGuard<'_, HashMap<SessionId, SessionRecord>> {
@@ -75,9 +190,16 @@ impl AgentRuntime for CodexRuntime {
             });
         }
         let receiver = self.connection.subscribe();
+        let (thread_params, bridge_tools) = if let Some(bridge) = &self.bridge {
+            let snapshot = echo_snapshot(&bridge.config.registry).map_err(agent_error)?;
+            let params = restricted_thread_params(Some(dynamic_tool_spec(&snapshot)));
+            (params, HashMap::from([("echo".to_owned(), snapshot)]))
+        } else {
+            (restricted_thread_params(None), HashMap::new())
+        };
         let thread = self
             .connection
-            .request("thread/start", restricted_thread_params())
+            .request("thread/start", thread_params)
             .await
             .map_err(agent_error)?;
         let thread_id = required_string(&thread, &["thread", "id"]).map_err(agent_error)?;
@@ -101,16 +223,20 @@ impl AgentRuntime for CodexRuntime {
             SessionRecord {
                 thread_id: thread_id.clone(),
                 active_turn: Some(turn_id.clone()),
+                bridge_tools,
             },
         );
         let events = event_stream(
             Arc::clone(&self.connection),
             receiver,
             Arc::clone(&self.sessions),
-            session_id.clone(),
+            TurnRoute {
+                session_id: session_id.clone(),
+                thread_id,
+                turn_id,
+            },
             request,
-            thread_id,
-            turn_id,
+            self.bridge.as_ref().map(|bridge| bridge.controls.clone()),
         );
         Ok(AgentHandle::new(session_id, events))
     }
@@ -139,6 +265,12 @@ impl AgentRuntime for CodexRuntime {
         let turn_id = record.active_turn.ok_or_else(|| AgentError::Runtime {
             message: format!("session `{session_id}` has no active Codex turn"),
         })?;
+        if let Some(bridge) = &self.bridge {
+            let _ = bridge.controls.send(BridgeControl::Cancel {
+                thread_id: record.thread_id.clone(),
+                turn_id: turn_id.clone(),
+            });
+        }
         let mut receiver = self.connection.subscribe();
         self.connection
             .request(
@@ -174,8 +306,8 @@ impl AgentRuntime for CodexRuntime {
     }
 }
 
-fn restricted_thread_params() -> Value {
-    json!({
+fn restricted_thread_params(dynamic_tool: Option<Value>) -> Value {
+    let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "read-only",
         "serviceName": "rah-runtime-codex",
@@ -185,7 +317,11 @@ fn restricted_thread_params() -> Value {
             "apps": { "_default": { "enabled": false } },
             "mcp_servers": {}
         }
-    })
+    });
+    if let Some(dynamic_tool) = dynamic_tool {
+        params["dynamicTools"] = json!([dynamic_tool]);
+    }
+    params
 }
 
 fn translate_input(request: &AgentRequest) -> Vec<Value> {
@@ -209,17 +345,23 @@ fn event_stream(
     connection: Arc<AppServerConnection>,
     mut receiver: broadcast::Receiver<ConnectionEvent>,
     sessions: Arc<Mutex<HashMap<SessionId, SessionRecord>>>,
-    session_id: SessionId,
+    route: TurnRoute,
     request: AgentRequest,
-    thread_id: String,
-    turn_id: String,
+    bridge_controls: Option<mpsc::UnboundedSender<BridgeControl>>,
 ) -> AgentEventStream {
+    let TurnRoute {
+        session_id,
+        thread_id,
+        turn_id,
+    } = route;
     let terminal = Arc::new(AtomicBool::new(false));
     let stream_terminal = Arc::clone(&terminal);
     let stream_session_id = session_id.clone();
     let guard_sessions = Arc::clone(&sessions);
     let guard_thread_id = thread_id.clone();
     let stream_turn_id = turn_id.clone();
+    let stream_bridge_controls = bridge_controls.clone();
+    let bridge_enabled = bridge_controls.is_some();
     let inner: AgentEventStream = Box::pin(async_stream::stream! {
         let model_request_id = ModelRequestId::new();
         let mut final_text = String::new();
@@ -251,6 +393,12 @@ fn event_stream(
                 Ok(ConnectionEvent::Notification { method, params })
                     if method == "turn/completed" && belongs_to(&params, &thread_id, &turn_id) =>
                 {
+                    if let Some(controls) = &stream_bridge_controls {
+                        let _ = controls.send(BridgeControl::Terminal {
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                        });
+                    }
                     clear_active_turn(&sessions, &session_id, &turn_id);
                     stream_terminal.store(true, Ordering::SeqCst);
                     match params.pointer("/turn/status").and_then(Value::as_str) {
@@ -280,7 +428,7 @@ fn event_stream(
                     break;
                 }
                 Ok(ConnectionEvent::Notification { method, params }) => {
-                    if unsupported_tool_item(&method, &params) {
+                    if unsupported_tool_item(&method, &params, bridge_enabled) {
                         yield failed(
                             &session_id,
                             "Codex-owned tool activity is unsupported by the restricted runtime",
@@ -289,6 +437,16 @@ fn event_stream(
                     }
                     tracing::debug!(target: "rah", codex_method = %method, "ignored additive Codex notification");
                 }
+                Ok(ConnectionEvent::RahEvent { thread_id: event_thread, turn_id: event_turn, event })
+                    if event_thread == thread_id && event_turn == turn_id =>
+                {
+                    let terminal = matches!(event, AgentEvent::Failed { .. });
+                    yield event;
+                    if terminal {
+                        break;
+                    }
+                }
+                Ok(ConnectionEvent::RahEvent { .. }) => {}
                 Ok(ConnectionEvent::UnsupportedRequest { method }) => {
                     yield AgentEvent::Failed {
                         session_id: session_id.clone(),
@@ -317,6 +475,7 @@ fn event_stream(
             thread_id: guard_thread_id,
             turn_id: stream_turn_id,
             terminal,
+            bridge_controls,
         },
     })
 }
@@ -341,11 +500,18 @@ struct TurnGuard {
     thread_id: String,
     turn_id: String,
     terminal: Arc<AtomicBool>,
+    bridge_controls: Option<mpsc::UnboundedSender<BridgeControl>>,
 }
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
         if !self.terminal.load(Ordering::SeqCst) {
+            if let Some(controls) = &self.bridge_controls {
+                let _ = controls.send(BridgeControl::Cancel {
+                    thread_id: self.thread_id.clone(),
+                    turn_id: self.turn_id.clone(),
+                });
+            }
             self.connection
                 .interrupt_now(self.thread_id.clone(), self.turn_id.clone());
             clear_active_turn(&self.sessions, &self.session_id, &self.turn_id);
@@ -365,12 +531,13 @@ fn passive_stream(
                     if params.get("threadId").and_then(Value::as_str) != Some(&thread_id) {
                         continue;
                     }
-                    if unsupported_tool_item(&method, &params) {
+                    if unsupported_tool_item(&method, &params, false) {
                         yield failed(&session_id, "Codex-owned tool activity is unsupported by the restricted runtime");
                         break;
                     }
                     tracing::debug!(target: "rah", codex_method = %method, "ignored resumed-thread notification");
                 }
+                Ok(ConnectionEvent::RahEvent { .. }) => {}
                 Ok(ConnectionEvent::UnsupportedRequest { method }) => {
                     yield AgentEvent::Failed {
                         session_id: session_id.clone(),
@@ -415,14 +582,15 @@ fn belongs_to(params: &Value, thread_id: &str, turn_id: &str) -> bool {
             || params.pointer("/turn/id").and_then(Value::as_str) == Some(turn_id))
 }
 
-fn unsupported_tool_item(method: &str, params: &Value) -> bool {
+fn unsupported_tool_item(method: &str, params: &Value, allow_dynamic: bool) -> bool {
     if method != "item/started" && method != "item/completed" {
         return false;
     }
-    matches!(
-        params.pointer("/item/type").and_then(Value::as_str),
-        Some("commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall")
-    )
+    match params.pointer("/item/type").and_then(Value::as_str) {
+        Some("dynamicToolCall") => !allow_dynamic,
+        Some("commandExecution" | "fileChange" | "mcpToolCall") => true,
+        _ => false,
+    }
 }
 
 fn clear_active_turn(

@@ -1,5 +1,6 @@
 //! Optional, process-isolated Codex runtime adapter for RAH.
 
+mod bridge;
 mod connection;
 mod errors;
 mod process;
@@ -7,6 +8,8 @@ mod protocol;
 mod runtime;
 mod transport;
 
+#[cfg(test)]
+mod bridge_tests;
 #[cfg(test)]
 mod runtime_tests;
 #[cfg(test)]

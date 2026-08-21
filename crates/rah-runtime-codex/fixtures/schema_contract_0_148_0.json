@@ -4,11 +4,14 @@
   "required_files": [
     { "path": "v1/InitializeParams.json", "required": ["clientInfo"] },
     { "path": "v2/ThreadStartResponse.json", "required": ["thread"] },
+    { "path": "v2/ThreadStartParams.json", "required": [], "properties": ["dynamicTools"], "experimental": true },
     { "path": "v2/TurnStartParams.json", "required": ["threadId", "input"] },
     { "path": "v2/TurnStartResponse.json", "required": ["turn"] },
     { "path": "v2/ThreadResumeParams.json", "required": ["threadId"] },
     { "path": "v2/AgentMessageDeltaNotification.json", "required": ["threadId", "turnId", "itemId", "delta"] },
     { "path": "v2/TurnCompletedNotification.json", "required": ["threadId", "turn"] },
-    { "path": "v2/TurnInterruptParams.json", "required": ["threadId", "turnId"] }
+    { "path": "v2/TurnInterruptParams.json", "required": ["threadId", "turnId"] },
+    { "path": "DynamicToolCallParams.json", "required": ["threadId", "turnId", "callId", "tool", "arguments"], "experimental": true },
+    { "path": "DynamicToolCallResponse.json", "required": ["contentItems", "success"], "experimental": true }
   ]
 }
