@@ -1,0 +1,21 @@
+[package]
+name = "rah-tools-plugin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+rah-protocol = { path = "../rah-protocol" }
+rah-tools = { path = "../rah-tools" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "rah-plugin-echo"
+path = "src/bin/rah_plugin_echo.rs"
