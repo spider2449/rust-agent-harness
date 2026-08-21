@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentOutput, AgentRequest, Message, MessageRole, ModelRequestId,
-    PermissionLevel, SessionId,
+    PermissionLevel, SessionId, ToolName,
 };
 use rah_runtime::{AgentError, AgentEventStream, AgentHandle, AgentRuntime};
 use rah_tools::ToolRegistry;
@@ -25,9 +25,7 @@ use tokio::{
 
 use crate::{
     CodexAdapterError,
-    bridge::{
-        BridgeConfig, BridgeControl, ToolSnapshot, dynamic_tool_spec, echo_snapshot, run_bridge,
-    },
+    bridge::{BridgeConfig, BridgeControl, ToolSnapshot, run_bridge, snapshot_tools},
     connection::{AppServerConnection, ConnectionEvent},
     process::ProcessTransport,
     transport::AppServerTransport,
@@ -38,6 +36,7 @@ pub(crate) struct SessionRecord {
     pub(crate) thread_id: String,
     pub(crate) active_turn: Option<String>,
     pub(crate) bridge_tools: HashMap<String, ToolSnapshot>,
+    pub(crate) bridge_aliases: HashMap<ToolName, String>,
 }
 
 struct BridgeMode {
@@ -79,13 +78,14 @@ impl CodexRuntime {
         Self::from_transport(transport).await
     }
 
-    /// Starts Codex in the experimental echo-only RAH Tool Bridge mode.
-    pub async fn connect_echo_bridge(
+    /// Starts Codex with the experimental RAH Tool Bridge explicitly enabled.
+    pub async fn connect_tool_bridge(
         executable: impl AsRef<Path>,
         registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
     ) -> Result<Self, CodexAdapterError> {
         let transport = ProcessTransport::start(executable.as_ref(), true).await?;
-        Self::from_transport_echo_bridge(transport, registry).await
+        Self::from_transport_bridge(transport, registry, allowed_permissions).await
     }
 
     pub(crate) async fn from_transport(
@@ -94,20 +94,11 @@ impl CodexRuntime {
         Self::from_transport_mode(transport, None).await
     }
 
-    pub(crate) async fn from_transport_echo_bridge(
-        transport: impl AppServerTransport,
-        registry: Arc<ToolRegistry>,
-    ) -> Result<Self, CodexAdapterError> {
-        let allowed_permissions = vec![PermissionLevel::None];
-        Self::from_transport_bridge(transport, registry, allowed_permissions).await
-    }
-
     pub(crate) async fn from_transport_bridge(
         transport: impl AppServerTransport,
         registry: Arc<ToolRegistry>,
         allowed_permissions: Vec<PermissionLevel>,
     ) -> Result<Self, CodexAdapterError> {
-        echo_snapshot(&registry)?;
         Self::from_transport_mode(
             transport,
             Some(BridgeConfig {
@@ -190,12 +181,16 @@ impl AgentRuntime for CodexRuntime {
             });
         }
         let receiver = self.connection.subscribe();
-        let (thread_params, bridge_tools) = if let Some(bridge) = &self.bridge {
-            let snapshot = echo_snapshot(&bridge.config.registry).map_err(agent_error)?;
-            let params = restricted_thread_params(Some(dynamic_tool_spec(&snapshot)));
-            (params, HashMap::from([("echo".to_owned(), snapshot)]))
+        let (thread_params, bridge_tools, bridge_aliases) = if let Some(bridge) = &self.bridge {
+            let snapshot = snapshot_tools(&bridge.config.registry);
+            let params = restricted_thread_params(Some(snapshot.dynamic_tools));
+            (params, snapshot.by_alias, snapshot.by_name)
         } else {
-            (restricted_thread_params(None), HashMap::new())
+            (
+                restricted_thread_params(None),
+                HashMap::new(),
+                HashMap::new(),
+            )
         };
         let thread = self
             .connection
@@ -224,6 +219,7 @@ impl AgentRuntime for CodexRuntime {
                 thread_id: thread_id.clone(),
                 active_turn: Some(turn_id.clone()),
                 bridge_tools,
+                bridge_aliases,
             },
         );
         let events = event_stream(
@@ -306,7 +302,7 @@ impl AgentRuntime for CodexRuntime {
     }
 }
 
-fn restricted_thread_params(dynamic_tool: Option<Value>) -> Value {
+fn restricted_thread_params(dynamic_tools: Option<Vec<Value>>) -> Value {
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "read-only",
@@ -318,8 +314,8 @@ fn restricted_thread_params(dynamic_tool: Option<Value>) -> Value {
             "mcp_servers": {}
         }
     });
-    if let Some(dynamic_tool) = dynamic_tool {
-        params["dynamicTools"] = json!([dynamic_tool]);
+    if let Some(dynamic_tools) = dynamic_tools {
+        params["dynamicTools"] = Value::Array(dynamic_tools);
     }
     params
 }

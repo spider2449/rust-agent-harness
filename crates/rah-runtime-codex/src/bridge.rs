@@ -1,18 +1,17 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
 use rah_protocol::{
     AgentErrorCode, AgentEvent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent,
-    ToolDefinition, ToolInput, ToolOutput,
+    ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
-use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
+use rah_tools::{ToolContext, ToolError, ToolRegistry};
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    CodexAdapterError,
     connection::{AppServerConnection, ServerRequest},
     runtime::SessionRecord,
 };
@@ -34,6 +33,13 @@ pub(crate) enum BridgeControl {
 #[derive(Clone, Debug)]
 pub(crate) struct ToolSnapshot {
     pub(crate) definition: ToolDefinition,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ThreadToolSnapshot {
+    pub(crate) dynamic_tools: Vec<Value>,
+    pub(crate) by_alias: HashMap<String, ToolSnapshot>,
+    pub(crate) by_name: HashMap<ToolName, String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -73,29 +79,65 @@ struct DynamicCallParams {
     arguments: Value,
 }
 
-pub(crate) fn echo_snapshot(registry: &ToolRegistry) -> Result<ToolSnapshot, CodexAdapterError> {
+pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
     let definitions = registry.definitions();
-    let expected = EchoTool::new().definition();
-    if definitions != [expected.clone()] {
-        return Err(CodexAdapterError::ProtocolViolation {
-            message:
-                "echo bridge requires a registry containing only the exact RAH EchoTool definition"
-                    .to_owned(),
-        });
+    let mut unavailable_aliases = definitions
+        .iter()
+        .filter(|definition| codex_name_is_usable(definition.name.as_str()))
+        .map(|definition| definition.name.as_str().to_owned())
+        .collect::<HashSet<_>>();
+    let mut dynamic_tools = Vec::with_capacity(definitions.len());
+    let mut by_alias = HashMap::with_capacity(definitions.len());
+    let mut by_name = HashMap::with_capacity(definitions.len());
+
+    for (index, definition) in definitions.into_iter().enumerate() {
+        let alias = if codex_name_is_usable(definition.name.as_str()) {
+            definition.name.as_str().to_owned()
+        } else {
+            private_alias(index, &mut unavailable_aliases)
+        };
+        let snapshot = ToolSnapshot { definition };
+        dynamic_tools.push(dynamic_tool_spec(&alias, &snapshot));
+        by_name.insert(snapshot.definition.name.clone(), alias.clone());
+        by_alias.insert(alias, snapshot);
     }
-    Ok(ToolSnapshot {
-        definition: expected,
-    })
+
+    ThreadToolSnapshot {
+        dynamic_tools,
+        by_alias,
+        by_name,
+    }
 }
 
-pub(crate) fn dynamic_tool_spec(snapshot: &ToolSnapshot) -> Value {
+fn dynamic_tool_spec(alias: &str, snapshot: &ToolSnapshot) -> Value {
     json!({
         "type": "function",
-        "name": "echo",
+        "name": alias,
         "description": snapshot.definition.description,
         "inputSchema": snapshot.definition.input_schema,
         "deferLoading": false
     })
+}
+
+fn codex_name_is_usable(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name != "mcp"
+        && !name.starts_with("mcp__")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn private_alias(index: usize, unavailable: &mut HashSet<String>) -> String {
+    let mut suffix = index;
+    loop {
+        let alias = format!("rah_tool_{suffix}");
+        if unavailable.insert(alias.clone()) {
+            return alias;
+        }
+        suffix += 1;
+    }
 }
 
 pub(crate) async fn run_bridge(
@@ -182,10 +224,13 @@ async fn handle_request(
             (record.thread_id == params.thread_id
                 && record.active_turn.as_deref() == Some(params.turn_id.as_str()))
             .then(|| {
-                (
-                    session_id.clone(),
-                    record.bridge_tools.get(&params.tool).cloned(),
-                )
+                let snapshot = record.bridge_tools.get(&params.tool).filter(|snapshot| {
+                    record
+                        .bridge_aliases
+                        .get(&snapshot.definition.name)
+                        .is_some_and(|alias| alias == &params.tool)
+                });
+                (session_id.clone(), snapshot.cloned())
             })
         })
     };
@@ -286,11 +331,15 @@ async fn handle_request(
         .registry
         .get(&call.name)
         .map(|tool| tool.definition());
-    if current.as_ref() != Some(&snapshot.definition)
-        || !config
-            .allowed_permissions
-            .contains(&snapshot.definition.permission)
-    {
+    let definition_matches_snapshot = current.as_ref().is_some_and(|definition| {
+        definition.name == snapshot.definition.name
+            && definition.description == snapshot.definition.description
+            && definition.input_schema == snapshot.definition.input_schema
+    });
+    let permission_allowed = current
+        .as_ref()
+        .is_some_and(|definition| config.allowed_permissions.contains(&definition.permission));
+    if !definition_matches_snapshot || !permission_allowed {
         let response = failure_response("RAH permission policy denied the dynamic tool call");
         connection.respond_result(request.id.clone(), response.clone());
         calls.insert(

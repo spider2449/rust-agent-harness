@@ -117,9 +117,13 @@ async fn run() -> Result<(), String> {
     );
 
     let runtime = Arc::new(
-        CodexRuntime::connect_echo_bridge(&executable, Arc::new(registry))
-            .await
-            .map_err(|error| format!("connection failed: {error}"))?,
+        CodexRuntime::connect_tool_bridge(
+            &executable,
+            Arc::new(registry),
+            vec![PermissionLevel::None],
+        )
+        .await
+        .map_err(|error| format!("connection failed: {error}"))?,
     );
     let live_result = run_turn(Arc::clone(&runtime), &executions).await;
     let shutdown_result = runtime.shutdown().await;

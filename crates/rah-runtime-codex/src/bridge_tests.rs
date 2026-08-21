@@ -2,7 +2,7 @@ use std::{
     future::pending,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
 };
 
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-    RequestId, ToolDefinition, ToolInput, ToolOutput,
+    RequestId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
@@ -49,6 +49,76 @@ struct BlockingEcho {
     dropped: Arc<AtomicUsize>,
 }
 
+struct LookupTool {
+    executions: Arc<AtomicUsize>,
+}
+
+struct MutablePermissionTool {
+    permission: Arc<AtomicU8>,
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for MutablePermissionTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("mutable_permission"),
+            description: "Tests execution-time permission lookup.".to_owned(),
+            input_schema: json!({"type": "object"}),
+            permission: match self.permission.load(Ordering::SeqCst) {
+                0 => PermissionLevel::None,
+                _ => PermissionLevel::Read,
+            },
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ToolContent::Text("current permission accepted".to_owned())],
+            is_error: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for LookupTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("record.lookup"),
+            description: "Looks up a deterministic test record.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "fail": { "type": "boolean" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            permission: PermissionLevel::Read,
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "record": input.0["id"],
+            }))],
+            is_error: input.0["fail"].as_bool().unwrap_or(false),
+        })
+    }
+}
+
 struct DropMark(Arc<AtomicUsize>);
 
 impl Drop for DropMark {
@@ -76,7 +146,7 @@ impl Tool for BlockingEcho {
 }
 
 #[tokio::test]
-async fn experimental_api_and_exact_echo_schema_are_bridge_only() {
+async fn experimental_api_and_generic_tool_definitions_are_bridge_only() {
     let (transport, mut peer) = fake_transport();
     let connecting = tokio::spawn(CodexRuntime::from_transport(transport));
     let initialize = peer.respond("initialize", json!({})).await;
@@ -89,8 +159,8 @@ async fn experimental_api_and_exact_echo_schema_are_bridge_only() {
     restricted.shutdown().await.expect("shutdown");
 
     let (runtime, mut peer, initialize) = connected_bridge(
-        counting_registry(Arc::new(AtomicUsize::new(0))),
-        vec![PermissionLevel::None],
+        generic_registry(Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))),
+        vec![PermissionLevel::None, PermissionLevel::Read],
     )
     .await;
     assert_eq!(
@@ -100,11 +170,12 @@ async fn experimental_api_and_exact_echo_schema_are_bridge_only() {
     let (handle, thread) = start_bridge(&runtime, &mut peer).await;
     assert_eq!(
         thread["params"]["dynamicTools"].as_array().map(Vec::len),
-        Some(1)
+        Some(2)
     );
     assert_eq!(
-        thread["params"]["dynamicTools"][0],
-        json!({
+        thread["params"]["dynamicTools"],
+        json!([
+        {
             "type": "function",
             "name": "echo",
             "description": "Returns the supplied text unchanged.",
@@ -115,11 +186,116 @@ async fn experimental_api_and_exact_echo_schema_are_bridge_only() {
                 "additionalProperties": false
             },
             "deferLoading": false
-        })
+        },
+        {
+            "type": "function",
+            "name": "rah_tool_1",
+            "description": "Looks up a deterministic test record.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "fail": { "type": "boolean" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            },
+            "deferLoading": false
+        }
+        ])
     );
     assert_restrictions(&thread["params"]);
     finish_turn(&peer, "completed");
     let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn aliases_dispatch_distinct_tools_and_map_json_error_outputs() {
+    let echo_executions = Arc::new(AtomicUsize::new(0));
+    let lookup_executions = Arc::new(AtomicUsize::new(0));
+    let (runtime, mut peer, _) = connected_bridge(
+        generic_registry(Arc::clone(&echo_executions), Arc::clone(&lookup_executions)),
+        vec![PermissionLevel::None, PermissionLevel::Read],
+    )
+    .await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+
+    peer.send(tool_request(
+        json!(70),
+        "private-thread",
+        "private-turn",
+        "lookup-success",
+        "rah_tool_1",
+        json!({"id": 7}),
+    ));
+    assert_eq!(
+        peer.next_sent().await["result"],
+        json!({
+            "contentItems": [{ "type": "inputText", "text": "{\"record\":7}" }],
+            "success": true
+        })
+    );
+    peer.send(tool_request(
+        json!(71),
+        "private-thread",
+        "private-turn",
+        "lookup-error-output",
+        "rah_tool_1",
+        json!({"id": 8, "fail": true}),
+    ));
+    assert_eq!(
+        peer.next_sent().await["result"],
+        json!({
+            "contentItems": [{ "type": "inputText", "text": "{\"record\":8}" }],
+            "success": false
+        })
+    );
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(echo_executions.load(Ordering::SeqCst), 0);
+    assert_eq!(lookup_executions.load(Ordering::SeqCst), 2);
+    assert_eq!(tool_event_count(&events), 6);
+    assert!(events.iter().all(|event| match event {
+        AgentEvent::ToolRequested { tool_call, .. } => {
+            tool_call.name == ToolName::new("record.lookup")
+        }
+        _ => true,
+    }));
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn permission_is_read_from_the_registered_definition_at_execution_time() {
+    let permission = Arc::new(AtomicU8::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(MutablePermissionTool {
+            permission: Arc::clone(&permission),
+            executions: Arc::clone(&executions),
+        }))
+        .expect("register mutable permission tool");
+    let (runtime, mut peer, _) =
+        connected_bridge(Arc::new(registry), vec![PermissionLevel::Read]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+
+    permission.store(1, Ordering::SeqCst);
+    peer.send(tool_request(
+        json!(72),
+        "private-thread",
+        "private-turn",
+        "permission-refresh",
+        "mutable_permission",
+        json!({}),
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], true);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(tool_event_count(&events), 3);
     runtime.shutdown().await.expect("shutdown");
 }
 
@@ -500,6 +676,24 @@ fn counting_registry(executions: Arc<AtomicUsize>) -> Arc<ToolRegistry> {
     registry
         .register(Arc::new(CountingEcho { executions }))
         .expect("register echo");
+    Arc::new(registry)
+}
+
+fn generic_registry(
+    echo_executions: Arc<AtomicUsize>,
+    lookup_executions: Arc<AtomicUsize>,
+) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(CountingEcho {
+            executions: echo_executions,
+        }))
+        .expect("register echo");
+    registry
+        .register(Arc::new(LookupTool {
+            executions: lookup_executions,
+        }))
+        .expect("register lookup");
     Arc::new(registry)
 }
 
