@@ -1,4 +1,4 @@
-# RAH v0.2 Architecture
+# RAH v0.3 Architecture
 
 ## Ownership boundaries
 
@@ -8,8 +8,31 @@ tool descriptions, calls, and outputs. Provider, runtime, MCP, and process-plugi
 adapters translate only at their private edges.
 
 `AgentRuntime`, `ModelBackend`, `Tool`, `ToolRegistry`, `SessionStore`, and
-`Sandbox` remain independent extension points. No v0.2 work changes their
+`Sandbox` remain independent extension points. No v0.3 work changes their
 architecture-defining public contracts.
+
+## v0.3 capability classification
+
+### Public / host capabilities
+
+The host-owned Execute surface is limited to `host.cargo.version`,
+`host.git.status`, `host.git.stage`, and `host.git.unstage`. The first two are
+fixed, host-constructed inspection capabilities. Stage and unstage use the
+private `RepositoryMutationPolicy` to prove one authorized index-only effect
+for one host-selected target. They never grant generic process, worktree-byte,
+history/ref, network, or credential authority.
+
+### Validation fixtures
+
+The hardened Execute deterministic/live fixture (`process.test.echo`) and the
+repository-mutation deterministic/live fixture are validation infrastructure.
+They establish policy behavior before the public host capabilities are exposed;
+they are not production/public capabilities. In particular,
+`host.fixture.echo` does not exist.
+
+The Generic Tool Bridge, `fs.read`, MCP adapter, and process-plugin adapter are
+also verified v0.3 components. All converge through RAH-owned `Tool`,
+`ToolRegistry`, and permission interfaces.
 
 ## Current crate topology
 

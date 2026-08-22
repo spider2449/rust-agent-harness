@@ -25,7 +25,7 @@ use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
 use rah_tools::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool, Tool, ToolRegistry};
 use serde_json::json;
 
-const TOOL_NAME: &str = "host.fixture.echo";
+const TOOL_NAME: &str = "process.test.echo";
 const CODEX_ALIAS: &str = "rah_tool_0";
 const EXPECTED_TEXT: &str = "RAH_EXECUTE_BRIDGE_OK";
 const FIXED_ENVIRONMENT_NAME: &str = "RAH_EXECUTE_FIXED";

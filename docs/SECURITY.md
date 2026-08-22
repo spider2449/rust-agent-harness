@@ -1,4 +1,25 @@
-# RAH v0.2 Security Model
+# RAH v0.3 Security Model
+
+## v0.3 release boundary
+
+The public/host Execute capabilities are `host.cargo.version`,
+`host.git.status`, `host.git.stage`, and `host.git.unstage`. They are
+host-constructed, capability-specific tools, not generic model-selected process
+authority. The hardened Execute deterministic/live fixture (`process.test.echo`)
+and the repository-mutation deterministic/live fixture are validation
+infrastructure, not public capabilities. `host.fixture.echo` does not exist.
+
+The v0.3 boundary excludes arbitrary `shell.exec` and `process.exec`,
+model-selected executable/argv/cwd/environment, worktree restore, arbitrary
+file mutation, commit/history/ref operations, reset/clean/checkout/switch/stash,
+merge/rebase, push/pull/fetch, network Git, and credential-bearing Git
+execution. Worktree-destructive authority is deferred and requires ADR 0011.
+
+Process supervision is not OS sandboxing and RAH makes no network-isolation or
+rollback guarantee. Timeout or cancellation can leave uncertain mutation
+effects; uncertain mutations are never automatically replayed. Windows Job
+Object assignment remains post-spawn, external OS processes can race repository
+mutation, and Git configuration may influence Git semantics.
 
 ## Trust and authorization boundary
 
