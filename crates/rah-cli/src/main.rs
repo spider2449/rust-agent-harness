@@ -1,4 +1,10 @@
-use std::{env, io::Write, path::Path, process::ExitCode, sync::Arc};
+use std::{
+    env,
+    io::Write,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -9,7 +15,7 @@ use rah_protocol::{
     RequestId, ToolCall, ToolCallId, ToolInput, ToolName,
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
-use rah_tools::{EchoTool, FsReadTool, ToolRegistry};
+use rah_tools::{EchoTool, FsReadTool, ToolRegistry, TrustedStaticProfile};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -31,6 +37,20 @@ enum Command {
     Tools,
     /// Checks that the local deterministic configuration can be built.
     Doctor,
+    /// Validates one explicitly selected trusted static capability profile.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    /// Validates a profile and prints its redacted effective inventory.
+    Validate {
+        /// Absolute profile path selected by the trusted operator.
+        profile_path: PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -61,6 +81,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Run { prompt } => run_prompt(prompt).await,
         Command::Tools => list_tools(),
         Command::Doctor => doctor(),
+        Command::Profile { command } => match command {
+            ProfileCommand::Validate { profile_path } => validate_profile(profile_path),
+        },
     }
 }
 
@@ -155,6 +178,28 @@ fn doctor() -> Result<()> {
         bail!("deterministic runtime has no registered tools");
     }
     println!("RAH doctor: ok");
+    Ok(())
+}
+
+fn validate_profile(profile_path: PathBuf) -> Result<()> {
+    let profile =
+        TrustedStaticProfile::load(profile_path).context("trusted profile validation failed")?;
+    let effective = profile.effective_profile();
+
+    println!("profile_version={}", effective.profile_version);
+    println!("profile_id={}", effective.profile_id);
+    println!("source_class={}", effective.source_class);
+    for capability in &effective.capabilities {
+        println!(
+            "capability name={} enabled={} registered={} permission={:?} resources={} validation={}",
+            capability.capability_id,
+            capability.enabled,
+            capability.registered,
+            capability.permission,
+            capability.resources.join(","),
+            capability.validation,
+        );
+    }
     Ok(())
 }
 

@@ -35,6 +35,34 @@ parsed ToolCall
  -> ToolOutput
 ```
 
+## Trusted static capability profile source
+
+`rah profile validate <absolute-profile-path>` accepts only an operator-selected
+absolute profile path; it has no search, environment selection, reload, or
+watching behavior. Before JSON parsing, `rah-tools` validates every path
+component, rejects links and Windows reparse points, requires the final object
+to be a regular file, opens it once, validates that opened object, and reads at
+most 1 MiB from that same handle. Profile text must be valid UTF-8.
+
+On Windows, the initial boundary accepts only normal drive-rooted paths. It
+rejects UNC, verbatim (`\\?\\`) and device prefix forms, and paths with an ADS
+colon in a normal component. `.` and `..` components are rejected on every
+platform. Junctions, symbolic links, and all other objects with
+`FILE_ATTRIBUTE_REPARSE_POINT` are rejected. Case-equivalent paths are not
+treated as distinct trust identities; raw path-string equality is never an
+identity claim. Unix permits hard links but rejects symbolic links; the opened
+object's device/inode is compared to the post-open pathname object.
+
+This is file identity/type validation, not a portable proof that only a trusted
+OS principal can modify the file. RAH does not inspect or enforce ownership,
+ACLs, or modes, and does not claim a trusted-store guarantee. Unix uses
+`O_NOFOLLOW` for the final component and reads from the opened handle; all
+platforms recheck pathname topology after open. An external actor can still
+race parent-path replacement or filesystem behavior outside the checks,
+especially on Windows where the standard library exposes no portable opened-file
+identity comparison used here. Operators must therefore place profiles in an
+OS-managed location with appropriate ownership and ACL controls.
+
 `ExternalToolIdentity` is an opaque RAH-owned key for one tool discovered from
 an external provider. `ExternalToolPermissionPolicy` maps those identities to
 host-selected RAH `PermissionLevel` values. It is default-deny: absence is not

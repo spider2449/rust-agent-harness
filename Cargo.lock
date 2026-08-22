@@ -506,6 +506,7 @@ dependencies = [
  "libc",
  "rah-protocol",
  "rah-sandbox",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

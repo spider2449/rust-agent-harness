@@ -17,6 +17,8 @@ mod git_unstage;
 mod host_execute;
 mod repository_mutation;
 mod shell_exec;
+mod trusted_profile;
+mod trusted_profile_source;
 
 pub use cargo_version::{CARGO_VERSION_TOOL_NAME, CargoVersionTool};
 pub use echo::EchoTool;
@@ -30,6 +32,7 @@ pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use shell_exec::ShellExecTool;
+pub use trusted_profile::{EffectiveProfile, ProfileError, TrustedStaticProfile};
 
 /// Neutral execution context supplied by the runtime to a tool.
 #[derive(Clone, Debug, Default)]
