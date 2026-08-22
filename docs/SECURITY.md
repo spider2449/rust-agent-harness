@@ -177,11 +177,31 @@ worktree restore, and all other Git mutation remain deferred.
 
 ## MCP process boundary
 
-`rah-tools-mcp` directly launches an explicitly configured local MCP executable
-without shell-string interpolation. The adapter owns the pinned stdio protocol,
-request correlation, timeouts, cooperative cancellation, shutdown, termination,
-and process reaping. Discovered definitions and results are validated and
-translated into neutral RAH types; unsupported result content fails closed.
+`rah-tools-mcp` directly launches an explicitly configured, absolute native MCP
+executable without shell-string interpolation or `PATH` lookup. It rejects
+symbolic links (and Windows reparse points), revalidates canonical file length
+and modification identity before launch, and documents the remaining
+check-to-spawn replacement race. Windows accepts only `.exe`; Unix requires a
+regular executable file.
+
+Each generation receives a host-created isolated temporary cwd and a cleared
+environment. Windows retains only `SystemRoot` when it is present. The adapter
+owns bounded stdio framing (1 MiB default), outstanding work (32), command
+queue (64), result/output (1 MiB), host-only stderr tail (64 KiB), and retired
+request tracking (64 IDs). Its bounded control queue holds every admitted
+outstanding cancellation plus one stop signal. Direct process spawn fails
+synchronously; initialize and discovery each time out after two seconds, tool
+calls use the host-configured 30-second default, and shutdown waits 500 ms
+before termination/reaping. The adapter owns the pinned stdio protocol,
+request correlation, cooperative cancellation, shutdown, termination, and
+process reaping. Child stderr never enters `ToolOutput`.
+
+Discovery is all-or-nothing: the discovered remote names must exactly equal
+the explicitly host-assigned set. Optional `McpExpectedTool` declarations pin
+the normalized JSON input schema and permission as well. Missing, extra,
+duplicate, malformed, or mismatched discovery returns no usable tool set.
+Discovered definitions and results are validated and translated into neutral
+RAH types; unsupported result content fails closed.
 
 The MCP server is a separate process with its own possible filesystem, process,
 and network authority. Owning and supervising that process does not sandbox its

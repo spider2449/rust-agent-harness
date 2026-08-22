@@ -1,11 +1,19 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use rah_protocol::{
     PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName, ToolOutput,
 };
 use rah_tools::{Tool, ToolContext, ToolError, ToolRegistry};
-use rah_tools_mcp::{MCP_PROTOCOL_VERSION, McpAdapter, McpServerConfig};
-use serde_json::json;
+use rah_tools_mcp::{MCP_PROTOCOL_VERSION, McpAdapter, McpLimits, McpServerConfig};
+use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
 fn server_program() -> PathBuf {
@@ -18,6 +26,34 @@ fn config(call_timeout: Duration) -> McpServerConfig {
         .with_tool_permission("echo", PermissionLevel::None)
         .expect("echo permission should be configured once")
         .with_call_timeout(call_timeout)
+}
+
+fn mode_config(mode: &str) -> McpServerConfig {
+    config(Duration::from_millis(75))
+        .with_arg("--mode")
+        .with_arg(mode)
+}
+
+fn fixture_path(label: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    std::env::temp_dir().join(format!(
+        "rah-mcp-test-{label}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+async fn connect_error(config: McpServerConfig) -> rah_tools_mcp::McpAdapterError {
+    match McpAdapter::connect(config).await {
+        Ok(adapter) => {
+            adapter
+                .shutdown()
+                .await
+                .expect("unexpected adapter should shut down");
+            panic!("fixture must fail connection");
+        }
+        Err(error) => error,
+    }
 }
 
 async fn adapter() -> McpAdapter {
@@ -87,7 +123,42 @@ async fn unconfigured_remote_tool_fails_closed_during_discovery() {
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains("no explicit host permission"));
+    assert!(error.to_string().contains("exact expected tool set"));
+}
+
+#[tokio::test]
+async fn exact_schema_expectation_admits_only_the_host_pinned_schema() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": false
+    });
+    let adapter = McpAdapter::connect(
+        McpServerConfig::stdio("test", server_program())
+            .expect("server config")
+            .with_expected_tool("echo", schema, PermissionLevel::Read)
+            .expect("host expectation"),
+    )
+    .await
+    .expect("exact schema should be admitted");
+    assert_eq!(
+        adapter.tools()[0].definition().permission,
+        PermissionLevel::Read
+    );
+    adapter.shutdown().await.expect("shutdown");
+}
+
+#[test]
+fn resource_limits_reject_unbounded_configuration() {
+    let error = McpServerConfig::stdio("test", server_program())
+        .expect("server config")
+        .with_limits(rah_tools_mcp::McpLimits {
+            max_outstanding: 33,
+            ..Default::default()
+        })
+        .expect_err("hard maximum must reject expansion");
+    assert!(error.to_string().contains("resource limits"));
 }
 
 #[tokio::test]
@@ -143,7 +214,7 @@ fn duplicate_and_malformed_permission_configuration_fails_deterministically() {
         .expect_err("empty remote identity should fail");
     assert_eq!(
         malformed.to_string(),
-        "invalid MCP configuration: external tool identity must not be empty"
+        "invalid MCP configuration: remote tool name must contain 1-64 lowercase ASCII letters, digits, `_`, or `-`"
     );
 
     let duplicate = McpServerConfig::stdio("test", server_program())
@@ -154,7 +225,7 @@ fn duplicate_and_malformed_permission_configuration_fails_deterministically() {
         .expect_err("duplicate assignment should fail");
     assert_eq!(
         duplicate.to_string(),
-        "invalid MCP configuration: permission for external tool `echo` is configured more than once"
+        "invalid MCP configuration: permission for external tool `mcp:test:echo` is configured more than once"
     );
 }
 
@@ -174,7 +245,7 @@ async fn partially_configured_discovery_does_not_create_implicit_none_tool() {
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains("remote tool `echo`"));
+    assert!(error.to_string().contains("exact expected tool set"));
     assert!(!error.to_string().contains("PermissionLevel::None"));
 }
 
@@ -361,6 +432,337 @@ async fn child_exit_and_disconnect_fail_closed_without_reconnect() {
         assert!(matches!(second, ToolError::Execution { .. }));
 
         adapter.shutdown().await.expect("adapter should shut down");
+    }
+}
+
+#[tokio::test]
+async fn child_cwd_and_environment_are_host_isolated_and_cleaned_up() {
+    let observation_file = fixture_path("observation.json");
+    // This is intentionally process-global: the fixture proves `env_clear` does
+    // not pass this ambient parent value to the child.
+    unsafe { std::env::set_var("RAH_MCP_PARENT_SECRET_SENTINEL", "parent-only") };
+    let adapter = McpAdapter::connect(
+        mode_config("echo")
+            .with_arg("--observation-file")
+            .with_arg(observation_file.to_string_lossy()),
+    )
+    .await
+    .expect("fixture should connect");
+    let observation: Value =
+        serde_json::from_slice(&fs::read(&observation_file).expect("observation"))
+            .expect("valid fixture observation");
+    let cwd = PathBuf::from(observation["cwd"].as_str().expect("fixture cwd"));
+    assert_ne!(cwd, std::env::current_dir().expect("parent cwd"));
+    assert!(cwd.exists(), "host-owned cwd exists while child is active");
+    assert!(
+        !observation["parentSecretPresent"]
+            .as_bool()
+            .expect("secret flag")
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        observation["systemRootPresent"].as_bool(),
+        Some(std::env::var_os("SystemRoot").is_some())
+    );
+
+    adapter.shutdown().await.expect("shutdown");
+    assert!(!cwd.exists(), "host-owned cwd is reaped with the child");
+    let _ = fs::remove_file(observation_file);
+    unsafe { std::env::remove_var("RAH_MCP_PARENT_SECRET_SENTINEL") };
+}
+
+#[tokio::test]
+async fn initialize_and_discovery_timeouts_return_no_partial_provider() {
+    for mode in ["hang-initialize", "hang-discovery"] {
+        let started = Instant::now();
+        let error = connect_error(mode_config(mode)).await;
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(matches!(
+            error,
+            rah_tools_mcp::McpAdapterError::Initialization { .. }
+        ));
+        assert!(error.to_string().contains("not replayed"));
+    }
+}
+
+#[tokio::test]
+async fn oversized_wire_message_fails_before_provider_admission() {
+    let error = connect_error(mode_config("oversized-message")).await;
+    assert!(matches!(
+        error,
+        rah_tools_mcp::McpAdapterError::Initialization { .. }
+    ));
+    assert!(!error.to_string().contains('x'));
+}
+
+#[tokio::test]
+async fn result_and_model_output_limits_reject_structured_and_text_results() {
+    let limits = McpLimits {
+        max_message_bytes: 16 * 1024,
+        max_result_bytes: 1024,
+        ..Default::default()
+    };
+    for mode in ["__oversized_structured__", "__oversized_text__"] {
+        let adapter = McpAdapter::connect(
+            config(Duration::from_secs(1))
+                .with_limits(limits.clone())
+                .expect("small valid limits"),
+        )
+        .await
+        .expect("adapter");
+        let error = execute(&adapter.tools()[0], mode)
+            .await
+            .expect_err("result must exceed output limit");
+        assert!(matches!(error, ToolError::Execution { .. }));
+        assert!(error.to_string().contains("result exceeded"));
+        adapter.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
+async fn bounded_stderr_is_host_diagnostic_only() {
+    let adapter = McpAdapter::connect(
+        mode_config("stderr-flood")
+            .with_limits(McpLimits {
+                max_stderr_bytes: 128,
+                ..Default::default()
+            })
+            .expect("small stderr tail"),
+    )
+    .await
+    .expect("adapter");
+    let diagnostic = adapter.diagnostics();
+    assert!(diagnostic.stderr.len() <= 128);
+    assert!(diagnostic.truncated_bytes > 0);
+    let output = execute(&adapter.tools()[0], "normal")
+        .await
+        .expect("normal result");
+    assert!(!format!("{output:?}").contains("RAH_MCP_STDERR_SECRET_SENTINEL"));
+    adapter.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn exact_discovery_rejects_missing_extra_duplicate_and_schema_drift_atomically() {
+    for mode in [
+        "missing-tool",
+        "extra-tool",
+        "duplicate-tool",
+        "schema-drift",
+    ] {
+        let config = if mode == "schema-drift" {
+            McpServerConfig::stdio("test", server_program()).expect("config")
+                .with_arg("--mode").with_arg(mode)
+                .with_expected_tool("echo", json!({"type":"object", "properties":{"text":{"type":"string"}}, "required":["text"], "additionalProperties":false}), PermissionLevel::None)
+                .expect("expected tool")
+        } else {
+            mode_config(mode)
+        };
+        let error = connect_error(config).await;
+        assert!(matches!(
+            error,
+            rah_tools_mcp::McpAdapterError::Initialization { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn schema_normalization_accepts_reordered_objects_but_not_security_relevant_drift() {
+    let schema = json!({"additionalProperties":false, "required":["text"], "properties":{"text":{"type":"string"}}, "type":"object"});
+    let adapter = McpAdapter::connect(
+        McpServerConfig::stdio("test", server_program())
+            .expect("config")
+            .with_expected_tool("echo", schema, PermissionLevel::None)
+            .expect("expected tool"),
+    )
+    .await
+    .expect("object key order is normalized");
+    adapter.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn exact_schema_rejects_added_removed_type_required_and_nested_drift() {
+    let actual = json!({"type":"object", "properties":{"text":{"type":"string"}}, "required":["text"], "additionalProperties":false});
+    let variants = [
+        json!({"type":"object", "properties":{"text":{"type":"string"}, "extra":{"type":"string"}}, "required":["text"], "additionalProperties":false}),
+        json!({"type":"object", "properties":{}, "required":["text"], "additionalProperties":false}),
+        json!({"type":"object", "properties":{"text":{"type":"number"}}, "required":["text"], "additionalProperties":false}),
+        json!({"type":"object", "properties":{"text":{"type":"string"}}, "required":[], "additionalProperties":false}),
+        json!({"type":"object", "properties":{"text":{"type":"string", "items":{"type":"string"}}}, "required":["text"], "additionalProperties":false}),
+    ];
+    for schema in variants {
+        assert_ne!(schema, actual);
+        let error = connect_error(
+            McpServerConfig::stdio("test", server_program())
+                .expect("config")
+                .with_expected_tool("echo", schema, PermissionLevel::None)
+                .expect("expected tool"),
+        )
+        .await;
+        assert!(error.to_string().contains("schema or permission"));
+    }
+}
+
+#[tokio::test]
+async fn malformed_discovery_cannot_admit_a_partial_provider() {
+    let error = connect_error(mode_config("malformed-discovery")).await;
+    assert!(matches!(
+        error,
+        rah_tools_mcp::McpAdapterError::Initialization { .. }
+    ));
+    assert!(error.to_string().contains("invalid name"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_admits_native_exe_and_rejects_script_extensions_without_running_them() {
+    let adapter = adapter().await;
+    adapter
+        .shutdown()
+        .await
+        .expect("native exe fixture should be admitted");
+    for extension in ["cmd", "ps1"] {
+        let path = fixture_path(extension).with_extension(extension);
+        fs::write(&path, b"not a native executable").expect("script fixture");
+        let error = connect_error(
+            McpServerConfig::stdio("test", &path)
+                .expect("absolute script path config")
+                .with_tool_permission("echo", PermissionLevel::None)
+                .expect("permission"),
+        )
+        .await;
+        assert!(matches!(
+            error,
+            rah_tools_mcp::McpAdapterError::InvalidConfiguration { .. }
+        ));
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_reparse_executable_alias_is_rejected_when_symlinks_are_available() {
+    use std::os::windows::fs::symlink_file;
+
+    let alias = fixture_path("exe-alias").with_extension("exe");
+    if let Err(error) = symlink_file(server_program(), &alias) {
+        eprintln!("skipped Windows symlink integration variant: {error}");
+        return;
+    }
+    let error = connect_error(
+        McpServerConfig::stdio("test", &alias)
+            .expect("absolute alias config")
+            .with_tool_permission("echo", PermissionLevel::None)
+            .expect("permission"),
+    )
+    .await;
+    assert!(matches!(
+        error,
+        rah_tools_mcp::McpAdapterError::InvalidConfiguration { .. }
+    ));
+    let _ = fs::remove_file(alias);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_rejects_non_executable_directories_and_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let regular = fixture_path("unix-regular");
+    fs::write(&regular, b"fixture").expect("regular fixture");
+    fs::set_permissions(&regular, fs::Permissions::from_mode(0o600)).expect("permissions");
+    let directory = fixture_path("unix-directory");
+    fs::create_dir(&directory).expect("directory fixture");
+    let link = fixture_path("unix-link");
+    symlink(server_program(), &link).expect("symlink fixture");
+    for path in [&regular, &directory, &link] {
+        let error = connect_error(
+            McpServerConfig::stdio("test", path)
+                .expect("config")
+                .with_tool_permission("echo", PermissionLevel::None)
+                .expect("permission"),
+        )
+        .await;
+        assert!(matches!(
+            error,
+            rah_tools_mcp::McpAdapterError::InvalidConfiguration { .. }
+                | rah_tools_mcp::McpAdapterError::Startup { .. }
+        ));
+    }
+    let _ = fs::remove_file(regular);
+    let _ = fs::remove_dir(directory);
+    let _ = fs::remove_file(link);
+}
+
+#[tokio::test]
+async fn cancellation_late_response_queue_pressure_and_exit_never_replay_or_restart() {
+    let counter = fixture_path("spawns");
+    let adapter = McpAdapter::connect(
+        mode_config("late-response")
+            .with_arg("--spawn-counter-file")
+            .with_arg(counter.to_string_lossy())
+            .with_limits(McpLimits {
+                max_outstanding: 2,
+                command_queue: 2,
+                ..Default::default()
+            })
+            .expect("small limits"),
+    )
+    .await
+    .expect("adapter");
+    let tool = adapter.tools().remove(0);
+    let first_tool = Arc::clone(&tool);
+    let first = tokio::spawn(async move { execute(&first_tool, "__cancel__").await });
+    let second_tool = Arc::clone(&tool);
+    let second = tokio::spawn(async move { execute(&second_tool, "__cancel__").await });
+    sleep(Duration::from_millis(20)).await;
+    let busy = execute(&tool, "second")
+        .await
+        .expect_err("outstanding limit must reject");
+    assert!(busy.to_string().contains("busy"));
+    first.abort();
+    second.abort();
+    let _ = first.await;
+    let _ = second.await;
+    sleep(Duration::from_millis(50)).await;
+    let output = execute(&tool, "after-cancel")
+        .await
+        .expect("late reply must not resurrect request");
+    assert_eq!(
+        output.content,
+        [ToolContent::Text("after-cancel".to_owned())]
+    );
+    adapter.shutdown().await.expect("shutdown");
+    assert_eq!(
+        fs::read_to_string(&counter)
+            .expect("counter")
+            .lines()
+            .count(),
+        1
+    );
+    let _ = fs::remove_file(counter);
+}
+
+#[tokio::test]
+async fn child_exits_before_initialize_during_discovery_and_call_without_restart() {
+    for mode in ["exit-before-init", "exit-during-discovery"] {
+        let counter = fixture_path("exit-spawns");
+        let error = connect_error(
+            mode_config(mode)
+                .with_arg("--spawn-counter-file")
+                .with_arg(counter.to_string_lossy()),
+        )
+        .await;
+        assert!(matches!(
+            error,
+            rah_tools_mcp::McpAdapterError::Initialization { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(&counter)
+                .expect("counter")
+                .lines()
+                .count(),
+            1
+        );
+        let _ = fs::remove_file(counter);
     }
 }
 
