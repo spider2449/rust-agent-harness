@@ -1,10 +1,13 @@
 #[cfg(any(test, feature = "live-test-support"))]
 use std::sync::atomic::Ordering;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
 };
+
+#[cfg(windows)]
+use std::fs::File;
 
 use async_trait::async_trait;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
