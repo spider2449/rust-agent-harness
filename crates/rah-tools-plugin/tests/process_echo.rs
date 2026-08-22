@@ -15,9 +15,18 @@ fn fixture() -> PathBuf {
 fn config(call_timeout: Duration) -> PluginConfig {
     PluginConfig::stdio("test", "0.1.0", fixture())
         .expect("fixture configuration should be valid")
-        .with_tool_permission("echo", PermissionLevel::None)
-        .expect("echo permission should be assigned once")
+        .with_expected_tool("echo", echo_schema(), PermissionLevel::None)
+        .expect("echo expectation should be assigned once")
         .with_call_timeout(call_timeout)
+}
+
+fn echo_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {"value": {}},
+        "required": ["value"],
+        "additionalProperties": false
+    })
 }
 
 async fn adapter() -> PluginAdapter {
@@ -102,13 +111,63 @@ async fn rejects_protocol_and_reported_identity_mismatches() {
 }
 
 #[tokio::test]
+async fn exact_expected_tool_set_and_normalized_schema_are_admitted() {
+    let expected = json!({
+        "additionalProperties": false,
+        "required": ["value"],
+        "properties": {"value": {}},
+        "type": "object"
+    });
+    let adapter = PluginAdapter::connect(
+        PluginConfig::stdio("test", "0.1.0", fixture())
+            .expect("fixture configuration")
+            .with_expected_tool("echo", expected, PermissionLevel::None)
+            .expect("expected tool"),
+    )
+    .await
+    .expect("equivalent schema object ordering must be admitted");
+    assert_eq!(adapter.tools().len(), 1);
+    adapter.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn discovery_admission_failures_are_atomic() {
+    for mode in [
+        "missing",
+        "extra",
+        "duplicate",
+        "invalid",
+        "malformed",
+        "property-added",
+        "property-removed",
+        "type-drift",
+        "required-drift",
+        "additional-properties-drift",
+        "nested-drift",
+        "exit",
+        "hang",
+    ] {
+        let error = PluginAdapter::connect(
+            config(Duration::from_millis(100)).with_arg(format!("--discovery={mode}")),
+        )
+        .await
+        .expect_err("any discovery mismatch must publish no plugin tools");
+        assert!(error.to_string().contains("initialization failed"));
+    }
+}
+
+#[tokio::test]
 async fn missing_permission_fails_closed_and_metadata_cannot_escalate() {
     let missing =
         PluginConfig::stdio("test", "0.1.0", fixture()).expect("configuration should be valid");
     let error = PluginAdapter::connect(missing)
         .await
         .expect_err("missing permission must fail the complete generation");
-    assert!(error.to_string().contains("no explicit host permission"));
+    assert!(
+        error
+            .to_string()
+            .contains("no host-configured expected tools")
+    );
 
     let configured = PluginConfig::stdio("test", "0.1.0", fixture())
         .expect("configuration should be valid")
@@ -342,10 +401,15 @@ async fn stderr_environment_and_cwd_are_bounded_and_isolated() {
 
 #[tokio::test]
 async fn live_text_mode_emits_host_only_single_call_audit() {
-    let adapter =
-        PluginAdapter::connect(config(Duration::from_secs(1)).with_arg("--live-text-audit"))
-            .await
-            .expect("live fixture mode should connect");
+    let adapter = PluginAdapter::connect(
+        PluginConfig::stdio("test", "0.1.0", fixture())
+            .expect("live fixture configuration")
+            .with_tool_permission("echo", PermissionLevel::None)
+            .expect("explicit host permission")
+            .with_arg("--live-text-audit"),
+    )
+    .await
+    .expect("live fixture mode should connect");
     let tool = adapter.tools().remove(0);
     assert_eq!(
         tool.definition().input_schema,

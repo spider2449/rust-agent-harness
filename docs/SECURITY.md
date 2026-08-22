@@ -231,10 +231,14 @@ effects. Timed-out, cancelled, disconnected, or otherwise uncertain
 
 ## Process Plugin process boundary
 
-`rah-tools-plugin` launches an explicitly selected executable directly and uses
-RAH process-plugin protocol version `1` over bounded NDJSON stdio. It validates
-configured/reported identity and version before discovery. The host controls
-every permission assignment.
+`rah-tools-plugin` launches an explicitly selected absolute native executable
+directly and uses RAH process-plugin protocol version `1` over bounded NDJSON
+stdio. It rejects direct symlinks (and Windows reparse points), scripts and
+non-native Windows executables, validates a canonical regular-file identity,
+and revalidates length/modification identity immediately before spawn. This
+narrows but cannot eliminate the final check-to-spawn replacement TOCTOU race.
+It validates configured/reported identity and version before discovery. The
+host controls every permission assignment.
 
 The adapter applies bounded plugin IPC, including limits for queued commands,
 outstanding requests, message bytes, result bytes, discovered metadata, and
@@ -258,6 +262,14 @@ Environment minimization, an isolated cwd, resource bounds, and child-process
 supervision reduce accidental ambient authority and denial-of-service exposure.
 They are not OS sandboxing and do not prevent arbitrary child syscalls,
 filesystem access, subprocess creation, or network access.
+
+Process Plugin discovery is all-or-nothing. The host may pin an exact expected
+tool set, each with a recursive object-key-order-normalized JSON input schema
+and explicit permission. Missing, extra, duplicate, malformed, invalid, or
+schema-mismatched tools fail provider construction and publish no usable proxy.
+Legacy explicit permission assignments still constrain the exact name set, but
+only an expected-tool declaration pins schema equality. Child metadata never
+grants authority.
 
 ## Restricted Codex adapter
 

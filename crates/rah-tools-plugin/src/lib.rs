@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -78,6 +78,15 @@ pub struct PluginConfig {
     call_timeout: Duration,
     limits: PluginLimits,
     tool_permissions: ExternalToolPermissionPolicy,
+    expected_names: HashSet<String>,
+    expected: HashMap<String, PluginExpectedTool>,
+}
+
+/// One host-owned admission contract for a discovered process-plugin tool.
+#[derive(Clone, Debug)]
+pub struct PluginExpectedTool {
+    schema: Value,
+    permission: PermissionLevel,
 }
 
 impl PluginConfig {
@@ -109,6 +118,8 @@ impl PluginConfig {
             call_timeout: Duration::from_secs(30),
             limits: PluginLimits::default(),
             tool_permissions: ExternalToolPermissionPolicy::new(),
+            expected_names: HashSet::new(),
+            expected: HashMap::new(),
         })
     }
 
@@ -168,6 +179,40 @@ impl PluginConfig {
         self.tool_permissions
             .assign(identity, permission)
             .map_err(permission_configuration_error)?;
+        self.expected_names.insert(remote_tool_name);
+        Ok(self)
+    }
+
+    /// Pins one remote tool's exact host-owned schema and permission.
+    ///
+    /// Discovery succeeds only when its complete tool set equals the configured
+    /// expected names. JSON object key order is normalized before comparison.
+    pub fn with_expected_tool(
+        mut self,
+        remote_tool_name: impl Into<String>,
+        input_schema: Value,
+        permission: PermissionLevel,
+    ) -> Result<Self, PluginAdapterError> {
+        let remote_tool_name = remote_tool_name.into();
+        validate_component(&remote_tool_name, "remote tool name")?;
+        validate_schema_object(&input_schema)?;
+        if self.expected.contains_key(&remote_tool_name) {
+            return Err(invalid_configuration(
+                "expected process-plugin tool configured more than once",
+            ));
+        }
+        let identity = external_identity(&self.plugin_id, &remote_tool_name)?;
+        self.tool_permissions
+            .assign(identity, permission)
+            .map_err(permission_configuration_error)?;
+        self.expected_names.insert(remote_tool_name.clone());
+        self.expected.insert(
+            remote_tool_name,
+            PluginExpectedTool {
+                schema: input_schema,
+                permission,
+            },
+        );
         Ok(self)
     }
 
@@ -235,12 +280,13 @@ impl PluginAdapter {
                 "the prototype requires process plugin protocol version `1`",
             ));
         }
-        let program = canonical_executable(&config.program)?;
+        let executable = ExecutableIdentity::capture(&config.program)?;
         let cwd = create_isolated_cwd().await?;
+        executable.revalidate()?;
         let diagnostics = Arc::new(Mutex::new(DiagnosticBuffer::new(
             config.limits.max_stderr_bytes,
         )));
-        let mut command = Command::new(&program);
+        let mut command = Command::new(&executable.path);
         command
             .args(&config.args)
             .current_dir(&cwd)
@@ -481,6 +527,11 @@ fn map_tools(
     if listed.len() > MAX_TOOLS {
         return Err(initialization("tools/list exceeded the tool count limit"));
     }
+    if config.expected_names.is_empty() {
+        return Err(initialization(
+            "process plugin has no host-configured expected tools",
+        ));
+    }
     let mut names = HashSet::new();
     let mut mapped = Vec::<Arc<dyn Tool>>::with_capacity(listed.len());
     for value in listed {
@@ -506,6 +557,11 @@ fn map_tools(
         if !names.insert(remote_name.to_owned()) {
             return Err(initialization("tools/list returned a duplicate tool name"));
         }
+        if !config.expected_names.contains(remote_name) {
+            return Err(initialization(
+                "tools/list did not match the exact host-configured tool set",
+            ));
+        }
         let description = object
             .get("description")
             .and_then(Value::as_str)
@@ -530,6 +586,14 @@ fn map_tools(
                     "remote tool `{remote_name}` has no explicit host permission assignment"
                 ))
             })?;
+        if let Some(expected) = config.expected.get(remote_name)
+            && (permission != expected.permission
+                || normalize_json(&schema) != normalize_json(&expected.schema))
+        {
+            return Err(initialization(
+                "tool schema or permission did not match the host expectation",
+            ));
+        }
         mapped.push(Arc::new(PluginTool {
             definition: ToolDefinition {
                 name: ToolName::new(format!("plugin.{}.{remote_name}", config.plugin_id)),
@@ -541,6 +605,11 @@ fn map_tools(
             client: client.clone(),
             max_result_bytes: config.limits.max_result_bytes,
         }));
+    }
+    if names != config.expected_names {
+        return Err(initialization(
+            "tools/list did not match the exact host-configured tool set",
+        ));
     }
     mapped.sort_by(|left, right| {
         left.definition()
@@ -1158,16 +1227,124 @@ fn external_identity(
         .map_err(permission_configuration_error)
 }
 
-fn canonical_executable(path: &Path) -> Result<PathBuf, PluginAdapterError> {
-    let canonical = std::fs::canonicalize(path).map_err(|error| PluginAdapterError::Startup {
-        message: format!("failed to resolve configured executable: {error}"),
-    })?;
-    if !canonical.is_file() {
-        return Err(PluginAdapterError::Startup {
-            message: "configured executable is not a regular file".to_owned(),
-        });
+/// A deliberately adapter-local executable identity check.
+///
+/// This matches the MCP boundary semantically, but remains private here so RAH
+/// does not grow a generic process-launch API. Revalidation narrows, but cannot
+/// eliminate, the filesystem replacement race between this check and spawn.
+struct ExecutableIdentity {
+    path: PathBuf,
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+impl ExecutableIdentity {
+    fn capture(path: &Path) -> Result<Self, PluginAdapterError> {
+        if !path.is_absolute() {
+            return Err(invalid_configuration(
+                "process-plugin executable must be absolute; PATH lookup is disabled",
+            ));
+        }
+        let link = std::fs::symlink_metadata(path)
+            .map_err(|_| startup("configured process-plugin executable could not be inspected"))?;
+        if link.file_type().is_symlink() {
+            return Err(invalid_configuration(
+                "process-plugin executable must not be a symbolic link",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if link.file_attributes() & 0x400 != 0 {
+                return Err(invalid_configuration(
+                    "process-plugin executable must not be a reparse point",
+                ));
+            }
+        }
+        let path = std::fs::canonicalize(path)
+            .map_err(|_| startup("configured process-plugin executable could not be resolved"))?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| startup("configured process-plugin executable could not be inspected"))?;
+        if !metadata.is_file() {
+            return Err(startup(
+                "configured process-plugin executable is not a regular file",
+            ));
+        }
+        #[cfg(windows)]
+        if path
+            .extension()
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("exe"))
+        {
+            return Err(invalid_configuration(
+                "process-plugin executable must be a native .exe",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(invalid_configuration(
+                    "process-plugin executable must have an executable permission bit",
+                ));
+            }
+        }
+        Ok(Self {
+            path,
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
     }
-    Ok(canonical)
+
+    fn revalidate(&self) -> Result<(), PluginAdapterError> {
+        let current = Self::capture(&self.path)?;
+        if !same_native_path(&current.path, &self.path)
+            || current.length != self.length
+            || current.modified != self.modified
+        {
+            return Err(startup(
+                "configured process-plugin executable identity changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn same_native_path(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_native_path(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+fn validate_schema_object(schema: &Value) -> Result<(), PluginAdapterError> {
+    if schema.is_object() {
+        Ok(())
+    } else {
+        Err(invalid_configuration(
+            "process-plugin input schema must be a JSON object",
+        ))
+    }
+}
+
+fn normalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), normalize_json(&object[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.iter().map(normalize_json).collect()),
+        _ => value.clone(),
+    }
 }
 
 async fn create_isolated_cwd() -> Result<PathBuf, PluginAdapterError> {
@@ -1200,6 +1377,12 @@ async fn create_isolated_cwd() -> Result<PathBuf, PluginAdapterError> {
 
 fn invalid_configuration(message: &str) -> PluginAdapterError {
     PluginAdapterError::InvalidConfiguration {
+        message: message.to_owned(),
+    }
+}
+
+fn startup(message: &str) -> PluginAdapterError {
+    PluginAdapterError::Startup {
         message: message.to_owned(),
     }
 }
@@ -1260,5 +1443,78 @@ mod tests {
             .expect("base config")
             .with_limits(limits);
         assert!(config.is_err());
+    }
+
+    #[test]
+    fn executable_identity_requires_a_native_regular_absolute_file() {
+        let current = std::env::current_exe().expect("test executable path");
+        assert!(ExecutableIdentity::capture(&current).is_ok());
+        assert!(ExecutableIdentity::capture(Path::new("relative-program")).is_err());
+        let directory = std::env::temp_dir();
+        assert!(ExecutableIdentity::capture(&directory).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_command_and_powershell_scripts() {
+        let root =
+            std::env::temp_dir().join(format!("rah-plugin-executable-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temporary test directory");
+        for extension in ["cmd", "ps1"] {
+            let path = root.join(format!("plugin.{extension}"));
+            std::fs::write(&path, "echo ignored").expect("test script");
+            assert!(ExecutableIdentity::capture(&path).is_err());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_executable_symlink_when_symlinks_are_available() {
+        let root =
+            std::env::temp_dir().join(format!("rah-plugin-link-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temporary test directory");
+        let link = root.join("plugin.exe");
+        let target = std::env::current_exe().expect("test executable");
+        match std::os::windows::fs::symlink_file(target, &link) {
+            Ok(()) => assert!(ExecutableIdentity::capture(&link).is_err()),
+            Err(error)
+                if matches!(error.kind(), std::io::ErrorKind::PermissionDenied)
+                    || error.raw_os_error() == Some(1314) => {}
+            Err(error) => panic!("unexpected symlink creation failure: {error}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_executable_identity_revalidation_detects_replacement() {
+        let root =
+            std::env::temp_dir().join(format!("rah-plugin-identity-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temporary test directory");
+        let executable = root.join("plugin.exe");
+        std::fs::write(&executable, b"first").expect("test executable");
+        let identity = ExecutableIdentity::capture(&executable).expect("capture identity");
+        assert!(identity.revalidate().is_ok());
+        std::fs::write(&executable, b"replacement").expect("replace test executable");
+        assert!(identity.revalidate().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_requires_an_executable_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path =
+            std::env::temp_dir().join(format!("rah-plugin-executable-test-{}", std::process::id()));
+        std::fs::write(&path, "fixture").expect("test executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("non-executable mode");
+        assert!(ExecutableIdentity::capture(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("executable mode");
+        assert!(ExecutableIdentity::capture(&path).is_ok());
+        let _ = std::fs::remove_file(path);
     }
 }

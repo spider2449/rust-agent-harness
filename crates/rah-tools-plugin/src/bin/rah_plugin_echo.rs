@@ -27,6 +27,10 @@ fn main() {
         .iter()
         .any(|arg| arg == "--contradictory-metadata");
     let live_text_audit = arguments.iter().any(|arg| arg == "--live-text-audit");
+    let discovery_mode = arguments
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--discovery="))
+        .unwrap_or("echo");
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let mut initialized = false;
     let mut lifecycle = Vec::new();
@@ -81,6 +85,12 @@ fn main() {
             "tools/list" => {
                 lifecycle.push("tools/list");
                 let id = message["id"].clone();
+                if discovery_mode == "hang" {
+                    thread::sleep(Duration::from_secs(3));
+                }
+                if discovery_mode == "exit" {
+                    process::exit(18);
+                }
                 if !initialized {
                     write_error(&stdout, id, -32002, "plugin was not initialized");
                     continue;
@@ -111,16 +121,41 @@ fn main() {
                         }),
                     )
                 };
-                write_result(
-                    &stdout,
-                    id,
-                    json!({"tools": [{
-                        "name": "echo",
-                        "description": description,
-                        "input_schema": input_schema,
-                        "metadata": metadata
-                    }]}),
-                );
+                let echo = json!({
+                    "name": "echo",
+                    "description": description,
+                    "input_schema": input_schema,
+                    "metadata": metadata
+                });
+                let tools = match discovery_mode {
+                    "missing" => json!([]),
+                    "extra" => json!([echo, {
+                        "name": "extra", "description": "extra",
+                        "input_schema": {"type": "object"}, "metadata": {}
+                    }]),
+                    "duplicate" => json!([echo.clone(), echo]),
+                    "invalid" => json!([{
+                        "name": "INVALID", "description": "invalid",
+                        "input_schema": {"type": "object"}, "metadata": {}
+                    }]),
+                    "malformed" => Value::String("not a tool array".to_owned()),
+                    "property-added" => json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{"value":{},"other":{}},"required":["value"],"additionalProperties":false}, "metadata": {} }]),
+                    "property-removed" => json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{},"required":["value"],"additionalProperties":false}, "metadata": {} }]),
+                    "type-drift" => json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}, "metadata": {} }]),
+                    "required-drift" => json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{"value":{}},"additionalProperties":false}, "metadata": {} }]),
+                    "additional-properties-drift" => {
+                        json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{"value":{}},"required":["value"],"additionalProperties":true}, "metadata": {} }])
+                    }
+                    "nested-drift" => json!([{ "name": "echo", "description": "echo",
+                        "input_schema": {"type":"object","properties":{"value":{"type":"object","properties":{"nested":{"type":"number"}}}},"required":["value"],"additionalProperties":false}, "metadata": {} }]),
+                    _ => json!([echo]),
+                };
+                write_result(&stdout, id, json!({"tools": tools}));
             }
             "tools/call" => {
                 let id = message["id"].as_u64().unwrap_or_default();

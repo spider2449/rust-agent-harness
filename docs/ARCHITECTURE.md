@@ -137,9 +137,12 @@ publishes a fresh `ToolRegistry` only when every provider has validated. The
 effective profile retains adapter ownership for as long as its tools are usable.
 
 `rah-tools-plugin` owns RAH process-plugin protocol version `1`, identity and
-version validation, bounded NDJSON stdio, resource limits, process lifecycle,
-and immutable `plugin.<plugin>.<tool>` proxies. It is a focused adapter, not a
-general plugin manager, installer, marketplace, SDK, or dynamic-library ABI.
+version validation, host-selected executable identity checks, exact expected
+tool/schema admission, bounded NDJSON stdio, resource limits, process
+lifecycle, and immutable `plugin.<plugin>.<tool>` proxies. Admission builds
+privately and publishes only after the complete provider validates. It is a
+focused adapter, not a general plugin manager, installer, marketplace, SDK, or
+dynamic-library ABI. It is not yet a trusted-profile provider.
 
 ## Conformance and architecture gates
 
