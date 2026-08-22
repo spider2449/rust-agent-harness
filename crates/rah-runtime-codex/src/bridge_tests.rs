@@ -2,6 +2,7 @@ use std::{
     fs,
     future::pending,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
@@ -11,13 +12,17 @@ use std::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use rah_cli::profile_composition::{EffectiveProfileComposition, compose};
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
     RequestId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
-use rah_tools::{EchoTool, FsReadTool, Tool, ToolContext, ToolError, ToolRegistry};
+use rah_tools::{
+    EchoTool, FsReadTool, Tool, ToolContext, ToolError, ToolRegistry, TrustedStaticProfile,
+};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
@@ -109,6 +114,157 @@ impl TestDirectory {
 impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct RepositoryFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    target: PathBuf,
+    unrelated: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).expect("repository directory should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(&root, &["config", "user.name", "RAH bridge test"]);
+        let target = root.join("target.txt");
+        let unrelated = root.join("unrelated.txt");
+        fs::write(&target, b"alpha\nold\nomega\n").expect("target should be written");
+        fs::write(&unrelated, b"unrelated\n").expect("unrelated file should be written");
+        git(&root, &["add", "--", "target.txt", "unrelated.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task051-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "worktree": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.patch",
+                "enabled": true,
+                "permission": "execute",
+                "executable": "git",
+                "repository": "worktree"
+            }]
+        });
+        fs::write(
+            &profile,
+            serde_json::to_vec(&document).expect("profile JSON should serialize"),
+        )
+        .expect("trusted profile should be written");
+        Self {
+            _base: base,
+            root,
+            target,
+            unrelated,
+            profile,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        compose(TrustedStaticProfile::load(&self.profile).expect("profile should load"))
+            .await
+            .expect("effective profile should compose")
+    }
+
+    fn request(&self, old: &str, replacement: &str) -> Value {
+        let bytes = fs::read(&self.target).expect("target should be readable");
+        json!({
+            "path": "target.txt",
+            "expected_file_sha256": sha256_hex(&bytes),
+            "expected_file_byte_length": bytes.len(),
+            "expected_old_text": old,
+            "replacement_text": replacement,
+        })
+    }
+
+    fn assert_clean_index(&self) {
+        git(&self.root, &["diff", "--cached", "--exit-code"]);
+    }
+
+    fn assert_original_worktree(&self) {
+        assert_eq!(fs::read(&self.target).unwrap(), b"alpha\nold\nomega\n");
+        assert_eq!(fs::read(&self.unrelated).unwrap(), b"unrelated\n");
+        self.assert_clean_index();
+    }
+}
+
+struct GatedComposedPatch {
+    inner: Arc<dyn Tool>,
+    bridge_executions: Arc<AtomicUsize>,
+    composed_executions: Arc<AtomicUsize>,
+    before_inner: Option<Arc<Notify>>,
+    after_inner: Option<Arc<Notify>>,
+    before_gate: Option<Arc<Notify>>,
+    after_gate: Option<Arc<Notify>>,
+}
+
+struct UncertainAfterComposedPatch {
+    inner: Arc<dyn Tool>,
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for UncertainAfterComposedPatch {
+    fn definition(&self) -> ToolDefinition {
+        self.inner.definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.inner.execute(input, context).await?;
+        Ok(ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "uncertain",
+                "changed": false,
+                "uncertain": true,
+                "reason": "replacement",
+            }))],
+            is_error: true,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for GatedComposedPatch {
+    fn definition(&self) -> ToolDefinition {
+        self.inner.definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.bridge_executions.fetch_add(1, Ordering::SeqCst);
+        if let Some(before_inner) = &self.before_inner {
+            before_inner.notify_one();
+        }
+        if let Some(gate) = &self.before_gate {
+            gate.notified().await;
+        }
+        self.composed_executions.fetch_add(1, Ordering::SeqCst);
+        let output = self.inner.execute(input, context).await;
+        if let Some(after_inner) = &self.after_inner {
+            after_inner.notify_one();
+            if let Some(gate) = &self.after_gate {
+                gate.notified().await;
+            }
+        }
+        output
     }
 }
 
@@ -868,6 +1024,426 @@ async fn disconnect_cancels_pending_execution_without_replay() {
 }
 
 #[tokio::test]
+async fn trusted_profile_composed_repo_patch_preserves_execute_alias_single_execution_and_redaction()
+ {
+    let fixture = RepositoryFixture::new("success");
+    let composition = fixture.compose().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .next()
+        .expect("effective composer should publish repo.patch");
+    assert_eq!(definition.name, ToolName::new("repo.patch"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .expect("repo.patch alias should be a string")
+        .to_owned();
+    assert_eq!(alias, "rah_tool_0");
+    assert_ne!(alias, "repo.patch");
+    assert_restrictions(&thread["params"]);
+
+    let arguments = fixture.request("old", "new");
+    peer.send(tool_request(
+        json!(501),
+        "private-thread",
+        "private-turn",
+        "repo-patch-once",
+        &alias,
+        arguments.clone(),
+    ));
+    peer.send(tool_request(
+        json!("task051-duplicate"),
+        "private-thread",
+        "private-turn",
+        "repo-patch-once",
+        &alias,
+        arguments,
+    ));
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true);
+    let visible = first["result"]["contentItems"][0]["text"]
+        .as_str()
+        .expect("tool output should be translated as text");
+    assert_eq!(
+        serde_json::from_str::<Value>(visible).unwrap(),
+        json!({"status":"ok","changed":true,"uncertain":false,"reason":"none"})
+    );
+    for private_value in [
+        fixture.root.to_string_lossy().into_owned(),
+        fixture.target.to_string_lossy().into_owned(),
+        git_executable().to_string_lossy().into_owned(),
+        "alpha".to_owned(),
+        "old".to_owned(),
+        "new".to_owned(),
+    ] {
+        assert!(
+            !visible.contains(&private_value),
+            "model-visible response leaked {private_value:?}"
+        );
+    }
+    assert_eq!(fs::read(&fixture.target).unwrap(), b"alpha\nnew\nomega\n");
+    assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"unrelated\n");
+    fixture.assert_clean_index();
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRequested { tool_call, .. }
+            if tool_call.name == ToolName::new("repo.patch")
+    )));
+    runtime.shutdown().await.expect("shutdown");
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_patch_requires_execute_and_refuses_without_mutation() {
+    for allowed in [
+        vec![PermissionLevel::None],
+        vec![PermissionLevel::Read],
+        vec![PermissionLevel::Write],
+    ] {
+        let fixture = RepositoryFixture::new("permission-denied");
+        let composition = fixture.compose().await;
+        let (runtime, mut peer, _) = connected_bridge(composition.registry_handle(), allowed).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        peer.send(tool_request(
+            json!(502),
+            "private-thread",
+            "private-turn",
+            "permission-denied",
+            "rah_tool_0",
+            fixture.request("old", "new"),
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(
+            response["result"]["contentItems"][0]["text"],
+            "RAH permission policy denied the dynamic tool call"
+        );
+        let collecting =
+            tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+        peer.respond("turn/interrupt", json!({})).await;
+        let events = collecting.await.expect("event collector");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Failed {
+                code: rah_protocol::AgentErrorCode::PermissionDenied,
+                ..
+            })
+        ));
+        assert_eq!(tool_event_count(&events), 1);
+        fixture.assert_original_worktree();
+        runtime.shutdown().await.expect("shutdown");
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_patch_refusals_are_translated_without_retry_or_evidence_leakage()
+ {
+    for (label, request) in [
+        ("stale", RequestKind::StaleDigest),
+        ("duplicate", RequestKind::DuplicateExpectedText),
+        ("staged", RequestKind::StagedTarget),
+        ("path", RequestKind::InvalidPath),
+    ] {
+        let fixture = RepositoryFixture::new(label);
+        if matches!(request, RequestKind::StagedTarget) {
+            fs::write(&fixture.target, b"alpha\nstaged\nomega\n").unwrap();
+            git(&fixture.root, &["add", "--", "target.txt"]);
+            fs::write(&fixture.target, b"alpha\nold\nomega\n").unwrap();
+        }
+        let composition = fixture.compose().await;
+        let (runtime, mut peer, _) = connected_bridge(
+            composition.registry_handle(),
+            vec![PermissionLevel::Execute],
+        )
+        .await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        let mut arguments = fixture.request("old", "new");
+        match request {
+            RequestKind::StaleDigest => arguments["expected_file_sha256"] = json!("0".repeat(64)),
+            RequestKind::DuplicateExpectedText => arguments["expected_old_text"] = json!("a"),
+            RequestKind::StagedTarget => {}
+            RequestKind::InvalidPath => arguments["path"] = json!(fixture.target),
+        }
+        peer.send(tool_request(
+            json!(503),
+            "private-thread",
+            "private-turn",
+            label,
+            "rah_tool_0",
+            arguments,
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        let visible = response["result"]["contentItems"][0]["text"]
+            .as_str()
+            .expect("translated refusal should be text");
+        if matches!(request, RequestKind::InvalidPath) {
+            assert_eq!(visible, "RAH tool execution failed");
+        } else {
+            let public =
+                serde_json::from_str::<Value>(visible).expect("refusal should remain JSON");
+            assert_eq!(public["status"], "precondition_failed");
+            assert_eq!(public["changed"], false);
+            assert_eq!(public["uncertain"], false);
+        }
+        assert!(!visible.contains(fixture.root.to_string_lossy().as_ref()));
+        assert!(!visible.contains("alpha"));
+        let events = if matches!(request, RequestKind::InvalidPath) {
+            let collecting =
+                tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+            peer.respond("turn/interrupt", json!({})).await;
+            collecting.await.expect("event collector")
+        } else {
+            finish_turn(&peer, "completed");
+            handle.into_events().collect::<Vec<_>>().await
+        };
+        assert_eq!(
+            tool_event_count(&events),
+            if matches!(request, RequestKind::InvalidPath) {
+                2
+            } else {
+                3
+            }
+        );
+        assert_eq!(fs::read(&fixture.target).unwrap(), b"alpha\nold\nomega\n");
+        assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"unrelated\n");
+        if !matches!(request, RequestKind::StagedTarget) {
+            fixture.assert_clean_index();
+        }
+        runtime.shutdown().await.expect("shutdown");
+        composition.shutdown().await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RequestKind {
+    StaleDigest,
+    DuplicateExpectedText,
+    StagedTarget,
+    InvalidPath,
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_patch_cancellation_never_replays_before_or_after_mutation() {
+    let before = RepositoryFixture::new("cancel-before");
+    let composition = before.compose().await;
+    let bridge_executions = Arc::new(AtomicUsize::new(0));
+    let composed_executions = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let registry = gated_composed_patch_registry(
+        &composition,
+        Arc::clone(&bridge_executions),
+        Arc::clone(&composed_executions),
+        Some(Arc::clone(&entered)),
+        None,
+        Some(Arc::clone(&gate)),
+        None,
+    );
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let session_id = handle.session_id().clone();
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.send(tool_request(
+        json!(504),
+        "private-thread",
+        "private-turn",
+        "cancel-before",
+        "rah_tool_0",
+        before.request("old", "new"),
+    ));
+    entered.notified().await;
+    let cancelling = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.cancel(session_id).await })
+    };
+    await_cancellation(&mut peer, json!(504)).await;
+    finish_turn(&peer, "interrupted");
+    cancelling.await.unwrap().expect("cancel should succeed");
+    let events = collecting.await.unwrap();
+    assert!(matches!(events.last(), Some(AgentEvent::Cancelled { .. })));
+    assert_eq!(bridge_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(composed_executions.load(Ordering::SeqCst), 0);
+    before.assert_original_worktree();
+    runtime.shutdown().await.expect("shutdown");
+    composition.shutdown().await;
+
+    let after = RepositoryFixture::new("cancel-after");
+    let composition = after.compose().await;
+    let bridge_executions = Arc::new(AtomicUsize::new(0));
+    let composed_executions = Arc::new(AtomicUsize::new(0));
+    let after_inner = Arc::new(Notify::new());
+    let after_gate = Arc::new(Notify::new());
+    let registry = gated_composed_patch_registry(
+        &composition,
+        Arc::clone(&bridge_executions),
+        Arc::clone(&composed_executions),
+        None,
+        Some(Arc::clone(&after_inner)),
+        None,
+        Some(Arc::clone(&after_gate)),
+    );
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let session_id = handle.session_id().clone();
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.send(tool_request(
+        json!(505),
+        "private-thread",
+        "private-turn",
+        "cancel-after",
+        "rah_tool_0",
+        after.request("old", "new"),
+    ));
+    after_inner.notified().await;
+    assert_eq!(fs::read(&after.target).unwrap(), b"alpha\nnew\nomega\n");
+    let cancelling = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.cancel(session_id).await })
+    };
+    await_cancellation(&mut peer, json!(505)).await;
+    finish_turn(&peer, "interrupted");
+    cancelling.await.unwrap().expect("cancel should succeed");
+    let events = collecting.await.unwrap();
+    assert!(matches!(events.last(), Some(AgentEvent::Cancelled { .. })));
+    assert_eq!(bridge_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(composed_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(&after.unrelated).unwrap(), b"unrelated\n");
+    after.assert_clean_index();
+    runtime.shutdown().await.expect("shutdown");
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_patch_disconnect_after_mutation_does_not_replay() {
+    let fixture = RepositoryFixture::new("disconnect");
+    let composition = fixture.compose().await;
+    let bridge_executions = Arc::new(AtomicUsize::new(0));
+    let composed_executions = Arc::new(AtomicUsize::new(0));
+    let after_inner = Arc::new(Notify::new());
+    let after_gate = Arc::new(Notify::new());
+    let registry = gated_composed_patch_registry(
+        &composition,
+        Arc::clone(&bridge_executions),
+        Arc::clone(&composed_executions),
+        None,
+        Some(Arc::clone(&after_inner)),
+        None,
+        Some(Arc::clone(&after_gate)),
+    );
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.send(tool_request(
+        json!(506),
+        "private-thread",
+        "private-turn",
+        "disconnect-after",
+        "rah_tool_0",
+        fixture.request("old", "new"),
+    ));
+    after_inner.notified().await;
+    assert_eq!(fs::read(&fixture.target).unwrap(), b"alpha\nnew\nomega\n");
+    peer.fail(crate::CodexAdapterError::ProtocolViolation {
+        message: "task051 deterministic disconnect".to_owned(),
+    });
+    let events = collecting.await.unwrap();
+    assert!(matches!(events.last(), Some(AgentEvent::Failed { .. })));
+    tokio::task::yield_now().await;
+    assert_eq!(bridge_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(composed_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"unrelated\n");
+    fixture.assert_clean_index();
+    drop(runtime);
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn uncertain_composed_patch_outcome_is_returned_once_without_bridge_retry() {
+    let fixture = RepositoryFixture::new("uncertain");
+    let composition = fixture.compose().await;
+    let executions = Arc::new(AtomicUsize::new(0));
+    let inner = composition
+        .registry()
+        .get(&ToolName::new("repo.patch"))
+        .expect("composer should own repo.patch");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(UncertainAfterComposedPatch {
+            inner,
+            executions: Arc::clone(&executions),
+        }))
+        .unwrap();
+    let (runtime, mut peer, _) =
+        connected_bridge(Arc::new(registry), vec![PermissionLevel::Execute]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let request = fixture.request("old", "new");
+    for id in [json!(507), json!("uncertain-duplicate")] {
+        peer.send(tool_request(
+            id,
+            "private-thread",
+            "private-turn",
+            "uncertain-once",
+            "rah_tool_0",
+            request.clone(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], false);
+    assert_eq!(
+        serde_json::from_str::<Value>(first["result"]["contentItems"][0]["text"].as_str().unwrap())
+            .unwrap(),
+        json!({"status":"uncertain","changed":false,"uncertain":true,"reason":"replacement"})
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(&fixture.target).unwrap(), b"alpha\nnew\nomega\n");
+    fixture.assert_clean_index();
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(tool_event_count(&events), 3);
+    runtime.shutdown().await.expect("shutdown");
+    composition.shutdown().await;
+}
+
+#[tokio::test]
 async fn codex_owned_requests_and_items_remain_denied_in_bridge_mode() {
     for method in [
         "item/commandExecution/requestApproval",
@@ -1004,6 +1580,92 @@ fn fs_read_registry(
         None => registry.register(Arc::new(tool)).expect("register fs.read"),
     }
     Arc::new(registry)
+}
+
+fn gated_composed_patch_registry(
+    composition: &EffectiveProfileComposition,
+    bridge_executions: Arc<AtomicUsize>,
+    composed_executions: Arc<AtomicUsize>,
+    before_inner: Option<Arc<Notify>>,
+    after_inner: Option<Arc<Notify>>,
+    before_gate: Option<Arc<Notify>>,
+    after_gate: Option<Arc<Notify>>,
+) -> Arc<ToolRegistry> {
+    let inner = composition
+        .registry()
+        .get(&ToolName::new("repo.patch"))
+        .expect("effective composer should register repo.patch");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(GatedComposedPatch {
+            inner,
+            bridge_executions,
+            composed_executions,
+            before_inner,
+            after_inner,
+            before_gate,
+            after_gate,
+        }))
+        .expect("test-only delegate should preserve repo.patch registration");
+    Arc::new(registry)
+}
+
+async fn await_cancellation(peer: &mut FakePeer, call_id: Value) {
+    let mut saw_call_denial = false;
+    let mut saw_interrupt = false;
+    while !saw_call_denial || !saw_interrupt {
+        let message = peer.next_sent().await;
+        if message.get("method") == Some(&json!("turn/interrupt")) {
+            let id = message["id"].clone();
+            peer.send(json!({"id": id, "result": {}}));
+            saw_interrupt = true;
+        } else if message["id"] == call_id {
+            assert_eq!(message["error"]["code"], -32800);
+            saw_call_denial = true;
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn git_executable() -> PathBuf {
+    #[cfg(windows)]
+    let output = Command::new("where.exe")
+        .arg("git.exe")
+        .output()
+        .expect("where should locate Git");
+    #[cfg(not(windows))]
+    let output = Command::new("which")
+        .arg("git")
+        .output()
+        .expect("which should locate Git");
+    assert!(
+        output.status.success(),
+        "Git should be available for fixtures"
+    );
+    fs::canonicalize(
+        String::from_utf8(output.stdout)
+            .expect("Git path should be UTF-8")
+            .lines()
+            .next()
+            .expect("Git path should be present"),
+    )
+    .expect("Git path should canonicalize")
+}
+
+fn git(root: &Path, arguments: &[&str]) {
+    let output = Command::new(git_executable())
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("Git command should start");
+    assert!(
+        output.status.success(),
+        "Git command {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn tool_request(
