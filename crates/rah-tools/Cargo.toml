@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures.workspace = true
 rah-protocol = { path = "../rah-protocol" }
 rah-sandbox = { path = "../rah-sandbox" }
 serde_json.workspace = true
@@ -13,7 +14,7 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
 futures.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

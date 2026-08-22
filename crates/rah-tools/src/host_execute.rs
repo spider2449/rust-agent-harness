@@ -184,9 +184,21 @@ impl HostExecutionPolicy {
     }
 
     async fn execute(&self, input: &ToolInput) -> Result<ToolOutput, ToolError> {
+        let output = self.execute_process(input).await?;
+        self.map_output(output)
+    }
+
+    pub(crate) fn validate_input(&self, input: &ToolInput) -> Result<(), ToolError> {
+        self.render_arguments(input).map(|_| ())
+    }
+
+    pub(crate) async fn execute_process(
+        &self,
+        input: &ToolInput,
+    ) -> Result<HostProcessOutput, ToolError> {
         self.revalidate()?;
         let args = self.render_arguments(input)?;
-        let output = execute_host_process(HostProcessSpec {
+        execute_host_process(HostProcessSpec {
             executable: self.executable.clone(),
             args,
             cwd: self.cwd.clone(),
@@ -197,8 +209,7 @@ impl HostExecutionPolicy {
         .await
         .map_err(|error| ToolError::Execution {
             message: error.to_string(),
-        })?;
-        self.map_output(output)
+        })
     }
 
     fn revalidate(&self) -> Result<(), ToolError> {
@@ -295,6 +306,17 @@ impl HostExecutionTool {
             description: description.into(),
             policy,
         }
+    }
+
+    pub(crate) fn validate_input(&self, input: &ToolInput) -> Result<(), ToolError> {
+        self.policy.validate_input(input)
+    }
+
+    pub(crate) async fn execute_process(
+        &self,
+        input: &ToolInput,
+    ) -> Result<HostProcessOutput, ToolError> {
+        self.policy.execute_process(input).await
     }
 }
 

@@ -85,6 +85,38 @@ neither filesystem nor network isolation. Repository and executable
 revalidation also retain the documented TOCTOU limitation between final checks
 and spawn.
 
+## Deterministic repository-mutation fixture
+
+ADR 0010 adds a deliberately narrow deterministic fixture for validating
+repository-mutation authority independently of Git. `PermissionLevel::Execute`
+remains required, but it is not mutation authorization: the private,
+host-owned `RepositoryMutationPolicy` in `rah-tools` captures a canonical root
+and root identity, maps the fixed symbolic `fixture-marker` target to one
+existing regular file, and rejects links, Windows reparse points, substitutions,
+and paths outside the root. The model-visible schema is an empty object; it
+cannot supply a path, executable, argv, cwd, environment, or timeout.
+
+The policy acquires an in-process lease keyed by repository identity before
+pre-state capture and holds it through post-state verification and audit-result
+construction. This serializes concurrent RAH mutations for one repository. It
+does not prevent an external process from changing that repository; bounded
+full-root snapshots detect unexpected additions, removals, or changes and fail
+closed where they can be observed.
+
+The fixture records pre/post root and target identities plus bounded content
+snapshots. A successful exit code is insufficient: the only accepted effect is
+the host-authorized marker replacement. Results expose only a bounded status,
+symbolic target, and changed/partial/uncertain flags. They do not reveal host
+paths, executable details, environment values, or audit paths.
+
+RAH does not promise rollback. Timeout, abort, cancellation, disconnect, crash,
+or a lost response after spawn may have caused an effect. The fixture reports a
+post-spawn timeout with an observed mutation as uncertain and never retries it.
+Dropping execution attempts process termination through the supervised-process
+layer; it is not rollback. The initial fixture has no Git mutation, no network,
+and no model-visible file-authoring surface. Git add/commit and all other Git
+mutation remain deferred.
+
 ## MCP process boundary
 
 `rah-tools-mcp` directly launches an explicitly configured local MCP executable

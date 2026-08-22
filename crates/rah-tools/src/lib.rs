@@ -12,6 +12,7 @@ mod external_permissions;
 mod fs_read;
 mod git_status;
 mod host_execute;
+mod repository_mutation;
 mod shell_exec;
 
 pub use cargo_version::{CARGO_VERSION_TOOL_NAME, CargoVersionTool};
@@ -22,6 +23,7 @@ pub use external_permissions::{
 pub use fs_read::FsReadTool;
 pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
+pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use shell_exec::ShellExecTool;
 
 /// Neutral execution context supplied by the runtime to a tool.

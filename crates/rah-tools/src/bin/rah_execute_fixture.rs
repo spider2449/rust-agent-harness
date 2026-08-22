@@ -35,6 +35,38 @@ fn run() -> Result<u8, String> {
             print!(" M tracked.txt\n?? untracked.txt\n");
             Ok(0)
         }
+        "mutate-marker" => {
+            let marker = args.next().ok_or("missing marker path")?;
+            let mode = args.next().ok_or("missing mutation mode")?;
+            let before_delay = parse_u64(args.next(), "pre-mutation delay")?;
+            let after_delay = parse_u64(args.next(), "post-mutation delay")?;
+            let outside_probe = args.next().ok_or("missing outside probe path")?;
+            reject_extra(args)?;
+            thread::sleep(Duration::from_millis(before_delay));
+            let marker = std::path::PathBuf::from(marker);
+            fs::write(&marker, "after\n").map_err(|error| error.to_string())?;
+            let root = marker.parent().ok_or("marker has no parent")?;
+            match mode.as_str() {
+                "normal" => {}
+                "second-file" => fs::write(root.join("protected.txt"), "changed\n")
+                    .map_err(|error| error.to_string())?,
+                "create-extra" => fs::write(root.join("extra.txt"), "extra\n")
+                    .map_err(|error| error.to_string())?,
+                "delete-protected" => fs::remove_file(root.join("protected.txt"))
+                    .map_err(|error| error.to_string())?,
+                "outside-root" => {
+                    if outside_probe.is_empty() {
+                        return Err("outside-root mode requires an outside probe".to_owned());
+                    }
+                    fs::write(outside_probe, "outside-changed\n")
+                        .map_err(|error| error.to_string())?;
+                }
+                _ => return Err("unknown mutation mode".to_owned()),
+            }
+            thread::sleep(Duration::from_millis(after_delay));
+            print!("mutation-complete");
+            Ok(0)
+        }
         "echo" => {
             let text = args.next().ok_or("missing echo text")?;
             reject_extra(args)?;
