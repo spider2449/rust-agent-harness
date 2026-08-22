@@ -5,9 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.3 architecture and release scope
+## v0.3 baseline and v0.4 trusted-profile scope
 
-RAH v0.3 keeps every tool on one RAH-owned execution path:
+RAH keeps every tool on one RAH-owned execution path. v0.4 adds trusted-host
+static profile composition to that existing boundary; it does not add a new
+authority class.
 
 ```text
 Built-in Tool -----------\

@@ -143,7 +143,8 @@ tool/schema admission, bounded NDJSON stdio, resource limits, process
 lifecycle, and immutable `plugin.<plugin>.<tool>` proxies. Admission builds
 privately and publishes only after the complete provider validates. It is a
 focused adapter, not a general plugin manager, installer, marketplace, SDK, or
-dynamic-library ABI. It is not yet a trusted-profile provider.
+dynamic-library ABI. It is a trusted-profile provider only through the closed
+ADR 0011 `process_plugins` declaration and the host-owned effective composer.
 
 ## Conformance and architecture gates
 

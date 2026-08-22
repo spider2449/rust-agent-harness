@@ -1,6 +1,6 @@
-# RAH v0.3 Security Model
+# RAH v0.3 Security Model and v0.4 Trusted-Profile Boundary
 
-## v0.3 release boundary
+## v0.3 baseline and v0.4 boundary
 
 The public/host Execute capabilities are `host.cargo.version`,
 `host.git.status`, `host.git.stage`, and `host.git.unstage`. They are
