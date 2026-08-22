@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.5.1 — 2026-08-22
+
+Portability-only recovery release for the published v0.5.0 repository-mutation
+milestone. v0.5.0 remains an immutable published release; this patch adds no
+authority, behavior, public API, dependency, or feature expansion.
+
+### Fixed
+
+- Corrected a Linux/Ubuntu clippy portability defect by importing
+  `std::fs::File` only for the Windows-native repository identity path that
+  uses it. The Ubuntu `unused import: File` failure is removed without changing
+  `repo.patch` replacement, policy, or test behavior.
+
+### Verified
+
+- The minimal recovery commit passed the required GitHub Ubuntu CI job,
+  including formatting, workspace check, workspace tests, and clippy.
+- v0.5.1 is the corrected, fully verified patch baseline. The Windows live
+  `repo.patch` release gate remains valid using exactly `codex-cli 0.149.0`;
+  this release makes no Unix live Codex validation claim.
+
 ## v0.5.0 — 2026-08-22
 
 Release preparation for the v0.5.0 repository-mutation milestone. Publication
