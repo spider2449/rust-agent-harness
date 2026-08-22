@@ -17,6 +17,7 @@ tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread",
 tracing.workspace = true
 
 [dev-dependencies]
+rah-cli = { path = "../rah-cli" }
 rah-tools-mcp = { path = "../rah-tools-mcp" }
 rah-tools-plugin = { path = "../rah-tools-plugin" }
 tracing-subscriber.workspace = true

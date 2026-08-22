@@ -205,6 +205,7 @@ fn main() {
                 write_result(&stdout, id, json!({"tools": tools}));
             }
             "tools/call" => {
+                _lifecycle_audit.event("call");
                 let id = message["id"].as_u64().unwrap_or_default();
                 let execution_id = message["params"]["execution_id"]
                     .as_str()

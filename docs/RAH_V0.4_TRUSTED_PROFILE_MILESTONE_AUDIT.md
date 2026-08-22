@@ -5,25 +5,24 @@ Audited checkpoint: `eb2bf25 feat: add trusted Process Plugin profile compositio
 
 ## Recommendation
 
-**B. NOT READY — REMAINING BLOCKER(S)**
+**A. READY FOR V0.4 RELEASE PREPARATION**
 
-1. Task 040/041 added real-composer mixed success and late Plugin admission tests:
-   one built-in plus MCP and Plugin echoes produce exactly three registered
-   tools; both external proxies execute; profile-assigned `None` permissions
-   survive; and a staged MCP followed by a Plugin schema mismatch returns no
-   composition aggregate. Task 041 closes the deterministic fixture-owned
-   shutdown/reap observation matrix for mixed late failures and collision
-   cleanup: it observes test-copied fixture `spawn`
-   markers plus bounded executable-unlock reaping after owner release for mixed
-   late failures, multiple staged providers, same-kind MCP failure, static
-   non-spawning, and CLI effective spawning. The live Codex gate remains the
-   only release blocker.
-2. Run one opt-in live Codex validation through the actual trusted-profile
-   composer and Generic Codex Tool Bridge, using one admitted local echo tool.
-   Prefer a profile that admits MCP and Process Plugin echoes; deterministic
-   tests from item 1 should carry the multi-provider construction proof.
+Task 043 closed the final live blocker with an opt-in actual-composer run. An
+explicit absolute temporary trusted profile loaded through `TrustedStaticProfile`
+selected a copied native `rah-plugin-echo` fixture by symbolic resource. The
+shared `rah profile validate-effective` composer admitted exactly
+`plugin.test.echo` with profile-assigned `PermissionLevel::None`, retained
+provider ownership, and yielded a one-tool fresh registry and redacted inventory.
+That registry was passed directly to the Generic Codex Tool Bridge, whose private
+alias was `rah_tool_0`.
 
-These are narrow verification blockers, not authority or feature work.
+Using exactly `codex-cli 0.149.0`, the live run observed one ToolRequested, one
+ToolStarted, one ToolFinished, one fixture provider call, ModelDelta continuation,
+and terminal Completed. The final marker was exact. Fixture lifecycle observation
+recorded `spawn -> call -> shutdown -> exit`; the Codex app-server shutdown also
+completed. The live output contains only profile/provider/tool identities and
+counts, not paths, temporary directories, environment, stderr, or raw profile
+content.
 
 ## Actual boundary
 
@@ -46,7 +45,7 @@ cwd, environment, shell, network, Git-ref/history, or arbitrary filesystem
 mutation fields. Unknown capability/resource/permission/schema/version fails
 closed.
 
-**PLANNED:** a test-observable, mixed-provider cleanup matrix and a live
+**VERIFIED:** deterministic mixed-provider cleanup plus an opt-in live
 profile-to-Codex bridge validation.
 
 **DEFERRED:** reload/auto-discovery, PluginManager/install/download/restart,
@@ -60,8 +59,8 @@ profile APIs, and any new mutation authority.
 | Trusted-host explicit source, strict version/content/source validation | VERIFIED by `rah-tools` source/profile tests and static CLI tests. |
 | Existing-authority-only closed schemas | VERIFIED by the DTO fields and denied unknown fields. |
 | Adapter-local exact admission and explicit permissions | VERIFIED per MCP and Plugin deterministic suites. Missing permission is rejected; `None` is only accepted when explicitly configured. |
-| Fresh registry / no replacement on failure | IMPLEMENTED. The composer returns its registry only on full success; CLI prints inventory only after success. Mixed-path cleanup is not deterministically VERIFIED. |
-| Provider lifecycle ownership | IMPLEMENTED: registry is borrowed from the owning composition, which owns adapter vectors and has explicit shutdown. Successful mixed ownership/drop behavior lacks a direct test. |
+| Fresh registry / no replacement on failure | VERIFIED. The composer returns its registry only on full success; CLI prints inventory only after success; mixed late-failure cleanup is deterministically observed. |
+| Provider lifecycle ownership | VERIFIED. The composition owns adapter vectors and exposes a shared registry handle without releasing provider ownership; deterministic mixed ownership and the live fixture shutdown are observed. |
 | Redacted host inspection | VERIFIED for static and CLI failure cases; MCP-only profile redaction is tested. Mixed success output is structurally redacted but lacks a sentinel test. |
 | Immutability and no auto-reload | VERIFIED by absence of reload/watch/discovery paths and closed CLI commands. |
 
@@ -78,14 +77,13 @@ Possible collisions include built-in/MCP, built-in/Plugin, MCP/MCP,
 Plugin/Plugin, and MCP/Plugin because provider-local names are prefixed but IDs
 and remote names can still coincide. `ToolRegistry::register` rejects them and
 the composer reports `DuplicateRegistration`; it does not replace a tool.
-This behavior is implemented but no mixed-composer collision cleanup test
-observes it, so it remains blocker 1.
+This behavior is implemented and mixed late-failure cleanup is observed by the
+Task 041 deterministic fixture matrix.
 
 Provider initialization/handshake/discovery/schema/permission failures are
-deterministically covered inside each adapter. The missing evidence is global:
-that an earlier successfully staged provider is reaped after a later provider
-fails, and that all provider-backed tools remain usable until the successful
-composition is shut down.
+deterministically covered inside each adapter. The Task 041 matrix verifies an
+earlier staged provider is reaped after a later provider fails, and that all
+provider-backed tools remain usable until successful composition shutdown.
 
 ## Permission and redaction audit
 

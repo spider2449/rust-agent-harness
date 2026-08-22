@@ -1,5 +1,7 @@
 //! Host-owned effective composition of already hardened external providers.
 
+use std::sync::Arc;
+
 use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, ToolRegistry, TrustedStaticProfile,
 };
@@ -8,7 +10,7 @@ use rah_tools_plugin::{PluginAdapter, PluginConfig};
 
 /// Owns every provider whose immutable tools are registered in the profile.
 pub struct EffectiveProfileComposition {
-    registry: ToolRegistry,
+    registry: Arc<ToolRegistry>,
     effective: EffectiveProfile,
     mcp_adapters: Vec<McpAdapter>,
     plugin_adapters: Vec<PluginAdapter>,
@@ -17,7 +19,13 @@ pub struct EffectiveProfileComposition {
 impl EffectiveProfileComposition {
     #[must_use]
     pub fn registry(&self) -> &ToolRegistry {
-        &self.registry
+        self.registry.as_ref()
+    }
+
+    /// Returns the fresh registry while this composition retains provider ownership.
+    #[must_use]
+    pub fn registry_handle(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.registry)
     }
 
     #[must_use]
@@ -148,7 +156,7 @@ pub async fn compose(
         }
     }
     Ok(EffectiveProfileComposition {
-        registry,
+        registry: Arc::new(registry),
         effective,
         mcp_adapters,
         plugin_adapters,

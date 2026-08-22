@@ -19,8 +19,6 @@ use rah_tools::{EchoTool, FsReadTool, ToolRegistry, TrustedStaticProfile};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
-mod profile_composition;
-
 #[derive(Debug, Parser)]
 #[command(name = "rah", version, about = "Rust Agent Harness")]
 struct Cli {
@@ -206,7 +204,7 @@ fn validate_profile(profile_path: PathBuf) -> Result<()> {
 async fn validate_effective_profile(profile_path: PathBuf) -> Result<()> {
     let profile = TrustedStaticProfile::load(profile_path)
         .context("trusted profile static validation failed")?;
-    let effective = profile_composition::compose(profile)
+    let effective = rah_cli::profile_composition::compose(profile)
         .await
         .context("trusted profile effective validation failed")?;
     render_profile(effective.effective_profile(), Some(effective.registry()));

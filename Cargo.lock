@@ -462,6 +462,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "rah-cli",
  "rah-protocol",
  "rah-runtime",
  "rah-tools",

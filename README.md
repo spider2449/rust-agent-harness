@@ -199,6 +199,10 @@ cargo run -p rah-runtime-codex --example live_mcp_echo_bridge
 # Generic bridge with a RAH-owned process-plugin tool
 cargo build -p rah-tools-plugin --bin rah-plugin-echo
 cargo run -p rah-runtime-codex --example live_plugin_echo_bridge
+
+# Trusted-profile effective composition through the Generic Codex Tool Bridge
+cargo build -p rah-tools-plugin --bin rah-plugin-echo
+cargo run -p rah-runtime-codex --example live_trusted_profile_bridge
 ```
 
 The MCP and process-plugin commands exercise RAH-owned adapters. They do not
