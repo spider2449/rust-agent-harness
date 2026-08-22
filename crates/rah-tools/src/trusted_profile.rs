@@ -25,6 +25,7 @@ const MAX_FS_READ_BYTES: u64 = 16 * 1024 * 1024;
 pub struct TrustedStaticProfile {
     registry: ToolRegistry,
     effective: EffectiveProfile,
+    repository_worktree_patches: Vec<RepositoryWorktreePatchProfile>,
     mcp_providers: Vec<McpProviderProfile>,
     process_plugins: Vec<ProcessPluginProfile>,
     resources: Resources,
@@ -69,9 +70,14 @@ impl TrustedStaticProfile {
 
         let mut registry = ToolRegistry::new();
         let mut capabilities = Vec::with_capacity(profile.capabilities.len());
+        let mut repository_worktree_patches = Vec::new();
         for capability in &profile.capabilities {
-            let inventory = build_capability(capability, &profile.resources, &mut registry)?;
+            let (inventory, repository_worktree_patch) =
+                build_capability(capability, &profile.resources, &mut registry)?;
             capabilities.push(inventory);
+            if let Some(repository_worktree_patch) = repository_worktree_patch {
+                repository_worktree_patches.push(repository_worktree_patch);
+            }
         }
 
         Ok(Self {
@@ -103,6 +109,7 @@ impl TrustedStaticProfile {
                     )
                     .collect(),
             },
+            repository_worktree_patches,
             mcp_providers: profile.mcp_providers,
             process_plugins: profile.process_plugins,
             resources: profile.resources,
@@ -121,7 +128,11 @@ impl TrustedStaticProfile {
         &self.effective
     }
 
-    /// Splits the constructed registry from its redacted inventory.
+    /// Splits the statically constructed registry from its redacted inventory.
+    ///
+    /// Capabilities that require effective host construction, such as
+    /// `repo.patch`, remain unavailable until the host invokes its effective
+    /// composer.
     #[must_use]
     pub fn into_parts(self) -> (ToolRegistry, EffectiveProfile) {
         (self.registry, self.effective)
@@ -139,9 +150,20 @@ impl TrustedStaticProfile {
         &self.process_plugins
     }
 
+    /// Returns closed, host-only `repo.patch` declarations for effective composition.
+    #[must_use]
+    pub fn repository_worktree_patches(&self) -> &[RepositoryWorktreePatchProfile] {
+        &self.repository_worktree_patches
+    }
+
     /// Resolves a configured symbolic executable for an external provider.
     pub fn executable_resource(&self, id: &str) -> Result<&Path, ProfileError> {
         executable(&self.resources, Some(id))
+    }
+
+    /// Resolves a configured symbolic repository resource for effective composition.
+    pub fn repository_resource(&self, id: &str) -> Result<&Path, ProfileError> {
+        directory(&self.resources, Some(id))
     }
 }
 
@@ -382,21 +404,66 @@ struct Capability {
     repository: Option<String>,
 }
 
+/// Closed host-only binding needed to construct the bounded `repo.patch` tool.
+///
+/// This contains symbolic resource identities only. The private
+/// `RepositoryWorktreeMutationPolicy` remains constructed by the host-side
+/// effective composer after resource resolution.
+#[derive(Clone, Debug)]
+pub struct RepositoryWorktreePatchProfile {
+    executable: String,
+    repository: String,
+}
+
+impl RepositoryWorktreePatchProfile {
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+}
+
 fn build_capability(
     capability: &Capability,
     resources: &Resources,
     registry: &mut ToolRegistry,
-) -> Result<EffectiveCapability, ProfileError> {
+) -> Result<(EffectiveCapability, Option<RepositoryWorktreePatchProfile>), ProfileError> {
     let (permission, symbolic_resources) = capability_contract(capability)?;
     if !capability.enabled {
-        return Ok(EffectiveCapability {
-            capability_id: capability.name.clone(),
-            enabled: false,
-            registered: false,
-            permission,
-            resources: symbolic_resources,
-            validation: "disabled",
-        });
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: false,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "disabled",
+            },
+            None,
+        ));
+    }
+
+    if capability.name == "repo.patch" {
+        let binding = repository_worktree_patch_binding(capability)?;
+        // Static validation resolves only the closed symbolic resource shape.
+        // It must not construct the tool, inspect Git, or touch the worktree.
+        executable(resources, Some(binding.executable()))?;
+        directory(resources, Some(binding.repository()))?;
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: true,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "configured",
+            },
+            Some(binding),
+        ));
     }
 
     let tool: Arc<dyn crate::Tool> = match capability.name.as_str() {
@@ -438,14 +505,17 @@ fn build_capability(
         _ => return Err(ProfileError::UnsupportedCapability),
     };
     registry.register(tool).map_err(registration_error)?;
-    Ok(EffectiveCapability {
-        capability_id: capability.name.clone(),
-        enabled: true,
-        registered: true,
-        permission,
-        resources: symbolic_resources,
-        validation: "validated",
-    })
+    Ok((
+        EffectiveCapability {
+            capability_id: capability.name.clone(),
+            enabled: true,
+            registered: true,
+            permission,
+            resources: symbolic_resources,
+            validation: "validated",
+        },
+        None,
+    ))
 }
 
 fn validate_resources(resources: &Resources) -> Result<(), ProfileError> {
@@ -574,12 +644,54 @@ fn capability_contract(
             .cloned()
             .collect(),
         ),
+        "repo.patch" => (
+            PermissionLevel::Execute,
+            [
+                capability.executable.as_ref(),
+                capability.repository.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        ),
         _ => return Err(ProfileError::UnsupportedCapability),
     };
     if parse_permission(&capability.permission) != Some(expected.0) {
         return Err(ProfileError::InvalidPermission);
     }
     Ok(expected)
+}
+
+fn repository_worktree_patch_binding(
+    capability: &Capability,
+) -> Result<RepositoryWorktreePatchProfile, ProfileError> {
+    if capability.workspace.is_some()
+        || capability.max_bytes.is_some()
+        || capability.cwd_resource.is_some()
+    {
+        return Err(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        });
+    }
+    let executable = capability
+        .executable
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let repository = capability
+        .repository
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
+    validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
+    Ok(RepositoryWorktreePatchProfile {
+        executable: executable.clone(),
+        repository: repository.clone(),
+    })
 }
 
 fn parse_permission(value: &str) -> Option<PermissionLevel> {
@@ -815,6 +927,70 @@ mod tests {
         assert_eq!(effective.source_class, "trusted_static_file");
         assert_eq!(effective.capabilities[0].resources, vec!["workspace"]);
         assert!(!format!("{effective:?}").contains(&directory.0.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn repo_patch_profile_is_deferred_and_accepts_only_symbolic_host_resources() {
+        let directory = TestDirectory::new();
+        let executable = directory
+            .0
+            .join("git.exe")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let repository = directory.0.to_string_lossy().replace('\\', "\\\\");
+        let valid = format!(
+            r#"{{"profile_version":1,"profile_id":"repo-patch","resources":{{"executables":{{"git":{{"path":"{executable}","kind":"native"}}}},"repositories":{{"worktree":{{"path":"{repository}"}}}}}},"capabilities":[{{"name":"repo.patch","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}}]}}"#
+        );
+
+        let loaded = TrustedStaticProfile::load(directory.profile(&valid))
+            .expect("repo.patch static profile should load");
+        assert!(loaded.registry().definitions().is_empty());
+        assert_eq!(loaded.repository_worktree_patches().len(), 1);
+        let capability = &loaded.effective_profile().capabilities[0];
+        assert_eq!(capability.capability_id, "repo.patch");
+        assert_eq!(
+            capability.permission,
+            rah_protocol::PermissionLevel::Execute
+        );
+        assert_eq!(capability.resources, ["git", "worktree"]);
+        assert!(!capability.registered);
+        assert_eq!(capability.validation, "configured");
+        assert!(!format!("{:?}", loaded.effective_profile()).contains(&repository));
+
+        for invalid in [
+            valid.replace("\"executable\":\"git\",", ""),
+            valid.replace("\"repository\":\"worktree\"", ""),
+            valid.replace("\"permission\":\"execute\",", ""),
+            valid.replace("\"repository\":\"worktree\"", "\"repository\":\"missing\""),
+            valid.replace("\"permission\":\"execute\"", "\"permission\":\"write\""),
+            valid.replace(
+                "\"repository\":\"worktree\"",
+                "\"repository\":\"worktree\",\"repository_root\":\"C:\\\\raw\"",
+            ),
+            valid.replace(
+                "\"repository\":\"worktree\"",
+                "\"repository\":\"worktree\",\"workspace\":\"worktree\"",
+            ),
+        ] {
+            assert!(TrustedStaticProfile::load(directory.profile(&invalid)).is_err());
+        }
+
+        let wrong_resource_type = format!(
+            r#"{{"profile_version":1,"profile_id":"repo-patch","resources":{{"executables":{{"worktree":{{"path":"{executable}","kind":"native"}}}},"repositories":{{"git":{{"path":"{repository}"}}}}}},"capabilities":[{{"name":"repo.patch","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}}]}}"#
+        );
+        assert!(TrustedStaticProfile::load(directory.profile(&wrong_resource_type)).is_err());
+
+        let mut duplicate: serde_json::Value =
+            serde_json::from_str(&valid).expect("valid profile should deserialize for fixture");
+        let capability = duplicate["capabilities"][0].clone();
+        duplicate["capabilities"]
+            .as_array_mut()
+            .expect("capabilities should be an array")
+            .push(capability);
+        assert!(matches!(
+            TrustedStaticProfile::load(directory.profile(&duplicate.to_string())),
+            Err(ProfileError::DuplicateCapability)
+        ));
     }
 
     #[test]

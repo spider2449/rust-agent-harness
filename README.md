@@ -182,6 +182,61 @@ failure. Neither command discovers profiles, selects one from environment or
 repository configuration, reloads a profile, or enables model provider
 selection.
 
+### Trusted `repo.patch` profile binding
+
+The existing hardened `repo.patch` capability can be requested only through a
+trusted static profile using host-owned symbolic resources. Its narrow profile
+entry is:
+
+```json
+{
+  "resources": {
+    "executables": {
+      "git": { "path": "C:\\host-tools\\git.exe", "kind": "native" }
+    },
+    "repositories": {
+      "worktree": { "path": "C:\\host-worktrees\\project" }
+    }
+  },
+  "capabilities": [
+    {
+      "name": "repo.patch",
+      "enabled": true,
+      "permission": "execute",
+      "executable": "git",
+      "repository": "worktree"
+    }
+  ]
+}
+```
+
+`execute` is the existing outer permission because the capability performs
+bounded host-owned Git observations. It is necessary but not sufficient:
+`PermissionLevel::Execute` is not generic worktree-write authority. During
+effective composition the host resolves the two symbolic resources and invokes
+the existing `RepositoryWorktreePatchTool` constructor; that constructor alone
+creates the private `RepositoryWorktreeMutationPolicy`. The profile cannot
+deserialize, construct, configure limits for, or bypass that policy.
+
+The entry accepts no raw repository root, Git command/argv, shell command,
+environment, mutation-policy settings, or filesystem write scope. The
+repository resource must pass the existing constructor's canonical worktree,
+repository identity, and confinement checks. `repo.patch configured` therefore
+does not mean arbitrary writes are authorized, and a model call remains only a
+request that must still pass `ToolRegistry`, runtime permission, and the private
+policy's deterministic eligibility checks. This binding neither alters nor
+substitutes for `WorkspacePolicy`; each capability retains its own applicable
+host policy.
+
+`rah profile validate` checks this entry's source/schema/symbolic-reference
+shape only. It neither constructs `repo.patch`, runs Git, nor reads or mutates
+worktree content. `rah profile validate-effective` resolves resources and may
+perform the bounded non-mutating host-side construction/inspection needed to
+register `repo.patch`; it never invokes the tool. Both inventories show only
+the logical capability name, `Execute` permission, symbolic resource IDs, and
+validation state, never native paths, file data, hashes, temporary paths,
+policy internals, or environment. ADR 0012 remains Proposed.
+
 ## Run opt-in live Codex validation
 
 These examples require the exactly supported Codex CLI version, configured live
@@ -259,10 +314,12 @@ Codex executable, network access, credentials, a paid API, or a real model.
   capability; provider schemas and generic subprocess schemas are not exposed.
 - Arbitrary `shell.exec`, arbitrary `process.exec`, and model-selected
   executable, argv, cwd, environment, or timeout are not live-model authority.
-- Worktree restore, arbitrary file mutation, Git commit, refs/history mutation,
+- Worktree restore, arbitrary file mutation outside the bounded `repo.patch`
+  policy, Git commit, refs/history mutation,
   reset, clean, checkout, switch, stash, merge, rebase, push, pull, fetch,
   network Git, and credential-bearing Git execution are deferred. Destructive
-  worktree authority requires ADR 0011.
+  worktree authority remains constrained by the private policy described in
+  proposed ADR 0012; ADR 0011 is composition-only.
 - Process supervision is not OS sandboxing; RAH makes no network-isolation or
   rollback guarantee. Timeout/cancellation may leave uncertain effects, which
   are never automatically replayed.

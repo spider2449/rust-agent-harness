@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use rah_tools::{
-    EffectiveCapability, EffectiveProfile, ProfileError, ToolRegistry, TrustedStaticProfile,
+    EffectiveCapability, EffectiveProfile, ProfileError, RepositoryWorktreePatchTool, ToolRegistry,
+    TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -56,6 +57,21 @@ pub async fn compose(
             .ok_or(ProfileError::ConstructionFailed)?;
         registry
             .register(tool)
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for patch in profile.repository_worktree_patches() {
+        let executable = profile
+            .executable_resource(patch.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(patch.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(
+                RepositoryWorktreePatchTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
     }
 
@@ -140,6 +156,12 @@ pub async fn compose(
     }
 
     let mut effective = profile.effective_profile().clone();
+    for capability in &mut effective.capabilities {
+        if capability.capability_id == "repo.patch" && capability.enabled {
+            capability.registered = true;
+            capability.validation = "validated";
+        }
+    }
     for provider in &mut effective.providers {
         provider.status = "validated";
     }
@@ -199,6 +221,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        process::Command,
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,
     };
@@ -221,6 +244,15 @@ mod tests {
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&directory).expect("fixture directory should be created");
+            let status = Command::new(git_executable())
+                .args(["init", "--quiet"])
+                .current_dir(&directory)
+                .status()
+                .expect("Git should initialize the owned fixture repository");
+            assert!(
+                status.success(),
+                "Git should initialize the fixture repository"
+            );
             Self(directory)
         }
     }
@@ -301,6 +333,40 @@ mod tests {
         path
     }
 
+    fn git_executable() -> PathBuf {
+        #[cfg(windows)]
+        let output = Command::new("where.exe")
+            .arg("git.exe")
+            .output()
+            .expect("where should locate Git");
+        #[cfg(not(windows))]
+        let output = Command::new("which")
+            .arg("git")
+            .output()
+            .expect("which should locate Git");
+        assert!(
+            output.status.success(),
+            "Git should be available for fixtures"
+        );
+        PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("Git path should be UTF-8")
+                .lines()
+                .next()
+                .expect("Git path should be present"),
+        )
+    }
+
+    fn worktree_status(directory: &Path) -> Vec<u8> {
+        let output = Command::new(git_executable())
+            .args(["status", "--porcelain=v1"])
+            .current_dir(directory)
+            .output()
+            .expect("Git status should run for fixture");
+        assert!(output.status.success(), "Git status should succeed");
+        output.stdout
+    }
+
     fn echo_schema(field: &str) -> serde_json::Value {
         let mut properties = serde_json::Map::new();
         properties.insert(field.to_owned(), json!({"type":"string"}));
@@ -320,6 +386,10 @@ mod tests {
     ) -> PathBuf {
         let path = directory.join("trusted-profile.json");
         let mut executables = serde_json::Map::new();
+        executables.insert(
+            "git".to_owned(),
+            json!({"path": git_executable(), "kind":"native"}),
+        );
         let mut mcp_providers = Vec::new();
         let mut process_plugins = Vec::new();
         for (id, fixture, schema, permission) in mcps {
@@ -345,7 +415,10 @@ mod tests {
                 "executables": executables,
                 "repositories": {"workspace": {"path": directory}}
             },
-            "capabilities": [{"name":"fs.read", "enabled":true, "permission":"read", "workspace":"workspace", "max_bytes":1024}],
+            "capabilities": [
+                {"name":"fs.read", "enabled":true, "permission":"read", "workspace":"workspace", "max_bytes":1024},
+                {"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
+            ],
             "mcp_providers": mcp_providers,
             "process_plugins": process_plugins
         });
@@ -369,6 +442,9 @@ mod tests {
     async fn actual_effective_composer_admits_mixed_providers_preserves_permissions_and_owns_lifetime()
      {
         let directory = FixtureDirectory::new("mixed-success");
+        let target = directory.0.join("target.txt");
+        fs::write(&target, b"repo.patch composition must not execute\n")
+            .expect("fixture target should be written");
         let mcp = LifecycleFixture::new(&directory.0, "rah-mcp-echo-server", "mcp");
         let plugin = LifecycleFixture::new(&directory.0, "rah-plugin-echo", "plugin");
         let profile_path = profile(
@@ -381,6 +457,7 @@ mod tests {
                 PermissionLevel::Execute,
             )],
         );
+        let target_before = fs::read(&target).expect("fixture target should be readable");
         let composition =
             compose(TrustedStaticProfile::load(&profile_path).expect("static profile should load"))
                 .await
@@ -392,8 +469,16 @@ mod tests {
         let definitions = composition.registry().definitions();
         assert_eq!(
             definitions.len(),
-            3,
-            "only built-in plus exactly admitted external tools are published"
+            4,
+            "built-ins, repo.patch, and exactly admitted external tools are published"
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == ToolName::new("repo.patch"))
+                .expect("repo.patch should be registered through ToolRegistry")
+                .permission,
+            PermissionLevel::Execute
         );
         assert_eq!(
             definitions
@@ -419,6 +504,36 @@ mod tests {
                 .map(|provider| provider.status)
                 .collect::<Vec<_>>(),
             ["validated", "validated"]
+        );
+        let repo_patch = composition
+            .effective_profile()
+            .capabilities
+            .iter()
+            .find(|capability| capability.capability_id == "repo.patch")
+            .expect("redacted inventory should include repo.patch");
+        assert!(repo_patch.registered);
+        assert_eq!(repo_patch.permission, PermissionLevel::Execute);
+        assert_eq!(repo_patch.resources, ["git", "workspace"]);
+        assert_eq!(repo_patch.validation, "validated");
+        assert!(
+            !format!("{:?}", composition.effective_profile())
+                .contains(directory.0.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            fs::read(&target).expect("composition must not mutate the fixture target"),
+            target_before
+        );
+        assert!(
+            !fs::read_dir(&directory.0)
+                .expect("fixture directory should remain readable")
+                .any(|entry| {
+                    entry
+                        .expect("fixture directory entry should be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".rah-repo-patch-")
+                }),
+            "composition must not leave repo.patch temporary files"
         );
 
         let mcp_output = composition
@@ -446,6 +561,55 @@ mod tests {
         drop(composition);
         plugin.assert_unlocked_after_owner_release().await;
         mcp.assert_unlocked_after_owner_release().await;
+    }
+
+    #[tokio::test]
+    async fn repo_patch_effective_composition_rejects_a_non_worktree_resource_without_mutation() {
+        let directory = FixtureDirectory::new("repo-patch-non-root");
+        let target = directory.0.join("target.txt");
+        fs::write(&target, b"original\n").expect("fixture target should be written");
+        let non_root = directory.0.join("nested");
+        fs::create_dir(&non_root).expect("non-root fixture directory should be created");
+        let profile_path = directory.0.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "repo-patch-non-root",
+            "resources": {
+                "executables": {"git": {"path": git_executable(), "kind": "native"}},
+                "repositories": {"non_root": {"path": non_root}}
+            },
+            "capabilities": [{
+                "name": "repo.patch",
+                "enabled": true,
+                "permission": "execute",
+                "executable": "git",
+                "repository": "non_root"
+            }]
+        });
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&document).expect("profile should serialize"),
+        )
+        .expect("profile should be written");
+        let status_before = worktree_status(&directory.0);
+        let target_before = fs::read(&target).expect("fixture target should be readable");
+
+        let error = match compose(
+            TrustedStaticProfile::load(&profile_path)
+                .expect("static validation should not inspect the repository resource"),
+        )
+        .await
+        {
+            Ok(composition) => {
+                composition.shutdown().await;
+                panic!("effective composition must reject a resource outside the worktree root");
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error, rah_tools::ProfileError::ConstructionFailed);
+        assert_eq!(fs::read(&target).unwrap(), target_before);
+        assert_eq!(worktree_status(&directory.0), status_before);
     }
 
     #[tokio::test]

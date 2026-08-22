@@ -91,6 +91,49 @@ fn external_profile(directory: &Path, mcp: &Path, plugin: &Path) -> String {
     )
 }
 
+fn git_executable() -> PathBuf {
+    #[cfg(windows)]
+    let output = Command::new("where.exe")
+        .arg("git.exe")
+        .output()
+        .expect("where should locate Git");
+    #[cfg(not(windows))]
+    let output = Command::new("which")
+        .arg("git")
+        .output()
+        .expect("which should locate Git");
+    assert!(
+        output.status.success(),
+        "Git should be available for fixtures"
+    );
+    PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("Git path should be UTF-8")
+            .lines()
+            .next()
+            .expect("Git path should be present"),
+    )
+}
+
+fn git_status(directory: &Path) -> Vec<u8> {
+    let output = Command::new(git_executable())
+        .args(["status", "--porcelain=v1"])
+        .current_dir(directory)
+        .output()
+        .expect("Git status should run");
+    assert!(output.status.success(), "Git status should succeed");
+    output.stdout
+}
+
+fn repo_patch_profile(directory: &Path) -> String {
+    let path = |value: &Path| value.to_string_lossy().replace('\\', "\\\\");
+    format!(
+        r#"{{"profile_version":1,"profile_id":"cli-repo-patch","resources":{{"executables":{{"git":{{"path":"{}","kind":"native"}}}},"repositories":{{"worktree":{{"path":"{}"}}}}}},"capabilities":[{{"name":"repo.patch","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}}]}}"#,
+        path(&git_executable()),
+        path(directory)
+    )
+}
+
 fn lifecycle(path: &Path) -> String {
     fs::read_to_string(path.with_extension("lifecycle")).unwrap_or_default()
 }
@@ -283,6 +326,69 @@ fn profile_validate_rejects_missing_profile_without_leaking_path() {
     assert!(stderr.contains("trusted profile source could not be read"));
     assert!(!stderr.contains(&missing.to_string_lossy().to_string()));
     assert!(!stderr.contains("CLI_PROFILE_MISSING_SECRET"));
+}
+
+#[test]
+fn profile_repo_patch_static_and_effective_validation_are_non_mutating_and_redacted() {
+    let directory = TestDirectory::new();
+    let initialized = Command::new(git_executable())
+        .args(["init", "--quiet"])
+        .current_dir(&directory.0)
+        .status()
+        .expect("Git should initialize the owned fixture repository");
+    assert!(initialized.success());
+    let target = directory.0.join("target.txt");
+    fs::write(&target, b"repo.patch must not execute during validation\n")
+        .expect("fixture target should be written");
+    let profile = directory.profile(&repo_patch_profile(&directory.0));
+    let target_before = fs::read(&target).expect("fixture target should be readable");
+    let status_before = git_status(&directory.0);
+
+    let static_output = rah()
+        .args(["profile", "validate"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch static validation");
+    let static_stdout = String::from_utf8_lossy(&static_output.stdout);
+    assert!(
+        static_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&static_output.stderr)
+    );
+    assert!(static_stdout.contains(
+        "capability name=repo.patch enabled=true registered=false permission=Execute resources=git,worktree validation=configured"
+    ));
+    assert!(!static_stdout.contains(directory.0.to_string_lossy().as_ref()));
+    assert_eq!(fs::read(&target).unwrap(), target_before);
+    assert_eq!(git_status(&directory.0), status_before);
+
+    let effective_output = rah()
+        .args(["profile", "validate-effective"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch effective validation");
+    let effective_stdout = String::from_utf8_lossy(&effective_output.stdout);
+    assert!(
+        effective_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&effective_output.stderr)
+    );
+    assert!(effective_stdout.contains(
+        "capability name=repo.patch enabled=true registered=true permission=Execute resources=git,worktree validation=validated"
+    ));
+    assert!(effective_stdout.contains("tool name=repo.patch permission=Execute"));
+    for secret in [
+        directory.0.to_string_lossy().as_ref(),
+        profile.to_string_lossy().as_ref(),
+        git_executable().to_string_lossy().as_ref(),
+    ] {
+        assert!(
+            !effective_stdout.contains(secret),
+            "inventory leaked {secret}"
+        );
+    }
+    assert_eq!(fs::read(&target).unwrap(), target_before);
+    assert_eq!(git_status(&directory.0), status_before);
 }
 
 #[test]
