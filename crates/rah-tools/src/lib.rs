@@ -13,6 +13,7 @@ mod fs_read;
 mod git_stage;
 mod git_status;
 mod git_support;
+mod git_unstage;
 mod host_execute;
 mod repository_mutation;
 mod shell_exec;
@@ -25,6 +26,7 @@ pub use external_permissions::{
 pub use fs_read::FsReadTool;
 pub use git_stage::{GIT_STAGE_TOOL_NAME, GitStageTool};
 pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
+pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use shell_exec::ShellExecTool;

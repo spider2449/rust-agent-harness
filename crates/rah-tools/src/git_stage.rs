@@ -25,7 +25,7 @@ const MAX_WORKTREE_SNAPSHOT_BYTES: usize = 1024 * 1024;
 /// `symbolic_target` and `target_path` are trusted host configuration, never
 /// model input. The only model-visible input accepted by this tool is `{}`.
 pub struct GitStageTool {
-    policy: GitStagePolicy,
+    policy: GitIndexMutationPolicy,
 }
 
 impl GitStageTool {
@@ -38,11 +38,12 @@ impl GitStageTool {
         target_path: impl AsRef<Path>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
-            policy: GitStagePolicy::new(
+            policy: GitIndexMutationPolicy::new(
                 git_executable.as_ref(),
                 repository_root.as_ref(),
                 symbolic_target.into(),
                 target_path.as_ref(),
+                GitIndexMutation::Stage,
             )?,
         })
     }
@@ -66,29 +67,37 @@ impl Tool for GitStageTool {
     ) -> Result<ToolOutput, ToolError> {
         reject_input(&input)?;
         let _lease = self.policy.acquire_lease().await;
-        self.policy.execute_once().await
+        self.policy.execute_once(GitIndexMutation::Stage).await
     }
 }
 
-struct GitStagePolicy {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GitIndexMutation {
+    Stage,
+    Unstage,
+}
+
+pub(crate) struct GitIndexMutationPolicy {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
     target: Target,
     track: HostExecutionPolicy,
-    stage: HostExecutionPolicy,
+    mutation: HostExecutionPolicy,
     head: HostExecutionPolicy,
+    head_tree: HostExecutionPolicy,
     refs: HostExecutionPolicy,
     index: HostExecutionPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
-impl GitStagePolicy {
-    fn new(
+impl GitIndexMutationPolicy {
+    pub(crate) fn new(
         git: &Path,
         root: &Path,
         symbolic_target: String,
         target_path: &Path,
+        mutation_kind: GitIndexMutation,
     ) -> Result<Self, ToolError> {
         if symbolic_target.is_empty() {
             return Err(git_error("symbolic target must not be empty"));
@@ -107,7 +116,7 @@ impl GitStagePolicy {
             return Err(git_error("repository metadata is missing"));
         }
         let target = Target::capture(&root, symbolic_target, target_path)?;
-        let relative = target.relative.to_string_lossy().into_owned();
+        let relative = target.git_relative.clone();
         if relative.contains('\0') {
             return Err(git_error("authorized target contains NUL"));
         }
@@ -120,18 +129,22 @@ impl GitStagePolicy {
             dot_git_identity: FileIdentity::capture(&dot_git)?,
             lease: repository_lease(&root),
             track: exact(vec![
+                "--literal-pathspecs".into(),
                 "ls-files".into(),
                 "--error-unmatch".into(),
                 "--".into(),
                 relative.clone(),
             ])?,
-            stage: exact(vec![
+            mutation: exact(mutation_arguments(mutation_kind, &relative))?,
+            head: exact(vec!["rev-parse".into(), "HEAD".into()])?,
+            head_tree: exact(vec![
                 "--literal-pathspecs".into(),
-                "add".into(),
+                "ls-tree".into(),
+                "-z".into(),
+                "HEAD".into(),
                 "--".into(),
                 relative.clone(),
             ])?,
-            head: exact(vec!["rev-parse".into(), "HEAD".into()])?,
             refs: exact(vec![
                 "for-each-ref".into(),
                 "--format=%(refname)%00%(objectname)%00".into(),
@@ -142,19 +155,22 @@ impl GitStagePolicy {
         })
     }
 
-    async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
+    pub(crate) async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
         self.lease.lock().await
     }
 
-    async fn execute_once(&self) -> Result<ToolOutput, ToolError> {
-        let pre = self.capture_state().await?;
+    pub(crate) async fn execute_once(
+        &self,
+        mutation_kind: GitIndexMutation,
+    ) -> Result<ToolOutput, ToolError> {
+        let pre = self.capture_state(mutation_kind).await?;
         self.require_tracked().await?;
         self.revalidate()?;
-        let process = self.stage.execute_process(&ToolInput(json!({}))).await;
+        let process = self.mutation.execute_process(&ToolInput(json!({}))).await;
         #[cfg(test)]
         let process = test_after_stage::run(process).await;
-        let post = self.capture_state().await;
-        Ok(self.result(pre, process, post))
+        let post = self.capture_state(mutation_kind).await;
+        Ok(self.result(pre, process, post, mutation_kind))
     }
 
     async fn require_tracked(&self) -> Result<(), ToolError> {
@@ -165,13 +181,21 @@ impl GitStagePolicy {
         Ok(())
     }
 
-    async fn capture_state(&self) -> Result<State, ToolError> {
+    async fn capture_state(&self, mutation_kind: GitIndexMutation) -> Result<State, ToolError> {
         self.revalidate()?;
         let head = successful_output(&self.head).await?;
+        let head_entry = match mutation_kind {
+            GitIndexMutation::Stage => None,
+            GitIndexMutation::Unstage => Some(parse_head_entry(
+                &successful_output(&self.head_tree).await?,
+                self.target.git_relative.as_bytes(),
+            )?),
+        };
         let refs = successful_output(&self.refs).await?;
         let index = successful_output(&self.index).await?;
         Ok(State {
             head,
+            head_entry,
             refs,
             index: parse_index(&index)?,
             worktree: WorktreeSnapshot::capture(&self.root)?,
@@ -199,9 +223,15 @@ impl GitStagePolicy {
         pre: State,
         process: Result<rah_sandbox::HostProcessOutput, ToolError>,
         post: Result<State, ToolError>,
+        mutation_kind: GitIndexMutation,
     ) -> ToolOutput {
         let verification = match post {
-            Ok(post) => verify(&pre, &post, &self.target.relative),
+            Ok(post) => verify(
+                &pre,
+                &post,
+                self.target.git_relative.as_bytes(),
+                mutation_kind,
+            ),
             Err(error) => Verification::uncertain(error.to_string()),
         };
         let process_failed = process.as_ref().map_or(true, |output| {
@@ -221,7 +251,8 @@ impl GitStagePolicy {
                 "status": status,
                 "target": self.target.symbolic,
                 "changed": verification.changed,
-                "staged": verification.target_changed,
+                "staged": matches!(mutation_kind, GitIndexMutation::Stage) && verification.target_changed,
+                "unstaged": matches!(mutation_kind, GitIndexMutation::Unstage) && verification.target_changed,
                 "no_op": !verification.target_changed && status == "ok",
                 "partial": status == "policy_violation" || status == "uncertain",
                 "uncertain": status == "uncertain"
@@ -244,7 +275,7 @@ async fn successful_output(policy: &HostExecutionPolicy) -> Result<Vec<u8>, Tool
 struct Target {
     symbolic: String,
     path: PathBuf,
-    relative: PathBuf,
+    git_relative: String,
     parent: FileIdentity,
     identity: FileIdentity,
 }
@@ -262,10 +293,11 @@ impl Target {
             .parent()
             .ok_or_else(|| git_error("authorized target has no parent"))?;
         Ok(Self {
-            relative: path
+            git_relative: path
                 .strip_prefix(root)
                 .map_err(|error| git_error(error.to_string()))?
-                .to_path_buf(),
+                .to_string_lossy()
+                .replace('\\', "/"),
             parent: FileIdentity::capture(parent)?,
             identity: FileIdentity::capture(&path)?,
             symbolic,
@@ -292,6 +324,7 @@ impl Target {
 
 struct State {
     head: Vec<u8>,
+    head_entry: Option<Vec<u8>>,
     refs: Vec<u8>,
     index: BTreeMap<Vec<u8>, Vec<u8>>,
     worktree: WorktreeSnapshot,
@@ -355,24 +388,93 @@ impl Verification {
         }
     }
 }
-fn verify(pre: &State, post: &State, target: &Path) -> Verification {
-    let target = target.as_os_str().as_encoded_bytes().to_vec();
+fn verify(
+    pre: &State,
+    post: &State,
+    target: &[u8],
+    mutation_kind: GitIndexMutation,
+) -> Verification {
+    let target = target.to_vec();
     let target_changed = pre.index.get(&target) != post.index.get(&target);
     let unrelated_equal = pre
         .index
         .iter()
         .filter(|(path, _)| *path != &target)
         .eq(post.index.iter().filter(|(path, _)| *path != &target));
+    let mutation_matches_authority = match mutation_kind {
+        GitIndexMutation::Stage => true,
+        GitIndexMutation::Unstage => pre
+            .head_entry
+            .as_ref()
+            .is_some_and(|head_entry| post.index.get(&target) == Some(head_entry)),
+    };
     let violation = pre.head != post.head
         || pre.refs != post.refs
         || pre.worktree.0 != post.worktree.0
-        || !unrelated_equal;
+        || !unrelated_equal
+        || !mutation_matches_authority;
     Verification {
         changed: target_changed,
         target_changed,
         violation,
         uncertain: false,
     }
+}
+
+fn mutation_arguments(mutation_kind: GitIndexMutation, relative: &str) -> Vec<String> {
+    match mutation_kind {
+        GitIndexMutation::Stage => vec![
+            "--literal-pathspecs".into(),
+            "add".into(),
+            "--".into(),
+            relative.into(),
+        ],
+        GitIndexMutation::Unstage => vec![
+            "--literal-pathspecs".into(),
+            "restore".into(),
+            "--staged".into(),
+            "--source=HEAD".into(),
+            "--".into(),
+            relative.into(),
+        ],
+    }
+}
+
+fn parse_head_entry(bytes: &[u8], target: &[u8]) -> Result<Vec<u8>, ToolError> {
+    let records = bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect::<Vec<_>>();
+    let [record] = records.as_slice() else {
+        return Err(git_error(
+            "authorized target must have exactly one HEAD tree entry",
+        ));
+    };
+    let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+        return Err(git_error("Git HEAD tree observation was malformed"));
+    };
+    if &record[separator + 1..] != target {
+        return Err(git_error(
+            "Git HEAD tree observation selected an unexpected target",
+        ));
+    }
+    let fields = record[..separator]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, kind, object] = fields.as_slice() else {
+        return Err(git_error("Git HEAD tree observation was malformed"));
+    };
+    if *kind != b"blob" || !matches!(*mode, b"100644" | b"100755") {
+        return Err(git_error(
+            "authorized target must be a regular HEAD tree entry",
+        ));
+    }
+    let mut entry = Vec::with_capacity(mode.len() + object.len() + 3);
+    entry.extend_from_slice(mode);
+    entry.push(b' ');
+    entry.extend_from_slice(object);
+    entry.extend_from_slice(b" 0");
+    Ok(entry)
 }
 fn parse_index(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, ToolError> {
     let mut entries = BTreeMap::new();
@@ -391,7 +493,7 @@ fn parse_index(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, ToolError> {
     }
     Ok(entries)
 }
-fn reject_input(input: &ToolInput) -> Result<(), ToolError> {
+pub(crate) fn reject_input(input: &ToolInput) -> Result<(), ToolError> {
     let Some(object) = input.0.as_object() else {
         return Err(ToolError::InvalidInput {
             message: "input must be an object".into(),
@@ -625,8 +727,11 @@ mod tests {
     use serde_json::json;
     use tokio::sync::Notify;
 
+    use crate::GitUnstageTool;
+
     use super::{
-        GitStageTool, State, Tool, ToolContext, WorktreeSnapshot, test_after_stage, verify,
+        GitIndexMutation, GitStageTool, State, Tool, ToolContext, WorktreeSnapshot,
+        test_after_stage, verify,
     };
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -718,17 +823,19 @@ mod tests {
         post_index.insert(b"other.txt".to_vec(), b"other-after".to_vec());
         let pre = State {
             head: b"head".to_vec(),
+            head_entry: Some(b"100644 object 0".to_vec()),
             refs: b"refs".to_vec(),
             index: pre_index,
             worktree: WorktreeSnapshot(BTreeMap::new()),
         };
         let post = State {
             head: b"head".to_vec(),
+            head_entry: Some(b"100644 object 0".to_vec()),
             refs: b"refs".to_vec(),
             index: post_index,
             worktree: WorktreeSnapshot(BTreeMap::new()),
         };
-        assert!(verify(&pre, &post, std::path::Path::new("target.txt")).violation);
+        assert!(verify(&pre, &post, b"target.txt", GitIndexMutation::Stage).violation);
     }
 
     #[tokio::test]
@@ -817,6 +924,88 @@ mod tests {
                 .unwrap()
                 .success(),
             "the real Git mutation happened before cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn unstage_detects_extra_index_changes_and_treats_lost_results_or_abort_as_no_replay() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged target\n").unwrap();
+        fs::write(root.join("other.txt"), "staged other\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let tool =
+            GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
+        test_after_stage::install(test_after_stage::Hook::MutateUnrelatedIndex {
+            git: git.clone(),
+            root: root.clone(),
+        })
+        .await;
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert_eq!(content(&output)["status"], "policy_violation");
+
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged target\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let tool =
+            GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
+        test_after_stage::install(test_after_stage::Hook::LoseProcessResult).await;
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(content(&output)["unstaged"], true);
+
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged target\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let tool =
+            GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
+        test_after_stage::install(test_after_stage::Hook::TimeoutAfterMutation).await;
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(content(&output)["unstaged"], true);
+
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged target\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let tool = Arc::new(
+            GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap(),
+        );
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        test_after_stage::install(test_after_stage::Hook::BlockAfterMutation {
+            entered: entered.clone(),
+            release,
+        })
+        .await;
+        let task = tokio::spawn({
+            let tool = tool.clone();
+            async move {
+                tool.execute(ToolInput(json!({})), ToolContext::default())
+                    .await
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.is_err());
+        assert!(
+            Command::new(&git)
+                .args(["diff", "--cached", "--quiet", "--", "target.txt"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success(),
+            "the sole fixed unstage happened before abort"
         );
     }
 }

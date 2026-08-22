@@ -114,8 +114,17 @@ or a lost response after spawn may have caused an effect. The fixture reports a
 post-spawn timeout with an observed mutation as uncertain and never retries it.
 Dropping execution attempts process termination through the supervised-process
 layer; it is not rollback. The initial fixture has no Git mutation, no network,
-and no model-visible file-authoring surface. Git add/commit and all other Git
-mutation remain deferred.
+and no model-visible file-authoring surface.
+
+`host.git.stage` and `host.git.unstage` are separate, host-constructed Git
+capabilities using that same private mutation policy. Each accepts only `{}`
+and binds one symbolic target to one tracked regular file. Stage invokes only
+the fixed literal-pathspec `git add`; unstage invokes only `git
+--literal-pathspecs restore --staged --source=HEAD -- <target>`. Unstage proves
+that its target index entry equals the pre-observed `HEAD` tree entry and that
+the full worktree snapshot, every unrelated index entry, `HEAD`, refs, and
+repository identity remain unchanged. It never writes worktree bytes. Commit,
+worktree restore, and all other Git mutation remain deferred.
 
 ## MCP process boundary
 
