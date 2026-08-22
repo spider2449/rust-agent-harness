@@ -42,6 +42,11 @@ policy in deterministic tests and an opt-in live Codex example.
 not registered unless the host explicitly assigns its RAH `PermissionLevel`.
 External metadata never grants permission.
 
+ADR 0011 defines the explicitly selected trusted-host capability profile as the
+composition boundary for already-approved built-in capabilities and external
+providers. It is not model authority and does not replace capability-specific
+permission, execution, workspace, or repository-mutation policies.
+
 ## Generic Codex Tool Bridge
 
 Codex is an optional adapter, not RAH's architecture. `CodexRuntime` implements

@@ -11,6 +11,11 @@ adapters translate only at their private edges.
 `Sandbox` remain independent extension points. No v0.3 work changes their
 architecture-defining public contracts.
 
+ADR 0011 establishes the trusted host capability profile as the authority-
+composition boundary for existing built-in capabilities and admitted external
+providers. It does not change runtime, `Tool`, `ToolRegistry`, or
+capability-specific policy contracts.
+
 ## v0.3 capability classification
 
 ### Public / host capabilities

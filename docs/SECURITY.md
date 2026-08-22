@@ -13,7 +13,8 @@ The v0.3 boundary excludes arbitrary `shell.exec` and `process.exec`,
 model-selected executable/argv/cwd/environment, worktree restore, arbitrary
 file mutation, commit/history/ref operations, reset/clean/checkout/switch/stash,
 merge/rebase, push/pull/fetch, network Git, and credential-bearing Git
-execution. Worktree-destructive authority is deferred and requires ADR 0011.
+execution. Worktree-destructive authority is deferred and requires a future
+dedicated ADR.
 
 Process supervision is not OS sandboxing and RAH makes no network-isolation or
 rollback guarantee. Timeout or cancellation can leave uncertain mutation
@@ -36,6 +37,12 @@ parsed ToolCall
 ```
 
 ## Trusted static capability profile source
+
+ADR 0011 defines this explicitly selected trusted-host profile as RAH's
+authority-composition boundary. It configures already-approved constructors and
+their host-owned resources; it does not replace their capability-specific
+policies or create generic process, filesystem, Git, network, or credential
+authority.
 
 `rah profile validate <absolute-profile-path>` accepts only an operator-selected
 absolute profile path; it has no search, environment selection, reload, or
