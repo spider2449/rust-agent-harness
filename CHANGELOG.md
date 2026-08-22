@@ -16,7 +16,7 @@ published release already exists.
 - `RepositoryMutationPolicy` is verified through deterministic and opt-in live
   repository-mutation fixture validation; `host.git.stage` and
   `host.git.unstage` have deterministic and opt-in live validation.
-- The optional Codex adapter baseline remains exactly `codex-cli 0.148.0`.
+- The optional Codex adapter baseline is exactly `codex-cli 0.149.0`.
 
 ### Capability classification
 

@@ -131,8 +131,12 @@ spawning. README, clap help, and CLI tests state that distinction. The static
 test does not use a spawn sentinel, but the call graph contains no adapter
 construction.
 
-The pinned Codex baseline remains `codex-cli 0.148.0` in the adapter constant,
-captured contract, README, and documentation. No provider dependency enters
+Task 042 selected the exact `codex-cli 0.149.0` baseline because no trusted native
+0.148.0 executable is available in the established local validation setup. Its
+generated app-server schemas retain every captured required lifecycle and
+dynamic-tool field; observed contract changes are additive only. The adapter
+constant, captured contract, README, and architecture documentation use that exact
+pin. No provider dependency enters
 `rah-protocol`, core, runtime, or the production Codex adapter. Actual v0.4
 edges are `rah-tools -> serde` (profile DTO parsing), Unix-only `libc` (source
 hardening), and `rah-cli -> rah-tools-mcp`/`rah-tools-plugin` (host effective

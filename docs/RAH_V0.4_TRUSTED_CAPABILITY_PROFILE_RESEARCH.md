@@ -2,7 +2,7 @@
 
 Status: **PLANNED — design research only**
 Date: 2026-08-22
-Baseline: RAH v0.3.0, Rust edition 2024, `codex-cli 0.148.0`
+Baseline: RAH v0.3.0, Rust edition 2024, `codex-cli 0.149.0`
 
 Status terminology is intentional. **VERIFIED** means the cited v0.3 source
 and its recorded deterministic or named opt-in live evidence support the claim.

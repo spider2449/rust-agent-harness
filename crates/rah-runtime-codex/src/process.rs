@@ -20,7 +20,7 @@ use tokio::{
 use crate::{CodexAdapterError, SUPPORTED_CODEX_VERSION, transport::AppServerTransport};
 
 const STDERR_LIMIT: usize = 64 * 1024;
-const CONTRACT_JSON: &str = include_str!("../fixtures/schema_contract_0_148_0.json");
+const CONTRACT_JSON: &str = include_str!("../fixtures/schema_contract_0_149_0.json");
 static SCHEMA_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Deserialize)]
@@ -449,7 +449,7 @@ mod tests {
     fn exact_version_is_required() {
         assert!(check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).is_ok());
         assert!(matches!(
-            check_version(true, "codex-cli 0.149.0".to_owned()),
+            check_version(true, "codex-cli 0.148.0".to_owned()),
             Err(CodexAdapterError::VersionMismatch { .. })
         ));
     }

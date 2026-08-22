@@ -214,7 +214,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
-transport, and captured Codex 0.148.0 schema/JSON fixtures. It does not require a
+transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
 ## v0.3 limitations and explicit deferrals

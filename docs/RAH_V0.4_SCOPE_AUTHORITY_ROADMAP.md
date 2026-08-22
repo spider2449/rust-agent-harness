@@ -2,7 +2,7 @@
 
 Status: **PLANNED — research recommendation only**
 Date: 2026-08-22
-Baseline: RAH v0.3.0, Rust edition 2024, `codex-cli 0.148.0`
+Baseline: RAH v0.3.0, Rust edition 2024, `codex-cli 0.149.0`
 
 This document recommends v0.4 scope. It does not grant authority, change a
 public contract, revise an accepted ADR, or claim an implementation exists.
@@ -48,7 +48,7 @@ of those values.
 
 **VERIFIED.** Normal validation is deterministic and offline. Opt-in live Codex
 examples require explicitly configured local prerequisites and the exact
-`codex-cli 0.148.0` baseline. A Codex upgrade is a separate compatibility task:
+`codex-cli 0.149.0` baseline. A future Codex upgrade is a separate compatibility task:
 it must revalidate executable version, app-server schema/fixtures, translation,
 and live behavior; it is not v0.4 scope.
 
@@ -249,7 +249,7 @@ invalid profiles in temporary directories, prove default denial and exact
 inventory, prove that each capability retains its existing fixed authority, and
 prove sensitive values are absent from diagnostics/events. Existing stage and
 unstage tests must still prove no worktree/ref mutation. An opt-in live Codex
-smoke may be retained only for the exact `0.148.0` bridge and explicitly enabled
+smoke may be retained only for the exact `0.149.0` bridge and explicitly enabled
 profile; it cannot become a normal test prerequisite.
 
 ## 7. ADR implications
