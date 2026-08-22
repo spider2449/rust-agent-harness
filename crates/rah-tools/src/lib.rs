@@ -32,7 +32,10 @@ pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use shell_exec::ShellExecTool;
-pub use trusted_profile::{EffectiveProfile, ProfileError, TrustedStaticProfile};
+pub use trusted_profile::{
+    EffectiveCapability, EffectiveProfile, EffectiveProvider, McpExpectedToolProfile,
+    McpProviderProfile, ProfileError, TrustedStaticProfile,
+};
 
 /// Neutral execution context supplied by the runtime to a tool.
 #[derive(Clone, Debug, Default)]

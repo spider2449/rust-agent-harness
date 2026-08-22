@@ -16,6 +16,7 @@ use rah_protocol::{
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
 use rah_tools::{EchoTool, FsReadTool, ToolRegistry, TrustedStaticProfile};
+use rah_tools_mcp::compose_trusted_profile;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -46,8 +47,13 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ProfileCommand {
-    /// Validates a profile and prints its redacted effective inventory.
+    /// Validates source/schema/static resources without launching providers.
     Validate {
+        /// Absolute profile path selected by the trusted operator.
+        profile_path: PathBuf,
+    },
+    /// Launches configured local MCP providers and prints redacted effective inventory.
+    ValidateEffective {
         /// Absolute profile path selected by the trusted operator.
         profile_path: PathBuf,
     },
@@ -83,6 +89,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Doctor => doctor(),
         Command::Profile { command } => match command {
             ProfileCommand::Validate { profile_path } => validate_profile(profile_path),
+            ProfileCommand::ValidateEffective { profile_path } => {
+                validate_effective_profile(profile_path).await
+            }
         },
     }
 }
@@ -189,6 +198,21 @@ fn validate_profile(profile_path: PathBuf) -> Result<()> {
     println!("profile_version={}", effective.profile_version);
     println!("profile_id={}", effective.profile_id);
     println!("source_class={}", effective.source_class);
+    render_profile(effective);
+    Ok(())
+}
+
+async fn validate_effective_profile(profile_path: PathBuf) -> Result<()> {
+    let profile = TrustedStaticProfile::load(profile_path)
+        .context("trusted profile static validation failed")?;
+    let effective = compose_trusted_profile(profile)
+        .await
+        .context("trusted profile effective validation failed")?;
+    render_profile(effective.effective_profile());
+    Ok(())
+}
+
+fn render_profile(effective: &rah_tools::EffectiveProfile) {
     for capability in &effective.capabilities {
         println!(
             "capability name={} enabled={} registered={} permission={:?} resources={} validation={}",
@@ -200,7 +224,12 @@ fn validate_profile(profile_path: PathBuf) -> Result<()> {
             capability.validation,
         );
     }
-    Ok(())
+    for provider in &effective.providers {
+        println!(
+            "provider kind={} id={} status={} tool_count={}",
+            provider.kind, provider.provider_id, provider.status, provider.tool_count,
+        );
+    }
 }
 
 fn tool_registry(workspace_root: impl AsRef<Path>) -> Result<ToolRegistry> {

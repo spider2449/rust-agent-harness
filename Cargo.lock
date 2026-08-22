@@ -408,6 +408,7 @@ dependencies = [
  "rah-protocol",
  "rah-runtime",
  "rah-tools",
+ "rah-tools-mcp",
  "serde_json",
  "tokio",
  "tracing-subscriber",

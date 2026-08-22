@@ -132,6 +132,7 @@ cargo run -p rah-cli -- run "read Cargo.toml and report the workspace package in
 cargo run -p rah-cli -- tools
 cargo run -p rah-cli -- doctor
 cargo run -p rah-cli -- profile validate C:\\trusted-host\\rah-profile.json
+cargo run -p rah-cli -- profile validate-effective C:\\trusted-host\\rah-profile.json
 ```
 
 The manifest-report command dispatches `fs.read` through `ToolRegistry`, an
@@ -141,9 +142,13 @@ explicit host `Read` permission, and the workspace path policy.
 path. Before parsing, the host-side loader requires a bounded UTF-8 regular
 file and rejects links and Windows reparse points. On Windows it accepts only
 drive-rooted paths; UNC, verbatim/device paths, and ADS forms are rejected. It
-then validates the existing built-in-only static profile and prints only its
-redacted effective inventory. It does not discover profiles, select one from
-environment or repository configuration, or enable live provider selection.
+then validates the static profile and prints only its redacted static inventory.
+It does not launch MCP providers. `profile validate-effective` is the explicit
+spawning operation: it launches only MCP executables named by the selected
+trusted profile, performs exact discovery/schema admission, and prints a
+redacted effective inventory. Neither command discovers profiles, selects one
+from environment or repository configuration, or enables live provider
+selection.
 
 ## Run opt-in live Codex validation
 

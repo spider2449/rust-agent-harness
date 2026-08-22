@@ -25,6 +25,8 @@ const MAX_FS_READ_BYTES: u64 = 16 * 1024 * 1024;
 pub struct TrustedStaticProfile {
     registry: ToolRegistry,
     effective: EffectiveProfile,
+    mcp_providers: Vec<McpProviderProfile>,
+    resources: Resources,
 }
 
 impl TrustedStaticProfile {
@@ -41,6 +43,7 @@ impl TrustedStaticProfile {
             return Err(ProfileError::UnsupportedVersion);
         }
         validate_resources(&profile.resources)?;
+        validate_mcp_providers(&profile.mcp_providers, &profile.resources)?;
 
         let mut names = BTreeSet::new();
         for capability in &profile.capabilities {
@@ -63,7 +66,19 @@ impl TrustedStaticProfile {
                 profile_id: profile.profile_id,
                 source_class: "trusted_static_file",
                 capabilities,
+                providers: profile
+                    .mcp_providers
+                    .iter()
+                    .map(|provider| EffectiveProvider {
+                        kind: "mcp",
+                        provider_id: provider.id.clone(),
+                        status: "configured",
+                        tool_count: provider.tools.len(),
+                    })
+                    .collect(),
             },
+            mcp_providers: profile.mcp_providers,
+            resources: profile.resources,
         })
     }
 
@@ -84,6 +99,17 @@ impl TrustedStaticProfile {
     pub fn into_parts(self) -> (ToolRegistry, EffectiveProfile) {
         (self.registry, self.effective)
     }
+
+    /// Returns closed, host-only MCP declarations for explicit effective composition.
+    #[must_use]
+    pub fn mcp_providers(&self) -> &[McpProviderProfile] {
+        &self.mcp_providers
+    }
+
+    /// Resolves a configured symbolic executable for an external provider.
+    pub fn executable_resource(&self, id: &str) -> Result<&Path, ProfileError> {
+        executable(&self.resources, Some(id))
+    }
 }
 
 /// Redacted host-side description of the successfully effective profile.
@@ -97,6 +123,17 @@ pub struct EffectiveProfile {
     pub source_class: &'static str,
     /// Effective states of all declared capabilities.
     pub capabilities: Vec<EffectiveCapability>,
+    /// Configured provider identities only; static validation never launches them.
+    pub providers: Vec<EffectiveProvider>,
+}
+
+/// Redacted provider state for trusted-host inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveProvider {
+    pub kind: &'static str,
+    pub provider_id: String,
+    pub status: &'static str,
+    pub tool_count: usize,
 }
 
 /// Redacted state for one declared capability.
@@ -155,6 +192,8 @@ pub enum ProfileError {
     ConstructionFailed,
     #[error("trusted profile contains a duplicate registered tool")]
     DuplicateRegistration,
+    #[error("trusted profile external provider could not be composed")]
+    ExternalProviderFailed,
 }
 
 #[derive(Deserialize)]
@@ -164,6 +203,55 @@ struct ProfileDocument {
     profile_id: String,
     resources: Resources,
     capabilities: Vec<Capability>,
+    #[serde(default)]
+    mcp_providers: Vec<McpProviderProfile>,
+}
+
+/// Closed host-only declaration for one local MCP provider.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpProviderProfile {
+    id: String,
+    executable: String,
+    tools: Vec<McpExpectedToolProfile>,
+}
+
+impl McpProviderProfile {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    #[must_use]
+    pub fn tools(&self) -> &[McpExpectedToolProfile] {
+        &self.tools
+    }
+}
+
+/// Exact host admission record for one remote MCP tool.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpExpectedToolProfile {
+    remote_name: String,
+    permission: String,
+    input_schema: Value,
+}
+
+impl McpExpectedToolProfile {
+    #[must_use]
+    pub fn remote_name(&self) -> &str {
+        &self.remote_name
+    }
+    #[must_use]
+    pub fn input_schema(&self) -> &Value {
+        &self.input_schema
+    }
+    pub fn permission(&self) -> Result<PermissionLevel, ProfileError> {
+        parse_external_permission(&self.permission).ok_or(ProfileError::InvalidPermission)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -302,6 +390,42 @@ fn validate_resources(resources: &Resources) -> Result<(), ProfileError> {
     Ok(())
 }
 
+fn validate_mcp_providers(
+    providers: &[McpProviderProfile],
+    resources: &Resources,
+) -> Result<(), ProfileError> {
+    let mut provider_ids = BTreeSet::new();
+    for provider in providers {
+        component_identifier(&provider.id).map_err(|_| ProfileError::InvalidProfile {
+            reason: "mcp_provider_id",
+        })?;
+        if !provider_ids.insert(&provider.id) {
+            return Err(ProfileError::InvalidProfile {
+                reason: "duplicate_mcp_provider",
+            });
+        }
+        executable(resources, Some(&provider.executable))?;
+        let mut names = BTreeSet::new();
+        for tool in &provider.tools {
+            component_identifier(&tool.remote_name).map_err(|_| ProfileError::InvalidProfile {
+                reason: "mcp_remote_name",
+            })?;
+            if !names.insert(&tool.remote_name) {
+                return Err(ProfileError::InvalidProfile {
+                    reason: "duplicate_mcp_tool",
+                });
+            }
+            tool.permission()?;
+            if !tool.input_schema.is_object() {
+                return Err(ProfileError::InvalidProfile {
+                    reason: "mcp_input_schema",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn capability_contract(
     capability: &Capability,
 ) -> Result<(PermissionLevel, Vec<String>), ProfileError> {
@@ -346,6 +470,28 @@ fn parse_permission(value: &str) -> Option<PermissionLevel> {
         "execute" => Some(PermissionLevel::Execute),
         _ => None,
     }
+}
+
+fn parse_external_permission(value: &str) -> Option<PermissionLevel> {
+    match value {
+        "None" | "none" => Some(PermissionLevel::None),
+        "Read" | "read" => Some(PermissionLevel::Read),
+        "Write" | "write" => Some(PermissionLevel::Write),
+        "Execute" | "execute" => Some(PermissionLevel::Execute),
+        _ => None,
+    }
+}
+
+fn component_identifier(value: &str) -> Result<(), ()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn executable<'a>(resources: &'a Resources, id: Option<&str>) -> Result<&'a Path, ProfileError> {
@@ -551,6 +697,32 @@ mod tests {
         assert_eq!(effective.source_class, "trusted_static_file");
         assert_eq!(effective.capabilities[0].resources, vec!["workspace"]);
         assert!(!format!("{effective:?}").contains(&directory.0.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn mcp_profile_schema_requires_symbolic_resources_unique_names_and_permissions() {
+        let directory = TestDirectory::new();
+        let executable = directory
+            .0
+            .join("server.exe")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        for contents in [
+            format!(
+                r#"{{"profile_version":1,"profile_id":"test","resources":{{"executables":{{"server":{{"path":"{executable}","kind":"native"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"same","executable":"missing","tools":[]}}]}}"#
+            ),
+            format!(
+                r#"{{"profile_version":1,"profile_id":"test","resources":{{"executables":{{"server":{{"path":"{executable}","kind":"native"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"same","executable":"server","tools":[{{"remote_name":"echo","permission":"None","input_schema":{{}}}},{{"remote_name":"echo","permission":"None","input_schema":{{}}}}]}}]}}"#
+            ),
+            format!(
+                r#"{{"profile_version":1,"profile_id":"test","resources":{{"executables":{{"server":{{"path":"{executable}","kind":"native"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"same","executable":"server","tools":[{{"remote_name":"echo","input_schema":{{}}}}]}}]}}"#
+            ),
+            format!(
+                r#"{{"profile_version":1,"profile_id":"test","resources":{{"executables":{{"server":{{"path":"{executable}","kind":"native"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"same","executable":"server","tools":[],"cwd":"forbidden"}}]}}"#
+            ),
+        ] {
+            assert!(TrustedStaticProfile::load(directory.profile(&contents)).is_err());
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use rah_tools::{
     ExternalToolIdentity, ExternalToolPermissionError, ExternalToolPermissionPolicy, Tool,
-    ToolContext, ToolError,
+    ToolContext, ToolError, ToolRegistry, TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use std::{
@@ -160,6 +160,110 @@ pub struct McpAdapter {
     tools: Vec<Arc<dyn Tool>>,
     actor: Mutex<Option<JoinHandle<()>>>,
     diagnostics: Arc<Mutex<Diagnostics>>,
+}
+
+/// Fully composed trusted profile. Adapter ownership keeps MCP proxy tools live.
+pub struct EffectiveMcpProfile {
+    registry: ToolRegistry,
+    effective: rah_tools::EffectiveProfile,
+    adapters: Vec<McpAdapter>,
+}
+
+impl EffectiveMcpProfile {
+    #[must_use]
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+    #[must_use]
+    pub fn effective_profile(&self) -> &rah_tools::EffectiveProfile {
+        &self.effective
+    }
+    #[must_use]
+    pub fn provider_count(&self) -> usize {
+        self.adapters.len()
+    }
+}
+
+/// Explicitly launches and admits every MCP provider from a static profile.
+/// No registry is returned unless every configured provider validates.
+pub async fn compose_trusted_profile(
+    profile: TrustedStaticProfile,
+) -> Result<EffectiveMcpProfile, rah_tools::ProfileError> {
+    let mut registry = ToolRegistry::new();
+    for definition in profile.registry().definitions() {
+        let tool = profile
+            .registry()
+            .get(&definition.name)
+            .ok_or(rah_tools::ProfileError::ConstructionFailed)?;
+        registry
+            .register(tool)
+            .map_err(|_| rah_tools::ProfileError::DuplicateRegistration)?;
+    }
+    let mut adapters = Vec::new();
+    for provider in profile.mcp_providers() {
+        let executable = profile
+            .executable_resource(provider.executable())
+            .map_err(|_| rah_tools::ProfileError::ExternalProviderFailed)?;
+        let mut config = McpServerConfig::stdio(provider.id(), executable)
+            .map_err(|_| rah_tools::ProfileError::ExternalProviderFailed)?;
+        for tool in provider.tools() {
+            config = config
+                .with_expected_tool(
+                    tool.remote_name(),
+                    tool.input_schema().clone(),
+                    tool.permission()
+                        .map_err(|_| rah_tools::ProfileError::ExternalProviderFailed)?,
+                )
+                .map_err(|_| rah_tools::ProfileError::ExternalProviderFailed)?;
+        }
+        let adapter = match McpAdapter::connect(config).await {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                shutdown_staged(adapters).await;
+                return Err(rah_tools::ProfileError::ExternalProviderFailed);
+            }
+        };
+        for tool in adapter.tools() {
+            if registry.register(tool).is_err() {
+                let _ = adapter.shutdown().await;
+                shutdown_staged(adapters).await;
+                return Err(rah_tools::ProfileError::DuplicateRegistration);
+            }
+        }
+        adapters.push(adapter);
+    }
+    let mut effective = profile.effective_profile().clone();
+    for provider in &mut effective.providers {
+        provider.status = "validated";
+    }
+    for definition in registry.definitions() {
+        if let Some(provider_id) = definition
+            .name
+            .as_str()
+            .strip_prefix("mcp.")
+            .and_then(|value| value.split('.').next())
+        {
+            effective.capabilities.push(rah_tools::EffectiveCapability {
+                capability_id: definition.name.to_string(),
+                enabled: true,
+                registered: true,
+                permission: definition.permission,
+                resources: vec![provider_id.to_owned()],
+                validation: "validated",
+            });
+        }
+    }
+    Ok(EffectiveMcpProfile {
+        registry,
+        effective,
+        adapters,
+    })
+}
+
+async fn shutdown_staged(adapters: Vec<McpAdapter>) {
+    for adapter in adapters {
+        let _ = adapter.shutdown().await;
+    }
 }
 impl McpAdapter {
     pub async fn connect(cfg: McpServerConfig) -> Result<Self, McpAdapterError> {

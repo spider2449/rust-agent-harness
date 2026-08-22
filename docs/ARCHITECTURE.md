@@ -125,6 +125,12 @@ capabilities remain disabled even in bridge mode.
 request correlation, timeout, cancellation, result conversion, child ownership,
 and immutable `mcp.<server>.<tool>` proxies.
 
+Trusted static profile composition is host-only. Its static pass parses closed
+symbolic MCP declarations without launching a provider; explicit effective
+composition delegates construction and exact admission to `rah-tools-mcp`, then
+publishes a fresh `ToolRegistry` only when every provider has validated. The
+effective profile retains adapter ownership for as long as its tools are usable.
+
 `rah-tools-plugin` owns RAH process-plugin protocol version `1`, identity and
 version validation, bounded NDJSON stdio, resource limits, process lifecycle,
 and immutable `plugin.<plugin>.<tool>` proxies. It is a focused adapter, not a

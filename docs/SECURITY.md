@@ -75,6 +75,18 @@ runtime or Generic Codex Tool Bridge still checks that requirement against the
 host's allowed permission levels before `ToolRegistry` dispatch. Permission
 ownership therefore remains with the host at both composition and execution.
 
+Trusted profiles may additionally declare closed `mcp_providers` entries. Each
+entry refers to an existing symbolic executable resource and contains a unique
+provider ID plus an exact set of remote names, object schemas, and explicit RAH
+permissions. Raw paths, argv, cwd, environments, inherited environment, and
+resource-limit overrides are not profile fields. Static validation does not
+launch a child; the separate explicit `profile validate-effective` operation
+does. It composes into a fresh registry and returns no registry or inventory if
+any provider fails. The effective profile owns the live MCP adapters, so proxy
+tools cannot outlive their provider connection. Inventory shows only symbolic
+provider/tool identities and never executable paths, cwd, environment, stderr,
+or child diagnostics.
+
 ## Built-in filesystem and subprocess tools
 
 `FsReadTool` canonicalizes paths through `WorkspacePolicy`, rejects traversal and

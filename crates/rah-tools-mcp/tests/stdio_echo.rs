@@ -11,8 +11,10 @@ use std::{
 use rah_protocol::{
     PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName, ToolOutput,
 };
-use rah_tools::{Tool, ToolContext, ToolError, ToolRegistry};
-use rah_tools_mcp::{MCP_PROTOCOL_VERSION, McpAdapter, McpLimits, McpServerConfig};
+use rah_tools::{Tool, ToolContext, ToolError, ToolRegistry, TrustedStaticProfile};
+use rah_tools_mcp::{
+    MCP_PROTOCOL_VERSION, McpAdapter, McpLimits, McpServerConfig, compose_trusted_profile,
+};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
@@ -73,6 +75,65 @@ fn call(name: &str, text: &str) -> ToolCall {
 async fn execute(tool: &Arc<dyn Tool>, text: &str) -> Result<ToolOutput, ToolError> {
     tool.execute(ToolInput(json!({"text": text})), ToolContext::default())
         .await
+}
+
+#[tokio::test]
+async fn trusted_profile_composes_exact_mcp_tool_and_redacts_executable() {
+    let directory = fixture_path("profile");
+    fs::create_dir(&directory).expect("profile directory should be created");
+    let profile_path = directory.join("profile.json");
+    let profile = json!({
+        "profile_version": 1,
+        "profile_id": "mcp-profile",
+        "resources": {"executables": {"echo-server": {
+            "path": server_program(), "kind": "native"
+        }}},
+        "capabilities": [],
+        "mcp_providers": [{
+            "id": "local-echo", "executable": "echo-server",
+            "tools": [{
+                "remote_name": "echo", "permission": "None",
+                "input_schema": {
+                    "type": "object", "properties": {"text": {"type": "string"}},
+                    "required": ["text"], "additionalProperties": false
+                }
+            }]
+        }]
+    });
+    fs::write(
+        &profile_path,
+        serde_json::to_vec(&profile).expect("JSON should serialize"),
+    )
+    .expect("profile should be written");
+
+    let effective = compose_trusted_profile(
+        TrustedStaticProfile::load(&profile_path).expect("static profile should validate"),
+    )
+    .await
+    .expect("effective MCP profile should validate");
+    assert_eq!(effective.provider_count(), 1);
+    assert!(
+        effective
+            .registry()
+            .get(&ToolName::new("mcp.local-echo.echo"))
+            .is_some()
+    );
+    let output = effective
+        .registry()
+        .execute(
+            call("mcp.local-echo.echo", "profile-ok"),
+            ToolContext::default(),
+        )
+        .await
+        .expect("profile MCP tool should execute");
+    assert_eq!(
+        output.content,
+        vec![ToolContent::Text("profile-ok".to_owned())]
+    );
+    let inventory = format!("{:?}", effective.effective_profile());
+    assert!(inventory.contains("local-echo"));
+    assert!(!inventory.contains(&*server_program().to_string_lossy()));
+    fs::remove_dir_all(directory).expect("profile directory should be removed");
 }
 
 #[tokio::test]

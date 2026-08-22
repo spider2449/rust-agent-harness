@@ -246,3 +246,25 @@ fn profile_validate_rejects_missing_profile_without_leaking_path() {
     assert!(!stderr.contains(&missing.to_string_lossy().to_string()));
     assert!(!stderr.contains("CLI_PROFILE_MISSING_SECRET"));
 }
+
+#[test]
+fn profile_validate_effective_fails_without_partial_inventory_or_path_leakage() {
+    let directory = TestDirectory::new();
+    let missing_executable = directory.0.join("CLI_MCP_SECRET.exe");
+    let profile = directory.profile(&format!(
+        r#"{{"profile_version":1,"profile_id":"mcp-cli","resources":{{"executables":{{"mcp":{{"path":"{}","kind":"native"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"local","executable":"mcp","tools":[{{"remote_name":"echo","permission":"None","input_schema":{{"type":"object"}}}}]}}]}}"#,
+        missing_executable.to_string_lossy().replace('\\', "\\\\")
+    ));
+    let output = rah()
+        .args(["profile", "validate-effective"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("trusted profile external provider could not be composed"));
+    assert!(!stderr.contains(&profile.to_string_lossy().to_string()));
+    assert!(!stderr.contains(&missing_executable.to_string_lossy().to_string()));
+}
