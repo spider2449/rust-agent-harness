@@ -2,8 +2,8 @@
 
 ## v0.4.0 — 2026-08-22
 
-Release preparation only. This entry does not claim that a Git tag or published
-release already exists.
+Released 2026-08-22. Tag `v0.4.0` targets release commit `ebd6358`; CI passed
+and the GitHub Release was published.
 
 ### Added
 
@@ -52,8 +52,7 @@ release already exists.
 
 ## v0.3.0 — 2026-08-22
 
-Current release being prepared. This entry does not claim that a Git tag or
-published release already exists.
+Git tag `v0.3.0` was created at release commit `1968326`.
 
 ### Verified
 

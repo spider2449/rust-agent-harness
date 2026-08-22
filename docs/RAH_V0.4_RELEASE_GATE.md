@@ -1,12 +1,13 @@
 # RAH v0.4 release-gate audit
 
-Status: **READY FOR RELEASE PREPARATION COMMIT**
+Status: **v0.4.0 RELEASED**
 
 Date: 2026-08-22
 
-This report records the v0.4 local release boundary and required verification.
-It does not create a tag, publish a release, push, or claim CI validation of the
-release-preparation commit.
+This report records the local v0.4 release gate that preceded publication. It
+does not itself create a tag, publish a release, push, or perform CI validation.
+RAH v0.4.0 was subsequently tagged at `ebd6358`, CI passed, and the GitHub
+Release was published.
 
 ## 1. Release boundary
 
@@ -132,7 +133,7 @@ types cross RAH public boundaries.
 
 ## 7. Deterministic release gate
 
-The release-preparation commit must pass the following local commands before
+The release-preparation commit passed the following local commands before
 tagging. The normal suite is deterministic and requires no model, credentials,
 network, paid API, or GPU.
 
@@ -205,14 +206,16 @@ Windows-verified baseline, not a claim of cross-platform live verification.
 
 ## 11. Release decision and checklist
 
-- [ ] Workspace version and lockfile resolve to `0.4.0`.
-- [ ] Release-preparation-only diff reviewed; no credentials, temporary
+- [x] Workspace version and lockfile resolve to `0.4.0`.
+- [x] Release-preparation diff reviewed; no credentials, temporary
   profiles, target artifacts, or unrelated dependency upgrades.
-- [ ] Deterministic release commands pass before commit.
-- [ ] One release-preparation commit is clean and the commands pass again.
-- [ ] CI is green, then a `v0.4.0` tag and published release are separately
-  authorized actions.
+- [x] Deterministic release commands passed before commit.
+- [x] Clean release-preparation commit passed post-commit gates.
+- [x] CI is green.
+- [x] `v0.4.0` tag created at `ebd6358`.
+- [x] GitHub Release published.
 
 With the carried-forward Task 043 live evidence and passing deterministic
-release commands, RAH v0.4.0 is ready for release preparation only. Tagging,
-publishing, and pushing remain outstanding.
+release commands, RAH v0.4.0 was released from commit `ebd6358`. The release
+tag is `v0.4.0`; the Codex baseline is `codex-cli 0.149.0`; and the release is
+a Windows-verified baseline, not a claim of cross-platform live verification.
