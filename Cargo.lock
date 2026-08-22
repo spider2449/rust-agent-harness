@@ -562,6 +562,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "uuid",
  "windows-sys",
 ]
 

@@ -1,8 +1,9 @@
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
@@ -25,7 +27,6 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const BOM: &[u8] = b"\xef\xbb\xbf";
-static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Host-constructed, bounded worktree text replacement capability.
 ///
@@ -142,52 +143,96 @@ impl RepositoryWorktreeMutationPolicy {
             Ok(pre) => pre,
             Err(reason) => return MutationOutcome::Refused { reason },
         };
-        #[cfg(test)]
-        self.test_hook.run_before_revalidation(&pre.target.path);
 
         let postimage = match build_postimage(&pre, &request, self.limits) {
             Ok(postimage) => postimage,
             Err(reason) => return MutationOutcome::Refused { reason },
         };
+        #[cfg(test)]
+        self.test_hook.run(
+            TestPhase::AfterExpectedTextValidation,
+            &pre.target.path,
+            None,
+        );
         let temporary = match self.write_temporary(&pre.target, &postimage.bytes) {
             Ok(temporary) => temporary,
             Err(reason) => return MutationOutcome::Refused { reason },
         };
+        #[cfg(test)]
+        self.test_hook.run(
+            TestPhase::AfterTemporaryWrite,
+            &pre.target.path,
+            Some(&temporary.path),
+        );
 
-        if let Err(reason) = self.revalidate_before_commit(&pre).await {
-            return self.refuse_after_temp(reason, temporary);
+        if let Err(reason) = self
+            .revalidate_before_commit(&pre, &temporary, &postimage)
+            .await
+        {
+            return self.refuse_after_temp(reason, temporary, &postimage);
         }
         #[cfg(test)]
-        self.test_hook.before_replace(&temporary);
+        self.test_hook.run(
+            TestPhase::BeforeReplacement,
+            &pre.target.path,
+            Some(&temporary.path),
+        );
         #[cfg(test)]
         self.test_hook
             .replacement_attempts
             .fetch_add(1, Ordering::Relaxed);
 
-        match replace_once(&temporary, &pre.target.path) {
-            Ok(()) => match self.verify_postimage(&pre, &postimage).await {
-                Ok(()) => MutationOutcome::Success {
-                    evidence: MutationEvidence::from_images(
-                        &pre,
-                        &postimage,
-                        MutationResultClass::Success,
-                    ),
-                },
-                Err(reason) => MutationOutcome::Uncertain {
-                    evidence: MutationEvidence::from_images(
-                        &pre,
-                        &postimage,
-                        MutationResultClass::Uncertain,
-                    ),
-                    reason,
-                },
-            },
-            Err(error) => self.classify_replacement_failure(&pre, &postimage, &temporary, error),
+        #[cfg(test)]
+        let replacement = self
+            .test_hook
+            .replace_once(&temporary.path, &pre.target.path);
+        #[cfg(not(test))]
+        let replacement = replace_once(&temporary.path, &pre.target.path);
+        match replacement {
+            Ok(()) => {
+                #[cfg(test)]
+                self.test_hook.run(
+                    TestPhase::AfterReplacement,
+                    &pre.target.path,
+                    Some(&temporary.path),
+                );
+                match self.verify_postimage(&pre, &postimage, &temporary).await {
+                    Ok(()) => MutationOutcome::Success {
+                        evidence: MutationEvidence::from_images(
+                            &pre,
+                            &postimage,
+                            MutationResultClass::Success,
+                        ),
+                    },
+                    Err(reason) => MutationOutcome::Uncertain {
+                        evidence: MutationEvidence::from_images(
+                            &pre,
+                            &postimage,
+                            MutationResultClass::Uncertain,
+                        ),
+                        reason,
+                    },
+                }
+            }
+            Err(error) => {
+                #[cfg(test)]
+                self.test_hook.run(
+                    TestPhase::AfterReplacement,
+                    &pre.target.path,
+                    Some(&temporary.path),
+                );
+                self.classify_replacement_failure(&pre, &postimage, &temporary, error)
+            }
         }
     }
 
-    fn refuse_after_temp(&self, reason: RefusalReason, temporary: PathBuf) -> MutationOutcome {
-        match remove_temporary(&temporary) {
+    fn refuse_after_temp(
+        &self,
+        reason: RefusalReason,
+        temporary: Temporary,
+        postimage: &Postimage,
+    ) -> MutationOutcome {
+        match remove_temporary(&temporary, &postimage.bytes, self.limits) {
             Ok(()) => MutationOutcome::Refused { reason },
             Err(cleanup) => MutationOutcome::Uncertain {
                 evidence: MutationEvidence::empty(MutationResultClass::Uncertain),
@@ -200,18 +245,43 @@ impl RepositoryWorktreeMutationPolicy {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
         let target = Target::capture(&self.root, &request.path).map_err(RefusalReason::Path)?;
+        #[cfg(test)]
+        self.test_hook
+            .run(TestPhase::AfterInitialPathValidation, &target.path, None);
         let git = self
             .git_state(&target)
             .await
             .map_err(RefusalReason::Repository)?;
+        #[cfg(test)]
+        self.test_hook
+            .run(TestPhase::AfterGitValidation, &target.path, None);
         let bytes = read_bounded(&target.path, self.limits.max_file_bytes)
             .map_err(|_| RefusalReason::Precondition("could not read bounded target preimage"))?;
         validate_preconditions(&bytes, request, self.limits)
             .map_err(RefusalReason::Precondition)?;
+        #[cfg(test)]
+        self.test_hook
+            .run(TestPhase::AfterPreimageValidation, &target.path, None);
         Ok(Preimage { target, git, bytes })
     }
 
-    async fn revalidate_before_commit(&self, pre: &Preimage) -> Result<(), RefusalReason> {
+    async fn revalidate_before_commit(
+        &self,
+        pre: &Preimage,
+        temporary: &Temporary,
+        postimage: &Postimage,
+    ) -> Result<(), RefusalReason> {
+        self.revalidate_repository()
+            .map_err(RefusalReason::Repository)?;
+        pre.target
+            .revalidate(&self.root)
+            .map_err(RefusalReason::Path)?;
+        #[cfg(test)]
+        self.test_hook.run(
+            TestPhase::AfterFinalTargetIdentityRevalidation,
+            &pre.target.path,
+            Some(&temporary.path),
+        );
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
         pre.target
@@ -233,6 +303,9 @@ impl RepositoryWorktreeMutationPolicy {
                 "target preimage changed before replacement",
             ));
         }
+        temporary
+            .revalidate(&postimage.bytes, self.limits)
+            .map_err(RefusalReason::Temporary)?;
         Ok(())
     }
 
@@ -240,10 +313,12 @@ impl RepositoryWorktreeMutationPolicy {
         &self,
         pre: &Preimage,
         postimage: &Postimage,
+        temporary: &Temporary,
     ) -> Result<(), RefusalReason> {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
-        Target::verify_replaced(&self.root, &pre.target).map_err(RefusalReason::Path)?;
+        Target::verify_replaced(&self.root, &pre.target, &temporary.identity)
+            .map_err(RefusalReason::Path)?;
         let git = self
             .git_state(&pre.target)
             .await
@@ -268,7 +343,7 @@ impl RepositoryWorktreeMutationPolicy {
         &self,
         pre: &Preimage,
         postimage: &Postimage,
-        temporary: &Path,
+        temporary: &Temporary,
         _error: std::io::Error,
     ) -> MutationOutcome {
         let target_intact = self
@@ -278,8 +353,13 @@ impl RepositoryWorktreeMutationPolicy {
                 read_bounded(&pre.target.path, self.limits.max_file_bytes).map_err(fs_error)
             })
             .is_ok_and(|current| current == pre.bytes);
-        let cleanup = remove_temporary(temporary);
-        if target_intact && cleanup.is_ok() {
+        let temporary_intact = temporary.revalidate(&postimage.bytes, self.limits).is_ok();
+        let cleanup = if temporary_intact {
+            remove_temporary(temporary, &postimage.bytes, self.limits)
+        } else {
+            Err("temporary replacement file could not be proven intact".to_owned())
+        };
+        if target_intact && temporary_intact && cleanup.is_ok() {
             MutationOutcome::KnownReplacementFailure {
                 evidence: MutationEvidence::from_images(
                     pre,
@@ -301,7 +381,7 @@ impl RepositoryWorktreeMutationPolicy {
         }
     }
 
-    fn write_temporary(&self, target: &Target, bytes: &[u8]) -> Result<PathBuf, RefusalReason> {
+    fn write_temporary(&self, target: &Target, bytes: &[u8]) -> Result<Temporary, RefusalReason> {
         for _ in 0..32 {
             let path = temporary_path(&target.parent);
             let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -309,18 +389,26 @@ impl RepositoryWorktreeMutationPolicy {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(RefusalReason::Temporary(error.to_string())),
             };
+            let temporary = match Temporary::capture_identity(&path) {
+                Ok(temporary) => temporary,
+                Err(reason) => {
+                    drop(file);
+                    return Err(RefusalReason::TemporaryCleanup(reason));
+                }
+            };
             if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-                return match remove_temporary(&path) {
+                drop(file);
+                return match remove_temporary_identity(&temporary) {
                     Ok(()) => Err(RefusalReason::Temporary(error.to_string())),
                     Err(cleanup) => Err(RefusalReason::TemporaryCleanup(cleanup)),
                 };
             }
             drop(file);
-            match validate_temporary(&path, bytes, self.limits) {
-                Ok(()) => return Ok(path),
+            match temporary.revalidate(bytes, self.limits) {
+                Ok(()) => return Ok(temporary),
                 Err(reason) => {
-                    return match remove_temporary(&path) {
-                        Ok(()) => Err(reason),
+                    return match remove_temporary_identity(&temporary) {
+                        Ok(()) => Err(RefusalReason::Temporary(reason)),
                         Err(cleanup) => Err(RefusalReason::TemporaryCleanup(cleanup)),
                     };
                 }
@@ -589,7 +677,11 @@ impl Target {
         Ok(())
     }
 
-    fn verify_replaced(root: &Path, previous: &Self) -> Result<(), ToolError> {
+    fn verify_replaced(
+        root: &Path,
+        previous: &Self,
+        expected_identity: &FileIdentity,
+    ) -> Result<(), ToolError> {
         let current = validate_existing_target(root, Path::new(&previous.git_path))?;
         let parent = current
             .parent()
@@ -597,9 +689,51 @@ impl Target {
         let identity = FileIdentity::capture(&current)?;
         if !paths_equivalent(&current, &previous.path)
             || FileIdentity::capture(parent)? != previous.parent_identity
+            || identity != *expected_identity
             || identity.link_count > 1
         {
             return Err(policy_error("target path safety changed after replacement"));
+        }
+        Ok(())
+    }
+}
+
+/// Host-named postimage staging file and the identity captured after its bytes
+/// were flushed. Its identity must become the target identity on success.
+struct Temporary {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+impl Temporary {
+    fn capture_identity(path: &Path) -> Result<Self, String> {
+        reject_link_or_reparse(path, "temporary replacement file")
+            .map_err(|error| error.to_string())?;
+        let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("temporary replacement file must be a regular file".to_owned());
+        }
+        reject_unsupported_file_attributes(&metadata).map_err(|error| error.to_string())?;
+        let identity = FileIdentity::capture(path).map_err(|error| error.to_string())?;
+        if identity.link_count > 1 {
+            return Err("temporary replacement file has unsupported hard links".to_owned());
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            identity,
+        })
+    }
+
+    fn revalidate(&self, expected: &[u8], limits: PatchLimits) -> Result<(), String> {
+        self.revalidate_identity()?;
+        validate_temporary(&self.path, expected, limits).map_err(|reason| reason.to_string())?;
+        Ok(())
+    }
+
+    fn revalidate_identity(&self) -> Result<(), String> {
+        let identity = FileIdentity::capture(&self.path).map_err(|error| error.to_string())?;
+        if identity != self.identity || identity.link_count > 1 {
+            return Err("temporary replacement file identity changed".to_owned());
         }
         Ok(())
     }
@@ -898,8 +1032,7 @@ fn validate_directory_path(root: &Path, directory: &Path, label: &str) -> Result
 }
 
 fn temporary_path(parent: &Path) -> PathBuf {
-    let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(".rah-repo-patch-{}-{id}.tmp", std::process::id()))
+    parent.join(format!(".rah-repo-patch-{}.tmp", Uuid::new_v4()))
 }
 
 fn validate_temporary(
@@ -908,6 +1041,15 @@ fn validate_temporary(
     limits: PatchLimits,
 ) -> Result<(), RefusalReason> {
     reject_link_or_reparse(path, "temporary replacement file")
+        .map_err(|error| RefusalReason::Temporary(error.to_string()))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| RefusalReason::Temporary(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(RefusalReason::Temporary(
+            "temporary replacement file must be a regular file".to_owned(),
+        ));
+    }
+    reject_unsupported_file_attributes(&metadata)
         .map_err(|error| RefusalReason::Temporary(error.to_string()))?;
     let bytes = read_bounded(path, limits.max_file_bytes)
         .map_err(|error| RefusalReason::Temporary(error.to_string()))?;
@@ -919,10 +1061,22 @@ fn validate_temporary(
     Ok(())
 }
 
-fn remove_temporary(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
+fn remove_temporary(
+    temporary: &Temporary,
+    expected: &[u8],
+    limits: PatchLimits,
+) -> Result<(), String> {
+    temporary.revalidate(expected, limits)?;
+    remove_temporary_identity(temporary)
+}
+
+fn remove_temporary_identity(temporary: &Temporary) -> Result<(), String> {
+    temporary.revalidate_identity()?;
+    match fs::remove_file(&temporary.path) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("temporary replacement file disappeared during cleanup".to_owned())
+        }
         Err(error) => Err(error.to_string()),
     }
 }
@@ -1303,36 +1457,75 @@ fn policy_error(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 #[derive(Default)]
 struct TestHook {
-    before_revalidation: std::sync::Mutex<Option<Vec<u8>>>,
-    delete_temporary_before_replace: std::sync::atomic::AtomicBool,
+    actions: std::sync::Mutex<Vec<TestAction>>,
+    force_replacement_failure: std::sync::atomic::AtomicBool,
     replacement_attempts: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestPhase {
+    AfterInitialPathValidation,
+    AfterGitValidation,
+    AfterPreimageValidation,
+    AfterExpectedTextValidation,
+    AfterTemporaryWrite,
+    AfterFinalTargetIdentityRevalidation,
+    BeforeReplacement,
+    AfterReplacement,
+}
+
+#[cfg(test)]
+type TestActionFunction = dyn Fn(&Path, Option<&Path>) + Send;
+
+#[cfg(test)]
+struct TestAction {
+    phase: TestPhase,
+    action: Box<TestActionFunction>,
+}
+
+#[cfg(test)]
 impl TestHook {
-    fn run_before_revalidation(&self, path: &Path) {
-        if let Some(bytes) = self
-            .before_revalidation
+    fn install<F>(&self, phase: TestPhase, action: F)
+    where
+        F: Fn(&Path, Option<&Path>) + Send + 'static,
+    {
+        self.actions
             .lock()
             .expect("test hook mutex poisoned")
-            .take()
-        {
-            fs::write(path, bytes).expect("test hook should mutate target");
+            .push(TestAction {
+                phase,
+                action: Box::new(action),
+            });
+    }
+
+    fn run(&self, phase: TestPhase, target: &Path, temporary: Option<&Path>) {
+        let mut actions = self.actions.lock().expect("test hook mutex poisoned");
+        let action = actions
+            .iter()
+            .position(|action| action.phase == phase)
+            .map(|index| actions.remove(index));
+        drop(actions);
+        if let Some(action) = action {
+            (action.action)(target, temporary);
         }
     }
 
-    fn before_replace(&self, temporary: &Path) {
+    fn replace_once(&self, temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
         if self
-            .delete_temporary_before_replace
+            .force_replacement_failure
             .swap(false, Ordering::Relaxed)
         {
-            fs::remove_file(temporary).expect("test hook should remove temporary replacement");
+            return Err(std::io::Error::other("injected replacement failure"));
         }
+        replace_once(temporary, target)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::sync::{Arc, Mutex};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1345,7 +1538,7 @@ mod tests {
 
     use super::{
         MAX_FILE_BYTES, PatchLimits, PatchRequest, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
-        RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, sha256_hex,
+        RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, TestPhase, sha256_hex,
     };
     use crate::{Tool, ToolContext};
 
@@ -1540,7 +1733,11 @@ mod tests {
         let policy =
             RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
                 .unwrap();
-        *policy.test_hook.before_revalidation.lock().unwrap() = Some(b"external\n".to_vec());
+        policy
+            .test_hook
+            .install(TestPhase::AfterPreimageValidation, |target, _| {
+                fs::write(target, b"external\n").unwrap();
+            });
         let request = PatchRequest::parse(
             &ToolInput(request("target.txt", b"alpha\nold\nomega\n", "old", "new")),
             PatchLimits::default(),
@@ -1569,7 +1766,7 @@ mod tests {
                 .unwrap();
         policy
             .test_hook
-            .delete_temporary_before_replace
+            .force_replacement_failure
             .store(true, AtomicOrdering::Relaxed);
         let request = PatchRequest::parse(
             &ToolInput(request("target.txt", b"alpha\nold\nomega\n", "old", "new")),
@@ -1598,6 +1795,359 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".rah-repo-patch-")
         }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn races_after_each_precommit_validation_phase_refuse_without_replacement() {
+        for phase in [
+            TestPhase::AfterInitialPathValidation,
+            TestPhase::AfterGitValidation,
+            TestPhase::AfterPreimageValidation,
+            TestPhase::AfterExpectedTextValidation,
+            TestPhase::AfterTemporaryWrite,
+            TestPhase::AfterFinalTargetIdentityRevalidation,
+        ] {
+            let base = TestDirectory::new("phase-race");
+            let root = base.repository();
+            let policy = RepositoryWorktreeMutationPolicy::new(
+                &git_executable(),
+                &root,
+                PatchLimits::default(),
+            )
+            .unwrap();
+            policy.test_hook.install(phase, |target, _| {
+                let displaced = target.with_extension("external");
+                fs::rename(target, &displaced).unwrap();
+                fs::write(target, b"alpha\nold\nomega\n").unwrap();
+            });
+            let request = parse_request();
+
+            let output = policy.execute_once(request).await.into_tool_output();
+
+            assert_eq!(
+                content(&output)["status"],
+                "precondition_failed",
+                "{phase:?}"
+            );
+            assert_eq!(
+                policy
+                    .test_hook
+                    .replacement_attempts
+                    .load(AtomicOrdering::Relaxed),
+                0,
+                "{phase:?} must not attempt replacement"
+            );
+            assert_eq!(
+                fs::read(root.join("target.txt")).unwrap(),
+                b"alpha\nold\nomega\n"
+            );
+            assert_no_patch_temporary(&root);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn index_and_head_races_after_git_observation_refuse_without_replacement() {
+        let base = TestDirectory::new("index-race");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        let git_root = root.clone();
+        policy
+            .test_hook
+            .install(TestPhase::AfterGitValidation, move |target, _| {
+                fs::write(target, b"alpha\nstaged\nomega\n").unwrap();
+                git(&git_root, &["add", "--", "target.txt"]);
+                fs::write(target, b"alpha\nold\nomega\n").unwrap();
+            });
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(content(&output)["reason"], "repository_state");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+
+        let base = TestDirectory::new("conflict-race");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        let git_root = root.clone();
+        policy
+            .test_hook
+            .install(TestPhase::AfterGitValidation, move |_, _| {
+                let object =
+                    String::from_utf8(git_output(&git_root, &["rev-parse", "HEAD:target.txt"]))
+                        .unwrap()
+                        .trim()
+                        .to_owned();
+                git_with_input(
+                    &git_root,
+                    &["update-index", "--index-info"],
+                    format!("100644 {object} 1\ttarget.txt\n").as_bytes(),
+                );
+            });
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(content(&output)["reason"], "repository_state");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+
+        let base = TestDirectory::new("head-race");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        let git_root = root.clone();
+        policy
+            .test_hook
+            .install(TestPhase::AfterGitValidation, move |_, _| {
+                fs::write(git_root.join("other.txt"), b"new head\n").unwrap();
+                git(&git_root, &["add", "--", "other.txt"]);
+                git(
+                    &git_root,
+                    &["commit", "--quiet", "-m", "external head change"],
+                );
+            });
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(content(&output)["reason"], "repository_state");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleted_target_after_text_validation_refuses_without_replacement() {
+        let base = TestDirectory::new("deleted-target");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .install(TestPhase::AfterExpectedTextValidation, |target, _| {
+                fs::remove_file(target).unwrap();
+            });
+
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert!(!root.join("target.txt").exists());
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn temporary_tampering_before_commit_is_uncertain_and_preserves_evidence() {
+        let base = TestDirectory::new("temporary-tamper");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .install(TestPhase::AfterTemporaryWrite, |_, temporary| {
+                fs::write(temporary.unwrap(), b"tampered\n").unwrap();
+            });
+
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nold\nomega\n"
+        );
+        assert!(has_patch_temporary(&root));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_temporary_after_a_replacement_error_is_uncertain_without_replay() {
+        let base = TestDirectory::new("missing-temporary");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .force_replacement_failure
+            .store(true, AtomicOrdering::Relaxed);
+        policy
+            .test_hook
+            .install(TestPhase::AfterReplacement, |_, temporary| {
+                fs::remove_file(temporary.unwrap()).unwrap();
+            });
+
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nold\nomega\n"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_replacement_identity_change_with_same_content_is_uncertain() {
+        let base = TestDirectory::new("post-identity");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .install(TestPhase::AfterReplacement, |target, _| {
+                let displaced = target.with_extension("replaced");
+                fs::rename(target, displaced).unwrap();
+                fs::write(target, b"alpha\nnew\nomega\n").unwrap();
+            });
+
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nnew\nomega\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_delete_sharing_locks_have_conservative_replacement_outcomes() {
+        let base = TestDirectory::new("windows-lock-release");
+        let root = base.repository();
+        let held = Arc::new(Mutex::new(Some(open_without_delete_share(
+            &root.join("target.txt"),
+        ))));
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        let release = held.clone();
+        policy
+            .test_hook
+            .install(TestPhase::BeforeReplacement, move |_, _| {
+                drop(release.lock().unwrap().take());
+            });
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+
+        let base = TestDirectory::new("windows-lock-known");
+        let root = base.repository();
+        let _lock = open_without_delete_share(&root.join("target.txt"));
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "replacement_failed_known");
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nold\nomega\n"
+        );
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+
+        let base = TestDirectory::new("windows-lock-uncertain");
+        let root = base.repository();
+        let _lock = open_without_delete_share(&root.join("target.txt"));
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .install(TestPhase::AfterReplacement, |_, temporary| {
+                fs::remove_file(temporary.unwrap()).unwrap();
+            });
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
     }
 
     #[cfg(any(unix, windows))]
@@ -1629,6 +2179,28 @@ mod tests {
 
     fn request(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
         request_value(path, bytes, old, replacement)
+    }
+
+    fn parse_request() -> PatchRequest {
+        PatchRequest::parse(
+            &ToolInput(request("target.txt", b"alpha\nold\nomega\n", "old", "new")),
+            PatchLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn has_patch_temporary(root: &Path) -> bool {
+        fs::read_dir(root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rah-repo-patch-")
+        })
+    }
+
+    fn assert_no_patch_temporary(root: &Path) {
+        assert!(!has_patch_temporary(root));
     }
 
     fn request_value(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
@@ -1714,6 +2286,36 @@ mod tests {
         );
         let path = String::from_utf8(output.stdout).unwrap();
         fs::canonicalize(path.lines().next().unwrap()).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn open_without_delete_share(path: &Path) -> fs::File {
+        use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            Storage::FileSystem::{
+                CreateFileW, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            },
+        };
+
+        let path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE, "test lock handle should open");
+        unsafe { fs::File::from_raw_handle(handle) }
     }
 
     #[cfg(unix)]
