@@ -1,6 +1,6 @@
 # ADR 0012 — Repository worktree content mutation authority
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
-# RAH v0.4 Security Model
+# RAH v0.5 Security Model
 
-## v0.4 boundary and preserved v0.3 capabilities
+## v0.5 boundary and preserved v0.3/v0.4 capabilities
 
 The public/host Execute capabilities are `host.cargo.version`,
 `host.git.status`, `host.git.stage`, and `host.git.unstage`. They are
@@ -11,10 +11,13 @@ infrastructure, not public capabilities. `host.fixture.echo` does not exist.
 
 The v0.3 boundary excludes arbitrary `shell.exec` and `process.exec`,
 model-selected executable/argv/cwd/environment, worktree restore, arbitrary
-file mutation, commit/history/ref operations, reset/clean/checkout/switch/stash,
+file mutation outside the accepted bounded `repo.patch` policy,
+commit/history/ref operations, reset/clean/checkout/switch/stash,
 merge/rebase, push/pull/fetch, network Git, and credential-bearing Git
-execution. Worktree-destructive authority is deferred and requires a future
-dedicated ADR.
+execution. ADR 0012 grants the only worktree-content exception: one conditional
+literal replacement in one existing HEAD-tracked, unstaged strict-UTF-8 file
+under a private host-owned `RepositoryWorktreeMutationPolicy`. It does not
+grant generic write, index, history/ref, network, rollback, or replay authority.
 
 Process supervision is not OS sandboxing and RAH makes no network-isolation or
 rollback guarantee. Timeout or cancellation can leave uncertain mutation

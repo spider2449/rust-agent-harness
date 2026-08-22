@@ -5,14 +5,14 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.4 trusted capability profiles
+## v0.5 repository worktree mutation
 
-RAH v0.4 adds a trusted-host static capability profile that securely and
-atomically composes existing built-in capabilities and hardened local external
-Tool providers into a fresh `ToolRegistry`. It uses explicit permissions,
-symbolic host resources, static and effective validation, provider lifecycle
-ownership, and redacted authority inspection. It does not add a new generic
-authority class.
+RAH v0.5 retains the v0.4 trusted-host static capability profile and adds one
+separate, accepted worktree-content authority: `repo.patch`. It can
+conditionally replace exactly one literal text occurrence in one bounded,
+existing, HEAD-tracked, unstaged, strict-UTF-8 worktree file. The capability is
+host-constructed through a private `RepositoryWorktreeMutationPolicy`; it is
+not generic filesystem write, shell/process, index, or Git history authority.
 
 ```text
 Built-in Tool -----------\
@@ -235,7 +235,9 @@ perform the bounded non-mutating host-side construction/inspection needed to
 register `repo.patch`; it never invokes the tool. Both inventories show only
 the logical capability name, `Execute` permission, symbolic resource IDs, and
 validation state, never native paths, file data, hashes, temporary paths,
-policy internals, or environment. ADR 0012 remains Proposed.
+policy internals, or environment. ADR 0012 is accepted; its worktree authority
+remains separate from ADR 0010's index-only policy and ADR 0011's
+composition-only profile boundary.
 
 ## Run opt-in live Codex validation
 
@@ -283,6 +285,9 @@ cargo run -p rah-runtime-codex --example live_plugin_echo_bridge
 # Trusted-profile effective composition through the Generic Codex Tool Bridge
 cargo build -p rah-tools-plugin --bin rah-plugin-echo
 cargo run -p rah-runtime-codex --example live_trusted_profile_bridge
+
+# Bounded repository worktree replacement (opt-in live validation)
+cargo run -p rah-runtime-codex --example live_trusted_profile_repo_patch_bridge
 ```
 
 The MCP and process-plugin commands exercise RAH-owned adapters. They do not
@@ -301,7 +306,7 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
-## v0.4 limitations and explicit deferrals
+## v0.5 limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile
   validation, not provider/profile auto-discovery or model-facing profile APIs.
@@ -314,12 +319,13 @@ Codex executable, network access, credentials, a paid API, or a real model.
   capability; provider schemas and generic subprocess schemas are not exposed.
 - Arbitrary `shell.exec`, arbitrary `process.exec`, and model-selected
   executable, argv, cwd, environment, or timeout are not live-model authority.
-- Worktree restore, arbitrary file mutation outside the bounded `repo.patch`
-  policy, Git commit, refs/history mutation,
+- `repo.patch` is limited to one literal replacement in one bounded existing
+  HEAD-tracked, unstaged strict-UTF-8 worktree file. Worktree restore, arbitrary
+  file mutation outside that policy, Git commit, refs/history mutation,
   reset, clean, checkout, switch, stash, merge, rebase, push, pull, fetch,
   network Git, and credential-bearing Git execution are deferred. Destructive
   worktree authority remains constrained by the private policy described in
-  proposed ADR 0012; ADR 0011 is composition-only.
+  accepted ADR 0012; ADR 0011 is composition-only.
 - Process supervision is not OS sandboxing; RAH makes no network-isolation or
   rollback guarantee. Timeout/cancellation may leave uncertain effects, which
   are never automatically replayed.

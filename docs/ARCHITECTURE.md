@@ -1,4 +1,4 @@
-# RAH v0.4 Architecture
+# RAH v0.5 Architecture
 
 ## Ownership boundaries
 
@@ -16,7 +16,24 @@ composition boundary for existing built-in capabilities and admitted external
 providers. It does not change runtime, `Tool`, `ToolRegistry`, or
 capability-specific policy contracts.
 
-## v0.4 trusted capability profile
+ADR 0012 establishes a distinct private, host-owned
+`RepositoryWorktreeMutationPolicy` for the bounded `repo.patch` capability.
+It is deliberately separate from ADR 0010's index-only
+`RepositoryMutationPolicy` and ADR 0011's composition-only profile boundary:
+
+```text
+worktree content mutation != index mutation != history/ref mutation
+```
+
+The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
+executable and repository root. Its closed request schema permits only a
+logical relative path, complete-file SHA-256 and byte-length preconditions, one
+nonempty literal expected text, and replacement text. The private policy
+performs all repository eligibility, identity, replacement, and uncertainty
+handling; model requests and `PermissionLevel::Execute` remain insufficient
+authority by themselves.
+
+## v0.4 trusted capability profile (preserved in v0.5)
 
 ADR 0011 defines trusted profile source validation and the explicitly selected
 trusted static profile as a host-only authority-composition boundary. The profile
