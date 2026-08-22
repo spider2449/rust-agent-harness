@@ -214,14 +214,14 @@ impl HostExecutionPolicy {
 
     fn revalidate(&self) -> Result<(), ToolError> {
         let current = canonical_native_executable(&self.executable)?;
-        if current != self.executable {
+        if !paths_equivalent(&current, &self.executable) {
             return Err(policy_error("configured executable identity changed"));
         }
         if ExecutableIdentity::capture(&current)? != self.executable_identity {
             return Err(policy_error("configured executable identity changed"));
         }
         let cwd = canonical_directory(&self.cwd, "working directory")?;
-        if cwd != self.cwd || !cwd.starts_with(&self.cwd_root) {
+        if !paths_equivalent(&cwd, &self.cwd) || !is_beneath(&cwd, &self.cwd_root) {
             return Err(policy_error(
                 "configured working directory identity changed",
             ));
@@ -362,6 +362,7 @@ fn canonical_native_executable(path: &Path) -> Result<PathBuf, ToolError> {
             "configured executable must be an absolute path; PATH lookup is disabled",
         ));
     }
+    reject_link_or_reparse(path, "configured executable")?;
     let canonical = fs::canonicalize(path).map_err(|error| policy_error(error.to_string()))?;
     let metadata = fs::metadata(&canonical).map_err(|error| policy_error(error.to_string()))?;
     if !metadata.is_file() {
@@ -369,6 +370,56 @@ fn canonical_native_executable(path: &Path) -> Result<PathBuf, ToolError> {
     }
     validate_native_executable(&canonical, &metadata)?;
     Ok(canonical)
+}
+
+pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let left = left.components().collect::<Vec<_>>();
+        let right = right.components().collect::<Vec<_>>();
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| left.as_os_str().eq_ignore_ascii_case(right.as_os_str()))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+pub(crate) fn is_beneath(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path = path.components().collect::<Vec<_>>();
+        let root = root.components().collect::<Vec<_>>();
+        path.len() >= root.len()
+            && path
+                .iter()
+                .zip(root)
+                .all(|(path, root)| path.as_os_str().eq_ignore_ascii_case(root.as_os_str()))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
+fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ToolError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| policy_error(error.to_string()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(policy_error(format!("{label} must not be a symbolic link")));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(policy_error(format!("{label} must not be a reparse point")));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

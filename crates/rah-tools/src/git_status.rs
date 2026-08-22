@@ -1,6 +1,4 @@
 use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
 };
@@ -10,6 +8,7 @@ use rah_protocol::{ToolDefinition, ToolInput, ToolOutput};
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool, Tool, ToolContext, ToolError,
+    git_support::git_environment,
 };
 
 /// Stable tool name for the repository-specific host Git status capability.
@@ -97,7 +96,9 @@ impl RepositoryIdentity {
         if root != self.root || FileIdentity::capture(&root)? != self.root_file {
             return Err(repository_error("repository root identity changed"));
         }
-        if DotGitIdentity::capture(&root.join(".git"))? != self.dot_git {
+        let dot_git = DotGitIdentity::capture(&root.join(".git"))
+            .map_err(|_| repository_error("repository metadata identity changed"))?;
+        if dot_git != self.dot_git {
             return Err(repository_error("repository metadata identity changed"));
         }
         Ok(())
@@ -221,47 +222,6 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {
         )));
     }
     Ok(canonical)
-}
-
-fn git_environment() -> BTreeMap<OsString, OsString> {
-    let mut environment = BTreeMap::new();
-    insert_environment(&mut environment, "GIT_CONFIG_NOSYSTEM", "1");
-    insert_environment(
-        &mut environment,
-        "GIT_CONFIG_GLOBAL",
-        platform_null_device(),
-    );
-    insert_environment(&mut environment, "GIT_CONFIG_COUNT", "2");
-    insert_environment(&mut environment, "GIT_CONFIG_KEY_0", "core.fsmonitor");
-    insert_environment(&mut environment, "GIT_CONFIG_VALUE_0", "false");
-    insert_environment(&mut environment, "GIT_CONFIG_KEY_1", "core.untrackedCache");
-    insert_environment(&mut environment, "GIT_CONFIG_VALUE_1", "false");
-    insert_environment(&mut environment, "GIT_OPTIONAL_LOCKS", "0");
-    insert_environment(&mut environment, "GIT_TERMINAL_PROMPT", "0");
-    environment
-}
-
-fn insert_environment(
-    environment: &mut BTreeMap<OsString, OsString>,
-    name: impl AsRef<OsStr>,
-    value: impl AsRef<OsStr>,
-) {
-    environment.insert(name.as_ref().to_owned(), value.as_ref().to_owned());
-}
-
-#[cfg(windows)]
-fn platform_null_device() -> &'static str {
-    "NUL"
-}
-
-#[cfg(unix)]
-fn platform_null_device() -> &'static str {
-    "/dev/null"
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_null_device() -> &'static str {
-    "/dev/null"
 }
 
 fn repository_error(message: impl Into<String>) -> ToolError {
