@@ -148,8 +148,8 @@ path. Before parsing, the host-side loader requires a bounded UTF-8 regular
 file and rejects links and Windows reparse points. On Windows it accepts only
 drive-rooted paths; UNC, verbatim/device paths, and ADS forms are rejected. It
 then validates the static profile and prints only its redacted static inventory.
-It does not launch MCP providers. `profile validate-effective` is the explicit
-spawning operation: it launches only MCP executables named by the selected
+It does not launch external providers. `profile validate-effective` is the explicit
+spawning operation: it launches only MCP and Process Plugin executables named by the selected
 trusted profile, performs exact discovery/schema admission, and prints a
 redacted effective inventory. Neither command discovers profiles, selects one
 from environment or repository configuration, or enables live provider

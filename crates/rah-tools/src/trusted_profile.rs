@@ -26,6 +26,7 @@ pub struct TrustedStaticProfile {
     registry: ToolRegistry,
     effective: EffectiveProfile,
     mcp_providers: Vec<McpProviderProfile>,
+    process_plugins: Vec<ProcessPluginProfile>,
     resources: Resources,
 }
 
@@ -44,6 +45,20 @@ impl TrustedStaticProfile {
         }
         validate_resources(&profile.resources)?;
         validate_mcp_providers(&profile.mcp_providers, &profile.resources)?;
+        validate_process_plugins(&profile.process_plugins, &profile.resources)?;
+        let mut external_provider_ids = BTreeSet::new();
+        for id in profile
+            .mcp_providers
+            .iter()
+            .map(|provider| &provider.id)
+            .chain(profile.process_plugins.iter().map(|provider| &provider.id))
+        {
+            if !external_provider_ids.insert(id) {
+                return Err(ProfileError::InvalidProfile {
+                    reason: "duplicate_external_provider",
+                });
+            }
+        }
 
         let mut names = BTreeSet::new();
         for capability in &profile.capabilities {
@@ -75,9 +90,21 @@ impl TrustedStaticProfile {
                         status: "configured",
                         tool_count: provider.tools.len(),
                     })
+                    .chain(
+                        profile
+                            .process_plugins
+                            .iter()
+                            .map(|provider| EffectiveProvider {
+                                kind: "process_plugin",
+                                provider_id: provider.id.clone(),
+                                status: "configured",
+                                tool_count: provider.tools.len(),
+                            }),
+                    )
                     .collect(),
             },
             mcp_providers: profile.mcp_providers,
+            process_plugins: profile.process_plugins,
             resources: profile.resources,
         })
     }
@@ -104,6 +131,12 @@ impl TrustedStaticProfile {
     #[must_use]
     pub fn mcp_providers(&self) -> &[McpProviderProfile] {
         &self.mcp_providers
+    }
+
+    /// Returns closed, host-only Process Plugin declarations for effective composition.
+    #[must_use]
+    pub fn process_plugins(&self) -> &[ProcessPluginProfile] {
+        &self.process_plugins
     }
 
     /// Resolves a configured symbolic executable for an external provider.
@@ -205,6 +238,8 @@ struct ProfileDocument {
     capabilities: Vec<Capability>,
     #[serde(default)]
     mcp_providers: Vec<McpProviderProfile>,
+    #[serde(default)]
+    process_plugins: Vec<ProcessPluginProfile>,
 }
 
 /// Closed host-only declaration for one local MCP provider.
@@ -241,6 +276,53 @@ pub struct McpExpectedToolProfile {
 }
 
 impl McpExpectedToolProfile {
+    #[must_use]
+    pub fn remote_name(&self) -> &str {
+        &self.remote_name
+    }
+    #[must_use]
+    pub fn input_schema(&self) -> &Value {
+        &self.input_schema
+    }
+    pub fn permission(&self) -> Result<PermissionLevel, ProfileError> {
+        parse_external_permission(&self.permission).ok_or(ProfileError::InvalidPermission)
+    }
+}
+
+/// Closed host-only declaration for one local Process Plugin provider.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessPluginProfile {
+    id: String,
+    executable: String,
+    tools: Vec<ProcessPluginExpectedToolProfile>,
+}
+
+impl ProcessPluginProfile {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    #[must_use]
+    pub fn tools(&self) -> &[ProcessPluginExpectedToolProfile] {
+        &self.tools
+    }
+}
+
+/// Exact host admission record for one remote Process Plugin tool.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessPluginExpectedToolProfile {
+    remote_name: String,
+    permission: String,
+    input_schema: Value,
+}
+
+impl ProcessPluginExpectedToolProfile {
     #[must_use]
     pub fn remote_name(&self) -> &str {
         &self.remote_name
@@ -419,6 +501,42 @@ fn validate_mcp_providers(
             if !tool.input_schema.is_object() {
                 return Err(ProfileError::InvalidProfile {
                     reason: "mcp_input_schema",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_process_plugins(
+    providers: &[ProcessPluginProfile],
+    resources: &Resources,
+) -> Result<(), ProfileError> {
+    let mut provider_ids = BTreeSet::new();
+    for provider in providers {
+        component_identifier(&provider.id).map_err(|_| ProfileError::InvalidProfile {
+            reason: "process_plugin_id",
+        })?;
+        if !provider_ids.insert(&provider.id) {
+            return Err(ProfileError::InvalidProfile {
+                reason: "duplicate_process_plugin",
+            });
+        }
+        executable(resources, Some(&provider.executable))?;
+        let mut names = BTreeSet::new();
+        for tool in &provider.tools {
+            component_identifier(&tool.remote_name).map_err(|_| ProfileError::InvalidProfile {
+                reason: "process_plugin_remote_name",
+            })?;
+            if !names.insert(&tool.remote_name) {
+                return Err(ProfileError::InvalidProfile {
+                    reason: "duplicate_process_plugin_tool",
+                });
+            }
+            tool.permission()?;
+            if !tool.input_schema.is_object() {
+                return Err(ProfileError::InvalidProfile {
+                    reason: "process_plugin_input_schema",
                 });
             }
         }
@@ -722,6 +840,37 @@ mod tests {
             ),
         ] {
             assert!(TrustedStaticProfile::load(directory.profile(&contents)).is_err());
+        }
+    }
+
+    #[test]
+    fn process_plugin_profile_is_closed_and_validated_without_spawning() {
+        let directory = TestDirectory::new();
+        let executable = directory
+            .0
+            .join("plugin.exe")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let valid = format!(
+            r#"{{"profile_version":1,"profile_id":"test","resources":{{"executables":{{"plugin":{{"path":"{executable}","kind":"native"}}}}}},"capabilities":[],"process_plugins":[{{"id":"local-test","executable":"plugin","tools":[{{"remote_name":"echo","permission":"None","input_schema":{{"type":"object"}}}}]}}]}}"#
+        );
+        let loaded = TrustedStaticProfile::load(directory.profile(&valid))
+            .expect("static profile should parse");
+        assert_eq!(loaded.process_plugins().len(), 1);
+        assert_eq!(
+            loaded.effective_profile().providers[0].kind,
+            "process_plugin"
+        );
+        for invalid in [
+            valid.replace("\"local-test\"", "\"INVALID\""),
+            valid.replace("\"permission\":\"None\",", ""),
+            valid.replace(
+                "\"input_schema\":{\"type\":\"object\"}",
+                "\"input_schema\":[]",
+            ),
+            valid.replace("\"tools\":[", "\"cwd\":\"forbidden\",\"tools\":["),
+        ] {
+            assert!(TrustedStaticProfile::load(directory.profile(&invalid)).is_err());
         }
     }
 

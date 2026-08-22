@@ -16,9 +16,10 @@ use rah_protocol::{
 };
 use rah_runtime::{AgentRuntime, MinimalTestRuntime};
 use rah_tools::{EchoTool, FsReadTool, ToolRegistry, TrustedStaticProfile};
-use rah_tools_mcp::compose_trusted_profile;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
+
+mod profile_composition;
 
 #[derive(Debug, Parser)]
 #[command(name = "rah", version, about = "Rust Agent Harness")]
@@ -52,7 +53,7 @@ enum ProfileCommand {
         /// Absolute profile path selected by the trusted operator.
         profile_path: PathBuf,
     },
-    /// Launches configured local MCP providers and prints redacted effective inventory.
+    /// Launches configured local external providers and prints redacted effective inventory.
     ValidateEffective {
         /// Absolute profile path selected by the trusted operator.
         profile_path: PathBuf,
@@ -198,21 +199,22 @@ fn validate_profile(profile_path: PathBuf) -> Result<()> {
     println!("profile_version={}", effective.profile_version);
     println!("profile_id={}", effective.profile_id);
     println!("source_class={}", effective.source_class);
-    render_profile(effective);
+    render_profile(effective, None);
     Ok(())
 }
 
 async fn validate_effective_profile(profile_path: PathBuf) -> Result<()> {
     let profile = TrustedStaticProfile::load(profile_path)
         .context("trusted profile static validation failed")?;
-    let effective = compose_trusted_profile(profile)
+    let effective = profile_composition::compose(profile)
         .await
         .context("trusted profile effective validation failed")?;
-    render_profile(effective.effective_profile());
+    render_profile(effective.effective_profile(), Some(effective.registry()));
+    effective.shutdown().await;
     Ok(())
 }
 
-fn render_profile(effective: &rah_tools::EffectiveProfile) {
+fn render_profile(effective: &rah_tools::EffectiveProfile, registry: Option<&ToolRegistry>) {
     for capability in &effective.capabilities {
         println!(
             "capability name={} enabled={} registered={} permission={:?} resources={} validation={}",
@@ -229,6 +231,14 @@ fn render_profile(effective: &rah_tools::EffectiveProfile) {
             "provider kind={} id={} status={} tool_count={}",
             provider.kind, provider.provider_id, provider.status, provider.tool_count,
         );
+    }
+    if let Some(registry) = registry {
+        for definition in registry.definitions() {
+            println!(
+                "tool name={} permission={:?} registered=true validation=validated",
+                definition.name, definition.permission,
+            );
+        }
     }
 }
 

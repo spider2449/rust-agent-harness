@@ -144,10 +144,10 @@ definition, so capability-specific boundaries remain reviewable and enforceable.
 - Local stdio MCP trusted-profile composition.
 - Exact MCP expected tool and schema admission.
 - Explicit MCP permission mapping.
+- Process Plugin trusted-profile composition with exact admission and lifecycle ownership.
 
 ## Deferred scope
 
-- Process Plugin profile composition.
 - MCP Streamable HTTP and network MCP.
 - Profile auto-discovery and hot reload.
 - `PluginManager`.

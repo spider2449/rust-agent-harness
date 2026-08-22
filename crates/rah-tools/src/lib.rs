@@ -34,7 +34,8 @@ pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutat
 pub use shell_exec::ShellExecTool;
 pub use trusted_profile::{
     EffectiveCapability, EffectiveProfile, EffectiveProvider, McpExpectedToolProfile,
-    McpProviderProfile, ProfileError, TrustedStaticProfile,
+    McpProviderProfile, ProcessPluginExpectedToolProfile, ProcessPluginProfile, ProfileError,
+    TrustedStaticProfile,
 };
 
 /// Neutral execution context supplied by the runtime to a tool.
