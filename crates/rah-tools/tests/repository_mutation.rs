@@ -386,6 +386,9 @@ fn symlink_target_is_rejected() {
     let root = base.repository();
     fs::remove_file(root.join("marker.txt")).unwrap();
     symlink(root.join("protected.txt"), root.join("marker.txt")).unwrap();
-    let error = RepositoryMutationFixtureTool::new(fixture(), &root).unwrap_err();
+    let error = match RepositoryMutationFixtureTool::new(fixture(), &root) {
+        Ok(_) => panic!("symlink target must be rejected"),
+        Err(error) => error,
+    };
     assert!(error.to_string().contains("symbolic link"));
 }
