@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, feature = "live-test-support"))]
 use std::sync::atomic::Ordering;
 use std::{
     fs::{self, File, OpenOptions},
@@ -27,6 +27,29 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const BOM: &[u8] = b"\xef\xbb\xbf";
+
+#[cfg(feature = "live-test-support")]
+static LIVE_REPLACEMENT_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Resets the opt-in process-local replacement-attempt observation counter.
+///
+/// This is compiled only for the live validation fixture. It is not a policy,
+/// audit, or execution surface and cannot alter `repo.patch` authority.
+#[cfg(feature = "live-test-support")]
+pub fn reset_live_test_replacement_attempts() {
+    LIVE_REPLACEMENT_ATTEMPTS.store(0, Ordering::Relaxed);
+}
+
+/// Returns the opt-in process-local native replacement-attempt observation.
+///
+/// This is compiled only for the live validation fixture and is deliberately
+/// unavailable from the default production crate build.
+#[cfg(feature = "live-test-support")]
+#[must_use]
+pub fn live_test_replacement_attempts() -> usize {
+    LIVE_REPLACEMENT_ATTEMPTS.load(Ordering::Relaxed)
+}
 
 /// Host-constructed, bounded worktree text replacement capability.
 ///
@@ -181,6 +204,8 @@ impl RepositoryWorktreeMutationPolicy {
         self.test_hook
             .replacement_attempts
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "live-test-support")]
+        LIVE_REPLACEMENT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
 
         #[cfg(test)]
         let replacement = self

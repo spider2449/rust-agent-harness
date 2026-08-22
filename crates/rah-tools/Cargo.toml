@@ -3,6 +3,12 @@ name = "rah-tools"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Opt-in fixture observability for the live Codex repository-patch example.
+# This records only a process-local replacement-attempt counter and grants no
+# additional tool, filesystem, or process authority.
+live-test-support = []
+
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true

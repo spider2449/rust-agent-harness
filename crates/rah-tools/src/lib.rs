@@ -35,6 +35,10 @@ pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutat
 pub use repository_worktree_patch::{
     REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryWorktreePatchTool,
 };
+#[cfg(feature = "live-test-support")]
+pub use repository_worktree_patch::{
+    live_test_replacement_attempts, reset_live_test_replacement_attempts,
+};
 pub use shell_exec::ShellExecTool;
 pub use trusted_profile::{
     EffectiveCapability, EffectiveProfile, EffectiveProvider, McpExpectedToolProfile,

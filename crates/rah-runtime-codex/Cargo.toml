@@ -18,6 +18,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 rah-cli = { path = "../rah-cli" }
+rah-tools = { path = "../rah-tools", features = ["live-test-support"] }
 rah-tools-mcp = { path = "../rah-tools-mcp" }
 rah-tools-plugin = { path = "../rah-tools-plugin" }
 sha2.workspace = true
