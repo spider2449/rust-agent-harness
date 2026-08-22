@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -26,6 +26,22 @@ impl TestDirectory {
         let path = self.0.join("profile.json");
         fs::write(&path, contents).expect("profile should be written");
         path
+    }
+
+    fn fixture(&self, binary: &str, label: &str) -> PathBuf {
+        let target = std::env::var_os("RAH_TEST_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace_root().join("target"));
+        let source = target
+            .join("debug")
+            .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
+        let executable = self
+            .0
+            .join(format!("{label}{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(&source, &executable).expect("fixture executable should be copied");
+        fs::write(executable.with_extension("lifecycle-request"), b"observe")
+            .expect("fixture lifecycle observation should be enabled");
+        executable
     }
 }
 
@@ -55,6 +71,28 @@ fn fs_read_profile(workspace: &str) -> String {
 
 fn rah() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rah"))
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("CLI crate is nested below workspace")
+        .to_owned()
+}
+
+fn external_profile(directory: &Path, mcp: &Path, plugin: &Path) -> String {
+    let path = |value: &Path| value.to_string_lossy().replace('\\', "\\\\");
+    format!(
+        r#"{{"profile_version":1,"profile_id":"cli-external","resources":{{"executables":{{"mcp":{{"path":"{}","kind":"native"}},"plugin":{{"path":"{}","kind":"native"}}}},"repositories":{{"workspace":{{"path":"{}"}}}}}},"capabilities":[],"mcp_providers":[{{"id":"mcp-a","executable":"mcp","tools":[{{"remote_name":"echo","permission":"None","input_schema":{{"type":"object","properties":{{"text":{{"type":"string"}}}},"required":["text"],"additionalProperties":false}}}}]}}],"process_plugins":[{{"id":"plugin-b","executable":"plugin","tools":[{{"remote_name":"echo","permission":"Read","input_schema":{{"type":"object","properties":{{"value":{{}}}},"required":["value"],"additionalProperties":false}}}}]}}]}}"#,
+        path(mcp),
+        path(plugin),
+        path(directory)
+    )
+}
+
+fn lifecycle(path: &Path) -> String {
+    fs::read_to_string(path.with_extension("lifecycle")).unwrap_or_default()
 }
 
 #[test]
@@ -267,4 +305,62 @@ fn profile_validate_effective_fails_without_partial_inventory_or_path_leakage() 
     assert!(stderr.contains("trusted profile external provider could not be composed"));
     assert!(!stderr.contains(&profile.to_string_lossy().to_string()));
     assert!(!stderr.contains(&missing_executable.to_string_lossy().to_string()));
+}
+
+#[test]
+fn profile_static_validation_never_spawns_mixed_external_fixtures() {
+    let directory = TestDirectory::new();
+    let mcp = directory.fixture("rah-mcp-echo-server", "mcp");
+    let plugin = directory.fixture("rah-plugin-echo", "plugin");
+    let profile = directory.profile(&external_profile(&directory.0, &mcp, &plugin));
+    let output = rah()
+        .args(["profile", "validate"])
+        .arg(profile)
+        .output()
+        .expect("rah should launch");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(lifecycle(&mcp).is_empty(), "static validation spawned MCP");
+    assert!(
+        lifecycle(&plugin).is_empty(),
+        "static validation spawned Plugin"
+    );
+}
+
+#[test]
+fn profile_effective_validation_spawns_redacts_and_shuts_down_mixed_external_fixtures() {
+    let directory = TestDirectory::new();
+    let mcp = directory.fixture("rah-mcp-echo-server", "mcp");
+    let plugin = directory.fixture("rah-plugin-echo", "plugin");
+    let profile = directory.profile(&external_profile(&directory.0, &mcp, &plugin));
+    let output = rah()
+        .args(["profile", "validate-effective"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(lifecycle(&mcp).contains("spawn"));
+    assert!(lifecycle(&plugin).contains("spawn"));
+    assert!(stdout.contains("provider kind=mcp id=mcp-a status=validated"));
+    assert!(stdout.contains("provider kind=process_plugin id=plugin-b status=validated"));
+    assert!(stdout.contains("tool name=mcp.mcp-a.echo permission=None"));
+    assert!(stdout.contains("tool name=plugin.plugin-b.echo permission=Read"));
+    for secret in [
+        mcp.to_string_lossy().as_ref(),
+        plugin.to_string_lossy().as_ref(),
+        directory.0.to_string_lossy().as_ref(),
+    ] {
+        assert!(!stdout.contains(secret), "inventory leaked {secret}");
+    }
+    let moved = mcp.with_extension("released");
+    fs::rename(&mcp, &moved).expect("MCP fixture must be reaped before CLI returns");
+    fs::rename(&moved, &mcp).expect("fixture should be restored");
 }

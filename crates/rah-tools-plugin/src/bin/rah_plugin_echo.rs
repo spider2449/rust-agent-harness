@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env,
     io::{self, BufRead, Write},
+    path::PathBuf,
     process,
     sync::{Arc, Mutex},
     thread,
@@ -12,6 +13,51 @@ use serde_json::{Map, Value, json};
 
 const PROTOCOL_VERSION: &str = "1";
 
+/// Opt-in, fixture-only lifecycle audit stored beside a test-copied executable.
+/// Normal fixture invocations never create this file because the request marker
+/// is absent from the installed binary directory.
+struct LifecycleAudit(Option<PathBuf>);
+
+impl LifecycleAudit {
+    fn start() -> Self {
+        let executable = env::current_exe().ok();
+        let request = executable
+            .as_ref()
+            .map(|path| path.with_extension("lifecycle-request"));
+        let audit = request
+            .filter(|path| path.is_file())
+            .map(|path| path.with_extension("lifecycle"));
+        if let Some(path) = &audit {
+            append_lifecycle(path, "spawn");
+        }
+        Self(audit)
+    }
+
+    fn event(&self, event: &str) {
+        if let Some(path) = &self.0 {
+            append_lifecycle(path, event);
+        }
+    }
+}
+
+impl Drop for LifecycleAudit {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            append_lifecycle(path, "exit");
+        }
+    }
+}
+
+fn append_lifecycle(path: &std::path::Path, event: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{event}");
+    }
+}
+
 #[derive(Clone)]
 struct PendingCall {
     request_id: u64,
@@ -19,6 +65,7 @@ struct PendingCall {
 }
 
 fn main() {
+    let _lifecycle_audit = LifecycleAudit::start();
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let wrong_protocol = arguments.iter().any(|arg| arg == "--wrong-protocol");
     let wrong_id = arguments.iter().any(|arg| arg == "--wrong-id");
@@ -284,6 +331,7 @@ fn main() {
                 }
             }
             "shutdown" => {
+                _lifecycle_audit.event("shutdown");
                 write_result(&stdout, message["id"].clone(), json!({}));
                 break;
             }

@@ -5,14 +5,19 @@ Audited checkpoint: `eb2bf25 feat: add trusted Process Plugin profile compositio
 
 ## Recommendation
 
-**B. NOT READY — COMPLETE THESE NARROW TASKS FIRST**
+**B. NOT READY — REMAINING BLOCKER(S)**
 
-1. Add deterministic tests through `rah-cli`'s actual mixed effective composer
-   for a staged MCP followed by a failing Process Plugin, a later failing
-   provider after multiple staged providers, collision cleanup, and successful
-   MCP-plus-Plugin ownership/use/shutdown. The current tests prove each adapter
-   and MCP-only profile composition, but do not observe cleanup or lifecycle for
-   the mixed composer that publishes the v0.4 registry.
+1. Task 040/041 added real-composer mixed success and late Plugin admission tests:
+   one built-in plus MCP and Plugin echoes produce exactly three registered
+   tools; both external proxies execute; profile-assigned `None` permissions
+   survive; and a staged MCP followed by a Plugin schema mismatch returns no
+   composition aggregate. Task 041 closes the deterministic fixture-owned
+   shutdown/reap observation matrix for mixed late failures and collision
+   cleanup: it observes test-copied fixture `spawn`
+   markers plus bounded executable-unlock reaping after owner release for mixed
+   late failures, multiple staged providers, same-kind MCP failure, static
+   non-spawning, and CLI effective spawning. The live Codex gate remains the
+   only release blocker.
 2. Run one opt-in live Codex validation through the actual trusted-profile
    composer and Generic Codex Tool Bridge, using one admitted local echo tool.
    Prefer a profile that admits MCP and Process Plugin echoes; deterministic

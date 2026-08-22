@@ -215,6 +215,9 @@ mod tests {
                 name: ToolName::new("alpha")
             }
         );
+        let output = block_on(registry.execute(call("alpha"), ToolContext::default()))
+            .expect("duplicate rejection must preserve the first registered tool");
+        assert_eq!(output.content, vec![ToolContent::Text("alpha".to_owned())]);
     }
 
     #[test]

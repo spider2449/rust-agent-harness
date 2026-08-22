@@ -2,13 +2,56 @@ use std::{
     collections::HashSet,
     env, fs,
     io::{self, BufRead, Write},
+    path::PathBuf,
 };
 
 use serde_json::{Value, json};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Opt-in, fixture-only lifecycle audit stored beside a test-copied executable.
+/// Normal fixture invocations never create this file because the request marker
+/// is absent from the installed binary directory.
+struct LifecycleAudit(Option<PathBuf>);
+
+impl LifecycleAudit {
+    fn start() -> Self {
+        let executable = env::current_exe().ok();
+        let request = executable
+            .as_ref()
+            .map(|path| path.with_extension("lifecycle-request"));
+        let audit = request
+            .filter(|path| path.is_file())
+            .map(|path| path.with_extension("lifecycle"));
+        if let Some(path) = &audit {
+            append_lifecycle(path, "spawn");
+        }
+        Self(audit)
+    }
+
+    fn event(&self, event: &str) {
+        if let Some(path) = &self.0 {
+            append_lifecycle(path, event);
+        }
+    }
+}
+
+impl Drop for LifecycleAudit {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            append_lifecycle(path, "exit");
+        }
+    }
+}
+
+fn append_lifecycle(path: &std::path::Path, event: &str) {
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{event}");
+    }
+}
+
 fn main() {
+    let _lifecycle_audit = LifecycleAudit::start();
     let args = env::args().collect::<Vec<_>>();
     let mode = argument(&args, "--mode").unwrap_or("echo");
     let expose_two_tools = args.iter().any(|arg| arg == "--two-tools") || mode == "extra-tool";
@@ -249,6 +292,11 @@ fn main() {
                         );
                     }
                 }
+            }
+            "shutdown" => {
+                _lifecycle_audit.event("shutdown");
+                write_result(&mut stdout, message["id"].clone(), json!({}));
+                break;
             }
             _ => {
                 if let Some(id) = message.get("id") {
