@@ -570,7 +570,9 @@ impl FileIdentity {
         }
     }
 }
-fn repository_lease(root: &Path) -> Arc<AsyncMutex<()>> {
+/// Shares RAH-owned repository mutation serialization across private policies.
+/// It grants no mutation authority by itself.
+pub(crate) fn repository_lease(root: &Path) -> Arc<AsyncMutex<()>> {
     static LEASES: OnceLock<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>> = OnceLock::new();
     let key = repository_key(root);
     let mut leases = LEASES

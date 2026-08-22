@@ -1,0 +1,1728 @@
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use async_trait::async_trait;
+use futures::lock::{Mutex as AsyncMutex, MutexGuard};
+use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
+    git_support::{git_environment, git_error},
+    host_execute::{is_beneath, paths_equivalent},
+};
+
+/// Stable name for the bounded repository worktree text replacement capability.
+pub const REPOSITORY_WORKTREE_PATCH_TOOL_NAME: &str = "repo.patch";
+
+const MAX_SERIALIZED_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_PATH_BYTES: usize = 1024;
+const MAX_TEXT_BYTES: usize = 64 * 1024;
+const MAX_FILE_BYTES: usize = 1024 * 1024;
+const BOM: &[u8] = b"\xef\xbb\xbf";
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Host-constructed, bounded worktree text replacement capability.
+///
+/// The policy that grants this authority remains crate-private. Construction
+/// fixes the Git executable and repository root; model input may only request
+/// the one exact conditional replacement described by this tool's schema.
+pub struct RepositoryWorktreePatchTool {
+    policy: RepositoryWorktreeMutationPolicy,
+}
+
+impl RepositoryWorktreePatchTool {
+    /// Creates a `repo.patch` tool for one trusted non-bare repository root.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            policy: RepositoryWorktreeMutationPolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+                PatchLimits::default(),
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for RepositoryWorktreePatchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new(REPOSITORY_WORKTREE_PATCH_TOOL_NAME),
+            description: "Replaces one uniquely matched literal text fragment in one clean tracked worktree file."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "maxLength": MAX_PATH_BYTES},
+                    "expected_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "expected_file_byte_length": {"type": "integer", "minimum": 0, "maximum": MAX_FILE_BYTES},
+                    "expected_old_text": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT_BYTES},
+                    "replacement_text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
+                },
+                "required": ["path", "expected_file_sha256", "expected_file_byte_length", "expected_old_text", "replacement_text"],
+                "additionalProperties": false
+            }),
+            permission: PermissionLevel::Execute,
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = PatchRequest::parse(&input, self.policy.limits)?;
+        let _lease = self.policy.acquire_lease().await;
+        let outcome = self.policy.execute_once(request).await;
+        Ok(outcome.into_tool_output())
+    }
+}
+
+/// Private, host-owned authority for one complete conditional worktree replacement.
+///
+/// It is intentionally distinct from `RepositoryMutationPolicy`,
+/// `WorkspacePolicy`, and `HostExecutionPolicy`. The latter is only used here
+/// as a bounded host-side Git observation mechanism.
+struct RepositoryWorktreeMutationPolicy {
+    git: PathBuf,
+    git_identity: FileIdentity,
+    root: PathBuf,
+    root_identity: FileIdentity,
+    dot_git_identity: FileIdentity,
+    lease: std::sync::Arc<AsyncMutex<()>>,
+    limits: PatchLimits,
+    #[cfg(test)]
+    test_hook: TestHook,
+}
+
+impl RepositoryWorktreeMutationPolicy {
+    fn new(git: &Path, root: &Path, limits: PatchLimits) -> Result<Self, ToolError> {
+        if !root.is_absolute() {
+            return Err(policy_error("repository root must be an absolute path"));
+        }
+        reject_reparse_ancestry(root, "repository root")?;
+        let root = canonical_directory(root, "repository root")?;
+        validate_directory_path(&root, &root, "repository root")?;
+        let dot_git = root.join(".git");
+        reject_link_or_reparse(&dot_git, "repository metadata")?;
+        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
+            return Err(policy_error(
+                "repository metadata must be a directory; linked worktrees are unsupported",
+            ));
+        }
+        let git = canonical_git_executable(git)?;
+        Ok(Self {
+            git_identity: FileIdentity::capture(&git)?,
+            git,
+            root_identity: FileIdentity::capture(&root)?,
+            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            lease: crate::git_stage::repository_lease(&root),
+            root,
+            limits,
+            #[cfg(test)]
+            test_hook: TestHook::default(),
+        })
+    }
+
+    async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
+        self.lease.lock().await
+    }
+
+    async fn execute_once(&self, request: PatchRequest) -> MutationOutcome {
+        let pre = match self.capture_preimage(&request).await {
+            Ok(pre) => pre,
+            Err(reason) => return MutationOutcome::Refused { reason },
+        };
+        #[cfg(test)]
+        self.test_hook.run_before_revalidation(&pre.target.path);
+
+        let postimage = match build_postimage(&pre, &request, self.limits) {
+            Ok(postimage) => postimage,
+            Err(reason) => return MutationOutcome::Refused { reason },
+        };
+        let temporary = match self.write_temporary(&pre.target, &postimage.bytes) {
+            Ok(temporary) => temporary,
+            Err(reason) => return MutationOutcome::Refused { reason },
+        };
+
+        if let Err(reason) = self.revalidate_before_commit(&pre).await {
+            return self.refuse_after_temp(reason, temporary);
+        }
+        #[cfg(test)]
+        self.test_hook.before_replace(&temporary);
+        #[cfg(test)]
+        self.test_hook
+            .replacement_attempts
+            .fetch_add(1, Ordering::Relaxed);
+
+        match replace_once(&temporary, &pre.target.path) {
+            Ok(()) => match self.verify_postimage(&pre, &postimage).await {
+                Ok(()) => MutationOutcome::Success {
+                    evidence: MutationEvidence::from_images(
+                        &pre,
+                        &postimage,
+                        MutationResultClass::Success,
+                    ),
+                },
+                Err(reason) => MutationOutcome::Uncertain {
+                    evidence: MutationEvidence::from_images(
+                        &pre,
+                        &postimage,
+                        MutationResultClass::Uncertain,
+                    ),
+                    reason,
+                },
+            },
+            Err(error) => self.classify_replacement_failure(&pre, &postimage, &temporary, error),
+        }
+    }
+
+    fn refuse_after_temp(&self, reason: RefusalReason, temporary: PathBuf) -> MutationOutcome {
+        match remove_temporary(&temporary) {
+            Ok(()) => MutationOutcome::Refused { reason },
+            Err(cleanup) => MutationOutcome::Uncertain {
+                evidence: MutationEvidence::empty(MutationResultClass::Uncertain),
+                reason: RefusalReason::TemporaryCleanup(cleanup),
+            },
+        }
+    }
+
+    async fn capture_preimage(&self, request: &PatchRequest) -> Result<Preimage, RefusalReason> {
+        self.revalidate_repository()
+            .map_err(RefusalReason::Repository)?;
+        let target = Target::capture(&self.root, &request.path).map_err(RefusalReason::Path)?;
+        let git = self
+            .git_state(&target)
+            .await
+            .map_err(RefusalReason::Repository)?;
+        let bytes = read_bounded(&target.path, self.limits.max_file_bytes)
+            .map_err(|_| RefusalReason::Precondition("could not read bounded target preimage"))?;
+        validate_preconditions(&bytes, request, self.limits)
+            .map_err(RefusalReason::Precondition)?;
+        Ok(Preimage { target, git, bytes })
+    }
+
+    async fn revalidate_before_commit(&self, pre: &Preimage) -> Result<(), RefusalReason> {
+        self.revalidate_repository()
+            .map_err(RefusalReason::Repository)?;
+        pre.target
+            .revalidate(&self.root)
+            .map_err(RefusalReason::Path)?;
+        let git = self
+            .git_state(&pre.target)
+            .await
+            .map_err(RefusalReason::Repository)?;
+        if git != pre.git {
+            return Err(RefusalReason::Repository(policy_error(
+                "repository state changed before replacement",
+            )));
+        }
+        let current = read_bounded(&pre.target.path, self.limits.max_file_bytes)
+            .map_err(|_| RefusalReason::Precondition("could not reread bounded target preimage"))?;
+        if current != pre.bytes {
+            return Err(RefusalReason::Precondition(
+                "target preimage changed before replacement",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_postimage(
+        &self,
+        pre: &Preimage,
+        postimage: &Postimage,
+    ) -> Result<(), RefusalReason> {
+        self.revalidate_repository()
+            .map_err(RefusalReason::Repository)?;
+        Target::verify_replaced(&self.root, &pre.target).map_err(RefusalReason::Path)?;
+        let git = self
+            .git_state(&pre.target)
+            .await
+            .map_err(RefusalReason::Repository)?;
+        if git != pre.git {
+            return Err(RefusalReason::Repository(policy_error(
+                "repository state changed during replacement",
+            )));
+        }
+        let current = read_bounded(&pre.target.path, self.limits.max_file_bytes).map_err(|_| {
+            RefusalReason::PostObservation("could not read bounded target after replacement")
+        })?;
+        if current != postimage.bytes {
+            return Err(RefusalReason::PostObservation(
+                "postimage did not match constructed content",
+            ));
+        }
+        Ok(())
+    }
+
+    fn classify_replacement_failure(
+        &self,
+        pre: &Preimage,
+        postimage: &Postimage,
+        temporary: &Path,
+        _error: std::io::Error,
+    ) -> MutationOutcome {
+        let target_intact = self
+            .revalidate_repository()
+            .and_then(|()| pre.target.revalidate(&self.root))
+            .and_then(|()| {
+                read_bounded(&pre.target.path, self.limits.max_file_bytes).map_err(fs_error)
+            })
+            .is_ok_and(|current| current == pre.bytes);
+        let cleanup = remove_temporary(temporary);
+        if target_intact && cleanup.is_ok() {
+            MutationOutcome::KnownReplacementFailure {
+                evidence: MutationEvidence::from_images(
+                    pre,
+                    postimage,
+                    MutationResultClass::KnownReplacementFailure,
+                ),
+            }
+        } else {
+            MutationOutcome::Uncertain {
+                evidence: MutationEvidence::from_images(
+                    pre,
+                    postimage,
+                    MutationResultClass::Uncertain,
+                ),
+                reason: RefusalReason::PostObservation(
+                    "replacement failure could not prove the preimage remained intact",
+                ),
+            }
+        }
+    }
+
+    fn write_temporary(&self, target: &Target, bytes: &[u8]) -> Result<PathBuf, RefusalReason> {
+        for _ in 0..32 {
+            let path = temporary_path(&target.parent);
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(RefusalReason::Temporary(error.to_string())),
+            };
+            if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                return match remove_temporary(&path) {
+                    Ok(()) => Err(RefusalReason::Temporary(error.to_string())),
+                    Err(cleanup) => Err(RefusalReason::TemporaryCleanup(cleanup)),
+                };
+            }
+            drop(file);
+            match validate_temporary(&path, bytes, self.limits) {
+                Ok(()) => return Ok(path),
+                Err(reason) => {
+                    return match remove_temporary(&path) {
+                        Ok(()) => Err(reason),
+                        Err(cleanup) => Err(RefusalReason::TemporaryCleanup(cleanup)),
+                    };
+                }
+            }
+        }
+        Err(RefusalReason::Temporary(
+            "could not allocate an exclusive temporary replacement file".to_owned(),
+        ))
+    }
+
+    fn revalidate_repository(&self) -> Result<(), ToolError> {
+        reject_reparse_ancestry(&self.root, "repository root")?;
+        validate_directory_path(&self.root, &self.root, "repository root")?;
+        let current = canonical_directory(&self.root, "repository root")?;
+        let dot_git = current.join(".git");
+        reject_link_or_reparse(&dot_git, "repository metadata")?;
+        if !paths_equivalent(&current, &self.root)
+            || FileIdentity::capture(&current)? != self.root_identity
+            || !fs::metadata(&dot_git).map_err(fs_error)?.is_dir()
+            || FileIdentity::capture(&dot_git)? != self.dot_git_identity
+        {
+            return Err(policy_error("repository identity changed"));
+        }
+        Ok(())
+    }
+
+    async fn git_state(&self, target: &Target) -> Result<GitState, ToolError> {
+        let top = self
+            .git_output(vec!["rev-parse", "--show-toplevel"])
+            .await?;
+        let top = std::str::from_utf8(&top)
+            .map_err(|_| git_error("Git repository root response was not UTF-8"))?
+            .trim_end_matches(['\r', '\n']);
+        if !paths_equivalent(&fs::canonicalize(top).map_err(fs_error)?, &self.root) {
+            return Err(git_error("configured root is not Git's worktree root"));
+        }
+        let bare = self
+            .git_output(vec!["rev-parse", "--is-bare-repository"])
+            .await?;
+        if bare.as_slice() != b"false\n" && bare.as_slice() != b"false\r\n" {
+            return Err(git_error("bare repositories are unsupported"));
+        }
+        let head = self
+            .git_output(vec!["rev-parse", "--verify", "HEAD"])
+            .await?;
+        let head_entry = self
+            .git_output(vec![
+                "--literal-pathspecs",
+                "ls-tree",
+                "-z",
+                "HEAD",
+                "--",
+                &target.git_path,
+            ])
+            .await?;
+        let index_entry = self
+            .git_output(vec![
+                "--literal-pathspecs",
+                "ls-files",
+                "-s",
+                "-z",
+                "--",
+                &target.git_path,
+            ])
+            .await?;
+        let tag = self
+            .git_output(vec![
+                "--literal-pathspecs",
+                "ls-files",
+                "-v",
+                "-z",
+                "--",
+                &target.git_path,
+            ])
+            .await?;
+        let refs = self
+            .git_output(vec![
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00",
+            ])
+            .await?;
+        let head_entry = parse_head_entry(&head_entry, target.git_path.as_bytes())?;
+        let index_entry = parse_index_entry(&index_entry, target.git_path.as_bytes())?;
+        if head_entry != index_entry {
+            return Err(git_error("target has staged or index divergence"));
+        }
+        require_normal_index_tag(&tag, target.git_path.as_bytes())?;
+        Ok(GitState {
+            head,
+            head_entry,
+            refs,
+        })
+    }
+
+    async fn git_output(&self, arguments: Vec<&str>) -> Result<Vec<u8>, ToolError> {
+        self.revalidate_git()?;
+        let policy = HostExecutionPolicy::new(
+            &self.git,
+            HostArgumentPolicy::Exact(arguments.into_iter().map(str::to_owned).collect()),
+            &self.root,
+            ".",
+        )?
+        .with_environment(git_environment())?;
+        let output = policy.execute_process(&ToolInput(json!({}))).await?;
+        if output.exit_code != Some(0) || output.timed_out || output.overflow.is_some() {
+            return Err(git_error(
+                "bounded Git state observation did not complete successfully",
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    fn revalidate_git(&self) -> Result<(), ToolError> {
+        let current = canonical_git_executable(&self.git)?;
+        if !paths_equivalent(&current, &self.git)
+            || FileIdentity::capture(&current)? != self.git_identity
+        {
+            return Err(policy_error("configured Git executable identity changed"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PatchLimits {
+    max_serialized_request_bytes: usize,
+    max_path_bytes: usize,
+    max_text_bytes: usize,
+    max_file_bytes: usize,
+}
+
+impl Default for PatchLimits {
+    fn default() -> Self {
+        Self {
+            max_serialized_request_bytes: MAX_SERIALIZED_REQUEST_BYTES,
+            max_path_bytes: MAX_PATH_BYTES,
+            max_text_bytes: MAX_TEXT_BYTES,
+            max_file_bytes: MAX_FILE_BYTES,
+        }
+    }
+}
+
+struct PatchRequest {
+    path: PathBuf,
+    expected_sha256: String,
+    expected_length: usize,
+    expected_old_text: String,
+    replacement_text: String,
+}
+
+impl PatchRequest {
+    fn parse(input: &ToolInput, limits: PatchLimits) -> Result<Self, ToolError> {
+        let serialized = serde_json::to_vec(&input.0).map_err(|error| ToolError::InvalidInput {
+            message: format!("input could not be serialized: {error}"),
+        })?;
+        if serialized.len() > limits.max_serialized_request_bytes {
+            return Err(ToolError::InvalidInput {
+                message: "input exceeds the repository patch request limit".to_owned(),
+            });
+        }
+        let object = input.0.as_object().ok_or_else(|| ToolError::InvalidInput {
+            message: "input must be an object".to_owned(),
+        })?;
+        reject_unknown_fields(
+            object,
+            [
+                "path",
+                "expected_file_sha256",
+                "expected_file_byte_length",
+                "expected_old_text",
+                "replacement_text",
+            ],
+        )?;
+        let path = required_string(object, "path")?;
+        let expected_sha256 = required_string(object, "expected_file_sha256")?;
+        let expected_old_text = required_string(object, "expected_old_text")?;
+        let replacement_text = required_string(object, "replacement_text")?;
+        let expected_length = object
+            .get("expected_file_byte_length")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| ToolError::InvalidInput {
+                message: "`expected_file_byte_length` must be a nonnegative integer".to_owned(),
+            })?;
+        if expected_length > limits.max_file_bytes {
+            return Err(ToolError::InvalidInput {
+                message: "`expected_file_byte_length` exceeds the file size limit".to_owned(),
+            });
+        }
+        let path = parse_logical_path(path, limits.max_path_bytes)?;
+        if !is_lower_sha256(expected_sha256) {
+            return Err(ToolError::InvalidInput {
+                message: "`expected_file_sha256` must be 64 lowercase hexadecimal characters"
+                    .to_owned(),
+            });
+        }
+        for (name, text, empty_allowed) in [
+            ("expected_old_text", expected_old_text, false),
+            ("replacement_text", replacement_text, true),
+        ] {
+            if text.len() > limits.max_text_bytes
+                || text.contains('\0')
+                || (!empty_allowed && text.is_empty())
+            {
+                return Err(ToolError::InvalidInput {
+                    message: format!("`{name}` exceeds limits or contains unsupported content"),
+                });
+            }
+            if text.contains('\u{feff}') {
+                return Err(ToolError::InvalidInput {
+                    message: format!("`{name}` must not add or remove a UTF-8 BOM"),
+                });
+            }
+        }
+        Ok(Self {
+            path,
+            expected_sha256: expected_sha256.to_owned(),
+            expected_length,
+            expected_old_text: expected_old_text.to_owned(),
+            replacement_text: replacement_text.to_owned(),
+        })
+    }
+}
+
+struct Target {
+    path: PathBuf,
+    parent: PathBuf,
+    parent_identity: FileIdentity,
+    identity: FileIdentity,
+    git_path: String,
+}
+
+impl Target {
+    fn capture(root: &Path, relative: &Path) -> Result<Self, ToolError> {
+        let path = validate_existing_target(root, relative)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| policy_error("target has no parent"))?
+            .to_path_buf();
+        let identity = FileIdentity::capture(&path)?;
+        if identity.link_count > 1 {
+            return Err(policy_error("hard-linked targets are unsupported"));
+        }
+        Ok(Self {
+            git_path: relative.to_string_lossy().replace('\\', "/"),
+            parent_identity: FileIdentity::capture(&parent)?,
+            parent,
+            identity,
+            path,
+        })
+    }
+
+    fn revalidate(&self, root: &Path) -> Result<(), ToolError> {
+        let current = validate_existing_target(root, Path::new(&self.git_path))?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| policy_error("target has no parent"))?;
+        let identity = FileIdentity::capture(&current)?;
+        if !paths_equivalent(&current, &self.path)
+            || FileIdentity::capture(parent)? != self.parent_identity
+            || identity != self.identity
+            || identity.link_count > 1
+        {
+            return Err(policy_error("target identity changed"));
+        }
+        Ok(())
+    }
+
+    fn verify_replaced(root: &Path, previous: &Self) -> Result<(), ToolError> {
+        let current = validate_existing_target(root, Path::new(&previous.git_path))?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| policy_error("target has no parent"))?;
+        let identity = FileIdentity::capture(&current)?;
+        if !paths_equivalent(&current, &previous.path)
+            || FileIdentity::capture(parent)? != previous.parent_identity
+            || identity.link_count > 1
+        {
+            return Err(policy_error("target path safety changed after replacement"));
+        }
+        Ok(())
+    }
+}
+
+struct Preimage {
+    target: Target,
+    git: GitState,
+    bytes: Vec<u8>,
+}
+
+struct Postimage {
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitState {
+    head: Vec<u8>,
+    head_entry: GitEntry,
+    refs: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitEntry {
+    mode: Vec<u8>,
+    object: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum RefusalReason {
+    Path(ToolError),
+    Repository(ToolError),
+    Precondition(&'static str),
+    Temporary(String),
+    TemporaryCleanup(String),
+    PostObservation(&'static str),
+}
+
+impl std::fmt::Display for RefusalReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(error) | Self::Repository(error) => error.fmt(formatter),
+            Self::Precondition(message) | Self::PostObservation(message) => {
+                formatter.write_str(message)
+            }
+            Self::Temporary(message) | Self::TemporaryCleanup(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+enum MutationOutcome {
+    Refused {
+        reason: RefusalReason,
+    },
+    Success {
+        evidence: MutationEvidence,
+    },
+    KnownReplacementFailure {
+        evidence: MutationEvidence,
+    },
+    Uncertain {
+        evidence: MutationEvidence,
+        reason: RefusalReason,
+    },
+}
+
+impl MutationOutcome {
+    fn into_tool_output(self) -> ToolOutput {
+        let (status, changed, uncertain, is_error, _evidence, reason) = match self {
+            Self::Refused { reason } => (
+                "precondition_failed",
+                false,
+                false,
+                true,
+                None,
+                redacted_refusal_reason(&reason),
+            ),
+            Self::Success { evidence } => ("ok", true, false, false, Some(evidence), "none"),
+            Self::KnownReplacementFailure { evidence } => (
+                "replacement_failed_known",
+                false,
+                false,
+                true,
+                Some(evidence),
+                "replacement",
+            ),
+            Self::Uncertain { evidence, reason } => (
+                "uncertain",
+                false,
+                true,
+                true,
+                Some(evidence),
+                redacted_refusal_reason(&reason),
+            ),
+        };
+        ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": status,
+                "changed": changed,
+                "uncertain": uncertain,
+                "reason": reason,
+            }))],
+            is_error,
+        }
+    }
+}
+
+/// Private audit evidence: only identities, hashes, sizes, and outcome class.
+#[allow(dead_code)]
+struct MutationEvidence {
+    target_identity: FileIdentity,
+    preimage_sha256: String,
+    preimage_length: usize,
+    postimage_sha256: String,
+    postimage_length: usize,
+    result: MutationResultClass,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum MutationResultClass {
+    Success,
+    KnownReplacementFailure,
+    Uncertain,
+}
+
+impl MutationEvidence {
+    fn from_images(pre: &Preimage, post: &Postimage, result: MutationResultClass) -> Self {
+        Self {
+            target_identity: pre.target.identity.clone(),
+            preimage_sha256: sha256_hex(&pre.bytes),
+            preimage_length: pre.bytes.len(),
+            postimage_sha256: sha256_hex(&post.bytes),
+            postimage_length: post.bytes.len(),
+            result,
+        }
+    }
+
+    fn empty(result: MutationResultClass) -> Self {
+        Self {
+            target_identity: FileIdentity::empty(),
+            preimage_sha256: String::new(),
+            preimage_length: 0,
+            postimage_sha256: String::new(),
+            postimage_length: 0,
+            result,
+        }
+    }
+}
+
+fn build_postimage(
+    pre: &Preimage,
+    request: &PatchRequest,
+    limits: PatchLimits,
+) -> Result<Postimage, RefusalReason> {
+    let text = std::str::from_utf8(&pre.bytes)
+        .map_err(|_| RefusalReason::Precondition("target is not strict UTF-8"))?;
+    let (bom, body) = if let Some(body) = text.strip_prefix('\u{feff}') {
+        (BOM, body)
+    } else {
+        (&[][..], text)
+    };
+    let matches = body
+        .match_indices(&request.expected_old_text)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Err(RefusalReason::Precondition("expected old text is missing"));
+    }
+    if matches.len() != 1 {
+        return Err(RefusalReason::Precondition(
+            "expected old text occurs more than once",
+        ));
+    }
+    if request.expected_old_text == request.replacement_text {
+        return Err(RefusalReason::Precondition(
+            "replacement is a verified no-op",
+        ));
+    }
+    let (offset, matched) = matches[0];
+    let mut body_postimage = String::with_capacity(
+        body.len()
+            .saturating_sub(matched.len())
+            .saturating_add(request.replacement_text.len()),
+    );
+    body_postimage.push_str(&body[..offset]);
+    body_postimage.push_str(&request.replacement_text);
+    body_postimage.push_str(&body[offset + matched.len()..]);
+    let length = bom.len().saturating_add(body_postimage.len());
+    if length > limits.max_file_bytes {
+        return Err(RefusalReason::Precondition(
+            "resulting postimage exceeds the file size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(length);
+    bytes.extend_from_slice(bom);
+    bytes.extend_from_slice(body_postimage.as_bytes());
+    Ok(Postimage { bytes })
+}
+
+fn validate_preconditions(
+    bytes: &[u8],
+    request: &PatchRequest,
+    limits: PatchLimits,
+) -> Result<(), &'static str> {
+    if bytes.len() > limits.max_file_bytes {
+        return Err("target exceeds the file size limit");
+    }
+    if bytes.contains(&0) {
+        return Err("target contains NUL and is unsupported");
+    }
+    if bytes.len() != request.expected_length {
+        return Err("target byte length does not match the request precondition");
+    }
+    if sha256_hex(bytes) != request.expected_sha256 {
+        return Err("target SHA-256 does not match the request precondition");
+    }
+    if std::str::from_utf8(bytes).is_err() {
+        return Err("target is not strict UTF-8");
+    }
+    Ok(())
+}
+
+fn parse_logical_path(value: &str, limit: usize) -> Result<PathBuf, ToolError> {
+    if value.is_empty()
+        || value.len() > limit
+        || value.contains('\0')
+        || value.contains('\\')
+        || value.contains(':')
+        || value.starts_with('/')
+        || value.starts_with("//")
+        || Path::new(value).is_absolute()
+    {
+        return Err(ToolError::InvalidInput {
+            message: "`path` must be a bounded logical relative path with slash separators"
+                .to_owned(),
+        });
+    }
+    for component in value.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.eq_ignore_ascii_case(".git")
+        {
+            return Err(ToolError::InvalidInput {
+                message: "`path` contains an unsupported component".to_owned(),
+            });
+        }
+    }
+    let path = PathBuf::from(value);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ToolError::InvalidInput {
+            message: "`path` must contain only normal components".to_owned(),
+        });
+    }
+    Ok(path)
+}
+
+fn validate_existing_target(root: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
+    validate_directory_path(root, root, "repository root")?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(policy_error("target contains a non-normal path component"));
+        };
+        current.push(component);
+        reject_link_or_reparse(&current, "target path component")?;
+    }
+    let canonical = fs::canonicalize(&current).map_err(fs_error)?;
+    if !is_beneath(&canonical, root) || !paths_equivalent(&canonical, &current) {
+        return Err(policy_error(
+            "target path aliases or escapes the repository root",
+        ));
+    }
+    let metadata = fs::metadata(&canonical).map_err(fs_error)?;
+    if !metadata.is_file() {
+        return Err(policy_error("target must be an existing regular file"));
+    }
+    reject_unsupported_file_attributes(&metadata)?;
+    Ok(canonical)
+}
+
+fn validate_directory_path(root: &Path, directory: &Path, label: &str) -> Result<(), ToolError> {
+    if !is_beneath(directory, root) {
+        return Err(policy_error(format!("{label} escapes the repository root")));
+    }
+    reject_link_or_reparse(directory, label)?;
+    if !fs::metadata(directory).map_err(fs_error)?.is_dir() {
+        return Err(policy_error(format!("{label} must be a directory")));
+    }
+    Ok(())
+}
+
+fn temporary_path(parent: &Path) -> PathBuf {
+    let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".rah-repo-patch-{}-{id}.tmp", std::process::id()))
+}
+
+fn validate_temporary(
+    path: &Path,
+    expected: &[u8],
+    limits: PatchLimits,
+) -> Result<(), RefusalReason> {
+    reject_link_or_reparse(path, "temporary replacement file")
+        .map_err(|error| RefusalReason::Temporary(error.to_string()))?;
+    let bytes = read_bounded(path, limits.max_file_bytes)
+        .map_err(|error| RefusalReason::Temporary(error.to_string()))?;
+    if bytes != expected {
+        return Err(RefusalReason::Temporary(
+            "temporary postimage verification failed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn remove_temporary(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, std::io::Error> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > u64::try_from(max).unwrap_or(u64::MAX) {
+        return Err(std::io::Error::other("target exceeds the file size limit"));
+    }
+    let bytes = fs::read(path)?;
+    if bytes.len() > max {
+        return Err(std::io::Error::other("target exceeds the file size limit"));
+    }
+    Ok(bytes)
+}
+
+fn canonical_git_executable(path: &Path) -> Result<PathBuf, ToolError> {
+    if !path.is_absolute() {
+        return Err(policy_error(
+            "Git executable must be an absolute host-selected path",
+        ));
+    }
+    reject_link_or_reparse(path, "Git executable")?;
+    let canonical = fs::canonicalize(path).map_err(fs_error)?;
+    if !fs::metadata(&canonical).map_err(fs_error)?.is_file() {
+        return Err(policy_error("Git executable must be a regular file"));
+    }
+    Ok(canonical)
+}
+
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {
+    let canonical = fs::canonicalize(path).map_err(fs_error)?;
+    if !canonical.is_dir() {
+        return Err(policy_error(format!(
+            "{label} must be an existing directory"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn reject_reparse_ancestry(path: &Path, label: &str) -> Result<(), ToolError> {
+    for ancestor in path.ancestors() {
+        if ancestor.exists() {
+            reject_link_or_reparse(ancestor, label)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ToolError> {
+    let metadata = fs::symlink_metadata(path).map_err(fs_error)?;
+    if metadata.file_type().is_symlink() {
+        return Err(policy_error(format!("{label} must not be a symbolic link")));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(policy_error(format!("{label} must not be a reparse point")));
+        }
+    }
+    Ok(())
+}
+
+fn reject_unsupported_file_attributes(metadata: &fs::Metadata) -> Result<(), ToolError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+        const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
+        const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
+        if metadata.file_attributes()
+            & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_ENCRYPTED)
+            != 0
+        {
+            return Err(policy_error(
+                "target has unsupported Windows file attributes",
+            ));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = metadata;
+    Ok(())
+}
+
+fn replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        windows_replace_once(temporary, target)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, target)
+    }
+}
+
+#[cfg(windows)]
+fn windows_replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // MoveFileExW is the one native commit attempt. It is deliberately never retried.
+    let result = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_head_entry(bytes: &[u8], expected_path: &[u8]) -> Result<GitEntry, ToolError> {
+    let records = records(bytes)?;
+    let [record] = records.as_slice() else {
+        return Err(git_error("target must have exactly one regular HEAD entry"));
+    };
+    let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+        return Err(git_error("Git HEAD entry was malformed"));
+    };
+    if &record[tab + 1..] != expected_path {
+        return Err(git_error("Git HEAD entry selected an unexpected target"));
+    }
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, kind, object] = fields.as_slice() else {
+        return Err(git_error("Git HEAD entry was malformed"));
+    };
+    if *kind != b"blob" || !matches!(*mode, b"100644" | b"100755") {
+        return Err(git_error("target must be a regular HEAD tree entry"));
+    }
+    Ok(GitEntry {
+        mode: mode.to_vec(),
+        object: object.to_vec(),
+    })
+}
+
+fn parse_index_entry(bytes: &[u8], expected_path: &[u8]) -> Result<GitEntry, ToolError> {
+    let records = records(bytes)?;
+    let [record] = records.as_slice() else {
+        return Err(git_error(
+            "target must have exactly one stage-0 index entry",
+        ));
+    };
+    let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+        return Err(git_error("Git index entry was malformed"));
+    };
+    if &record[tab + 1..] != expected_path {
+        return Err(git_error("Git index entry selected an unexpected target"));
+    }
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, object, stage] = fields.as_slice() else {
+        return Err(git_error("Git index entry was malformed"));
+    };
+    if *stage != b"0" || !matches!(*mode, b"100644" | b"100755") {
+        return Err(git_error("target must be one regular stage-0 index entry"));
+    }
+    Ok(GitEntry {
+        mode: mode.to_vec(),
+        object: object.to_vec(),
+    })
+}
+
+fn require_normal_index_tag(bytes: &[u8], expected_path: &[u8]) -> Result<(), ToolError> {
+    let records = records(bytes)?;
+    let [record] = records.as_slice() else {
+        return Err(git_error("Git index tag observation was malformed"));
+    };
+    if record.first() != Some(&b'H')
+        || record.get(1) != Some(&b' ')
+        || &record[2..] != expected_path
+    {
+        return Err(git_error("target has unsupported sparse or index flags"));
+    }
+    Ok(())
+}
+
+fn records(bytes: &[u8]) -> Result<Vec<&[u8]>, ToolError> {
+    if !bytes.ends_with(&[0]) {
+        return Err(git_error("Git NUL-delimited observation was malformed"));
+    }
+    Ok(bytes[..bytes.len() - 1].split(|byte| *byte == 0).collect())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut text = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn required_string<'a>(object: &'a Map<String, Value>, name: &str) -> Result<&'a str, ToolError> {
+    object
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidInput {
+            message: format!("`{name}` must be a string"),
+        })
+}
+
+fn reject_unknown_fields<const N: usize>(
+    object: &Map<String, Value>,
+    allowed: [&str; N],
+) -> Result<(), ToolError> {
+    if let Some(name) = object.keys().find(|name| !allowed.contains(&name.as_str())) {
+        return Err(ToolError::InvalidInput {
+            message: format!("unknown field `{name}`"),
+        });
+    }
+    Ok(())
+}
+
+fn redacted_refusal_reason(reason: &RefusalReason) -> &'static str {
+    match reason {
+        RefusalReason::Path(_) => "path_or_filesystem",
+        RefusalReason::Repository(_) => "repository_state",
+        RefusalReason::Temporary(_) | RefusalReason::TemporaryCleanup(_) => "temporary",
+        RefusalReason::PostObservation(_) => "replacement",
+        RefusalReason::Precondition(message) => redacted_precondition_reason(message),
+    }
+}
+
+fn redacted_precondition_reason(reason: &str) -> &'static str {
+    if reason.contains("SHA-256")
+        || reason.contains("byte length")
+        || reason.contains("expected old text")
+        || reason.contains("UTF-8")
+    {
+        "precondition"
+    } else if reason.contains("replacement") {
+        "replacement"
+    } else if reason.contains("temporary") {
+        "temporary"
+    } else if reason.contains("Git") || reason.contains("repository") || reason.contains("index") {
+        "repository_state"
+    } else {
+        "path_or_filesystem"
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    link_count: u32,
+}
+
+impl FileIdentity {
+    fn capture(path: &Path) -> Result<Self, ToolError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(path).map_err(fs_error)?;
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                link_count: u32::try_from(metadata.nlink()).unwrap_or(u32::MAX),
+            })
+        }
+        #[cfg(windows)]
+        {
+            capture_windows_file_identity(path)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Ok(Self { link_count: 1 })
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            #[cfg(unix)]
+            device: 0,
+            #[cfg(unix)]
+            inode: 0,
+            #[cfg(windows)]
+            volume_serial: 0,
+            #[cfg(windows)]
+            file_index: 0,
+            link_count: 0,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn capture_windows_file_identity(path: &Path) -> Result<FileIdentity, ToolError> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        OPEN_EXISTING,
+    };
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(fs_error(std::io::Error::last_os_error()));
+    }
+    let _file = unsafe { File::from_raw_handle(handle) };
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    let result = unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) };
+    if result == 0 {
+        return Err(fs_error(std::io::Error::last_os_error()));
+    }
+    let information = unsafe { information.assume_init() };
+    Ok(FileIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+        link_count: information.nNumberOfLinks,
+    })
+}
+
+fn fs_error(error: impl std::fmt::Display) -> ToolError {
+    policy_error(error.to_string())
+}
+
+fn policy_error(message: impl Into<String>) -> ToolError {
+    ToolError::Execution {
+        message: format!(
+            "repository worktree mutation policy rejected capability: {}",
+            message.into()
+        ),
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestHook {
+    before_revalidation: std::sync::Mutex<Option<Vec<u8>>>,
+    delete_temporary_before_replace: std::sync::atomic::AtomicBool,
+    replacement_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestHook {
+    fn run_before_revalidation(&self, path: &Path) {
+        if let Some(bytes) = self
+            .before_revalidation
+            .lock()
+            .expect("test hook mutex poisoned")
+            .take()
+        {
+            fs::write(path, bytes).expect("test hook should mutate target");
+        }
+    }
+
+    fn before_replace(&self, temporary: &Path) {
+        if self
+            .delete_temporary_before_replace
+            .swap(false, Ordering::Relaxed)
+        {
+            fs::remove_file(temporary).expect("test hook should remove temporary replacement");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+    };
+
+    use rah_protocol::ToolInput;
+    use serde_json::{Value, json};
+
+    use super::{
+        MAX_FILE_BYTES, PatchLimits, PatchRequest, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
+        RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, sha256_hex,
+    };
+    use crate::{Tool, ToolContext};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let id = NEXT_TEST_DIRECTORY.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "rah-repo-patch-{label}-{}-{id}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path).expect("test directory should be created");
+            Self(path)
+        }
+
+        fn repository(&self) -> PathBuf {
+            let root = self.0.join("repository");
+            fs::create_dir(&root).expect("repository directory should be created");
+            git(&root, &["init", "--quiet"]);
+            git(&root, &["config", "user.name", "RAH Test"]);
+            git(&root, &["config", "user.email", "rah@example.invalid"]);
+            fs::write(root.join("target.txt"), b"alpha\nold\nomega\n")
+                .expect("target should be written");
+            fs::write(root.join("other.txt"), b"other\n").expect("other should be written");
+            git(&root, &["add", "--", "target.txt", "other.txt"]);
+            git(&root, &["commit", "--quiet", "-m", "initial"]);
+            root
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replaces_one_clean_tracked_utf8_file_and_preserves_the_index() {
+        let base = TestDirectory::new("success");
+        let root = base.repository();
+        let before_index = git_output(&root, &["ls-files", "-s", "-z"]);
+        let other_before = fs::read(root.join("other.txt")).unwrap();
+        let input = request("target.txt", b"alpha\nold\nomega\n", "old", "new");
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+
+        let output = run(&tool, input).await;
+
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(content(&output)["changed"], true);
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nnew\nomega\n"
+        );
+        assert_eq!(fs::read(root.join("other.txt")).unwrap(), other_before);
+        assert_eq!(git_output(&root, &["ls-files", "-s", "-z"]), before_index);
+        assert_eq!(
+            tool.definition().name.as_str(),
+            REPOSITORY_WORKTREE_PATCH_TOOL_NAME
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserves_one_leading_bom_and_crlf_without_normalization() {
+        let base = TestDirectory::new("bom-crlf");
+        let root = base.repository();
+        let bytes = b"\xef\xbb\xbfalpha\r\nold\r\nomega\r\n";
+        replace_and_commit(&root, "target.txt", bytes);
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+
+        let output = run(&tool, request("target.txt", bytes, "old", "new")).await;
+
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"\xef\xbb\xbfalpha\r\nnew\r\nomega\r\n"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_wrong_digest_length_missing_or_duplicate_text_without_writing() {
+        let base = TestDirectory::new("preconditions");
+        let root = base.repository();
+        let original = fs::read(root.join("target.txt")).unwrap();
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let mut wrong_hash = request("target.txt", &original, "old", "new");
+        wrong_hash["expected_file_sha256"] = json!("0".repeat(64));
+        let mut wrong_length = request("target.txt", &original, "old", "new");
+        wrong_length["expected_file_byte_length"] = json!(original.len() + 1);
+        let missing = request("target.txt", &original, "absent", "new");
+        for input in [wrong_hash, wrong_length, missing] {
+            let output = run(&tool, input).await;
+            assert_eq!(content(&output)["status"], "precondition_failed");
+        }
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), original);
+
+        let duplicate_bytes = b"old\nold\n";
+        replace_and_commit(&root, "target.txt", duplicate_bytes);
+        let duplicate = request("target.txt", duplicate_bytes, "old", "new");
+        let output = run(&tool, duplicate).await;
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), duplicate_bytes);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_malformed_utf8_and_oversized_postimage() {
+        let base = TestDirectory::new("encoding-size");
+        let root = base.repository();
+        let invalid = b"old\xff";
+        replace_and_commit(&root, "target.txt", invalid);
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let malformed = run(&tool, request("target.txt", invalid, "old", "new")).await;
+        assert_eq!(content(&malformed)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), invalid);
+
+        let large = vec![b'a'; MAX_FILE_BYTES - 1];
+        replace_and_commit(&root, "target.txt", &large);
+        let oversized = run(&tool, request("target.txt", &large, "a", "bbbb")).await;
+        assert_eq!(content(&oversized)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), large);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_untracked_staged_and_non_stage_zero_targets() {
+        let base = TestDirectory::new("git-state");
+        let root = base.repository();
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+
+        let untracked = b"old\n";
+        fs::write(root.join("untracked.txt"), untracked).unwrap();
+        let output = run(&tool, request("untracked.txt", untracked, "old", "new")).await;
+        assert_eq!(content(&output)["status"], "precondition_failed");
+
+        let staged = b"alpha\nstaged\nomega\n";
+        fs::write(root.join("target.txt"), staged).unwrap();
+        git(&root, &["add", "--", "target.txt"]);
+        let output = run(&tool, request("target.txt", staged, "staged", "new")).await;
+        assert_eq!(content(&output)["reason"], "repository_state");
+
+        git(&root, &["reset", "--quiet", "HEAD", "--", "target.txt"]);
+        fs::write(root.join("target.txt"), b"alpha\nold\nomega\n").unwrap();
+        let object = git_output(&root, &["rev-parse", "HEAD:target.txt"]);
+        let object = String::from_utf8(object).unwrap().trim().to_owned();
+        git_with_input(
+            &root,
+            &["update-index", "--index-info"],
+            format!("100644 {object} 1\ttarget.txt\n").as_bytes(),
+        );
+        let current = fs::read(root.join("target.txt")).unwrap();
+        let output = run(&tool, request("target.txt", &current, "old", "new")).await;
+        assert_eq!(content(&output)["reason"], "repository_state");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_directory_outside_and_alias_paths() {
+        let base = TestDirectory::new("paths");
+        let root = base.repository();
+        fs::create_dir(root.join("directory")).unwrap();
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let directory = request("directory", b"", "old", "new");
+        let output = run(&tool, directory).await;
+        assert_eq!(content(&output)["reason"], "path_or_filesystem");
+
+        for path in [
+            root.join("target.txt").to_string_lossy().into_owned(),
+            "../target.txt".to_owned(),
+            ".git/config".to_owned(),
+            "target.txt:stream".to_owned(),
+            "dir//target.txt".to_owned(),
+            "./target.txt".to_owned(),
+            r"\\?\C:\target.txt".to_owned(),
+            r"\\server\share\target.txt".to_owned(),
+        ] {
+            let error = tool
+                .execute(
+                    ToolInput(request_value(&path, b"old", "old", "new")),
+                    ToolContext::default(),
+                )
+                .await
+                .expect_err("unsafe logical paths must be rejected before mutation");
+            assert!(error.to_string().contains("path"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_target_between_validation_phases_fails_closed_without_attempting_replacement() {
+        let base = TestDirectory::new("stale");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        *policy.test_hook.before_revalidation.lock().unwrap() = Some(b"external\n".to_vec());
+        let request = PatchRequest::parse(
+            &ToolInput(request("target.txt", b"alpha\nold\nomega\n", "old", "new")),
+            PatchLimits::default(),
+        )
+        .unwrap();
+
+        let output = policy.execute_once(request).await.into_tool_output();
+
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), b"external\n");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uses_one_replacement_attempt_and_cleans_temporary_after_known_failure() {
+        let base = TestDirectory::new("one-attempt");
+        let root = base.repository();
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy
+            .test_hook
+            .delete_temporary_before_replace
+            .store(true, AtomicOrdering::Relaxed);
+        let request = PatchRequest::parse(
+            &ToolInput(request("target.txt", b"alpha\nold\nomega\n", "old", "new")),
+            PatchLimits::default(),
+        )
+        .unwrap();
+
+        let output = policy.execute_once(request).await.into_tool_output();
+
+        assert_eq!(content(&output)["status"], "replacement_failed_known");
+        assert_eq!(
+            policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nold\nomega\n"
+        );
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rah-repo-patch-")
+        }));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_symbolic_link_targets_when_supported() {
+        let base = TestDirectory::new("symlink");
+        let root = base.repository();
+        fs::remove_file(root.join("target.txt")).unwrap();
+        if create_symlink(Path::new("other.txt"), &root.join("target.txt")).is_err() {
+            return;
+        }
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let output = run(&tool, request("target.txt", b"other\n", "other", "new")).await;
+        assert_eq!(content(&output)["reason"], "path_or_filesystem");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_hard_link_targets_when_the_platform_reports_them() {
+        let base = TestDirectory::new("hard-link");
+        let root = base.repository();
+        if fs::hard_link(root.join("target.txt"), root.join("target-alias.txt")).is_err() {
+            return;
+        }
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let bytes = fs::read(root.join("target.txt")).unwrap();
+        let output = run(&tool, request("target.txt", &bytes, "old", "new")).await;
+        assert_eq!(content(&output)["reason"], "path_or_filesystem");
+    }
+
+    fn request(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
+        request_value(path, bytes, old, replacement)
+    }
+
+    fn request_value(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
+        json!({
+            "path": path,
+            "expected_file_sha256": sha256_hex(bytes),
+            "expected_file_byte_length": bytes.len(),
+            "expected_old_text": old,
+            "replacement_text": replacement,
+        })
+    }
+
+    async fn run(tool: &RepositoryWorktreePatchTool, input: Value) -> crate::ToolOutput {
+        tool.execute(ToolInput(input), ToolContext::default())
+            .await
+            .expect("well-formed patch request should return a bounded outcome")
+    }
+
+    fn content(output: &crate::ToolOutput) -> &Value {
+        match output.content.as_slice() {
+            [rah_protocol::ToolContent::Json(value)] => value,
+            _ => panic!("outcome should contain one JSON object"),
+        }
+    }
+
+    fn replace_and_commit(root: &Path, path: &str, bytes: &[u8]) {
+        fs::write(root.join(path), bytes).unwrap();
+        git(root, &["add", "--", path]);
+        git(root, &["commit", "--quiet", "-m", "replace target"]);
+    }
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let output = Command::new(git_executable())
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .expect("Git command should start");
+        assert!(
+            output.status.success(),
+            "Git command {:?} failed: {}",
+            arguments,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output(root: &Path, arguments: &[&str]) -> Vec<u8> {
+        let output = Command::new(git_executable())
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .expect("Git command should start");
+        assert!(output.status.success());
+        output.stdout
+    }
+
+    fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) {
+        let mut child = Command::new(git_executable())
+            .args(arguments)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Git command should start");
+        use std::io::Write as _;
+        child.stdin.as_mut().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Git command {:?} failed: {}",
+            arguments,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_executable() -> PathBuf {
+        #[cfg(windows)]
+        let output = Command::new("where.exe").arg("git.exe").output().unwrap();
+        #[cfg(not(windows))]
+        let output = Command::new("which").arg("git").output().unwrap();
+        assert!(
+            output.status.success(),
+            "Git executable must be available for tests"
+        );
+        let path = String::from_utf8(output.stdout).unwrap();
+        fs::canonicalize(path.lines().next().unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
