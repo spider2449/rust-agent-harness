@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.4.0 — 2026-08-22
+
+Release preparation only. This entry does not claim that a Git tag or published
+release already exists.
+
+### Added
+
+- Trusted static capability profiles with strict versioned parsing, hardened
+  explicit source loading, symbolic host resources, built-in composition, and
+  redacted static/effective inventories.
+- `rah profile validate` for non-spawning static validation and `rah profile
+  validate-effective` for explicit effective provider composition.
+- Trusted-profile composition for hardened local stdio MCP and Process Plugin
+  providers, including exact expected tool/schema admission and explicit host
+  permission mapping.
+- ADR 0011, the trusted capability profile authority boundary.
+
+### Changed
+
+- Effective composition constructs a fresh `ToolRegistry`, preserves declared
+  permissions, fails closed on duplicate registration, and retains provider
+  lifecycle ownership. Staged providers are cleaned up after later failure.
+- The optional Codex adapter baseline is exactly `codex-cli 0.149.0`.
+
+### Security
+
+- Profiles configure existing host authority only; model requests and provider
+  metadata remain non-authoritative.
+- MCP and Process Plugin providers use native executable validation/revalidation,
+  isolated cwd, minimized environment, bounded stdio/lifecycle resources, and
+  atomic admission. These controls are not OS sandboxing or network isolation.
+
+### Verified
+
+- Deterministic mixed built-in + MCP + Process Plugin composition, permission
+  preservation, redacted inventory, duplicate fail-closed behavior, and staged
+  provider cleanup.
+- Opt-in trusted-profile Generic Codex Tool Bridge validation using exactly
+  `codex-cli 0.149.0`: one `plugin.test.echo` execution, Codex continuation,
+  and child/app-server cleanup.
+
+### Deferred
+
+- Profile discovery, reload, editing, or mutation; generic provider and
+  subprocess schemas; MCP Streamable HTTP/network MCP; PluginManager;
+  provider/plugin installation or download; automatic restart; and hot reload.
+- Generic shell/process authority, model-selected executable/argv/cwd/env,
+  destructive worktree authority, Git commit/ref/history mutation, network or
+  credential-bearing Git, OS sandboxing, network isolation, and rollback.
+
 ## v0.3.0 — 2026-08-22
 
 Current release being prepared. This entry does not claim that a Git tag or

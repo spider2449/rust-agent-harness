@@ -1,6 +1,6 @@
-# RAH v0.3 Security Model and v0.4 Trusted-Profile Boundary
+# RAH v0.4 Security Model
 
-## v0.3 baseline and v0.4 boundary
+## v0.4 boundary and preserved v0.3 capabilities
 
 The public/host Execute capabilities are `host.cargo.version`,
 `host.git.status`, `host.git.stage`, and `host.git.unstage`. They are
@@ -70,6 +70,12 @@ especially on Windows where the standard library exposes no portable opened-file
 identity comparison used here. Operators must therefore place profiles in an
 OS-managed location with appropriate ownership and ACL controls.
 
+The source policy rejects relative paths, lexical `.`/`..` aliases, links,
+junctions/reparse points, non-regular sources, and unsupported ambiguous path
+forms. On Windows it additionally rejects UNC, verbatim/device, and ADS forms.
+It does not prove exclusive ACL ownership, provide an OS trusted-store claim,
+or eliminate filesystem TOCTOU races.
+
 `ExternalToolIdentity` is an opaque RAH-owned key for one tool discovered from
 an external provider. `ExternalToolPermissionPolicy` maps those identities to
 host-selected RAH `PermissionLevel` values. It is default-deny: absence is not
@@ -94,6 +100,12 @@ any provider fails. The effective profile owns the live MCP and Process Plugin a
 tools cannot outlive their provider connection. Inventory shows only symbolic
 provider/tool identities and never executable paths, cwd, environment, stderr,
 or child diagnostics.
+
+`profile validate` is non-spawning static/source/schema/resource validation.
+`profile validate-effective` is explicit effective composition and may launch
+trusted configured provider processes for handshake, discovery, and admission.
+Neither operation discovers, edits, reloads, or grants a model authority to
+choose profiles or provider configuration.
 
 ## Built-in filesystem and subprocess tools
 

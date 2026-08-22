@@ -5,10 +5,13 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.3 baseline and v0.4 trusted-profile scope
+## v0.4 trusted capability profiles
 
-RAH keeps every tool on one RAH-owned execution path. v0.4 adds trusted-host
-static profile composition to that existing boundary; it does not add a new
+RAH v0.4 adds a trusted-host static capability profile that securely and
+atomically composes existing built-in capabilities and hardened local external
+Tool providers into a fresh `ToolRegistry`. It uses explicit permissions,
+symbolic host resources, static and effective validation, provider lifecycle
+ownership, and redacted authority inspection. It does not add a new generic
 authority class.
 
 ```text
@@ -49,12 +52,30 @@ composition boundary for already-approved built-in capabilities and external
 providers. It is not model authority and does not replace capability-specific
 permission, execution, workspace, or repository-mutation policies.
 
+The authority path is deliberately host-owned:
+
+```text
+trusted host
+ -> explicit trusted static profile
+ -> source validation
+ -> symbolic resource resolution
+ -> capability/provider-specific constructor and security policy
+ -> exact provider admission
+ -> fresh ToolRegistry
+ -> runtime/model-visible Tool definitions
+```
+
+Profiles configure existing authority. A model request remains non-authoritative.
+
 ## Generic Codex Tool Bridge
 
 Codex is an optional adapter, not RAH's architecture. `CodexRuntime` implements
 `AgentRuntime` and communicates with an exactly version-pinned `codex app-server`
 subprocess over newline-delimited stdio JSON-RPC. It does not depend on Codex Rust
 crates.
+
+The sole supported Codex baseline is exactly `codex-cli 0.149.0`; RAH does not
+claim multi-version Codex compatibility.
 
 In explicitly enabled bridge mode, the Generic Codex Tool Bridge snapshots the
 host-supplied `ToolRegistry`, translates definitions to private Codex dynamic-tool
@@ -92,7 +113,7 @@ are rejected, and Codex shell/file/MCP tool items fail closed.
 Neither external adapter grants authority to its child process, and process
 supervision is not advertised as operating-system sandboxing.
 
-## v0.3 host capabilities and validation fixtures
+## Preserved v0.3 host capabilities and validation fixtures
 
 ### Public / host capabilities
 
@@ -112,9 +133,10 @@ Each accepts only `{}` and operates on one host-selected, tracked regular-file
 target. They modify only the Git index; they do not write worktree bytes, move
 refs, create commits, or use network Git.
 
-`fs.read`, the Generic Codex Tool Bridge, the MCP adapter, and the process
-plugin adapter remain verified v0.3 RAH components. They use the same
-RAH-owned `ToolRegistry` and permission boundary.
+`fs.read`, the Generic Codex Tool Bridge, the MCP Tool adapter, and the Process
+Plugin Tool adapter are preserved v0.3 components. They use the same RAH-owned
+`ToolRegistry` and permission boundary; v0.4 composes them but does not present
+them as new capabilities.
 
 ### Validation fixtures
 
@@ -128,7 +150,7 @@ production or public host capabilities:
 
 In particular, RAH v0.3 does **not** provide `host.fixture.echo`.
 
-## Run the deterministic demo
+## Run the deterministic demo and profile validation
 
 The CLI uses scripted model output and requires no model, credentials, network,
 or GPU:
@@ -145,16 +167,19 @@ cargo run -p rah-cli -- profile validate-effective C:\\trusted-host\\rah-profile
 The manifest-report command dispatches `fs.read` through `ToolRegistry`, an
 explicit host `Read` permission, and the workspace path policy.
 
-`profile validate` accepts one explicitly supplied absolute trusted-profile
-path. Before parsing, the host-side loader requires a bounded UTF-8 regular
-file and rejects links and Windows reparse points. On Windows it accepts only
-drive-rooted paths; UNC, verbatim/device paths, and ADS forms are rejected. It
-then validates the static profile and prints only its redacted static inventory.
-It does not launch external providers. `profile validate-effective` is the explicit
-spawning operation: it launches only MCP and Process Plugin executables named by the selected
-trusted profile, performs exact discovery/schema admission, and prints a
-redacted effective inventory. Neither command discovers profiles, selects one
-from environment or repository configuration, or enables live provider
+`profile validate` is non-spawning static/source/schema/resource validation. It
+accepts one explicitly supplied absolute trusted-profile path, then prints only
+its redacted static inventory. Before parsing, the loader requires a bounded
+UTF-8 regular file and rejects links and Windows reparse points. On Windows it
+accepts only drive-rooted paths; UNC, verbatim/device paths, ADS, and lexical
+aliases are rejected.
+
+`profile validate-effective` is explicit effective composition. It may launch
+the trusted MCP and Process Plugin executables named by the selected profile,
+performs handshake/discovery/exact schema admission, and prints a redacted
+effective inventory. It builds a fresh registry and publishes nothing on
+failure. Neither command discovers profiles, selects one from environment or
+repository configuration, reloads a profile, or enables model provider
 selection.
 
 ## Run opt-in live Codex validation
@@ -221,13 +246,17 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
-## v0.3 limitations and explicit deferrals
+## v0.4 limitations and explicit deferrals
 
-- The CLI exposes the deterministic demo path, not live provider selection.
+- The CLI exposes deterministic demos and explicit host-selected profile
+  validation, not provider/profile auto-discovery or model-facing profile APIs.
 - The Codex dynamic-tool protocol remains experimental and exactly version-pinned.
-- MCP support is the pinned stdio prototype; Streamable HTTP is not implemented.
-- Process plugins are a bounded stdio prototype, not a general plugin platform or
-  OS sandbox.
+- MCP support is local pinned stdio only; Streamable HTTP and network MCP are
+  not implemented.
+- Process plugins are a bounded stdio protocol, not a `PluginManager`, generic
+  plugin platform, installer/download mechanism, automatic restart, or hot reload.
+- Profiles have no editing/mutation, discovery, auto-discovery, or hot-reload
+  capability; provider schemas and generic subprocess schemas are not exposed.
 - Arbitrary `shell.exec`, arbitrary `process.exec`, and model-selected
   executable, argv, cwd, environment, or timeout are not live-model authority.
 - Worktree restore, arbitrary file mutation, Git commit, refs/history mutation,
@@ -237,9 +266,9 @@ Codex executable, network access, credentials, a paid API, or a real model.
 - Process supervision is not OS sandboxing; RAH makes no network-isolation or
   rollback guarantee. Timeout/cancellation may leave uncertain effects, which
   are never automatically replayed.
-- Interactive approvals, a `PluginManager`, automatic plugin restart, SQLite
-  persistence, TUI/web UI, multi-agent orchestration, RAG, and long-term memory
-  remain out of scope.
+- OS sandboxing, network isolation, and rollback guarantees are not provided.
+- Interactive approvals, SQLite persistence, TUI/web UI, multi-agent
+  orchestration, RAG, and long-term memory remain out of scope.
 
 See [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), and the
 accepted [ADRs](docs/adr/).

@@ -1,4 +1,4 @@
-# RAH v0.3 Architecture
+# RAH v0.4 Architecture
 
 ## Ownership boundaries
 
@@ -8,7 +8,7 @@ tool descriptions, calls, and outputs. Provider, runtime, MCP, and process-plugi
 adapters translate only at their private edges.
 
 `AgentRuntime`, `ModelBackend`, `Tool`, `ToolRegistry`, `SessionStore`, and
-`Sandbox` remain independent extension points. No v0.3 work changes their
+`Sandbox` remain independent extension points. No v0.4 work changes their
 architecture-defining public contracts.
 
 ADR 0011 establishes the trusted host capability profile as the authority-
@@ -16,7 +16,38 @@ composition boundary for existing built-in capabilities and admitted external
 providers. It does not change runtime, `Tool`, `ToolRegistry`, or
 capability-specific policy contracts.
 
-## v0.3 capability classification
+## v0.4 trusted capability profile
+
+ADR 0011 defines trusted profile source validation and the explicitly selected
+trusted static profile as a host-only authority-composition boundary. The profile
+selects existing constructors, symbolic resources, exact external-provider
+admission, and explicit permission mappings; it is neither an `AgentRuntime`
+nor a model-facing API.
+
+```text
+Trusted Host Capability Profile
+             |
+             v
+      effective composition
+             |
+             v
+         ToolRegistry
+       /      |       \
+ built-in    MCP     Plugin
+```
+
+Static validation parses and validates the source/profile/resources without
+launching a provider. Explicit effective composition resolves host-owned
+resources, launches configured providers where required, admits their exact
+declared tools/schemas, and returns a fresh registry only after complete
+success. The effective profile owns its provider adapters for the registry's
+usable lifetime.
+
+The runtime remains downstream of this boundary. `CodexRuntime` receives a
+host-supplied registry through its optional Generic Tool Bridge and cannot
+select providers or profile authority.
+
+## Preserved v0.3 capability classification
 
 ### Public / host capabilities
 
@@ -69,7 +100,8 @@ the opt-in examples and cross-boundary tests.
 
 ## Tool convergence
 
-Every tool source converges before runtime dispatch:
+Every tool source converges through the profile/composition boundary before
+runtime dispatch:
 
 ```text
 Built-in Tool -----------\
@@ -134,8 +166,9 @@ Trusted static profile composition is host-only. Its static pass parses closed
 symbolic MCP and Process Plugin declarations without launching a provider;
 explicit effective composition delegates construction and exact admission to
 their hardened adapters, then publishes a fresh `ToolRegistry` only when every
-provider has validated. The effective profile retains adapter ownership for as
-long as its tools are usable.
+provider has validated. Provider-qualified names and registry duplicate checks
+fail closed where names could otherwise collide. The effective profile retains
+adapter ownership for as long as its tools are usable.
 
 `rah-tools-plugin` owns RAH process-plugin protocol version `1`, identity and
 version validation, host-selected executable identity checks, exact expected
