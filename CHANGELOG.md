@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.5.0 — 2026-08-22
+
+Release preparation for the v0.5.0 repository-mutation milestone. Publication
+and tagging are intentionally not performed by this commit.
+
+### Added
+
+- `repo.patch`, a repository-aware capability that conditionally replaces one
+  exact literal text occurrence in one bounded existing, HEAD-tracked, unstaged
+  UTF-8 worktree file.
+- ADR 0012, accepted: a separate private, host-owned
+  `RepositoryWorktreeMutationPolicy` for worktree-content mutation. The existing
+  `PermissionLevel::Execute` is only an outer runtime gate, not the authority.
+- Whole-file SHA-256 and byte-length preconditions; exact single-match
+  replacement; bounded request, source-file, and postimage sizes; and strict
+  UTF-8 handling that preserves a leading BOM and CRLF/LF bytes exactly.
+- Repository, path, link/reparse-point, and hard-link protections; a
+  same-directory exclusive temporary complete postimage; one-attempt/no-replay
+  behavior; and known-failure versus uncertain-effect classification.
+- Trusted-profile composition of `repo.patch`, Generic Tool Bridge verification,
+  and a Windows live validation using exactly `codex-cli 0.149.0`. Restricted
+  Codex-owned filesystem, shell, process, MCP, and network-tool capabilities
+  remain disabled in that path.
+
+### Security
+
+- Worktree content mutation, index mutation, and Git history/ref mutation are
+  separately authorized state planes. `repo.patch` does not grant generic
+  filesystem write, generic shell/process, Git command, or network authority.
+- The policy accepts one request and one native replacement attempt only.
+  Successful results require post-observation; failures are reported as known
+  only when the preimage is proven intact. Uncertain outcomes are never replayed.
+
+### Verified
+
+- Deterministic repository-patch, trusted-profile composition, and Generic Tool
+  Bridge coverage; the opt-in live gate observed the one-request/one-attempt
+  path, preserved index/HEAD/refs and unrelated content, and cleaned its
+  temporary repository and app-server child.
+- Windows is the verified v0.5 release baseline. This release makes no Unix
+  live-validation claim.
+
+### Limitations
+
+- No file creation, deletion, rename/move, binary edits, multi-file
+  transactions, staged or untracked target mutation, or `restore-worktree`.
+- No Git history/ref mutation, network Git, automatic rollback, complete TOCTOU
+  elimination, or Unix live-validation claim.
+
 ## v0.4.0 — 2026-08-22
 
 Released 2026-08-22. Tag `v0.4.0` targets release commit `ebd6358`; CI passed
