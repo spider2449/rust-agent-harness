@@ -243,9 +243,11 @@ fn parse_raw(bytes: &[u8]) -> Result<Vec<RawEntry>, ToolError> {
         return Err(diff_error("raw output had a missing path"));
     }
     let mut entries = Vec::with_capacity(records.len() / 2);
-    for pair in records.chunks_exact(2) {
-        let header = pair[0];
-        let path = pair[1];
+    let mut records = records.into_iter();
+    while let Some(header) = records.next() {
+        let path = records
+            .next()
+            .ok_or_else(|| diff_error("raw output had a missing path"))?;
         if path.is_empty() || path.len() > MAX_PATH_BYTES {
             return Err(diff_error("raw path was malformed or exceeded its limit"));
         }
