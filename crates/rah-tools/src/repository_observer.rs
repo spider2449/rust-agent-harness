@@ -25,9 +25,11 @@ use crate::{
 
 const FILE_INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_STDOUT_LIMIT: usize = 96 * 1024;
 const OBSERVER_STDERR_LIMIT: usize = 8 * 1024;
 pub(crate) const STATUS_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const DIFF_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 /// The only command shapes currently authorized for repository observation.
 #[derive(Clone, Copy)]
@@ -37,6 +39,9 @@ pub(crate) enum ObserverCommand {
     HeadTree,
     FileInfoStatus,
     Status,
+    DiffRaw,
+    DiffNumstat,
+    DiffPatch,
 }
 
 /// One private, host-configured repository observer envelope.
@@ -47,6 +52,9 @@ pub(crate) struct RepositoryObserver {
     head_tree: HostExecutionPolicy,
     file_info_status: HostExecutionPolicy,
     status: HostExecutionPolicy,
+    diff_raw: HostExecutionPolicy,
+    diff_numstat: HostExecutionPolicy,
+    diff_patch: HostExecutionPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
@@ -143,6 +151,65 @@ impl RepositoryObserver {
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
                 combined_bytes: STATUS_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
             })?,
+            diff_raw: exact(vec![
+                "--no-pager".into(),
+                "diff".into(),
+                "--raw".into(),
+                "-z".into(),
+                "--no-abbrev".into(),
+                "--no-renames".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--ignore-submodules=all".into(),
+                "--submodule=short".into(),
+            ])?
+            .with_timeout(DIFF_TIMEOUT)?
+            .with_output_limits(OutputLimits {
+                stdout_bytes: DIFF_OUTPUT_LIMIT,
+                stderr_bytes: OBSERVER_STDERR_LIMIT,
+                combined_bytes: DIFF_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
+            })?,
+            diff_numstat: exact(vec![
+                "--no-pager".into(),
+                "diff".into(),
+                "--numstat".into(),
+                "-z".into(),
+                "--no-renames".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--ignore-submodules=all".into(),
+                "--submodule=short".into(),
+            ])?
+            .with_timeout(DIFF_TIMEOUT)?
+            .with_output_limits(OutputLimits {
+                stdout_bytes: DIFF_OUTPUT_LIMIT,
+                stderr_bytes: OBSERVER_STDERR_LIMIT,
+                combined_bytes: DIFF_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
+            })?,
+            diff_patch: exact(vec![
+                "--no-pager".into(),
+                "diff".into(),
+                "--patch".into(),
+                "--no-color".into(),
+                "--no-prefix".into(),
+                "--full-index".into(),
+                "--no-renames".into(),
+                "--no-relative".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--diff-algorithm=myers".into(),
+                "--no-indent-heuristic".into(),
+                "--inter-hunk-context=0".into(),
+                "--unified=3".into(),
+                "--ignore-submodules=all".into(),
+                "--submodule=short".into(),
+            ])?
+            .with_timeout(DIFF_TIMEOUT)?
+            .with_output_limits(OutputLimits {
+                stdout_bytes: DIFF_OUTPUT_LIMIT,
+                stderr_bytes: OBSERVER_STDERR_LIMIT,
+                combined_bytes: DIFF_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
+            })?,
             lease: crate::git_stage::repository_lease(&repository.root),
             repository,
         })
@@ -170,6 +237,9 @@ impl RepositoryObserver {
         self.revalidate()?;
         let timeout = match command {
             ObserverCommand::Status => STATUS_TIMEOUT,
+            ObserverCommand::DiffRaw
+            | ObserverCommand::DiffNumstat
+            | ObserverCommand::DiffPatch => DIFF_TIMEOUT,
             ObserverCommand::Index
             | ObserverCommand::Head
             | ObserverCommand::HeadTree
@@ -189,6 +259,9 @@ impl RepositoryObserver {
             ObserverCommand::HeadTree => &self.head_tree,
             ObserverCommand::FileInfoStatus => &self.file_info_status,
             ObserverCommand::Status => &self.status,
+            ObserverCommand::DiffRaw => &self.diff_raw,
+            ObserverCommand::DiffNumstat => &self.diff_numstat,
+            ObserverCommand::DiffPatch => &self.diff_patch,
         }
         .clone()
         .with_timeout(remaining)?;
