@@ -62,6 +62,8 @@ Successful output is one closed JSON object:
 
 `index_state` and `worktree_state` use `unmodified`, `added`, `modified`,
 `deleted`, `renamed`, `copied`, `type_changed`, `unmerged`, or `untracked`.
+An executable-bit-only transition is reported by Git as `modified`; the
+old/new mode fields carry that exact mode transition.
 Unmerged records retain `unmerged` and use one of `both_added`,
 `both_deleted`, `added_by_us`, `deleted_by_them`, `added_by_them`,
 `deleted_by_us`, or `both_modified`; their stage modes are retained in

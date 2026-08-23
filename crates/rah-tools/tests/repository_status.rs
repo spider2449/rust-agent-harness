@@ -339,5 +339,5 @@ async fn unix_paths_modes_symlinks_and_invalid_utf8_are_byte_safe() {
         .unwrap();
     assert_eq!(run["head_mode"], "100755");
     assert_eq!(run["worktree_mode"], "100644");
-    assert_eq!(run["worktree_state"], "type_changed");
+    assert_eq!(run["worktree_state"], "modified");
 }
