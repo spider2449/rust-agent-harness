@@ -167,11 +167,9 @@ struct FileIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
-    creation_time: u64,
+    volume_serial_number: u32,
     #[cfg(windows)]
-    file_size: u64,
-    #[cfg(windows)]
-    attributes: u32,
+    file_index: u64,
     #[cfg(not(any(unix, windows)))]
     length: u64,
     #[cfg(not(any(unix, windows)))]
@@ -180,8 +178,14 @@ struct FileIdentity {
 
 impl FileIdentity {
     fn capture(path: &Path) -> Result<Self, ToolError> {
-        let metadata = fs::metadata(path).map_err(|error| repository_error(error.to_string()))?;
-        capture_file_identity(&metadata)
+        #[cfg(windows)]
+        return capture_file_identity(path);
+        #[cfg(not(windows))]
+        {
+            let metadata =
+                fs::metadata(path).map_err(|error| repository_error(error.to_string()))?;
+            capture_file_identity(&metadata)
+        }
     }
 }
 
@@ -196,13 +200,32 @@ fn capture_file_identity(metadata: &fs::Metadata) -> Result<FileIdentity, ToolEr
 }
 
 #[cfg(windows)]
-fn capture_file_identity(metadata: &fs::Metadata) -> Result<FileIdentity, ToolError> {
-    use std::os::windows::fs::MetadataExt;
+fn capture_file_identity(path: &Path) -> Result<FileIdentity, ToolError> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    };
 
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let file = options
+        .open(path)
+        .map_err(|error| repository_error(error.to_string()))?;
+    // The handle remains owned by `file` throughout the Windows API call, and
+    // the API initializes the out structure when it reports success.
+    let information = unsafe {
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
+            return Err(repository_error(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        information
+    };
     Ok(FileIdentity {
-        creation_time: metadata.creation_time(),
-        file_size: metadata.file_size(),
-        attributes: metadata.file_attributes(),
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: u64::from(information.nFileIndexHigh) << 32
+            | u64::from(information.nFileIndexLow),
     })
 }
 

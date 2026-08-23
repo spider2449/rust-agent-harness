@@ -528,11 +528,14 @@ struct FileIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
-    creation_time: u64,
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
 }
 
 impl FileIdentity {
     fn capture(path: &Path) -> Result<Self, ToolError> {
+        #[cfg(not(windows))]
         let metadata = fs::metadata(path).map_err(filesystem_error)?;
         #[cfg(unix)]
         {
@@ -544,9 +547,10 @@ impl FileIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
+            let (volume_serial_number, file_index) = windows_file_identity(path)?;
             Ok(Self {
-                creation_time: metadata.creation_time(),
+                volume_serial_number,
+                file_index,
             })
         }
         #[cfg(not(any(unix, windows)))]
@@ -555,6 +559,31 @@ impl FileIdentity {
             Ok(Self {})
         }
     }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> Result<(u32, u64), ToolError> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let file = options.open(path).map_err(filesystem_error)?;
+    // The handle remains owned by `file` throughout the Windows API call, and
+    // the API initializes the out structure when it reports success.
+    let information = unsafe {
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
+            return Err(filesystem_error(std::io::Error::last_os_error()));
+        }
+        information
+    };
+    Ok((
+        information.dwVolumeSerialNumber,
+        u64::from(information.nFileIndexHigh) << 32 | u64::from(information.nFileIndexLow),
+    ))
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {

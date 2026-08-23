@@ -23,16 +23,19 @@ use crate::{
     host_execute::paths_equivalent,
 };
 
-const OBSERVER_TIMEOUT: Duration = Duration::from_secs(5);
+const FILE_INFO_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVER_STDOUT_LIMIT: usize = 96 * 1024;
 const OBSERVER_STDERR_LIMIT: usize = 8 * 1024;
+pub(crate) const STATUS_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
 /// The only command shapes currently authorized for repository observation.
 #[derive(Clone, Copy)]
-pub(crate) enum FileInfoCommand {
+pub(crate) enum ObserverCommand {
     Index,
     Head,
     HeadTree,
+    FileInfoStatus,
     Status,
 }
 
@@ -42,6 +45,7 @@ pub(crate) struct RepositoryObserver {
     index: HostExecutionPolicy,
     head: HostExecutionPolicy,
     head_tree: HostExecutionPolicy,
+    file_info_status: HostExecutionPolicy,
     status: HostExecutionPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
@@ -57,7 +61,7 @@ impl RepositoryObserver {
                 ".",
             )?
             .with_environment(git_environment())?
-            .with_timeout(OBSERVER_TIMEOUT)?
+            .with_timeout(FILE_INFO_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
@@ -75,7 +79,7 @@ impl RepositoryObserver {
                 ".",
             )?
             .with_environment(git_environment())?
-            .with_timeout(OBSERVER_TIMEOUT)?
+            .with_timeout(FILE_INFO_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
@@ -111,7 +115,7 @@ impl RepositoryObserver {
                 "HEAD".into(),
                 "--".into(),
             ])?,
-            status: path(vec![
+            file_info_status: path(vec![
                 "--no-pager".into(),
                 "--literal-pathspecs".into(),
                 "status".into(),
@@ -123,6 +127,22 @@ impl RepositoryObserver {
                 "--ignore-submodules=all".into(),
                 "--".into(),
             ])?,
+            status: exact(vec![
+                "--no-pager".into(),
+                "status".into(),
+                "--porcelain=v2".into(),
+                "-z".into(),
+                "--untracked-files=normal".into(),
+                "--ignored=no".into(),
+                "--no-renames".into(),
+                "--ignore-submodules=all".into(),
+            ])?
+            .with_timeout(STATUS_TIMEOUT)?
+            .with_output_limits(OutputLimits {
+                stdout_bytes: STATUS_OUTPUT_LIMIT,
+                stderr_bytes: OBSERVER_STDERR_LIMIT,
+                combined_bytes: STATUS_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
+            })?,
             lease: crate::git_stage::repository_lease(&repository.root),
             repository,
         })
@@ -143,12 +163,19 @@ impl RepositoryObserver {
     /// Executes one of the fixed observation commands within a common timeout.
     pub(crate) async fn run(
         &self,
-        command: FileInfoCommand,
+        command: ObserverCommand,
         path: Option<&str>,
         started: Instant,
     ) -> Result<HostProcessOutput, ToolError> {
         self.revalidate()?;
-        let remaining = OBSERVER_TIMEOUT
+        let timeout = match command {
+            ObserverCommand::Status => STATUS_TIMEOUT,
+            ObserverCommand::Index
+            | ObserverCommand::Head
+            | ObserverCommand::HeadTree
+            | ObserverCommand::FileInfoStatus => FILE_INFO_TIMEOUT,
+        };
+        let remaining = timeout
             .checked_sub(started.elapsed())
             .ok_or_else(|| git_error("repository observation exceeded its total timeout"))?;
         if remaining.is_zero() {
@@ -157,10 +184,11 @@ impl RepositoryObserver {
             ));
         }
         let policy = match command {
-            FileInfoCommand::Index => &self.index,
-            FileInfoCommand::Head => &self.head,
-            FileInfoCommand::HeadTree => &self.head_tree,
-            FileInfoCommand::Status => &self.status,
+            ObserverCommand::Index => &self.index,
+            ObserverCommand::Head => &self.head,
+            ObserverCommand::HeadTree => &self.head_tree,
+            ObserverCommand::FileInfoStatus => &self.file_info_status,
+            ObserverCommand::Status => &self.status,
         }
         .clone()
         .with_timeout(remaining)?;
@@ -221,17 +249,16 @@ struct FileIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
-    creation_time: u64,
+    volume_serial_number: u32,
     #[cfg(windows)]
-    size: u64,
-    #[cfg(windows)]
-    attributes: u32,
+    file_index: u64,
     #[cfg(not(any(unix, windows)))]
     length: u64,
 }
 
 impl FileIdentity {
     fn capture(path: &Path) -> Result<Self, ToolError> {
+        #[cfg(not(windows))]
         let metadata = fs::metadata(path).map_err(fs_error)?;
         #[cfg(unix)]
         {
@@ -243,11 +270,10 @@ impl FileIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
+            let (volume_serial_number, file_index) = windows_file_identity(path)?;
             Ok(Self {
-                creation_time: metadata.creation_time(),
-                size: metadata.file_size(),
-                attributes: metadata.file_attributes(),
+                volume_serial_number,
+                file_index,
             })
         }
         #[cfg(not(any(unix, windows)))]
@@ -257,6 +283,31 @@ impl FileIdentity {
             })
         }
     }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> Result<(u32, u64), ToolError> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let file = options.open(path).map_err(fs_error)?;
+    // The handle remains owned by `file` throughout the Windows API call, and
+    // the API initializes the out structure when it reports success.
+    let information = unsafe {
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
+            return Err(fs_error(std::io::Error::last_os_error()));
+        }
+        information
+    };
+    Ok((
+        information.dwVolumeSerialNumber,
+        u64::from(information.nFileIndexHigh) << 32 | u64::from(information.nFileIndexLow),
+    ))
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {
@@ -293,4 +344,71 @@ pub(crate) fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), Too
 
 fn fs_error(error: std::io::Error) -> ToolError {
     git_error(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        process::Command,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use tokio::{
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+
+    use super::RepositoryObserver;
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn native_git() -> PathBuf {
+        #[cfg(windows)]
+        let output = Command::new("where.exe").arg("git.exe").output().unwrap();
+        #[cfg(not(windows))]
+        let output = Command::new("which").arg("git").output().unwrap();
+        assert!(output.status.success());
+        let path = String::from_utf8(output.stdout).unwrap();
+        fs::canonicalize(path.lines().next().unwrap()).unwrap()
+    }
+
+    fn repository() -> PathBuf {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "rah-repository-observer-lease-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".git")).unwrap();
+        root
+    }
+
+    #[tokio::test]
+    async fn observers_for_one_root_share_and_release_the_existing_exclusive_lease() {
+        let root = repository();
+        let git = native_git();
+        let first = RepositoryObserver::new(&git, &root).unwrap();
+        let second = RepositoryObserver::new(&git, &root).unwrap();
+        let held = first.acquire_lease().await;
+        let (entered, mut observed) = oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let _guard = second.acquire_lease().await;
+            let _ = entered.send(());
+        });
+        assert!(
+            timeout(Duration::from_millis(50), &mut observed)
+                .await
+                .is_err(),
+            "a second observer must wait for the existing repository lease"
+        );
+        drop(held);
+        timeout(Duration::from_secs(1), &mut observed)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.await.unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
 }

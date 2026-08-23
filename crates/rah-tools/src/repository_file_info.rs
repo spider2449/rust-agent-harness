@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Tool, ToolContext, ToolError,
     git_support::git_error,
-    repository_observer::{FileInfoCommand, RepositoryObserver, reject_link_or_reparse},
+    repository_observer::{ObserverCommand, RepositoryObserver, reject_link_or_reparse},
 };
 
 /// Stable name for the fixed, read-only one-path repository observer.
@@ -68,19 +68,19 @@ impl Tool for RepositoryFileInfoTool {
 
         let index = required_output(
             self.observer
-                .run(FileInfoCommand::Index, Some(&request.path), started)
+                .run(ObserverCommand::Index, Some(&request.path), started)
                 .await?,
             "index",
         )?;
         let head_output = self
             .observer
-            .run(FileInfoCommand::Head, None, started)
+            .run(ObserverCommand::Head, None, started)
             .await?;
         let head = parse_head_result(head_output)?;
         let tree = if head.is_some() {
             required_output(
                 self.observer
-                    .run(FileInfoCommand::HeadTree, Some(&request.path), started)
+                    .run(ObserverCommand::HeadTree, Some(&request.path), started)
                     .await?,
                 "HEAD tree",
             )?
@@ -89,7 +89,11 @@ impl Tool for RepositoryFileInfoTool {
         };
         let status = required_output(
             self.observer
-                .run(FileInfoCommand::Status, Some(&request.path), started)
+                .run(
+                    ObserverCommand::FileInfoStatus,
+                    Some(&request.path),
+                    started,
+                )
                 .await?,
             "status",
         )?;
@@ -593,7 +597,7 @@ fn is_object_id(value: &str) -> bool {
 fn is_zero_id(value: &str) -> bool {
     value.bytes().all(|byte| byte == b'0')
 }
-fn tagged_path(bytes: &[u8]) -> Value {
+pub(crate) fn tagged_path(bytes: &[u8]) -> Value {
     match std::str::from_utf8(bytes) {
         Ok(value) => json!({"encoding":"utf8", "value": value}),
         Err(_) => json!({"encoding":"base64", "value": base64(bytes)}),
