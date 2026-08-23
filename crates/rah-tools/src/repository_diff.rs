@@ -1,6 +1,6 @@
-//! Closed, byte-safe `repo.diff` observer.
+//! Shared, closed, byte-safe repository diff observer foundation.
 //!
-//! This is deliberately a fixed worktree-versus-index observation rather than
+//! This is deliberately a pair of fixed host-selected observations rather than
 //! a generic Git diff API. Raw and numstat records establish file identity;
 //! patch sections are opaque presentation bytes associated only after the two
 //! machine-readable streams agree exactly.
@@ -20,6 +20,16 @@ use crate::{
 
 /// Stable name for the fixed, read-only worktree-versus-index diff observer.
 pub const REPOSITORY_DIFF_TOOL_NAME: &str = "repo.diff";
+
+/// Private fixed comparison selected by the host-facing tool construction.
+///
+/// This is crate-visible only so no model input or public API can choose a Git
+/// baseline, revision, or argument list.
+#[derive(Clone, Copy)]
+pub(crate) enum DiffBaseline {
+    WorktreeVsIndex,
+    IndexVsHead,
+}
 
 const MAX_FILES: usize = 256;
 const MAX_PATH_BYTES: usize = 4 * 1024;
@@ -67,31 +77,58 @@ impl Tool for RepositoryDiffTool {
         input: ToolInput,
         _context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        validate_empty_request(&input)?;
-        let _lease = self.observer.acquire_lease().await;
-        self.observer.revalidate()?;
-        let started = Instant::now();
-        let raw = successful_output(
-            self.observer
-                .run(ObserverCommand::DiffRaw, None, started)
-                .await?,
-            "raw",
-        )?;
-        let numstat = successful_output(
-            self.observer
-                .run(ObserverCommand::DiffNumstat, None, started)
-                .await?,
-            "numstat",
-        )?;
-        let patch = successful_output(
-            self.observer
-                .run(ObserverCommand::DiffPatch, None, started)
-                .await?,
-            "patch",
-        )?;
-        self.observer.revalidate()?;
-        bounded_output(correlate(&raw, &numstat, &patch)?)
+        execute_fixed_diff(&self.observer, &input, DiffBaseline::WorktreeVsIndex).await
     }
+}
+
+pub(crate) async fn execute_fixed_diff(
+    observer: &RepositoryObserver,
+    input: &ToolInput,
+    baseline: DiffBaseline,
+) -> Result<ToolOutput, ToolError> {
+    validate_empty_request(input)?;
+    let _lease = observer.acquire_lease().await;
+    observer.revalidate()?;
+    let started = Instant::now();
+    let before_head = match baseline {
+        DiffBaseline::WorktreeVsIndex => None,
+        DiffBaseline::IndexVsHead => Some(observe_head(observer, started).await?),
+    };
+    let raw = successful_output(
+        observer
+            .run(ObserverCommand::DiffRaw(baseline), None, started)
+            .await?,
+        "raw",
+    )?;
+    let numstat = successful_output(
+        observer
+            .run(ObserverCommand::DiffNumstat(baseline), None, started)
+            .await?,
+        "numstat",
+    )?;
+    let patch = successful_output(
+        observer
+            .run(ObserverCommand::DiffPatch(baseline), None, started)
+            .await?,
+        "patch",
+    )?;
+    if let Some(before_head) = before_head.as_ref() {
+        let after_head = observe_head(observer, started).await?;
+        ensure_same_head(before_head, after_head)?;
+    }
+    observer.revalidate()?;
+    bounded_output(
+        correlate(&raw, &numstat, &patch)?,
+        baseline,
+        before_head.flatten(),
+    )
+}
+
+fn ensure_same_head(before: &Option<String>, after: Option<String>) -> Result<(), ToolError> {
+    if before != &after {
+        return Err(diff_error("HEAD changed during staged observation"));
+    }
+    Ok(())
 }
 
 fn validate_empty_request(input: &ToolInput) -> Result<(), ToolError> {
@@ -101,6 +138,30 @@ fn validate_empty_request(input: &ToolInput) -> Result<(), ToolError> {
             message: "input must be an empty object".to_owned(),
         }),
     }
+}
+
+/// `rev-parse --verify -q HEAD` exits one with no output for an unborn HEAD.
+/// Any other result is a fixed-command observation failure, never model-visible
+/// Git diagnostics.
+async fn observe_head(
+    observer: &RepositoryObserver,
+    started: Instant,
+) -> Result<Option<String>, ToolError> {
+    let output = observer.run(ObserverCommand::Head, None, started).await?;
+    if output.exit_code == Some(1)
+        && !output.timed_out
+        && output.overflow.is_none()
+        && output.stdout.is_empty()
+    {
+        return Ok(None);
+    }
+    let stdout = successful_output(output, "HEAD")?;
+    let value = std::str::from_utf8(&stdout)
+        .ok()
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| valid_object_id(value.as_bytes()))
+        .ok_or_else(|| diff_error("HEAD identity was malformed"))?;
+    Ok(Some(value.to_owned()))
 }
 
 fn successful_output(
@@ -418,7 +479,11 @@ fn ascii(value: &[u8], label: &str) -> Result<String, ToolError> {
         .map_err(|_| diff_error(format!("{label} was not ASCII")))
 }
 
-fn bounded_output(entries: Vec<DiffEntry>) -> Result<ToolOutput, ToolError> {
+fn bounded_output(
+    entries: Vec<DiffEntry>,
+    baseline: DiffBaseline,
+    head: Option<String>,
+) -> Result<ToolOutput, ToolError> {
     let files = entries
         .into_iter()
         .map(|entry| {
@@ -439,8 +504,15 @@ fn bounded_output(entries: Vec<DiffEntry>) -> Result<ToolOutput, ToolError> {
         content: vec![ToolContent::Json(json!({
             "status": "ok",
             "consistency": "best_effort",
-            "comparison": "worktree_to_index",
-            "base": "index",
+            "comparison": match baseline {
+                DiffBaseline::WorktreeVsIndex => "worktree_to_index",
+                DiffBaseline::IndexVsHead => "index_to_head",
+            },
+            "base": match baseline {
+                DiffBaseline::WorktreeVsIndex => "index",
+                DiffBaseline::IndexVsHead if head.is_some() => "head",
+                DiffBaseline::IndexVsHead => "empty_tree",
+            },
             "files": files,
         }))],
         is_error: false,
@@ -474,7 +546,12 @@ mod tests {
         let raw = raw('M', "a.txt");
         let numstat = b"2\t1\ta.txt\0";
         let patch = b"diff --git a.txt a.txt\nindex 1..2 100644\n--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old\n+new\n";
-        let output = bounded_output(correlate(&raw, numstat, patch).unwrap()).unwrap();
+        let output = bounded_output(
+            correlate(&raw, numstat, patch).unwrap(),
+            DiffBaseline::WorktreeVsIndex,
+            None,
+        )
+        .unwrap();
         let ToolContent::Json(value) = &output.content[0] else {
             panic!("expected JSON")
         };
@@ -492,7 +569,7 @@ mod tests {
             b"diff --git binary.bin binary.bin\nBinary files binary.bin and binary.bin differ\n",
         )
         .unwrap();
-        let output = bounded_output(entries).unwrap();
+        let output = bounded_output(entries, DiffBaseline::WorktreeVsIndex, None).unwrap();
         let ToolContent::Json(value) = &output.content[0] else {
             panic!("expected JSON")
         };
@@ -535,6 +612,14 @@ mod tests {
             .is_err()
         );
         assert!(split_patch_sections(b"not a patch").is_err());
+    }
+
+    #[test]
+    fn staged_head_race_checks_reject_born_and_changed_head_states() {
+        assert!(ensure_same_head(&None, Some(ID.to_owned())).is_err());
+        assert!(ensure_same_head(&Some(ID.to_owned()), None).is_err());
+        assert!(ensure_same_head(&Some(ID.to_owned()), Some("f".repeat(40))).is_err());
+        assert!(ensure_same_head(&Some(ID.to_owned()), Some(ID.to_owned())).is_ok());
     }
 
     #[test]
