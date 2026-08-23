@@ -69,6 +69,7 @@ fn repository(label: &str) -> (TestDirectory, PathBuf, PathBuf) {
         &["config", "user.email", "rah@example.invalid"],
     );
     run(&git, &root, &["config", "core.autocrlf", "false"]);
+    run(&git, &root, &["config", "core.filemode", "true"]);
     for (name, contents) in [
         ("tracked.txt", b"initial\r\n".as_slice()),
         ("delete-staged.txt", b"delete staged\n".as_slice()),
