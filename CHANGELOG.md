@@ -2,9 +2,10 @@
 
 ## v0.5.1 — 2026-08-22
 
-Portability-only recovery release for the published v0.5.0 repository-mutation
-milestone. v0.5.0 remains an immutable published release; this patch adds no
-authority, behavior, public API, dependency, or feature expansion.
+Released and published as `v0.5.1`, tagged at
+`0ea648d84d6f48720c33e8b1bb07e1c24101c870`. This is the portability-only
+recovery release for the published v0.5.0 repository-mutation milestone; it
+adds no authority, behavior, public API, dependency, or feature expansion.
 
 ### Fixed
 
@@ -17,14 +18,22 @@ authority, behavior, public API, dependency, or feature expansion.
 
 - The minimal recovery commit passed the required GitHub Ubuntu CI job,
   including formatting, workspace check, workspace tests, and clippy.
-- v0.5.1 is the corrected, fully verified patch baseline. The Windows live
-  `repo.patch` release gate remains valid using exactly `codex-cli 0.149.0`;
-  this release makes no Unix live Codex validation claim.
+- The release-preparation CI run `32574019502` and tag CI run `32574129999`
+  both completed successfully. v0.5.1 is the corrected, fully required-CI
+  verified v0.5.x baseline.
+- The Windows live `repo.patch` release gate remains valid using exactly
+  `codex-cli 0.149.0`; this release makes no Unix live Codex validation claim.
 
 ## v0.5.0 — 2026-08-22
 
-Release preparation for the v0.5.0 repository-mutation milestone. Publication
-and tagging are intentionally not performed by this commit.
+Published feature release, tagged at
+`b1f0fb4a903a59e0b5c23ca107d7508ebcbd8786`. It contains the complete v0.5
+`repo.patch` feature milestone and passed Windows release validation. Its
+required Ubuntu CI later failed only because `std::fs::File` was imported
+unconditionally while used only by the Windows native-identity path. This was a
+lint-only portability defect, not a `repo.patch` authority or runtime-semantics
+defect. The public release and immutable tag were preserved unchanged; v0.5.1
+supersedes v0.5.0 operationally as the fully verified v0.5.x baseline.
 
 ### Added
 

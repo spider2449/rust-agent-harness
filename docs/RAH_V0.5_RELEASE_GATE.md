@@ -1,11 +1,16 @@
 # RAH v0.5 release-gate audit
 
-Status: **RELEASE CANDIDATE PREPARED — NOT PUBLISHED OR TAGGED**
+Status: **RELEASED — HISTORICAL REQUIRED-CI VERIFICATION INCOMPLETE**
 
 Date: 2026-08-22
 
-This document records the local v0.5 release gate. It prepares a release only;
-it does not create `v0.5.0`, push, publish a GitHub Release, or validate CI.
+This document records the historical v0.5.0 release gate and its final release
+state. v0.5.0 was published and its immutable annotated tag peels to
+`b1f0fb4a903a59e0b5c23ca107d7508ebcbd8786`. Windows release validation passed.
+The required Ubuntu CI did not complete successfully because of the lint-only
+unused `std::fs::File` import described below. Recovery proceeded through
+v0.5.1; the v0.5.0 tag and GitHub Release were not moved, deleted, recreated,
+or otherwise changed.
 
 ## 1. Release boundary
 
@@ -111,9 +116,21 @@ paid API, or GPU; the final command is opt-in and may use live model access.
 | Fresh-fixture v0.5 live `repo.patch` gate | Passed |
 | Only intended release-preparation files; no fixture/temp artifacts | Passed |
 | Release-preparation commit created and clean-tree checks repeated | Passed |
-| `v0.5.0` tag created | Not performed |
-| CI/GitHub Release published | Not performed |
+| `v0.5.0` tag created at `b1f0fb4a903a59e0b5c23ca107d7508ebcbd8786` | Passed |
+| GitHub Release published | Passed |
+| Required Ubuntu CI | Did not complete: clippy-only unused `File` import failure |
+| Public tag and release preserved during recovery | Passed |
 
-When the pending deterministic and live gates pass, the next authorized task is
-Task 055: create and verify the `v0.5.0` tag and publication state, then stop
-before post-release cleanup.
+## 8. Historical release outcome
+
+v0.5.0 is a published feature release, not a withdrawn or retagged release.
+Its complete `repo.patch` milestone evidence and Windows live release gate
+remain valid. The required Ubuntu CI failure was limited to the unconditional
+`std::fs::File` import, which is used only by the Windows native-identity path;
+it was not a repository-patch correctness, authority, or security failure.
+
+The minimal `#[cfg(windows)]` import correction was made in
+`6aae5b1fb710cb9d84fc1bcc51bddb9d1be9e22e`, whose Ubuntu CI passed. v0.5.1
+then became the portability-only patch recovery release and the fully
+required-CI verified v0.5.x baseline. This v0.5.0 record makes no Unix live
+Codex validation claim.
