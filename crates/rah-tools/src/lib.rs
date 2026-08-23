@@ -15,7 +15,9 @@ mod git_status;
 mod git_support;
 mod git_unstage;
 mod host_execute;
+mod repository_file_info;
 mod repository_mutation;
+mod repository_observer;
 mod repository_worktree_patch;
 mod shell_exec;
 mod trusted_profile;
@@ -31,6 +33,7 @@ pub use git_stage::{GIT_STAGE_TOOL_NAME, GitStageTool};
 pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
 pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
+pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInfoTool};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use repository_worktree_patch::{
     REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryWorktreePatchTool,
