@@ -299,6 +299,8 @@ async fn unix_paths_modes_symlinks_and_invalid_utf8_are_byte_safe() {
     fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
     fs::remove_file(root.join("link.txt")).unwrap();
     symlink("binary.bin", root.join("link.txt")).unwrap();
+    fs::write(root.join("Case.txt"), "upper changed\n").unwrap();
+    fs::write(root.join("case.txt"), "lower changed\n").unwrap();
     let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
     fs::write(root.join(&invalid), "invalid\n").unwrap();
     fs::write(root.join("tab\tname\nnext"), "special\n").unwrap();
