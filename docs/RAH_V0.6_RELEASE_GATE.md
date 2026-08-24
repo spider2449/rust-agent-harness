@@ -1,20 +1,27 @@
-# RAH v0.6 release-preparation gate
+# RAH v0.6 historical release gate
 
-Status: **RELEASE PREPARATION IN PROGRESS**
+Status: **RELEASED**
 
 Date: 2026-08-24
 
-## Release candidate
+## Release record
 
-Target version: `v0.6.0`
+- Version: `v0.6.0`
+- Release-preparation commit:
+  `6326c18937bbcfd1e515001692a2c88c6884d552`
+- Immutable annotated tag object:
+  `0a31db7ede796051a026e79187417c7759d349d3`
+- Peeled tag target:
+  `6326c18937bbcfd1e515001692a2c88c6884d552`
+- Release-preparation CI: `32685119256` (`completed / success`)
+- Tag CI: `32685443380` (`completed / success`)
+- Codex baseline: exactly `codex-cli 0.149.0`
+- GitHub Release: published — [RAH v0.6.0](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.6.0)
+  (release ID `375426125`, published `2026-08-24T03:25:30Z`)
 
-Release-preparation commit: this commit; its full SHA is recorded in the Task
-067 completion report.
-
-Codex baseline: exactly `codex-cli 0.149.0`
-
-The tag and GitHub Release are intentionally deferred to Task 068 after this
-release-preparation commit is pushed and its required CI is green.
+The GitHub Release names the existing immutable `v0.6.0` tag. Its authoritative
+release target is the tag's peeled commit above; the release does not own a
+separate mutable commit pointer.
 
 ## Milestone scope
 
@@ -32,10 +39,12 @@ does not merge with `repo.patch` authority.
 
 ## Authority and security contract
 
-Observers use fixed commands against a host-selected, revalidated native Git
-executable and trusted repository. Model input never selects argv, cwd,
-environment, repository, revision, diff baseline, or executable. Their
-environment is cleared and fixed by the host; output and execution are bounded.
+Observers use fixed commands against a host-selected, revalidated Git executable
+and host-selected trusted repository. The host selects executable, repository,
+argv, cwd, and environment. Model input cannot select arbitrary Git commands,
+argv, cwd, environment, repository, revision, diff baseline, or executable.
+Their environment is cleared and fixed by the host; output and execution are
+bounded.
 
 Paths are UTF-8 or base64 tagged without lossy decoding. Diff observers suppress
 binary payloads, and all successful results state only `best_effort`
@@ -43,9 +52,10 @@ consistency. Conflicts and contradictory observations fail closed.
 
 The observers are fixed-command host capabilities, not a generic Git API. They
 allow no generic Git execution, arbitrary executable/argv/cwd/env, external
-diff, textconv, pager/helper escape, or intentional repository mutation.
-`PermissionLevel::Execute` remains only the outer host-process gate and does
-not grant mutation authority. Hardened execution and process supervision are
+diff, textconv, pager/helper escape, or intentional repository mutation. They
+provide no new mutation authority. `PermissionLevel::Execute` remains only the
+outer host subprocess gate and does not grant mutation authority; a model
+request is never authorization. Hardened execution and process supervision are
 not OS sandboxing.
 
 ## Deterministic evidence
@@ -64,26 +74,29 @@ coverage, not Unix live Codex validation.
 ## Live evidence
 
 Task 065 ran the native trusted-profile observer bridge on Windows using exactly
-`codex-cli 0.149.0`. Three fresh fixtures each invoked `repo.file-info`,
+`codex-cli 0.149.0`. Three fresh Windows runs each invoked `repo.file-info`,
 `repo.status`, `repo.diff`, and `repo.diff-staged` exactly once, with one
-requested/started/finished lifecycle per observer, terminal completion, cleanup,
-and no repository mutation. The exact marker was:
+requested/started/finished lifecycle per observer, terminal completion, and
+cleanup. Each run preserved HEAD, refs, the raw index, tracked and untracked
+fixture bytes, and staged and unstaged semantic state. The observers make no
+intentional repository mutation. The exact marker was:
 
 ```text
 RAH_REPOSITORY_OBSERVERS_LIVE_OK
 ```
 
-Windows is live validated. Unix live Codex validation is not claimed.
+Windows live gate: passed. Ubuntu deterministic validation: passed. Unix live
+Codex validation is not claimed.
 
 `repo.patch` is not rerun as a v0.6 live release gate: current release policy
 requires the new milestone's critical live path, while v0.5.1 retains its prior
 live evidence and deterministic regression coverage. This is regression
 evidence separation, not shared authority.
 
-## Audit and release checklist
+## Historical audit and release checklist
 
-Task 066 concluded **RELEASE READY** for this scope. It remains historically
-accurate and is not rewritten by release preparation.
+Task 066 concluded **RELEASE READY** for this scope before publication. The
+following records the completed release state.
 
 | Check | Status |
 | --- | --- |
@@ -91,12 +104,20 @@ accurate and is not rewritten by release preparation.
 | Local deterministic and focused release gates | Passed |
 | Fresh Windows live observer gate at exact Codex baseline | Passed: 3 fresh runs |
 | Release-preparation commit created | Passed |
-| Required CI for that exact commit | Pending |
-| `v0.6.0` tag created | Deferred to Task 068 |
-| GitHub Release published | Deferred to Task 068 |
+| Required CI for release-preparation commit | Passed: `32685119256` |
+| `v0.6.0` annotated tag created | Passed: immutable tag object `0a31db7ede796051a026e79187417c7759d349d3` |
+| Tag CI | Passed: `32685443380` |
+| GitHub Release published | Passed: `RAH v0.6.0` |
 
 ## Platform scope
 
 - Windows live validated.
 - Ubuntu deterministic validated.
 - Unix live Codex validation is not claimed.
+
+## Consistency limitations
+
+Observer results retain `best_effort` consistency only. There is no
+transactional snapshot guarantee; detectable contradictions fail closed, and
+external actors may race with observations. The release makes no claim that
+repository observation performs zero filesystem writes.

@@ -1,10 +1,12 @@
 # Changelog
 
-## v0.6.0 — 2026-08-24 (release preparation)
+## v0.6.0 — 2026-08-24
 
-Release preparation for the repository-aware read-only workflow inspection
-milestone. Tagging and GitHub Release publication are intentionally deferred
-until the release-preparation commit has passed its required CI.
+Released repository-aware read-only workflow inspection milestone. The immutable
+annotated tag `v0.6.0` peels to
+`6326c18937bbcfd1e515001692a2c88c6884d552`. The GitHub Release, titled
+`RAH v0.6.0`, was published at
+<https://github.com/spider2449/rust-agent-harness/releases/tag/v0.6.0>.
 
 ### Added
 
@@ -33,9 +35,9 @@ until the release-preparation commit has passed its required CI.
   Tool Bridge. Task 065 ran three fresh Windows live fixtures with exactly
   `codex-cli 0.149.0`; each observer was invoked once and the repository was
   unchanged.
-- Task 066 recorded the `RELEASE READY` milestone decision and Ubuntu CI run
-  `32684390117` as completed successfully. This release does not claim Unix
-  live Codex validation, snapshot consistency, or zero incidental filesystem
+- Release-preparation CI run `32685119256` and tag CI run `32685443380`
+  completed successfully. This release does not claim Unix live Codex
+  validation, transactional snapshot consistency, or zero incidental filesystem
   writes.
 
 ## v0.5.1 — 2026-08-22
