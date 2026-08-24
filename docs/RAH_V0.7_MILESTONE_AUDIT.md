@@ -196,3 +196,124 @@ bounded one-to-sixteen original-snapshot `replacements[]` contract, preserving
 all excluded-authority and no-rollback statements. Then rerun the Task 077
 audit gates. Do not begin release preparation, version changes, tagging, or
 baseline promotion until that re-audit returns `RELEASE READY`.
+
+## Task 079 Re-Audit
+
+Date: 2026-08-24
+
+Task: 079 — RAH v0.7 milestone re-audit / release-gate analysis only
+
+Starting baseline: Task 078 `47a5b9bbf709e4d38d63a3406a80faf25c6490d6`
+Task 078 CI: `32698501475` (completed / success)
+
+### Blocker closure
+
+Task 077 blocker: README contract mismatch. Its current-state product summary
+and security-boundary list incorrectly limited `repo.patch` to exactly one
+replacement, while ADR 0012 and the v0.7 implementation accepted the legacy
+single form and a bounded `replacements[]` form with one through sixteen
+items.
+
+Resolution: Task 078 corrected both README locations. The current README now
+states that the legacy single form remains supported; `replacements[]` permits
+one through sixteen exact replacements in one existing HEAD-tracked,
+unstaged, strict-UTF-8 file; all matches use the original snapshot;
+non-overlapping edits are deterministic; SHA-256 and byte-length preconditions
+are required; and no automatic staging occurs. It continues to exclude broad
+filesystem write, shell/process, and Git history/ref authority.
+
+**Was the Task 077 sole blocker resolved by Task 078?**
+
+YES
+
+The focused stale-wording search found only the corrected current README and
+historical records. The v0.5/v0.6 roadmap and planning matches accurately
+describe their earlier one-replacement scope, and the Task 077 passages
+truthfully preserve its historical finding; none is a current-state claim.
+
+### Contract and authority revalidation
+
+README and ADR 0012 agree on the legacy form plus bounded multiple
+replacements, one existing tracked file, original-snapshot matching, no broad
+filesystem authority, uncertain mutation semantics, and no automatic replay.
+The current implementation and tests retain the same contract: 1–16 items,
+legacy compatibility, duplicate/overlap/repeated-source refusal, adjacent
+ranges allowed, deterministic postimage construction, and SHA-256/length
+preconditions.
+
+The bounds remain aligned across documentation, code, and tests: 16
+replacements; 64 KiB serialized request; 64 KiB aggregate replacement text;
+64 KiB per replacement item; 1 MiB input file; and 1 MiB final output.
+
+`repo.patch` remains `PermissionLevel::Execute`-gated and is still bound only
+by a trusted profile to host-owned `RepositoryWorktreeMutationPolicy` and
+`ToolRegistry` authority. No generic `fs.write`, generic shell/process,
+model-selected executable/path, Git commit/history/ref, or network-Git
+authority was introduced. `profile_version` remains `1`, with capability
+`repo.patch` and no profile migration. The Generic Tool Bridge behavior and
+Task 073 deterministic evidence therefore remain valid.
+
+No relevant production behavior changed after Task 074, so its three fresh
+certified native app-server runs, one three-item `replacements[]` call, exact
+single execution counts, observer post-state checks, unchanged index/HEAD/refs,
+restricted Codex-owned authority, `Completed` terminal state, and
+`RAH_MULTI_PATCH_LIVE_OK` marker remain valid evidence. Task 075's platform
+conclusions also remain valid: the native app-server is the primary boundary,
+the SDK is optional future adapter convenience, RAH does not implement
+inference, `ToolRegistry` is host-owned, MCP/Plugin are Tool providers, Codex
+approval creates no RAH authority, Sessions reference Codex threads, and
+authority is recomputed on resume.
+
+### Fresh current-head checks
+
+The certified Windows x64 baseline verified as `codex-cli 0.149.0` with
+SHA-256 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+The independent global daily executable reported `codex-cli 0.149.1`; it is
+not a release requirement. With `RAH_CODEX_EXECUTABLE` explicitly set to the
+archived certified executable, `live_smoke` launched that archive and passed
+with `RAH_CODEX_SMOKE_OK` and terminal `Completed`.
+
+Current-head deterministic gates passed: `cargo fmt --check`, `cargo check
+--workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets
+--all-features -- -D warnings`, and `git diff --check`. `cargo metadata
+--no-deps --format-version 1` reports 11 packages, all version `0.6.0`, all
+edition `2024`. Tasks 077–078 introduced no dependency edges, Cargo.toml or
+Cargo.lock changes, unintended public Rust API changes, ADR change, or version
+change.
+
+The audit makes only supported platform claims: Windows live Codex validation,
+Windows x64 certified-baseline management, and Ubuntu deterministic CI. It
+makes no Unix/macOS live-Codex, Windows ARM64, or universal binary-portability
+claim. Existing limitations remain intentional and documented: existing tracked
+files only; no creation/deletion/rename, multi-file transaction, arbitrary
+unified patches, Git history/ref or network Git, network MCP, PluginManager,
+profile hot reload, generic shell/process, rollback, or automatic replay;
+cancellation/timeout is not rollback; external process supervision is not OS
+sandboxing; workflow/session persistence and schema-diff automation remain
+future work; certified baseline tooling is Windows x64 focused.
+
+### Release evidence matrix
+
+| Gate | Evidence | Result |
+| --- | --- | --- |
+| Multi-replacement implementation | Task 072 | PASS |
+| Deterministic bridge validation | Task 073 | PASS |
+| Windows live Codex gate | Task 074 | PASS |
+| Codex platform alignment | Task 075 | PASS |
+| Certified baseline tooling | Task 076 | PASS |
+| Milestone audit | Task 077 | blocker identified |
+| README correction | Task 078 | PASS |
+| Re-audit current gates | Task 079 | PASS |
+
+**Did the re-audit discover any new release blocker?**
+
+NO
+
+### RELEASE READY
+
+Task 079 confirms that the Task 077 documentation blocker is closed, no new
+release blocker was found, and the v0.7 evidence and current gates remain
+valid. This audit does not bump versions, mark a release, create a tag, or
+perform release preparation.
+
+Suggested next task: **Task 080 — RAH v0.7 Release Preparation**.
