@@ -26,6 +26,7 @@ pub struct TrustedStaticProfile {
     registry: ToolRegistry,
     effective: EffectiveProfile,
     repository_worktree_patches: Vec<RepositoryWorktreePatchProfile>,
+    repository_observers: Vec<RepositoryObserverProfile>,
     mcp_providers: Vec<McpProviderProfile>,
     process_plugins: Vec<ProcessPluginProfile>,
     resources: Resources,
@@ -71,12 +72,16 @@ impl TrustedStaticProfile {
         let mut registry = ToolRegistry::new();
         let mut capabilities = Vec::with_capacity(profile.capabilities.len());
         let mut repository_worktree_patches = Vec::new();
+        let mut repository_observers = Vec::new();
         for capability in &profile.capabilities {
-            let (inventory, repository_worktree_patch) =
+            let (inventory, repository_worktree_patch, repository_observer) =
                 build_capability(capability, &profile.resources, &mut registry)?;
             capabilities.push(inventory);
             if let Some(repository_worktree_patch) = repository_worktree_patch {
                 repository_worktree_patches.push(repository_worktree_patch);
+            }
+            if let Some(repository_observer) = repository_observer {
+                repository_observers.push(repository_observer);
             }
         }
 
@@ -110,6 +115,7 @@ impl TrustedStaticProfile {
                     .collect(),
             },
             repository_worktree_patches,
+            repository_observers,
             mcp_providers: profile.mcp_providers,
             process_plugins: profile.process_plugins,
             resources: profile.resources,
@@ -154,6 +160,12 @@ impl TrustedStaticProfile {
     #[must_use]
     pub fn repository_worktree_patches(&self) -> &[RepositoryWorktreePatchProfile] {
         &self.repository_worktree_patches
+    }
+
+    /// Returns closed, host-only repository observer declarations for effective composition.
+    #[must_use]
+    pub fn repository_observers(&self) -> &[RepositoryObserverProfile] {
+        &self.repository_observers
     }
 
     /// Resolves a configured symbolic executable for an external provider.
@@ -415,6 +427,34 @@ pub struct RepositoryWorktreePatchProfile {
     repository: String,
 }
 
+/// Closed host-only binding needed to construct one fixed repository observer.
+///
+/// This carries only the closed capability identity and symbolic resources. The
+/// private observer command envelope remains entirely inside the observer tools.
+#[derive(Clone, Debug)]
+pub struct RepositoryObserverProfile {
+    capability_id: String,
+    executable: String,
+    repository: String,
+}
+
+impl RepositoryObserverProfile {
+    #[must_use]
+    pub fn capability_id(&self) -> &str {
+        &self.capability_id
+    }
+
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+}
+
 impl RepositoryWorktreePatchProfile {
     #[must_use]
     pub fn executable(&self) -> &str {
@@ -431,7 +471,14 @@ fn build_capability(
     capability: &Capability,
     resources: &Resources,
     registry: &mut ToolRegistry,
-) -> Result<(EffectiveCapability, Option<RepositoryWorktreePatchProfile>), ProfileError> {
+) -> Result<
+    (
+        EffectiveCapability,
+        Option<RepositoryWorktreePatchProfile>,
+        Option<RepositoryObserverProfile>,
+    ),
+    ProfileError,
+> {
     let (permission, symbolic_resources) = capability_contract(capability)?;
     if !capability.enabled {
         return Ok((
@@ -443,6 +490,7 @@ fn build_capability(
                 resources: symbolic_resources,
                 validation: "disabled",
             },
+            None,
             None,
         ));
     }
@@ -462,6 +510,27 @@ fn build_capability(
                 resources: symbolic_resources,
                 validation: "configured",
             },
+            Some(binding),
+            None,
+        ));
+    }
+
+    if is_repository_observer(&capability.name) {
+        let binding = repository_observer_binding(capability)?;
+        // Static validation resolves only the closed symbolic resource shape.
+        // It must not construct an observer, inspect Git, or touch the worktree.
+        executable(resources, Some(binding.executable()))?;
+        directory(resources, Some(binding.repository()))?;
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: true,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "configured",
+            },
+            None,
             Some(binding),
         ));
     }
@@ -514,6 +583,7 @@ fn build_capability(
             resources: symbolic_resources,
             validation: "validated",
         },
+        None,
         None,
     ))
 }
@@ -644,7 +714,7 @@ fn capability_contract(
             .cloned()
             .collect(),
         ),
-        "repo.patch" => (
+        "repo.patch" | "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -661,6 +731,13 @@ fn capability_contract(
         return Err(ProfileError::InvalidPermission);
     }
     Ok(expected)
+}
+
+fn is_repository_observer(name: &str) -> bool {
+    matches!(
+        name,
+        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
+    )
 }
 
 fn repository_worktree_patch_binding(
@@ -689,6 +766,38 @@ fn repository_worktree_patch_binding(
     validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
     validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
     Ok(RepositoryWorktreePatchProfile {
+        executable: executable.clone(),
+        repository: repository.clone(),
+    })
+}
+
+fn repository_observer_binding(
+    capability: &Capability,
+) -> Result<RepositoryObserverProfile, ProfileError> {
+    if capability.workspace.is_some()
+        || capability.max_bytes.is_some()
+        || capability.cwd_resource.is_some()
+    {
+        return Err(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        });
+    }
+    let executable = capability
+        .executable
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let repository = capability
+        .repository
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
+    validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
+    Ok(RepositoryObserverProfile {
+        capability_id: capability.name.clone(),
         executable: executable.clone(),
         repository: repository.clone(),
     })
@@ -864,6 +973,7 @@ mod tests {
 
     use super::{ProfileError, TrustedStaticProfile};
     use crate::trusted_profile_source::MAX_PROFILE_BYTES;
+    use serde_json::json;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -991,6 +1101,79 @@ mod tests {
             TrustedStaticProfile::load(directory.profile(&duplicate.to_string())),
             Err(ProfileError::DuplicateCapability)
         ));
+    }
+
+    #[test]
+    fn repository_observer_profiles_are_deferred_and_fail_closed() {
+        let directory = TestDirectory::new();
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "repository-observers",
+            "resources": {
+                "executables": {"git": {"path": directory.0.join("git.exe"), "kind": "native"}},
+                "repositories": {"workspace": {"path": directory.0}}
+            },
+            "capabilities": [
+                {"name": "repo.file-info", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.status", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.diff", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.diff-staged", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
+            ]
+        });
+        let loaded = TrustedStaticProfile::load(directory.profile(&document.to_string()))
+            .expect("observer static profile should not construct tools");
+        assert!(loaded.registry().definitions().is_empty());
+        assert_eq!(loaded.repository_observers().len(), 4);
+        for capability in &loaded.effective_profile().capabilities {
+            assert!(capability.enabled);
+            assert!(!capability.registered);
+            assert_eq!(
+                capability.permission,
+                rah_protocol::PermissionLevel::Execute
+            );
+            assert_eq!(capability.resources, ["git", "workspace"]);
+            assert_eq!(capability.validation, "configured");
+        }
+        assert!(
+            !format!("{:?}", loaded.effective_profile())
+                .contains(directory.0.to_string_lossy().as_ref())
+        );
+
+        for invalid in [
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "repository":"workspace"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"missing", "repository":"workspace"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"missing"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "workspace":"workspace"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "max_bytes":1}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "cwd_resource":"workspace"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"read", "executable":"git", "repository":"workspace"}),
+            json!({"name":"repo.unknown", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
+        ] {
+            let mut invalid_document = document.clone();
+            invalid_document["capabilities"] = json!([invalid]);
+            assert!(
+                TrustedStaticProfile::load(directory.profile(&invalid_document.to_string()))
+                    .is_err()
+            );
+        }
+
+        let mut duplicate = document.clone();
+        for name in [
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+        ] {
+            duplicate["capabilities"] = json!([
+                {"name":name, "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":name, "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
+            ]);
+            assert!(matches!(
+                TrustedStaticProfile::load(directory.profile(&duplicate.to_string())),
+                Err(ProfileError::DuplicateCapability)
+            ));
+        }
     }
 
     #[test]

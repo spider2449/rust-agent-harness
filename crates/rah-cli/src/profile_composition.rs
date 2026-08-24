@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use rah_tools::{
-    EffectiveCapability, EffectiveProfile, ProfileError, RepositoryWorktreePatchTool, ToolRegistry,
-    TrustedStaticProfile,
+    EffectiveCapability, EffectiveProfile, ProfileError, RepositoryDiffStagedTool,
+    RepositoryDiffTool, RepositoryFileInfoTool, RepositoryStatusTool, RepositoryWorktreePatchTool,
+    ToolRegistry, TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -72,6 +73,37 @@ pub async fn compose(
                 RepositoryWorktreePatchTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for observer in profile.repository_observers() {
+        let executable = profile
+            .executable_resource(observer.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(observer.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let tool: Arc<dyn rah_tools::Tool> = match observer.capability_id() {
+            "repo.file-info" => Arc::new(
+                RepositoryFileInfoTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
+            "repo.status" => Arc::new(
+                RepositoryStatusTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
+            "repo.diff" => Arc::new(
+                RepositoryDiffTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
+            "repo.diff-staged" => Arc::new(
+                RepositoryDiffStagedTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
+            _ => return Err(ProfileError::ConstructionFailed),
+        };
+        registry
+            .register(tool)
             .map_err(|_| ProfileError::DuplicateRegistration)?;
     }
 
@@ -157,7 +189,13 @@ pub async fn compose(
 
     let mut effective = profile.effective_profile().clone();
     for capability in &mut effective.capabilities {
-        if capability.capability_id == "repo.patch" && capability.enabled {
+        if capability.enabled
+            && (capability.capability_id == "repo.patch"
+                || matches!(
+                    capability.capability_id.as_str(),
+                    "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
+                ))
+        {
             capability.registered = true;
             capability.validation = "validated";
         }
@@ -417,7 +455,11 @@ mod tests {
             },
             "capabilities": [
                 {"name":"fs.read", "enabled":true, "permission":"read", "workspace":"workspace", "max_bytes":1024},
-                {"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
+                {"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.file-info", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.diff", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.diff-staged", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
             ],
             "mcp_providers": mcp_providers,
             "process_plugins": process_plugins
@@ -469,9 +511,24 @@ mod tests {
         let definitions = composition.registry().definitions();
         assert_eq!(
             definitions.len(),
-            4,
-            "built-ins, repo.patch, and exactly admitted external tools are published"
+            8,
+            "built-ins, repository tools, and exactly admitted external tools are published"
         );
+        for name in [
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+        ] {
+            assert_eq!(
+                definitions
+                    .iter()
+                    .find(|definition| definition.name == ToolName::new(name))
+                    .expect("repository observer should be registered")
+                    .permission,
+                PermissionLevel::Execute
+            );
+        }
         assert_eq!(
             definitions
                 .iter()
@@ -515,6 +572,23 @@ mod tests {
         assert_eq!(repo_patch.permission, PermissionLevel::Execute);
         assert_eq!(repo_patch.resources, ["git", "workspace"]);
         assert_eq!(repo_patch.validation, "validated");
+        for name in [
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+        ] {
+            let observer = composition
+                .effective_profile()
+                .capabilities
+                .iter()
+                .find(|capability| capability.capability_id == name)
+                .expect("redacted inventory should include repository observer");
+            assert!(observer.registered);
+            assert_eq!(observer.permission, PermissionLevel::Execute);
+            assert_eq!(observer.resources, ["git", "workspace"]);
+            assert_eq!(observer.validation, "validated");
+        }
         assert!(
             !format!("{:?}", composition.effective_profile())
                 .contains(directory.0.to_string_lossy().as_ref())

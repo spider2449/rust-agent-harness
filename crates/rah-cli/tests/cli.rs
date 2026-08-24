@@ -134,6 +134,15 @@ fn repo_patch_profile(directory: &Path) -> String {
     )
 }
 
+fn repository_observer_profile(directory: &Path) -> String {
+    let path = |value: &Path| value.to_string_lossy().replace('\\', "\\\\");
+    format!(
+        r#"{{"profile_version":1,"profile_id":"cli-repository-observers","resources":{{"executables":{{"git":{{"path":"{}","kind":"native"}}}},"repositories":{{"worktree":{{"path":"{}"}}}}}},"capabilities":[{{"name":"repo.file-info","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}},{{"name":"repo.status","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}},{{"name":"repo.diff","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}},{{"name":"repo.diff-staged","enabled":true,"permission":"execute","executable":"git","repository":"worktree"}}]}}"#,
+        path(&git_executable()),
+        path(directory)
+    )
+}
+
 fn lifecycle(path: &Path) -> String {
     fs::read_to_string(path.with_extension("lifecycle")).unwrap_or_default()
 }
@@ -377,6 +386,81 @@ fn profile_repo_patch_static_and_effective_validation_are_non_mutating_and_redac
         "capability name=repo.patch enabled=true registered=true permission=Execute resources=git,worktree validation=validated"
     ));
     assert!(effective_stdout.contains("tool name=repo.patch permission=Execute"));
+    for secret in [
+        directory.0.to_string_lossy().as_ref(),
+        profile.to_string_lossy().as_ref(),
+        git_executable().to_string_lossy().as_ref(),
+    ] {
+        assert!(
+            !effective_stdout.contains(secret),
+            "inventory leaked {secret}"
+        );
+    }
+    assert_eq!(fs::read(&target).unwrap(), target_before);
+    assert_eq!(git_status(&directory.0), status_before);
+}
+
+#[test]
+fn profile_repository_observers_static_and_effective_validation_are_redacted_and_non_mutating() {
+    let directory = TestDirectory::new();
+    let initialized = Command::new(git_executable())
+        .args(["init", "--quiet"])
+        .current_dir(&directory.0)
+        .status()
+        .expect("Git should initialize the owned fixture repository");
+    assert!(initialized.success());
+    let target = directory.0.join("target.txt");
+    fs::write(
+        &target,
+        b"observer validation must not execute observations\n",
+    )
+    .expect("fixture target should be written");
+    let profile = directory.profile(&repository_observer_profile(&directory.0));
+    let target_before = fs::read(&target).expect("fixture target should be readable");
+    let status_before = git_status(&directory.0);
+
+    let static_output = rah()
+        .args(["profile", "validate"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch static validation");
+    let static_stdout = String::from_utf8_lossy(&static_output.stdout);
+    assert!(static_output.status.success());
+    for name in [
+        "repo.file-info",
+        "repo.status",
+        "repo.diff",
+        "repo.diff-staged",
+    ] {
+        assert!(static_stdout.contains(&format!(
+            "capability name={name} enabled=true registered=false permission=Execute resources=git,worktree validation=configured"
+        )));
+    }
+    assert_eq!(fs::read(&target).unwrap(), target_before);
+    assert_eq!(git_status(&directory.0), status_before);
+
+    let effective_output = rah()
+        .args(["profile", "validate-effective"])
+        .arg(&profile)
+        .output()
+        .expect("rah should launch effective validation");
+    let effective_stdout = String::from_utf8_lossy(&effective_output.stdout);
+    assert!(
+        effective_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&effective_output.stderr)
+    );
+    for name in [
+        "repo.file-info",
+        "repo.status",
+        "repo.diff",
+        "repo.diff-staged",
+    ] {
+        assert!(effective_stdout.contains(&format!(
+            "capability name={name} enabled=true registered=true permission=Execute resources=git,worktree validation=validated"
+        )));
+        assert!(effective_stdout.contains(&format!("tool name={name} permission=Execute")));
+    }
     for secret in [
         directory.0.to_string_lossy().as_ref(),
         profile.to_string_lossy().as_ref(),
