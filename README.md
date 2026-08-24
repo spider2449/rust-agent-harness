@@ -9,8 +9,12 @@ and does not load model weights or implement model execution.
 
 RAH v0.6 retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
-conditionally replace exactly one literal text occurrence in one bounded,
-existing, HEAD-tracked, unstaged, strict-UTF-8 worktree file. The capability is
+conditionally perform a legacy single exact replacement or one to sixteen
+bounded exact replacements within one existing, HEAD-tracked, unstaged,
+strict-UTF-8 worktree file. All matches use the same original snapshot;
+overlapping replacements are refused and non-overlapping replacements are
+applied deterministically. Full-file SHA-256 and byte-length preconditions are
+required, and the operation does not stage changes. The capability is
 host-constructed through a private `RepositoryWorktreeMutationPolicy`; it is
 not generic filesystem write, shell/process, index, or Git history authority.
 
@@ -328,13 +332,14 @@ Codex executable, network access, credentials, a paid API, or a real model.
   capability; provider schemas and generic subprocess schemas are not exposed.
 - Arbitrary `shell.exec`, arbitrary `process.exec`, and model-selected
   executable, argv, cwd, environment, or timeout are not live-model authority.
-- `repo.patch` is limited to one literal replacement in one bounded existing
-  HEAD-tracked, unstaged strict-UTF-8 worktree file. Worktree restore, arbitrary
-  file mutation outside that policy, Git commit, refs/history mutation,
-  reset, clean, checkout, switch, stash, merge, rebase, push, pull, fetch,
-  network Git, and credential-bearing Git execution are deferred. Destructive
-  worktree authority remains constrained by the private policy described in
-  accepted ADR 0012; ADR 0011 is composition-only.
+- `repo.patch` is limited to a legacy single exact replacement or a bounded
+  `replacements` array of one to sixteen exact replacements in one existing,
+  HEAD-tracked, unstaged strict-UTF-8 worktree file. It has no automatic
+  staging, file creation/deletion/rename, multi-file transaction, Git commit,
+  refs/history mutation, reset, clean, checkout, switch, stash, merge, rebase,
+  push, pull, fetch, network Git, or credential-bearing Git execution authority.
+  Destructive worktree authority remains constrained by the private policy
+  described in accepted ADR 0012; ADR 0011 is composition-only.
 - Repository observers are best-effort point-in-time observations, not a
   snapshot transaction or cross-process lock. They provide no intentional
   mutation authority, file creation/deletion/rename, generic patches/hunks,
