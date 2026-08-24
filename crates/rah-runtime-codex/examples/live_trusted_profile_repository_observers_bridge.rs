@@ -13,6 +13,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "support/live_gate_contract.rs"]
+mod live_gate_contract;
+
 use futures::StreamExt;
 use rah_cli::profile_composition::{EffectiveProfileComposition, compose};
 use rah_protocol::{
@@ -120,6 +123,8 @@ async fn run() -> Result<(), String> {
         "RESTRICTED_CODEX_CAPABILITIES shell=false file=false mcp=false process=false network_tools=false web=false image=false apps=false approvals=false"
     );
     println!("TOOL_COUNTS {}", outcome.count_summary());
+    println!("FINAL_ASSISTANT_TEXT_DIAGNOSTIC {:?}", outcome.final_text);
+    println!("FINAL_ASSISTANT_TEXT_AUTHORITY diagnostic_only");
     println!("RAH_EVENT_SEQUENCE {}", outcome.sequence.join(" -> "));
     println!("SEMANTIC_ASSERTIONS status=passed file_info=passed diff=passed diff_staged=passed");
     println!(
@@ -254,26 +259,24 @@ async fn run_turn(runtime: &CodexRuntime) -> Result<TurnOutcome, String> {
     })
     .await
     .map_err(|_| "timed out waiting for Codex completion".to_owned())??;
-    if outcome.final_text.as_deref() != Some(FINAL_MARKER)
-        || outcome.sequence.last().map(String::as_str) != Some("Completed")
-    {
-        return Err("Codex did not produce the exact terminal marker".to_owned());
-    }
+    outcome
+        .final_text
+        .as_ref()
+        .ok_or_else(|| "missing Completed output".to_owned())?;
+    live_gate_contract::require_completed(&outcome.sequence)?;
     for name in OBSERVERS {
-        if outcome.requested.get(name) != Some(&1)
-            || outcome.started.get(name) != Some(&1)
-            || outcome.finished.get(name) != Some(&1)
-        {
-            return Err(format!(
-                "{name} did not have exactly one request, start, and finish"
-            ));
-        }
+        live_gate_contract::require_exactly_once(
+            name,
+            *outcome.requested.get(name).unwrap_or(&0),
+            *outcome.started.get(name).unwrap_or(&0),
+            *outcome.finished.get(name).unwrap_or(&0),
+        )?;
     }
     Ok(outcome)
 }
 
 fn prompt() -> &'static str {
-    "Use only the available RAH observer tools. Invoke each exactly once, in this order: repo.status with {}, repo.file-info with {\"path\":\"tracked.txt\"}, repo.diff with {}, then repo.diff-staged with {}. Do not modify anything and do not invoke any other tool. After all four successful observations, reply with exactly RAH_REPOSITORY_OBSERVERS_LIVE_OK and no other text."
+    "Use only the available RAH observer tools. Invoke each exactly once, in this order: repo.status with {}, repo.file-info with {\"path\":\"tracked.txt\"}, repo.diff with {}, then repo.diff-staged with {}. Do not modify anything and do not invoke any other tool. After all four successful observations, respond compactly."
 }
 
 enum CountKind {

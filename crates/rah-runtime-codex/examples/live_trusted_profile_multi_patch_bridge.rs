@@ -12,6 +12,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "support/live_gate_contract.rs"]
+mod live_gate_contract;
+
 use futures::StreamExt;
 use rah_cli::profile_composition::{EffectiveProfileComposition, compose};
 use rah_protocol::{
@@ -109,16 +112,18 @@ async fn run() -> Result<(), String> {
     let outcome = turn?;
     fixture.assert_after(&git)?;
     audit_observers(&outcome, &fixture)?;
-    if outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Requested) != 1
-        || outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Started) != 1
-        || outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Finished) != 1
-        || live_test_replacement_attempts() != 1
-    {
+    if live_test_replacement_attempts() != 1 {
         return Err(format!(
             "repo.patch exactly-once proof failed: {}",
             outcome.count_summary()
         ));
     }
+    live_gate_contract::require_exactly_once(
+        REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
+        outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Requested),
+        outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Started),
+        outcome.count(REPOSITORY_WORKTREE_PATCH_TOOL_NAME, Count::Finished),
+    )?;
     println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
     println!("CODEX_EXECUTABLE_IDENTITY native_discovery_and_exact_version_verified=true");
     println!("PROFILE_SOURCE_VALIDATION succeeded");
@@ -137,6 +142,8 @@ async fn run() -> Result<(), String> {
         outcome.count_summary(),
         live_test_replacement_attempts()
     );
+    println!("FINAL_ASSISTANT_TEXT_DIAGNOSTIC {:?}", outcome.final_text);
+    println!("FINAL_ASSISTANT_TEXT_AUTHORITY diagnostic_only");
     println!("RAH_EVENT_SEQUENCE {}", outcome.sequence.join(" -> "));
     println!(
         "MUTATION_ARGUMENTS canonical=repo.patch form=replacements count=3 legacy_fields=false preimage_sha_length=true values=alpha,beta,gamma"
@@ -261,18 +268,11 @@ async fn run_turn(runtime: &CodexRuntime, expected_patch: &Value) -> Result<Turn
     })
     .await
     .map_err(|_| "timed out waiting for Codex completion".to_owned())??;
-    if !outcome
+    outcome
         .final_text
-        .as_deref()
-        .is_some_and(|text| text.ends_with(FINAL_MARKER))
-        || outcome.sequence.last().map(String::as_str) != Some("Completed")
-    {
-        return Err(format!(
-            "turn did not reach the required Completed marker: final={:?} sequence={}",
-            outcome.final_text,
-            outcome.sequence.join(" -> ")
-        ));
-    }
+        .as_ref()
+        .ok_or_else(|| "missing Completed output".to_owned())?;
+    live_gate_contract::require_completed(&outcome.sequence)?;
     Ok(outcome)
 }
 
@@ -292,7 +292,7 @@ fn assert_multi_request(actual: &Value, expected: &Value) -> Result<(), String> 
 }
 
 fn prompt() -> &'static str {
-    "Use only the available RAH repository tools. First inspect repository state and the target file with repo.status and repo.file-info. Then change target.txt in exactly ONE repo.patch call using its replacements array form: alpha = 1 to alpha = 10, beta = 2 to beta = 20, and gamma = 3 to gamma = 30. Do not use the legacy old/new form. After the mutation inspect repo.file-info, repo.status, repo.diff, and repo.diff-staged; finish only after they verify the exact requested post-state, no staged mutation, and no unrelated change. Do not invoke any capability outside this RAH repository toolkit. Reply with exactly RAH_MULTI_PATCH_LIVE_OK and no other text."
+    "Use only the available RAH repository tools. First inspect repository state and the target file with repo.status and repo.file-info. Then change target.txt in exactly ONE repo.patch call using its replacements array form: alpha = 1 to alpha = 10, beta = 2 to beta = 20, and gamma = 3 to gamma = 30. Do not use the legacy old/new form. After the mutation inspect repo.file-info, repo.status, repo.diff, and repo.diff-staged; finish only after they verify the exact requested post-state, no staged mutation, and no unrelated change. Do not invoke any capability outside this RAH repository toolkit. Respond compactly after the observations."
 }
 
 fn audit_observers(outcome: &TurnOutcome, fixture: &LiveFixture) -> Result<(), String> {

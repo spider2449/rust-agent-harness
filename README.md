@@ -272,6 +272,9 @@ cargo run -p rah-runtime-codex --example live_cancel_smoke
 cargo run -p rah-runtime-codex --example live_echo_bridge
 cargo run -p rah-runtime-codex --example live_fs_read_bridge
 
+# Certified isolated live-gate wrapper (pins the approved model/config surface)
+.\scripts\codex-live-gate.ps1 -Command { cargo run -p rah-runtime-codex --example live_echo_bridge }
+
 # Hardened Execute validation fixture (not a public capability)
 cargo build -p rah-tools --bin rah_execute_fixture
 cargo run -p rah-runtime-codex --example live_execute_fixture_bridge
@@ -305,6 +308,18 @@ cargo run -p rah-runtime-codex --example live_trusted_profile_repo_patch_bridge
 
 The MCP and process-plugin commands exercise RAH-owned adapters. They do not
 enable Codex-owned MCP, shell, or file capabilities.
+
+### Host-attested live markers
+
+Live examples record final assistant text as diagnostic output, but it is not
+release-gate authority. A marker such as `RAH_ECHO_BRIDGE_OK`,
+`RAH_REPOSITORY_OBSERVERS_LIVE_OK`, or `RAH_MULTI_PATCH_LIVE_OK` is emitted by
+the host harness only after it has observed the required tool lifecycle,
+validated tool outputs and state postconditions, observed `Completed`, and
+cleaned up the app-server child. Model-generated marker text is weaker than
+host-observed execution state: a model request or statement is not execution
+evidence and never overrides the host-owned ToolRegistry, policy, or sandbox
+boundaries.
 
 ## Validate
 

@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "support/live_gate_contract.rs"]
+mod live_gate_contract;
+
 use async_trait::async_trait;
 use futures::StreamExt;
 use rah_protocol::{
@@ -26,7 +29,8 @@ use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
 const EXPECTED_TEXT: &str = "RAH_TOOL_BRIDGE_OK";
-const PROMPT: &str = "You have an echo tool.\nCall the echo tool exactly once with:\n{\"text\":\"RAH_TOOL_BRIDGE_OK\"}\nAfter receiving the tool result, reply with exactly the returned text.";
+const HOST_MARKER: &str = "RAH_ECHO_BRIDGE_OK";
+const PROMPT: &str = "You have an echo tool.\nCall the echo tool exactly once with:\n{\"text\":\"RAH_TOOL_BRIDGE_OK\"}\nAfter receiving the tool result, respond compactly.";
 const TERMINAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct CountingEchoTool {
@@ -70,7 +74,7 @@ fn main() -> ExitCode {
 
     match runtime.block_on(run()) {
         Ok(()) => {
-            println!("LIVE_ECHO_BRIDGE_PASS");
+            println!("{HOST_MARKER}");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -111,6 +115,7 @@ async fn run() -> Result<(), String> {
             "deferLoading": false
         })
     );
+    println!("EXPECTED_DYNAMIC_TOOL_ALIAS echo -> echo");
     println!(
         "PROMPT {}",
         serde_json::to_string(PROMPT).map_err(|error| error.to_string())?
@@ -155,6 +160,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
     let mut requested = 0_usize;
     let mut started = 0_usize;
     let mut finished = 0_usize;
+    let mut requested_call = None;
     let mut tool_text = None;
     let mut final_text = None;
     let mut finished_index = None;
@@ -176,10 +182,25 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
                     {
                         return Err(format!("unexpected RAH ToolCall: {tool_call:?}"));
                     }
+                    if requested_call.replace(tool_call.id).is_some() {
+                        return Err("echo received more than one requested call".to_owned());
+                    }
                 }
-                AgentEvent::ToolStarted { .. } => started += 1,
-                AgentEvent::ToolFinished { output, .. } => {
+                AgentEvent::ToolStarted { tool_call_id, .. } => {
+                    started += 1;
+                    if requested_call.as_ref() != Some(&tool_call_id) {
+                        return Err("echo started an unrequested tool call".to_owned());
+                    }
+                }
+                AgentEvent::ToolFinished {
+                    tool_call_id,
+                    output,
+                    ..
+                } => {
                     finished += 1;
+                    if requested_call.as_ref() != Some(&tool_call_id) {
+                        return Err("echo finished an unrequested tool call".to_owned());
+                    }
                     finished_index = Some(index);
                     if output.is_error {
                         return Err("EchoTool returned an error output".to_owned());
@@ -216,11 +237,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
 
     let execution_count = executions.load(Ordering::SeqCst);
     let final_text = final_text.ok_or_else(|| "missing Completed output".to_owned())?;
-    if requested != 1 || started != 1 || finished != 1 {
-        return Err(format!(
-            "unexpected tool lifecycle counts: requested={requested}, started={started}, finished={finished}"
-        ));
-    }
+    live_gate_contract::require_exactly_once("echo", requested, started, finished)?;
     if execution_count != 1 {
         return Err(format!("EchoTool execution count was {execution_count}"));
     }
@@ -230,19 +247,15 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
     if continuation_index.is_none() {
         return Err("no Codex model continuation followed ToolFinished".to_owned());
     }
-    if final_text != EXPECTED_TEXT {
-        return Err(format!("unexpected final assistant text: {final_text:?}"));
-    }
-    if observed.last() != Some(&"Completed") {
-        return Err(format!("Completed was not terminal: {observed:?}"));
-    }
+    live_gate_contract::require_completed(&observed)?;
 
     println!("RAH_EVENT_SEQUENCE {}", observed.join(" -> "));
     println!("TOOL_LIFECYCLE_COUNTS requested={requested} started={started} finished={finished}");
     println!("ECHO_EXECUTION_COUNT {execution_count}");
     println!("TOOL_RETURNED_TEXT {tool_text:?}");
     println!("CODEX_CONTINUED_AFTER_TOOL_RESPONSE true");
-    println!("FINAL_ASSISTANT_TEXT {final_text:?}");
+    println!("FINAL_ASSISTANT_TEXT_DIAGNOSTIC {final_text:?}");
+    println!("FINAL_ASSISTANT_TEXT_AUTHORITY diagnostic_only");
     println!("TERMINAL_RAH_EVENT Completed");
     println!("PROHIBITED_ACTIONS none observed; restricted runtime remained active");
     Ok(())
