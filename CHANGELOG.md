@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.7.0 — 2026-08-24
+
+Release-preparation entry for the bounded multi-replacement evolution of the
+existing `repo.patch` capability. Publication and tagging remain outside this
+entry.
+
+### Added
+
+- `repo.patch` retains its legacy single-replacement request and additionally
+  accepts `replacements[]` with one through sixteen exact replacements in one
+  existing, HEAD-tracked, regular UTF-8 worktree file.
+- Every replacement is resolved against the same original snapshot. Duplicate,
+  overlapping, absent, and ambiguous matches are refused; accepted
+  non-overlapping replacements are applied deterministically in one final
+  single-file replacement.
+- Full-file SHA-256 and byte-length preconditions remain mandatory. The
+  operation does not automatically stage changes.
+
+### Verified
+
+- Deterministic Generic Tool Bridge validation, Windows native Codex live
+  multi-replacement validation, and repository-observer verification cover the
+  milestone. Reproducible certified baseline tooling uses isolated configuration
+  and host-attested structural markers; the Codex platform-alignment audit
+  remains part of the release evidence.
+- The certified live runtime is exactly `codex-cli 0.149.0`. This release does
+  not claim Unix live Codex validation.
+
+### Security and limitations
+
+- `repo.patch` is not arbitrary filesystem write authority. It does not create,
+  delete, or rename files; provide a multi-file transaction or rollback; or
+  grant Git commit, history, ref, or network authority.
+- It does not grant generic shell or process authority. Model requests and
+  Codex approvals remain non-authoritative; host policy and `ToolRegistry`
+  checks remain required.
+
 ## v0.6.0 — 2026-08-24
 
 Released repository-aware read-only workflow inspection milestone. The immutable

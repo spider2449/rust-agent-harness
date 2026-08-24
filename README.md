@@ -5,9 +5,9 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.6 repository-aware workflow inspection
+## v0.7 bounded repository patching and workflow inspection
 
-RAH v0.6 retains the v0.4 trusted-host static capability profile and the v0.5
+RAH v0.7 retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
 conditionally perform a legacy single exact replacement or one to sixteen
 bounded exact replacements within one existing, HEAD-tracked, unstaged,
@@ -18,7 +18,7 @@ required, and the operation does not stage changes. The capability is
 host-constructed through a private `RepositoryWorktreeMutationPolicy`; it is
 not generic filesystem write, shell/process, index, or Git history authority.
 
-v0.6 additionally provides four host-fixed, read-only repository observers:
+v0.7 additionally provides four host-fixed, read-only repository observers:
 `repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. They
 inspect one validated repository-relative path, normalized repository status,
 unstaged worktree-versus-index changes, and staged index-versus-HEAD changes.
@@ -334,7 +334,7 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
-## v0.6 limitations and explicit deferrals
+## v0.7 limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile
   validation, not provider/profile auto-discovery or model-facing profile APIs.
