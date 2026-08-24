@@ -71,6 +71,13 @@ struct CountingFsRead {
     executions: Arc<AtomicUsize>,
 }
 
+/// Test-only delegation keeps the production bridge generic while proving that
+/// a real composed tool enters exactly once for each logical bridge call.
+struct CountingComposedTool {
+    inner: Arc<dyn Tool>,
+    executions: Arc<AtomicUsize>,
+}
+
 #[async_trait]
 impl Tool for CountingFsRead {
     fn definition(&self) -> ToolDefinition {
@@ -84,6 +91,22 @@ impl Tool for CountingFsRead {
     ) -> Result<ToolOutput, ToolError> {
         self.executions.fetch_add(1, Ordering::SeqCst);
         self.tool.execute(input, context).await
+    }
+}
+
+#[async_trait]
+impl Tool for CountingComposedTool {
+    fn definition(&self) -> ToolDefinition {
+        self.inner.definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.inner.execute(input, context).await
     }
 }
 
@@ -195,6 +218,85 @@ impl RepositoryFixture {
         assert_eq!(fs::read(&self.target).unwrap(), b"alpha\nold\nomega\n");
         assert_eq!(fs::read(&self.unrelated).unwrap(), b"unrelated\n");
         self.assert_clean_index();
+    }
+}
+
+struct RepositoryObserverFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    tracked: PathBuf,
+    profile: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RepositoryObserverSnapshot {
+    head: Vec<u8>,
+    refs: Vec<u8>,
+    index: Vec<u8>,
+    tracked: Vec<u8>,
+    untracked: Vec<u8>,
+}
+
+impl RepositoryObserverFixture {
+    fn new(label: &str, include_patch: bool) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).expect("repository directory should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(&root, &["config", "user.name", "RAH observer bridge test"]);
+        let tracked = root.join("tracked.txt");
+        fs::write(&tracked, b"base\n").expect("tracked file should be written");
+        git(&root, &["add", "--", "tracked.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let mut capabilities = vec![
+            json!({"name":"repo.file-info", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
+            json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
+            json!({"name":"repo.diff", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
+            json!({"name":"repo.diff-staged", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
+        ];
+        if include_patch {
+            capabilities.push(json!({"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}));
+        }
+        let profile = base.path().join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task064-observer-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "workspace": { "path": &root } }
+            },
+            "capabilities": capabilities,
+        });
+        fs::write(
+            &profile,
+            serde_json::to_vec(&document).expect("profile JSON should serialize"),
+        )
+        .expect("trusted profile should be written");
+        Self {
+            _base: base,
+            root,
+            tracked,
+            profile,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        compose(TrustedStaticProfile::load(&self.profile).expect("profile should load"))
+            .await
+            .expect("effective profile should compose")
+    }
+
+    fn snapshot(&self) -> RepositoryObserverSnapshot {
+        RepositoryObserverSnapshot {
+            head: git_output(&self.root, &["rev-parse", "HEAD"]),
+            refs: git_output(&self.root, &["show-ref"]),
+            index: fs::read(self.root.join(".git").join("index"))
+                .expect("index should be readable"),
+            tracked: fs::read(&self.tracked).expect("tracked worktree should be readable"),
+            untracked: fs::read(self.root.join("untracked.txt")).unwrap_or_default(),
+        }
     }
 }
 
@@ -1493,6 +1595,422 @@ async fn codex_owned_requests_and_items_remain_denied_in_bridge_mode() {
     }
 }
 
+#[tokio::test]
+async fn trusted_profile_composed_observers_advertise_canonical_schemas_and_observe_read_only() {
+    let fixture = RepositoryObserverFixture::new("observer-success", false);
+    fs::write(&fixture.tracked, b"unstaged-only\n").unwrap();
+    fs::write(fixture.root.join("staged.txt"), b"staged-only\n").unwrap();
+    git(&fixture.root, &["add", "--", "staged.txt"]);
+    fs::write(fixture.root.join("untracked.txt"), b"untracked-only\n").unwrap();
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let definitions = composition.registry().definitions();
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.file-info",
+            "repo.status"
+        ]
+    );
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition.permission == PermissionLevel::Execute)
+    );
+
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    assert_restrictions(&thread["params"]);
+    let advertised = thread["params"]["dynamicTools"].as_array().unwrap();
+    for (index, (definition, tool)) in definitions.iter().zip(advertised).enumerate() {
+        assert_eq!(tool["name"], format!("rah_tool_{index}"));
+        assert_ne!(tool["name"], definition.name.as_str());
+        assert_eq!(tool["inputSchema"], definition.input_schema);
+    }
+    assert!(advertised.iter().all(|tool| tool["name"] != "repo.patch"));
+
+    let file_info = bridge_call(
+        &mut peer,
+        json!(640),
+        "file-info",
+        "rah_tool_2",
+        json!({"path":"tracked.txt"}),
+    )
+    .await;
+    assert_eq!(
+        file_info["path"],
+        json!({"encoding":"utf8","value":"tracked.txt"})
+    );
+    let status = bridge_call(&mut peer, json!(641), "status", "rah_tool_3", json!({})).await;
+    assert_eq!(status["status"], "ok");
+    let paths = status["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].clone())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&json!({"encoding":"utf8","value":"tracked.txt"})));
+    assert!(paths.contains(&json!({"encoding":"utf8","value":"staged.txt"})));
+    assert!(paths.contains(&json!({"encoding":"utf8","value":"untracked.txt"})));
+    let diff = bridge_call(&mut peer, json!(642), "diff", "rah_tool_0", json!({})).await;
+    assert_eq!(diff["comparison"], "worktree_to_index");
+    assert_eq!(diff["base"], "index");
+    assert!(
+        diff["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"tracked.txt"}))
+    );
+    assert!(
+        !diff["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"staged.txt"}))
+    );
+    let staged = bridge_call(
+        &mut peer,
+        json!(643),
+        "diff-staged",
+        "rah_tool_1",
+        json!({}),
+    )
+    .await;
+    assert_eq!(staged["comparison"], "index_to_head");
+    assert_eq!(staged["base"], "head");
+    assert!(
+        staged["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"staged.txt"}))
+    );
+    assert!(
+        !staged["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"tracked.txt"}))
+    );
+    for response in [&file_info, &status, &diff, &staged] {
+        let visible = response.to_string();
+        for secret in [
+            fixture.root.to_string_lossy().into_owned(),
+            git_executable().to_string_lossy().into_owned(),
+            std::env::var("HOME").unwrap_or_default(),
+            "HostExecutionPolicy".to_owned(),
+            "RepositoryObserver".to_owned(),
+            fixture.profile.to_string_lossy().into_owned(),
+        ] {
+            assert!(
+                secret.is_empty() || !visible.contains(&secret),
+                "response leaked {secret:?}"
+            );
+        }
+    }
+    assert_eq!(
+        fixture.snapshot(),
+        before,
+        "observers must not intentionally mutate the repository"
+    );
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(tool_event_count(&events), 12);
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn composed_observers_require_execute_before_entry_and_validate_input_without_retries() {
+    for (name, alias, valid) in [
+        (
+            "repo.file-info",
+            "rah_tool_2",
+            json!({"path":"tracked.txt"}),
+        ),
+        ("repo.status", "rah_tool_3", json!({})),
+        ("repo.diff", "rah_tool_0", json!({})),
+        ("repo.diff-staged", "rah_tool_1", json!({})),
+    ] {
+        for allowed in [
+            PermissionLevel::None,
+            PermissionLevel::Read,
+            PermissionLevel::Write,
+        ] {
+            let fixture = RepositoryObserverFixture::new("observer-denied", false);
+            let before = fixture.snapshot();
+            let composition = fixture.compose().await;
+            let executions = Arc::new(AtomicUsize::new(0));
+            let registry = counting_composed_registry(&composition, name, Arc::clone(&executions));
+            let (runtime, mut peer, _) = connected_bridge(registry, vec![allowed]).await;
+            let (handle, _) = start_bridge(&runtime, &mut peer).await;
+            peer.send(tool_request(
+                json!(644),
+                "private-thread",
+                "private-turn",
+                "denied",
+                alias,
+                valid.clone(),
+            ));
+            let response = peer.next_sent().await;
+            assert_eq!(response["result"]["success"], false);
+            assert_eq!(
+                response["result"]["contentItems"][0]["text"],
+                "RAH permission policy denied the dynamic tool call"
+            );
+            assert_eq!(
+                executions.load(Ordering::SeqCst),
+                0,
+                "{name} entered despite {allowed:?}"
+            );
+            let collecting =
+                tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+            peer.respond("turn/interrupt", json!({})).await;
+            let events = collecting.await.unwrap();
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::Failed {
+                    code: rah_protocol::AgentErrorCode::PermissionDenied,
+                    ..
+                })
+            ));
+            assert_eq!(fixture.snapshot(), before);
+            runtime.shutdown().await.unwrap();
+            composition.shutdown().await;
+        }
+    }
+
+    for (name, alias, input) in [
+        ("repo.file-info", "rah_tool_2", json!({"path":"../escape"})),
+        ("repo.status", "rah_tool_3", json!({"unexpected":true})),
+        ("repo.diff", "rah_tool_0", json!({"unexpected":true})),
+        ("repo.diff-staged", "rah_tool_1", json!({"unexpected":true})),
+    ] {
+        let fixture = RepositoryObserverFixture::new("observer-invalid", false);
+        let before = fixture.snapshot();
+        let composition = fixture.compose().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_composed_registry(&composition, name, Arc::clone(&executions));
+        let (runtime, mut peer, _) =
+            connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        peer.send(tool_request(
+            json!(645),
+            "private-thread",
+            "private-turn",
+            "invalid",
+            alias,
+            input,
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(
+            response["result"]["contentItems"][0]["text"],
+            "RAH tool execution failed"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        let collecting =
+            tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+        peer.respond("turn/interrupt", json!({})).await;
+        let events = collecting.await.unwrap();
+        assert_eq!(tool_event_count(&events), 2);
+        assert_eq!(fixture.snapshot(), before);
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn composed_observer_deduplication_is_call_identity_not_input_memoization() {
+    for (name, alias, input) in [
+        (
+            "repo.file-info",
+            "rah_tool_2",
+            json!({"path":"tracked.txt"}),
+        ),
+        ("repo.diff", "rah_tool_0", json!({})),
+    ] {
+        let fixture = RepositoryObserverFixture::new("observer-dedupe", false);
+        fs::write(&fixture.tracked, b"changed\n").unwrap();
+        let before = fixture.snapshot();
+        let composition = fixture.compose().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_composed_registry(&composition, name, Arc::clone(&executions));
+        let (runtime, mut peer, _) =
+            connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        for id in [json!(646), json!("duplicate")] {
+            peer.send(tool_request(
+                id,
+                "private-thread",
+                "private-turn",
+                "same-call",
+                alias,
+                input.clone(),
+            ));
+        }
+        let first = peer.next_sent().await;
+        let second = peer.next_sent().await;
+        assert_eq!(first["result"], second["result"]);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "{name} should enter once for a duplicate call"
+        );
+        peer.send(tool_request(
+            json!(647),
+            "private-thread",
+            "private-turn",
+            "new-call",
+            alias,
+            input,
+        ));
+        assert_eq!(peer.next_sent().await["result"]["success"], true);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            2,
+            "{name} should execute for a new call ID"
+        );
+        assert_eq!(fixture.snapshot(), before);
+        finish_turn(&peer, "completed");
+        let events = handle.into_events().collect::<Vec<_>>().await;
+        assert_eq!(tool_event_count(&events), 6);
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn composed_observer_aliases_are_exact_and_patch_authority_remains_separate() {
+    let fixture = RepositoryObserverFixture::new("observer-routing", true);
+    let composition = fixture.compose().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let aliases = thread["params"]["dynamicTools"].as_array().unwrap();
+    assert_eq!(aliases.len(), 5);
+    assert_eq!(aliases[0]["name"], "rah_tool_0");
+    assert_eq!(aliases[4]["name"], "rah_tool_4");
+    peer.send(tool_request(
+        json!(648),
+        "private-thread",
+        "private-turn",
+        "unknown",
+        "not-a-tool",
+        json!({}),
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], false);
+    peer.send(tool_request(
+        json!(649),
+        "private-thread",
+        "private-turn",
+        "canonical",
+        "repo.status",
+        json!({}),
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], false);
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.respond("turn/interrupt", json!({})).await;
+    let events = collecting.await.unwrap();
+    assert_eq!(tool_event_count(&events), 0);
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn composed_diff_cancellation_before_entry_does_not_observe_or_replay() {
+    let fixture = RepositoryObserverFixture::new("observer-cancel", false);
+    fs::write(&fixture.tracked, b"changed\n").unwrap();
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let bridge_executions = Arc::new(AtomicUsize::new(0));
+    let composed_executions = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let registry = gated_composed_observer_registry(
+        &composition,
+        "repo.diff",
+        Arc::clone(&bridge_executions),
+        Arc::clone(&composed_executions),
+        Arc::clone(&entered),
+        Arc::clone(&gate),
+    );
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let session_id = handle.session_id().clone();
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.send(tool_request(
+        json!(650),
+        "private-thread",
+        "private-turn",
+        "cancel",
+        "rah_tool_0",
+        json!({}),
+    ));
+    entered.notified().await;
+    let cancelling = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.cancel(session_id).await })
+    };
+    await_cancellation(&mut peer, json!(650)).await;
+    finish_turn(&peer, "interrupted");
+    cancelling.await.unwrap().unwrap();
+    let events = collecting.await.unwrap();
+    assert!(matches!(events.last(), Some(AgentEvent::Cancelled { .. })));
+    assert_eq!(bridge_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(composed_executions.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.snapshot(), before);
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn composed_diff_reports_binary_without_payload_or_path_leakage() {
+    let fixture = RepositoryObserverFixture::new("observer-binary", false);
+    fs::write(&fixture.tracked, [0_u8, 159, 146, 150, 1]).unwrap();
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    let diff = bridge_call(&mut peer, json!(651), "binary", "rah_tool_0", json!({})).await;
+    let entry = diff["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"tracked.txt"}))
+        .unwrap();
+    assert_eq!(entry["binary"], true);
+    assert!(entry["patch"].is_null());
+    assert!(!diff.to_string().contains("159"));
+    assert!(
+        !diff
+            .to_string()
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+    assert_eq!(fixture.snapshot(), before);
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
 async fn connected_bridge(
     registry: Arc<ToolRegistry>,
     allowed: Vec<PermissionLevel>,
@@ -1610,6 +2128,84 @@ fn gated_composed_patch_registry(
     Arc::new(registry)
 }
 
+fn counting_composed_registry(
+    composition: &EffectiveProfileComposition,
+    counted_name: &str,
+    executions: Arc<AtomicUsize>,
+) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    for definition in composition.registry().definitions() {
+        let tool = composition
+            .registry()
+            .get(&definition.name)
+            .expect("effective composition should retain every definition");
+        let tool: Arc<dyn Tool> = if definition.name == ToolName::new(counted_name) {
+            Arc::new(CountingComposedTool {
+                inner: tool,
+                executions: Arc::clone(&executions),
+            })
+        } else {
+            tool
+        };
+        registry
+            .register(tool)
+            .expect("test registry should preserve names");
+    }
+    Arc::new(registry)
+}
+
+fn gated_composed_observer_registry(
+    composition: &EffectiveProfileComposition,
+    name: &str,
+    bridge_executions: Arc<AtomicUsize>,
+    composed_executions: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+    gate: Arc<Notify>,
+) -> Arc<ToolRegistry> {
+    let inner = composition.registry().get(&ToolName::new(name)).unwrap();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(GatedComposedPatch {
+            inner,
+            bridge_executions,
+            composed_executions,
+            before_inner: Some(entered),
+            after_inner: None,
+            before_gate: Some(gate),
+            after_gate: None,
+        }))
+        .unwrap();
+    Arc::new(registry)
+}
+
+async fn bridge_call(
+    peer: &mut FakePeer,
+    id: Value,
+    call: &str,
+    alias: &str,
+    input: Value,
+) -> Value {
+    peer.send(tool_request(
+        id,
+        "private-thread",
+        "private-turn",
+        call,
+        alias,
+        input,
+    ));
+    let response = peer.next_sent().await;
+    assert_eq!(
+        response["result"]["success"], true,
+        "bridge call should succeed: {response}"
+    );
+    serde_json::from_str(
+        response["result"]["contentItems"][0]["text"]
+            .as_str()
+            .expect("observer response should be JSON text"),
+    )
+    .expect("observer response should retain JSON")
+}
+
 async fn await_cancellation(peer: &mut FakePeer, call_id: Value) {
     let mut saw_call_denial = false;
     let mut saw_interrupt = false;
@@ -1666,6 +2262,19 @@ fn git(root: &Path, arguments: &[&str]) {
         "Git command {arguments:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_output(root: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new(git_executable())
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("Git command should start");
+    assert!(
+        output.status.success(),
+        "Git command {arguments:?} should succeed"
+    );
+    output.stdout
 }
 
 fn tool_request(
