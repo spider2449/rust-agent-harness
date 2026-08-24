@@ -150,6 +150,10 @@ struct RepositoryFixture {
 
 impl RepositoryFixture {
     fn new(label: &str) -> Self {
+        Self::new_with_target(label, b"alpha\nold\nomega\n")
+    }
+
+    fn new_with_target(label: &str, target_contents: &[u8]) -> Self {
         let base = TestDirectory::new();
         let root = base.path().join(label);
         fs::create_dir(&root).expect("repository directory should be created");
@@ -158,7 +162,7 @@ impl RepositoryFixture {
         git(&root, &["config", "user.name", "RAH bridge test"]);
         let target = root.join("target.txt");
         let unrelated = root.join("unrelated.txt");
-        fs::write(&target, b"alpha\nold\nomega\n").expect("target should be written");
+        fs::write(&target, target_contents).expect("target should be written");
         fs::write(&unrelated, b"unrelated\n").expect("unrelated file should be written");
         git(&root, &["add", "--", "target.txt", "unrelated.txt"]);
         git(&root, &["commit", "--quiet", "-m", "fixture"]);
@@ -210,6 +214,19 @@ impl RepositoryFixture {
         })
     }
 
+    fn multi_request(&self, replacements: &[(&str, &str)]) -> Value {
+        let bytes = fs::read(&self.target).expect("target should be readable");
+        json!({
+            "path": "target.txt",
+            "expected_file_sha256": sha256_hex(&bytes),
+            "expected_file_byte_length": bytes.len(),
+            "replacements": replacements.iter().map(|(old, new)| json!({
+                "expected_old_text": old,
+                "replacement_text": new,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
     fn assert_clean_index(&self) {
         git(&self.root, &["diff", "--cached", "--exit-code"]);
     }
@@ -246,7 +263,12 @@ impl RepositoryObserverFixture {
         git(&root, &["config", "user.email", "rah-test@example.invalid"]);
         git(&root, &["config", "user.name", "RAH observer bridge test"]);
         let tracked = root.join("tracked.txt");
-        fs::write(&tracked, b"base\n").expect("tracked file should be written");
+        let initial = if include_patch {
+            b"alpha = 1\nbeta = 2\ngamma = 3\nsentinel = unchanged\n".as_slice()
+        } else {
+            b"base\n".as_slice()
+        };
+        fs::write(&tracked, initial).expect("tracked file should be written");
         git(&root, &["add", "--", "tracked.txt"]);
         git(&root, &["commit", "--quiet", "-m", "fixture"]);
 
@@ -1231,6 +1253,238 @@ async fn trusted_profile_composed_repo_patch_preserves_execute_alias_single_exec
 }
 
 #[tokio::test]
+async fn trusted_profile_bridge_applies_multi_replacement_once_and_preserves_invariants() {
+    let original = b"alpha = 1\nbeta = 2\ngamma = 3\nsentinel = unchanged\n";
+    let expected = b"alpha = 10\nbeta = 20\ngamma = 30\nsentinel = unchanged\n";
+    let fixture = RepositoryFixture::new_with_target("multi-replacement", original);
+    let head = git_output(&fixture.root, &["rev-parse", "HEAD"]);
+    let refs = git_output(&fixture.root, &["show-ref"]);
+    let index = fs::read(fixture.root.join(".git").join("index")).unwrap();
+    let composition = fixture.compose().await;
+    let executions = Arc::new(AtomicUsize::new(0));
+    let registry = counting_composed_registry(&composition, "repo.patch", Arc::clone(&executions));
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+
+    let tool = &thread["params"]["dynamicTools"][0];
+    assert_eq!(tool["name"], "rah_tool_0");
+    assert_eq!(tool["inputSchema"]["oneOf"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        tool["inputSchema"]["oneOf"][0]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        tool["inputSchema"]["oneOf"][1]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        tool["inputSchema"]["oneOf"][1]["properties"]["replacements"]["minItems"],
+        1
+    );
+    assert_eq!(
+        tool["inputSchema"]["oneOf"][1]["properties"]["replacements"]["maxItems"],
+        16
+    );
+    assert_restrictions(&thread["params"]);
+
+    let multi = fixture.multi_request(&[
+        ("alpha = 1", "alpha = 10"),
+        ("beta = 2", "beta = 20"),
+        ("gamma = 3", "gamma = 30"),
+    ]);
+    for id in [json!(730), json!("duplicate-delivery")] {
+        peer.send(tool_request(
+            id,
+            "private-thread",
+            "private-turn",
+            "multi-once",
+            "rah_tool_0",
+            multi.clone(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(&fixture.target).unwrap(), expected);
+    assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"unrelated\n");
+    assert_eq!(git_output(&fixture.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_output(&fixture.root, &["show-ref"]), refs);
+    assert_eq!(
+        fs::read(fixture.root.join(".git").join("index")).unwrap(),
+        index
+    );
+    fixture.assert_clean_index();
+
+    let legacy_after_multi = fixture.request("alpha = 10", "alpha = 100");
+    peer.send(tool_request(
+        json!(731),
+        "private-thread",
+        "private-turn",
+        "new-call",
+        "rah_tool_0",
+        legacy_after_multi,
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], true);
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        2,
+        "a new call ID is distinct"
+    );
+    assert_eq!(
+        fs::read(&fixture.target).unwrap(),
+        b"alpha = 100\nbeta = 20\ngamma = 30\nsentinel = unchanged\n"
+    );
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(tool_event_count(&events), 6);
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_bridge_rejects_invalid_multi_replacement_forms_without_mutation() {
+    let original = b"A B\nrepeated repeated\n";
+    for label in [
+        "empty",
+        "too-many",
+        "duplicate",
+        "overlap",
+        "generated-match",
+        "repeated-source",
+        "stale",
+        "mixed",
+    ] {
+        let fixture = RepositoryFixture::new_with_target(label, original);
+        let composition = fixture.compose().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry =
+            counting_composed_registry(&composition, "repo.patch", Arc::clone(&executions));
+        let (runtime, mut peer, _) =
+            connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        let request = match label {
+            "empty" => fixture.multi_request(&[]),
+            "too-many" => fixture.multi_request(&[("A", "X"); 17]),
+            "duplicate" => fixture.multi_request(&[("A", "X"), ("A", "Y")]),
+            "overlap" => fixture.multi_request(&[("A B", "X"), ("B", "Y")]),
+            "generated-match" => fixture.multi_request(&[("A", "X"), ("X", "Y")]),
+            "repeated-source" => fixture.multi_request(&[("repeated", "once")]),
+            "stale" => {
+                let mut request = fixture.multi_request(&[("A", "X")]);
+                request["expected_file_sha256"] = json!("0".repeat(64));
+                request
+            }
+            "mixed" => {
+                let mut request = fixture.multi_request(&[("A", "X")]);
+                request["expected_old_text"] = json!("A");
+                request["replacement_text"] = json!("X");
+                request
+            }
+            _ => unreachable!("case list is closed"),
+        };
+        peer.send(tool_request(
+            json!(732),
+            "private-thread",
+            "private-turn",
+            label,
+            "rah_tool_0",
+            request,
+        ));
+        assert_eq!(
+            peer.next_sent().await["result"]["success"],
+            false,
+            "{label} must fail closed"
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "{label} should reach the real tool once"
+        );
+        assert_eq!(
+            fs::read(&fixture.target).unwrap(),
+            original,
+            "{label} mutated the target"
+        );
+        assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"unrelated\n");
+        fixture.assert_clean_index();
+        finish_turn(&peer, "completed");
+        let _ = handle.into_events().collect::<Vec<_>>().await;
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn composed_repository_observers_verify_multi_patch_post_state() {
+    let fixture = RepositoryObserverFixture::new("multi-observers", true);
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    assert_eq!(
+        thread["params"]["dynamicTools"].as_array().unwrap().len(),
+        5
+    );
+
+    let bytes = fs::read(&fixture.tracked).unwrap();
+    let patch = json!({
+        "path": "tracked.txt",
+        "expected_file_sha256": sha256_hex(&bytes),
+        "expected_file_byte_length": bytes.len(),
+        "replacements": [
+            {"expected_old_text":"alpha = 1", "replacement_text":"alpha = 10"},
+            {"expected_old_text":"beta = 2", "replacement_text":"beta = 20"},
+            {"expected_old_text":"gamma = 3", "replacement_text":"gamma = 30"}
+        ]
+    });
+    assert_eq!(
+        bridge_call(&mut peer, json!(733), "patch", "rah_tool_3", patch).await["changed"],
+        true
+    );
+    let info = bridge_call(
+        &mut peer,
+        json!(734),
+        "info",
+        "rah_tool_2",
+        json!({"path":"tracked.txt"}),
+    )
+    .await;
+    assert_eq!(
+        info["content"]["byte_length"],
+        fs::read(&fixture.tracked).unwrap().len()
+    );
+    let status = bridge_call(&mut peer, json!(735), "status", "rah_tool_4", json!({})).await;
+    assert!(
+        status["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == json!({"encoding":"utf8","value":"tracked.txt"}))
+    );
+    let diff = bridge_call(&mut peer, json!(736), "diff", "rah_tool_0", json!({})).await;
+    assert!(
+        diff["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["new_path"] == json!({"encoding":"utf8","value":"tracked.txt"}))
+    );
+    assert_eq!(fixture.snapshot().head, before.head);
+    assert_eq!(fixture.snapshot().refs, before.refs);
+    assert_eq!(fixture.snapshot().index, before.index);
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
 async fn trusted_profile_composed_repo_patch_requires_execute_and_refuses_without_mutation() {
     for allowed in [
         vec![PermissionLevel::None],
@@ -1247,7 +1501,7 @@ async fn trusted_profile_composed_repo_patch_requires_execute_and_refuses_withou
             "private-turn",
             "permission-denied",
             "rah_tool_0",
-            fixture.request("old", "new"),
+            fixture.multi_request(&[("old", "new")]),
         ));
         let response = peer.next_sent().await;
         assert_eq!(response["result"]["success"], false);
