@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.6.0 — 2026-08-24 (release preparation)
+
+Release preparation for the repository-aware read-only workflow inspection
+milestone. Tagging and GitHub Release publication are intentionally deferred
+until the release-preparation commit has passed its required CI.
+
+### Added
+
+- A repository-aware read-only observer toolkit: `repo.file-info`,
+  `repo.status`, `repo.diff`, and `repo.diff-staged`.
+- Trusted-profile composition for the four fixed host observer capabilities,
+  deterministic Generic Tool Bridge verification, and Windows live Codex
+  verification using exactly `codex-cli 0.149.0`.
+- Ubuntu deterministic and cross-platform coverage for repository-observer
+  behavior.
+
+### Security
+
+- No new mutation authority. Observers are fixed-command host capabilities;
+  `PermissionLevel::Execute` is only their outer host-process gate.
+- The observers do not provide generic Git execution or arbitrary executable,
+  argv, cwd, or environment selection. They disable external diff and textconv
+  behavior and make no intentional repository mutation.
+- The existing guarded `repo.patch` worktree mutation capability remains
+  separately governed by ADR 0012. ADR 0010 remains repository-index mutation
+  only, and ADR 0011 remains trusted-profile authority composition.
+
+### Verified
+
+- Task 064 deterministically verified all four observers through the Generic
+  Tool Bridge. Task 065 ran three fresh Windows live fixtures with exactly
+  `codex-cli 0.149.0`; each observer was invoked once and the repository was
+  unchanged.
+- Task 066 recorded the `RELEASE READY` milestone decision and Ubuntu CI run
+  `32684390117` as completed successfully. This release does not claim Unix
+  live Codex validation, snapshot consistency, or zero incidental filesystem
+  writes.
+
 ## v0.5.1 — 2026-08-22
 
 Released and published as `v0.5.1`, tagged at
