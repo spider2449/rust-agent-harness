@@ -1,9 +1,11 @@
-# RAH v0.5 Security Model
+# RAH v0.6 Security Model
 
-## v0.5 boundary and preserved v0.3/v0.4 capabilities
+## v0.6 boundary and preserved v0.3/v0.4/v0.5 capabilities
 
-The public/host Execute capabilities are `host.cargo.version`,
-`host.git.status`, `host.git.stage`, and `host.git.unstage`. They are
+The public/host Execute capabilities include `host.cargo.version`,
+`host.git.status`, `host.git.stage`, `host.git.unstage`, and the v0.6 fixed
+repository observers `repo.file-info`, `repo.status`, `repo.diff`, and
+`repo.diff-staged`. They are
 host-constructed, capability-specific tools, not generic model-selected process
 authority. The hardened Execute deterministic/live fixture (`process.test.echo`)
 and the repository-mutation deterministic/live fixture are validation
@@ -18,6 +20,19 @@ execution. ADR 0012 grants the only worktree-content exception: one conditional
 literal replacement in one existing HEAD-tracked, unstaged strict-UTF-8 file
 under a private host-owned `RepositoryWorktreeMutationPolicy`. It does not
 grant generic write, index, history/ref, network, rollback, or replay authority.
+
+v0.6 adds only fixed read-only repository observation: `repo.file-info`,
+`repo.status`, `repo.diff`, and `repo.diff-staged`. The host fixes executable,
+repository, cwd, argv, environment, limits, and diff baseline; model input
+cannot choose any of them. Cleared Git environments disable system/global
+configuration, inherited HOME/XDG/PATH, pager, external diff/textconv,
+fsmonitor, untracked cache, optional locks, terminal prompting, and ambient
+credential/proxy variables. NUL-framed machine output is normalized into UTF-8
+or tagged base64 paths without returning binary content. The tools make no
+intentional repository mutation claim, but do not claim that Git and the host
+perform zero incidental filesystem writes. Their shared lease is not a
+cross-process snapshot transaction; detectable contradictions fail closed and
+external races remain a documented best-effort limitation.
 
 Process supervision is not OS sandboxing and RAH makes no network-isolation or
 rollback guarantee. Timeout or cancellation can leave uncertain mutation

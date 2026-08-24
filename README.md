@@ -5,14 +5,23 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.5 repository worktree mutation
+## v0.6 repository-aware workflow inspection
 
-RAH v0.5 retains the v0.4 trusted-host static capability profile and adds one
+RAH v0.6 retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
 conditionally replace exactly one literal text occurrence in one bounded,
 existing, HEAD-tracked, unstaged, strict-UTF-8 worktree file. The capability is
 host-constructed through a private `RepositoryWorktreeMutationPolicy`; it is
 not generic filesystem write, shell/process, index, or Git history authority.
+
+v0.6 additionally provides four host-fixed, read-only repository observers:
+`repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. They
+inspect one validated repository-relative path, normalized repository status,
+unstaged worktree-versus-index changes, and staged index-versus-HEAD changes.
+They are `Execute`-gated subprocess capabilities, not generic Git or filesystem
+authority; model input cannot select their executable, argv, cwd, environment,
+repository, refs, or baselines. Their precise claim is **no intentional
+repository mutation**, not zero incidental filesystem writes.
 
 ```text
 Built-in Tool -----------\
@@ -306,7 +315,7 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
-## v0.5 limitations and explicit deferrals
+## v0.6 limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile
   validation, not provider/profile auto-discovery or model-facing profile APIs.
@@ -326,6 +335,11 @@ Codex executable, network access, credentials, a paid API, or a real model.
   network Git, and credential-bearing Git execution are deferred. Destructive
   worktree authority remains constrained by the private policy described in
   accepted ADR 0012; ADR 0011 is composition-only.
+- Repository observers are best-effort point-in-time observations, not a
+  snapshot transaction or cross-process lock. They provide no intentional
+  mutation authority, file creation/deletion/rename, generic patches/hunks,
+  commit/history, or network Git authority. Live observer validation is Windows
+  only at exactly `codex-cli 0.149.0`; Unix live Codex validation is unverified.
 - Process supervision is not OS sandboxing; RAH makes no network-isolation or
   rollback guarantee. Timeout/cancellation may leave uncertain effects, which
   are never automatically replayed.

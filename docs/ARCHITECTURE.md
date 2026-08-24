@@ -1,4 +1,4 @@
-# RAH v0.5 Architecture
+# RAH v0.6 Architecture
 
 ## Ownership boundaries
 
@@ -33,7 +33,16 @@ performs all repository eligibility, identity, replacement, and uncertainty
 handling; model requests and `PermissionLevel::Execute` remain insufficient
 authority by themselves.
 
-## v0.4 trusted capability profile (preserved in v0.5)
+v0.6 adds four separate, host-constructed repository-observation tools:
+`repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. They use
+a crate-private fixed-command observer envelope with host-selected executable
+and repository identities, fixed cwd/environment, bounds, and the existing RAH
+repository lease. `Execute` remains an outer process gate, not generic Git,
+filesystem, or mutation authority. This bounded observation work neither
+extends ADR 0010 index mutation nor ADR 0012 worktree mutation; ADR 0011 alone
+governs trusted-profile composition.
+
+## v0.4 trusted capability profile (preserved in v0.6)
 
 ADR 0011 defines trusted profile source validation and the explicitly selected
 trusted static profile as a host-only authority-composition boundary. The profile
@@ -68,11 +77,13 @@ select providers or profile authority.
 
 ### Public / host capabilities
 
-The host-owned Execute surface is limited to `host.cargo.version`,
-`host.git.status`, `host.git.stage`, and `host.git.unstage`. The first two are
-fixed, host-constructed inspection capabilities. Stage and unstage use the
-private `RepositoryMutationPolicy` to prove one authorized index-only effect
-for one host-selected target. They never grant generic process, worktree-byte,
+The host-owned Execute surface includes `host.cargo.version`, `host.git.status`,
+`host.git.stage`, `host.git.unstage`, and the v0.6 fixed observers
+`repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. The first
+two and the observers are fixed, host-constructed inspection capabilities.
+Stage and unstage use the private `RepositoryMutationPolicy` to prove one
+authorized index-only effect for one host-selected target. They never grant
+generic process, worktree-byte,
 history/ref, network, or credential authority.
 
 ### Validation fixtures
