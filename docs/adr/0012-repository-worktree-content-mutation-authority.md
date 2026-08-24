@@ -16,7 +16,9 @@ PermissionLevel::Execute may remain an outer runtime gate only if the later impl
 
 ### Authority granted
 
-For exactly one accepted call, the policy may read one bounded target and attempt one direct worktree replacement. Trusted host construction owns the canonical non-bare repository root, limits, internal audit/preimage retention, and all internal temporary paths. The model supplies only a constrained logical relative path, a complete-file SHA-256 and byte-length precondition, literal expected old text, and replacement text.
+For exactly one accepted call, the policy may read one bounded target and attempt one direct worktree replacement. Trusted host construction owns the canonical non-bare repository root, limits, internal audit/preimage retention, and all internal temporary paths. The model supplies only a constrained logical relative path, a complete-file SHA-256 and byte-length precondition, and either one literal expected-old/replacement pair or a bounded list of such pairs.
+
+This amendment accepts multiple bounded exact replacements only within that one already-authorized existing tracked regular UTF-8 file. Every target is resolved against the same validated original snapshot, every target must occur exactly once, duplicate and overlapping ranges are refused, and all validated edits are materialized into one final single-file replacement. This increases operation expressiveness; it does not create a new authority class.
 
 The policy may create a uniquely named, exclusive temporary regular file in the validated target parent solely to construct and validate the complete postimage on the same filesystem before attempting replacement. This is not authority to create a model-selected or persistent user file. The temporary artifact is host-named, bounded, cleaned up when possible, and audited if cleanup is not proven.
 
@@ -25,14 +27,14 @@ The policy may create a uniquely named, exclusive temporary regular file in the 
 This policy does not authorize:
 
 - generic fs.write, arbitrary full-file writes, append, arbitrary truncation, file creation/deletion, rename/move, binary edits, alternate streams, or permissions/ACL/attribute changes;
-- regex, glob, line/range, unified-diff, hunk-fuzz, multi-edit, multi-file, or automatic retry behavior;
+- regex, glob, line/range, unified-diff, hunk-fuzz, multi-file, or automatic retry behavior;
 - generic shell/process execution or any model-selected executable, argv, cwd, environment, timeout, temporary path, or backup path;
 - .git internals, git add, git restore, checkout/switch, reset, clean, stash, index mutation, commit/amend, refs/history/reflogs/object database, merge/rebase, hooks, signing, editors, templates, identity, credentials, or network Git; and
 - OS sandboxing, cross-process exclusivity, transactional rollback, automatic recovery, or automatic replay.
 
 ## Initial capability scope
 
-repo.patch is one existing-file conditional literal replacement per call. It must have a bounded strict schema equivalent to:
+repo.patch is one existing-file conditional literal replacement or a bounded list of exact literal replacements per call. Its strict closed schema retains the legacy fields and additionally permits a mutually exclusive `replacements` array of one to sixteen `{expected_old_text, replacement_text}` items. The two forms share:
 
     path
     expected_file_sha256
@@ -40,7 +42,7 @@ repo.patch is one existing-file conditional literal replacement per call. It mus
     expected_old_text
     replacement_text
 
-All limits are host-fixed and nonzero. The schema must reject unknown fields, NUL, oversized serialized input, and all model-supplied native/absolute paths. The only supported transformation is to replace one exact, nonempty expected_old_text occurrence with replacement_text in a captured decoded file. An empty replacement is only exact text removal; it does not delete the file or introduce an offset/length truncate primitive.
+All limits are host-fixed and nonzero. The schema must reject unknown fields, NUL, oversized serialized input, and all model-supplied native/absolute paths. The only supported transformation is to replace each exact, nonempty expected_old_text occurrence with replacement_text in one captured decoded file. Each target occurs exactly once in the original snapshot; matching is never sequential over generated output. An empty replacement is only exact text removal; it does not delete the file or introduce an offset/length truncate primitive.
 
 The request is a verified no-op when old and replacement text are equal; RAH must not replace the file in that case. The result is bounded and redacted: it contains status and minimal logical target/effect indicators, never private absolute paths, preimage text, temporary names, backup locations, or secrets.
 
@@ -56,7 +58,7 @@ Under the per-repository RAH lease, before any commit attempt the policy must re
 
 1. raw file length and SHA-256 exactly match the expected complete-file values;
 2. strict supported UTF-8 decoding succeeds;
-3. the literal expected old text occurs exactly once; and
+3. every literal expected old text occurs exactly once in the same original snapshot, without duplicate or overlapping ranges; and
 4. the repository, parent, target, tracking, index, HEAD, and ref observations remain supported and unchanged.
 
 Absent or multiple expected-text matches, a stale digest/length, or any failed precondition is a known refusal with no target write. The implementation must revalidate immediately before the replacement call. It must never choose a first match, apply fuzzy matching, silently refresh the request, or retry.
@@ -65,13 +67,13 @@ Absent or multiple expected-text matches, a stale digest/length, or any failed p
 
 The policy supports only bounded strict UTF-8 files without NUL. Malformed UTF-8, binary data, unsupported encodings, and oversized raw files are refused. One leading UTF-8 BOM is accepted as transport metadata, excluded from text matching, and preserved exactly. No request field may add or remove it.
 
-Matching operates over decoded Unicode scalar values after the optional BOM; it uses no Unicode normalization, case folding, regex, or byte offsets. The whole-file digest/length covers the original raw bytes including BOM and newlines. RAH performs no implicit CRLF/LF/CR normalization. Unchanged text remains byte-identical and replacement newlines are literal request content.
+Matching operates over decoded Unicode scalar values after the optional BOM; it uses no Unicode normalization, case folding, regex, or newline normalization. Resolved UTF-8 byte ranges are derived from that original decoded snapshot. The whole-file digest/length covers the original raw bytes including BOM and newlines. RAH performs no implicit CRLF/LF/CR normalization. Unchanged text remains byte-identical and replacement newlines are literal request content.
 
 ## Mutation strategy
 
 RAH rejects in-place content modification because it can expose partial target bytes during a write failure, cancellation, or crash. The policy must first construct, size-check, encode, and flush a complete postimage to a bounded exclusive same-directory temporary regular file, then perform one best-available same-filesystem replacement attempt.
 
-On Windows, use a tested native Unicode replacement primitive rather than a shell, Git command, or cross-volume move. A successful replacement may be an atomic name/content switch for ordinary lookup purposes; that property is not a transaction. It does not guarantee metadata preservation, cross-process exclusion, rollback, recovery from every replacement failure, or that an attempted operation had no effect. Post-observation, not the API return alone, determines the RAH outcome.
+On Windows, use a tested native Unicode replacement primitive rather than a shell, Git command, or cross-volume move. On Unix, preserve the existing target's executable/file permission mode when preparing the host-owned temporary file; this is preservation, not model-selected mode-change authority. A successful replacement may be an atomic name/content switch for ordinary lookup purposes; that property is not a transaction. It does not guarantee timestamps, ownership, ACLs, arbitrary extended attributes, power-loss durability, cross-process exclusion, rollback, recovery from every replacement failure, or that an attempted operation had no effect. Post-observation, not the API return alone, determines the RAH outcome.
 
 ## Windows behavior and TOCTOU limits
 
@@ -147,6 +149,6 @@ Rejected because either would create broad arbitrary-path/content or ambient pro
 
 Rejected because it makes partial target bytes a normal failure possibility.
 
-### Unified diff, git apply, regex, or multi-edit patching
+### Unified diff, git apply, regex, or multi-file patching
 
-Rejected because their parsing, matching, path, conversion, and partial-failure semantics are larger than a first deterministic literal replacement.
+Rejected because their parsing, matching, path, conversion, and partial-failure semantics are larger than this bounded deterministic one-file literal replacement contract.

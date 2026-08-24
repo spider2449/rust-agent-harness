@@ -29,6 +29,7 @@ const MAX_SERIALIZED_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
+const MAX_REPLACEMENTS: usize = 16;
 const BOM: &[u8] = b"\xef\xbb\xbf";
 
 #[cfg(feature = "live-test-support")]
@@ -84,19 +85,42 @@ impl Tool for RepositoryWorktreePatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new(REPOSITORY_WORKTREE_PATCH_TOOL_NAME),
-            description: "Replaces one uniquely matched literal text fragment in one clean tracked worktree file."
+            description: "Replaces one or more uniquely matched literal text fragments in one clean tracked worktree file."
                 .to_owned(),
             input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "maxLength": MAX_PATH_BYTES},
-                    "expected_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                    "expected_file_byte_length": {"type": "integer", "minimum": 0, "maximum": MAX_FILE_BYTES},
-                    "expected_old_text": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT_BYTES},
-                    "replacement_text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
-                },
-                "required": ["path", "expected_file_sha256", "expected_file_byte_length", "expected_old_text", "replacement_text"],
-                "additionalProperties": false
+                "oneOf": [{
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1, "maxLength": MAX_PATH_BYTES},
+                        "expected_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "expected_file_byte_length": {"type": "integer", "minimum": 0, "maximum": MAX_FILE_BYTES},
+                        "expected_old_text": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT_BYTES},
+                        "replacement_text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
+                    },
+                    "required": ["path", "expected_file_sha256", "expected_file_byte_length", "expected_old_text", "replacement_text"],
+                    "additionalProperties": false
+                }, {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1, "maxLength": MAX_PATH_BYTES},
+                        "expected_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "expected_file_byte_length": {"type": "integer", "minimum": 0, "maximum": MAX_FILE_BYTES},
+                        "replacements": {
+                            "type": "array", "minItems": 1, "maxItems": MAX_REPLACEMENTS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "expected_old_text": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT_BYTES},
+                                    "replacement_text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
+                                },
+                                "required": ["expected_old_text", "replacement_text"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["path", "expected_file_sha256", "expected_file_byte_length", "replacements"],
+                    "additionalProperties": false
+                }]
             }),
             permission: PermissionLevel::Execute,
         }
@@ -180,6 +204,12 @@ impl RepositoryWorktreeMutationPolicy {
             &pre.target.path,
             None,
         );
+        #[cfg(test)]
+        if self.test_hook.should_fail(TestPhase::BeforeTemporaryWrite) {
+            return MutationOutcome::Refused {
+                reason: RefusalReason::Temporary("injected pre-temporary failure".to_owned()),
+            };
+        }
         let temporary = match self.write_temporary(&pre.target, &postimage.bytes) {
             Ok(temporary) => temporary,
             Err(reason) => return MutationOutcome::Refused { reason },
@@ -190,6 +220,14 @@ impl RepositoryWorktreeMutationPolicy {
             &pre.target.path,
             Some(&temporary.path),
         );
+        #[cfg(test)]
+        if self.test_hook.should_fail(TestPhase::AfterTemporaryWrite) {
+            return self.refuse_after_temp(
+                RefusalReason::Temporary("injected post-temporary failure".to_owned()),
+                temporary,
+                &postimage,
+            );
+        }
 
         if let Err(reason) = self
             .revalidate_before_commit(&pre, &temporary, &postimage)
@@ -203,6 +241,14 @@ impl RepositoryWorktreeMutationPolicy {
             &pre.target.path,
             Some(&temporary.path),
         );
+        #[cfg(test)]
+        if self.test_hook.should_fail(TestPhase::BeforeReplacement) {
+            return self.refuse_after_temp(
+                RefusalReason::Temporary("injected pre-replacement failure".to_owned()),
+                temporary,
+                &postimage,
+            );
+        }
         #[cfg(test)]
         self.test_hook
             .replacement_attempts
@@ -224,6 +270,22 @@ impl RepositoryWorktreeMutationPolicy {
                     &pre.target.path,
                     Some(&temporary.path),
                 );
+                #[cfg(test)]
+                if self
+                    .test_hook
+                    .should_fail(TestPhase::BeforePostVerification)
+                {
+                    return MutationOutcome::Uncertain {
+                        evidence: MutationEvidence::from_images(
+                            &pre,
+                            &postimage,
+                            MutationResultClass::Uncertain,
+                        ),
+                        reason: RefusalReason::PostObservation(
+                            "injected post-replacement observation failure",
+                        ),
+                    };
+                }
                 match self.verify_postimage(&pre, &postimage, &temporary).await {
                     Ok(()) => MutationOutcome::Success {
                         evidence: MutationEvidence::from_images(
@@ -424,6 +486,14 @@ impl RepositoryWorktreeMutationPolicy {
                     return Err(RefusalReason::TemporaryCleanup(reason));
                 }
             };
+            #[cfg(unix)]
+            if let Err(error) = set_temporary_permissions(&file, target.unix_mode) {
+                drop(file);
+                return match remove_temporary_identity(&temporary) {
+                    Ok(()) => Err(RefusalReason::Temporary(error.to_string())),
+                    Err(cleanup) => Err(RefusalReason::TemporaryCleanup(cleanup)),
+                };
+            }
             if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
                 drop(file);
                 return match remove_temporary_identity(&temporary) {
@@ -583,8 +653,13 @@ struct PatchRequest {
     path: PathBuf,
     expected_sha256: String,
     expected_length: usize,
-    expected_old_text: String,
-    replacement_text: String,
+    replacements: Vec<Replacement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Replacement {
+    old: String,
+    new: String,
 }
 
 impl PatchRequest {
@@ -608,12 +683,11 @@ impl PatchRequest {
                 "expected_file_byte_length",
                 "expected_old_text",
                 "replacement_text",
+                "replacements",
             ],
         )?;
         let path = required_string(object, "path")?;
         let expected_sha256 = required_string(object, "expected_file_sha256")?;
-        let expected_old_text = required_string(object, "expected_old_text")?;
-        let replacement_text = required_string(object, "replacement_text")?;
         let expected_length = object
             .get("expected_file_byte_length")
             .and_then(Value::as_u64)
@@ -633,32 +707,93 @@ impl PatchRequest {
                     .to_owned(),
             });
         }
+        let legacy_old = object.get("expected_old_text");
+        let legacy_new = object.get("replacement_text");
+        let replacements = object.get("replacements");
+        let replacements = match (legacy_old, legacy_new, replacements) {
+            (Some(_), Some(_), None) => vec![Replacement {
+                old: required_string(object, "expected_old_text")?.to_owned(),
+                new: required_string(object, "replacement_text")?.to_owned(),
+            }],
+            (None, None, Some(value)) => parse_replacements(value)?,
+            (Some(_), None, None) | (None, Some(_), None) => {
+                return Err(ToolError::InvalidInput {
+                    message: "legacy replacement fields must be supplied together".to_owned(),
+                });
+            }
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "input must use exactly one replacement form".to_owned(),
+                });
+            }
+        };
+        validate_replacements(&replacements, limits)?;
+        Ok(Self {
+            path,
+            expected_sha256: expected_sha256.to_owned(),
+            expected_length,
+            replacements,
+        })
+    }
+}
+
+fn parse_replacements(value: &Value) -> Result<Vec<Replacement>, ToolError> {
+    let items = value.as_array().ok_or_else(|| ToolError::InvalidInput {
+        message: "`replacements` must be an array".to_owned(),
+    })?;
+    if items.is_empty() || items.len() > MAX_REPLACEMENTS {
+        return Err(ToolError::InvalidInput {
+            message: "`replacements` must contain between 1 and 16 items".to_owned(),
+        });
+    }
+    items
+        .iter()
+        .map(|item| {
+            let object = item.as_object().ok_or_else(|| ToolError::InvalidInput {
+                message: "each replacement must be an object".to_owned(),
+            })?;
+            reject_unknown_fields(object, ["expected_old_text", "replacement_text"])?;
+            Ok(Replacement {
+                old: required_string(object, "expected_old_text")?.to_owned(),
+                new: required_string(object, "replacement_text")?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn validate_replacements(
+    replacements: &[Replacement],
+    limits: PatchLimits,
+) -> Result<(), ToolError> {
+    let mut aggregate = 0usize;
+    for replacement in replacements {
         for (name, text, empty_allowed) in [
-            ("expected_old_text", expected_old_text, false),
-            ("replacement_text", replacement_text, true),
+            ("expected_old_text", replacement.old.as_str(), false),
+            ("replacement_text", replacement.new.as_str(), true),
         ] {
             if text.len() > limits.max_text_bytes
                 || text.contains('\0')
                 || (!empty_allowed && text.is_empty())
+                || text.contains('\u{feff}')
             {
                 return Err(ToolError::InvalidInput {
                     message: format!("`{name}` exceeds limits or contains unsupported content"),
                 });
             }
-            if text.contains('\u{feff}') {
-                return Err(ToolError::InvalidInput {
-                    message: format!("`{name}` must not add or remove a UTF-8 BOM"),
-                });
-            }
+            aggregate =
+                aggregate
+                    .checked_add(text.len())
+                    .ok_or_else(|| ToolError::InvalidInput {
+                        message: "aggregate replacement text exceeds the request limit".to_owned(),
+                    })?;
         }
-        Ok(Self {
-            path,
-            expected_sha256: expected_sha256.to_owned(),
-            expected_length,
-            expected_old_text: expected_old_text.to_owned(),
-            replacement_text: replacement_text.to_owned(),
-        })
     }
+    if aggregate > limits.max_text_bytes {
+        return Err(ToolError::InvalidInput {
+            message: "aggregate replacement text exceeds the request limit".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 struct Target {
@@ -667,6 +802,8 @@ struct Target {
     parent_identity: FileIdentity,
     identity: FileIdentity,
     git_path: String,
+    #[cfg(unix)]
+    unix_mode: u32,
 }
 
 impl Target {
@@ -680,12 +817,16 @@ impl Target {
         if identity.link_count > 1 {
             return Err(policy_error("hard-linked targets are unsupported"));
         }
+        #[cfg(unix)]
+        let unix_mode = unix_permission_mode(&fs::metadata(&path).map_err(fs_error)?);
         Ok(Self {
             git_path: relative.to_string_lossy().replace('\\', "/"),
             parent_identity: FileIdentity::capture(&parent)?,
             parent,
             identity,
             path,
+            #[cfg(unix)]
+            unix_mode,
         })
     }
 
@@ -701,6 +842,10 @@ impl Target {
             || identity.link_count > 1
         {
             return Err(policy_error("target identity changed"));
+        }
+        #[cfg(unix)]
+        if unix_permission_mode(&fs::metadata(&current).map_err(fs_error)?) != self.unix_mode {
+            return Err(policy_error("target permissions changed"));
         }
         Ok(())
     }
@@ -721,6 +866,12 @@ impl Target {
             || identity.link_count > 1
         {
             return Err(policy_error("target path safety changed after replacement"));
+        }
+        #[cfg(unix)]
+        if unix_permission_mode(&fs::metadata(&current).map_err(fs_error)?) != previous.unix_mode {
+            return Err(policy_error(
+                "target permissions were not preserved after replacement",
+            ));
         }
         Ok(())
     }
@@ -926,31 +1077,50 @@ fn build_postimage(
     } else {
         (&[][..], text)
     };
-    let matches = body
-        .match_indices(&request.expected_old_text)
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        return Err(RefusalReason::Precondition("expected old text is missing"));
+    let mut ranges = Vec::with_capacity(request.replacements.len());
+    for replacement in &request.replacements {
+        let matches = body.match_indices(&replacement.old).collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(RefusalReason::Precondition("expected old text is missing"));
+        }
+        if matches.len() != 1 {
+            return Err(RefusalReason::Precondition(
+                "expected old text occurs more than once",
+            ));
+        }
+        if replacement.old == replacement.new {
+            return Err(RefusalReason::Precondition(
+                "replacement is a verified no-op",
+            ));
+        }
+        let (start, matched) = matches[0];
+        ranges.push(ResolvedReplacement {
+            start,
+            end: start + matched.len(),
+            new: replacement.new.as_str(),
+        });
     }
-    if matches.len() != 1 {
-        return Err(RefusalReason::Precondition(
-            "expected old text occurs more than once",
-        ));
+    ranges.sort_by_key(|range| range.start);
+    for pair in ranges.windows(2) {
+        if pair[1].start < pair[0].end {
+            return Err(RefusalReason::Precondition(
+                "replacement ranges overlap or duplicate",
+            ));
+        }
     }
-    if request.expected_old_text == request.replacement_text {
-        return Err(RefusalReason::Precondition(
-            "replacement is a verified no-op",
-        ));
+    let estimated_body_length = ranges.iter().fold(body.len(), |length, range| {
+        length
+            .saturating_sub(range.end - range.start)
+            .saturating_add(range.new.len())
+    });
+    let mut body_postimage = Vec::with_capacity(estimated_body_length);
+    let mut cursor = 0;
+    for range in ranges {
+        body_postimage.extend_from_slice(&body.as_bytes()[cursor..range.start]);
+        body_postimage.extend_from_slice(range.new.as_bytes());
+        cursor = range.end;
     }
-    let (offset, matched) = matches[0];
-    let mut body_postimage = String::with_capacity(
-        body.len()
-            .saturating_sub(matched.len())
-            .saturating_add(request.replacement_text.len()),
-    );
-    body_postimage.push_str(&body[..offset]);
-    body_postimage.push_str(&request.replacement_text);
-    body_postimage.push_str(&body[offset + matched.len()..]);
+    body_postimage.extend_from_slice(&body.as_bytes()[cursor..]);
     let length = bom.len().saturating_add(body_postimage.len());
     if length > limits.max_file_bytes {
         return Err(RefusalReason::Precondition(
@@ -959,8 +1129,14 @@ fn build_postimage(
     }
     let mut bytes = Vec::with_capacity(length);
     bytes.extend_from_slice(bom);
-    bytes.extend_from_slice(body_postimage.as_bytes());
+    bytes.extend_from_slice(&body_postimage);
     Ok(Postimage { bytes })
+}
+
+struct ResolvedReplacement<'a> {
+    start: usize,
+    end: usize,
+    new: &'a str,
 }
 
 fn validate_preconditions(
@@ -1199,6 +1375,18 @@ fn replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
     {
         fs::rename(temporary, target)
     }
+}
+
+#[cfg(unix)]
+fn unix_permission_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode() & 0o7777
+}
+
+#[cfg(unix)]
+fn set_temporary_permissions(file: &fs::File, mode: u32) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(mode))
 }
 
 #[cfg(windows)]
@@ -1486,6 +1674,7 @@ fn policy_error(message: impl Into<String>) -> ToolError {
 #[derive(Default)]
 struct TestHook {
     actions: std::sync::Mutex<Vec<TestAction>>,
+    failures: std::sync::Mutex<Vec<TestPhase>>,
     force_replacement_failure: std::sync::atomic::AtomicBool,
     replacement_attempts: std::sync::atomic::AtomicUsize,
 }
@@ -1497,10 +1686,12 @@ enum TestPhase {
     AfterGitValidation,
     AfterPreimageValidation,
     AfterExpectedTextValidation,
+    BeforeTemporaryWrite,
     AfterTemporaryWrite,
     AfterFinalTargetIdentityRevalidation,
     BeforeReplacement,
     AfterReplacement,
+    BeforePostVerification,
 }
 
 #[cfg(test)]
@@ -1514,6 +1705,24 @@ struct TestAction {
 
 #[cfg(test)]
 impl TestHook {
+    fn fail_at(&self, phase: TestPhase) {
+        self.failures
+            .lock()
+            .expect("test hook mutex poisoned")
+            .push(phase);
+    }
+
+    fn should_fail(&self, phase: TestPhase) -> bool {
+        let mut failures = self.failures.lock().expect("test hook mutex poisoned");
+        failures
+            .iter()
+            .position(|configured| *configured == phase)
+            .map(|index| {
+                failures.remove(index);
+                true
+            })
+            .unwrap_or(false)
+    }
     fn install<F>(&self, phase: TestPhase, action: F)
     where
         F: Fn(&Path, Option<&Path>) + Send + 'static,
@@ -2205,8 +2414,142 @@ mod tests {
         assert_eq!(content(&output)["reason"], "path_or_filesystem");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn applies_multiple_original_snapshot_replacements_in_offset_order() {
+        let base = TestDirectory::new("multiple");
+        let root = base.repository();
+        let bytes = b"first A, second B, third C\r\n";
+        fs::write(root.join("target.txt"), bytes).unwrap();
+        git(&root, &["add", "--", "target.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "multiple"]);
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let output = run(
+            &tool,
+            request_multiple("target.txt", bytes, &[("C", "3"), ("A", "1"), ("B", "2")]),
+        )
+        .await;
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"first 1, second 2, third 3\r\n"
+        );
+        assert_eq!(fs::read(root.join("other.txt")).unwrap(), b"other\n");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_mixed_duplicate_overlap_and_generated_match_forms() {
+        let base = TestDirectory::new("multiple-rejections");
+        let root = base.repository();
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let bytes = b"A B\n";
+        fs::write(root.join("target.txt"), bytes).unwrap();
+        git(&root, &["add", "--", "target.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "replace"]);
+        let mixed = json!({
+            "path": "target.txt", "expected_file_sha256": sha256_hex(bytes),
+            "expected_file_byte_length": bytes.len(), "expected_old_text": "A",
+            "replacement_text": "X", "replacements": []
+        });
+        assert!(
+            tool.execute(ToolInput(mixed), ToolContext::default())
+                .await
+                .is_err()
+        );
+        for replacements in [
+            vec![("A", "X"), ("A", "Y")],
+            vec![("A", "X"), ("A B", "Y")],
+            vec![("A", "X"), ("X", "Y")],
+        ] {
+            let output = run(&tool, request_multiple("target.txt", bytes, &replacements)).await;
+            assert_eq!(content(&output)["status"], "precondition_failed");
+            assert_eq!(fs::read(root.join("target.txt")).unwrap(), bytes);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn private_faults_preserve_precommit_and_report_postcommit_uncertainty() {
+        let base = TestDirectory::new("faults");
+        let root = base.repository();
+        for phase in [
+            TestPhase::BeforeTemporaryWrite,
+            TestPhase::AfterTemporaryWrite,
+            TestPhase::BeforeReplacement,
+        ] {
+            let policy = RepositoryWorktreeMutationPolicy::new(
+                &git_executable(),
+                &root,
+                PatchLimits::default(),
+            )
+            .unwrap();
+            policy.test_hook.fail_at(phase);
+            let output = policy
+                .execute_once(parse_request())
+                .await
+                .into_tool_output();
+            assert_eq!(content(&output)["status"], "precondition_failed");
+            assert_eq!(
+                fs::read(root.join("target.txt")).unwrap(),
+                b"alpha\nold\nomega\n"
+            );
+            assert_no_patch_temporary(&root);
+        }
+        let policy =
+            RepositoryWorktreeMutationPolicy::new(&git_executable(), &root, PatchLimits::default())
+                .unwrap();
+        policy.test_hook.fail_at(TestPhase::BeforePostVerification);
+        let output = policy
+            .execute_once(parse_request())
+            .await
+            .into_tool_output();
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nnew\nomega\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserves_unix_executable_and_nonexecutable_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o755, 0o644] {
+            let base = TestDirectory::new("unix-mode");
+            let root = base.repository();
+            fs::set_permissions(root.join("target.txt"), fs::Permissions::from_mode(mode)).unwrap();
+            if mode & 0o111 != 0 {
+                git(&root, &["add", "--chmod=+x", "--", "target.txt"]);
+                git(&root, &["commit", "--quiet", "-m", "executable target"]);
+            }
+            let bytes = fs::read(root.join("target.txt")).unwrap();
+            let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+            let output = run(&tool, request("target.txt", &bytes, "old", "new")).await;
+            assert_eq!(content(&output)["status"], "ok");
+            assert_eq!(
+                fs::metadata(root.join("target.txt"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                mode & 0o111
+            );
+        }
+    }
+
     fn request(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
         request_value(path, bytes, old, replacement)
+    }
+
+    fn request_multiple(path: &str, bytes: &[u8], replacements: &[(&str, &str)]) -> Value {
+        json!({
+            "path": path,
+            "expected_file_sha256": sha256_hex(bytes),
+            "expected_file_byte_length": bytes.len(),
+            "replacements": replacements.iter().map(|(old, new)| json!({
+                "expected_old_text": old,
+                "replacement_text": new,
+            })).collect::<Vec<_>>(),
+        })
     }
 
     fn parse_request() -> PatchRequest {
