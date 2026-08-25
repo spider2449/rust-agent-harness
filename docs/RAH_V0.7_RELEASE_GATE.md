@@ -1,8 +1,23 @@
-# RAH v0.7 Release Gate
+# RAH v0.7 Release Evidence
 
-Status: **RELEASE PREPARATION**
+Release status: **RELEASED**
 
-Date: 2026-08-24
+Publication date: 2026-08-24
+
+## Immutable release identity
+
+- Release: `RAH v0.7.0`
+- Tag: `v0.7.0`
+- Release commit: `9521fa4e5f5c184eabd0061eb71854422752b8f1`
+- Annotated tag object: `b4df68290053f7dd8f6a2b45671fd7cdab8d128f`
+- Tag CI: run `32706469848`, completed / success.
+- GitHub Release: <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.7.0>
+- GitHub Release ID: `375550583`
+- GitHub Release publication: `2026-08-24T08:32:30Z` (draft: false, prerelease: false).
+
+The `v0.7.0` annotated tag remains permanently attached to release commit
+`9521fa4e5f5c184eabd0061eb71854422752b8f1`. Post-release documentation
+cleanup advances `master` beyond that tag; it does not retag the cleanup commit.
 
 ## Release scope
 
@@ -20,7 +35,7 @@ public Rust interfaces, trusted-profile binding format, `profile_version` 1,
 and canonical `repo.patch` capability name remain compatible; no migration is
 required.
 
-## Milestone evidence
+## Historical milestone evidence
 
 | Task | Evidence |
 | --- | --- |
@@ -40,7 +55,7 @@ required.
 | 080C | made live-gate success host-attested rather than model-text-attested |
 | 080R | resumed release preparation using the corrected certified gate |
 
-## Certified runtime
+## Certified Codex runtime
 
 - Certified runtime: exactly `codex-cli 0.149.0`.
 - Certified SHA-256:
@@ -61,11 +76,10 @@ required.
 
 Windows local deterministic release gates cover formatting, workspace check,
 tests, clippy, Cargo metadata, and focused `rah-tools`, `rah-runtime-codex`,
-and `rah-cli` gates. Ubuntu CI supplies deterministic cross-platform evidence
-for the exact release-preparation commit. Neither class is Unix live Codex
-validation.
+and `rah-cli` gates. Ubuntu CI supplied deterministic cross-platform evidence
+for the exact release commit. Neither class is Unix live Codex validation.
 
-## Live evidence
+## Windows live evidence
 
 Live evidence is Windows native Codex only. Historical Task 074 evidence used
 the then-current live setup; it is not retroactively claimed to have used the
@@ -109,3 +123,12 @@ automatically replayed.
 - Session/workflow persistence, network MCP, PluginManager, and profile reload
   remain deferred.
 - Windows live validation only; Ubuntu evidence is deterministic only.
+
+## Historical record
+
+This document records the evidence that supported the released v0.7.0 tag. It
+is no longer a pending gate or release-preparation checklist. The failed and
+blocked milestones above remain historical evidence: Task 077 was initially
+**NOT RELEASE READY**; Task 080 was initially blocked; Task 080A diagnosed
+local configuration drift; Tasks 080B and 080C fixed live-gate reproducibility;
+and Task 080R reached **RELEASE PREP READY** before publication.

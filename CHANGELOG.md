@@ -2,9 +2,9 @@
 
 ## v0.7.0 — 2026-08-24
 
-Release-preparation entry for the bounded multi-replacement evolution of the
-existing `repo.patch` capability. Publication and tagging remain outside this
-entry.
+Released as `RAH v0.7.0` on 2026-08-24. The immutable annotated tag `v0.7.0`
+has object ID `b4df68290053f7dd8f6a2b45671fd7cdab8d128f` and peels to release
+commit `9521fa4e5f5c184eabd0061eb71854422752b8f1`.
 
 ### Added
 
@@ -24,7 +24,8 @@ entry.
   multi-replacement validation, and repository-observer verification cover the
   milestone. Reproducible certified baseline tooling uses isolated configuration
   and host-attested structural markers; the Codex platform-alignment audit
-  remains part of the release evidence.
+  remains part of the release evidence. Tag CI run `32706469848` completed
+  successfully.
 - The certified live runtime is exactly `codex-cli 0.149.0`. This release does
   not claim Unix live Codex validation.
 
