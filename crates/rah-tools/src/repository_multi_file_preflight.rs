@@ -1111,17 +1111,20 @@ mod tests {
         .unwrap()
     }
     fn git(git: &Path, root: &Path, args: &[&str]) {
-        let output = Command::new(git)
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap();
+        let output = git_output(git, root, args);
         assert!(
             output.status.success(),
             "{:?}: {}",
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    fn git_output(git: &Path, root: &Path, args: &[&str]) -> std::process::Output {
+        Command::new(git)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
     }
     fn state(root: &Path) -> (Vec<Vec<u8>>, Vec<u8>, Vec<u8>, Vec<u8>) {
         (
@@ -1790,16 +1793,46 @@ mod tests {
                 "branch master",
             ],
         );
-        assert!(
-            !Command::new(&git_path)
-                .args(["merge", "conflict-a"])
-                .current_dir(&root)
-                .status()
-                .unwrap()
-                .success()
+        let merge = git_output(
+            &git_path,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH Test",
+                "-c",
+                "user.email=rah-test@example.invalid",
+                "merge",
+                "conflict-a",
+            ],
         );
+        assert!(
+            !merge.status.success(),
+            "merge unexpectedly succeeded: stdout={} stderr={}",
+            String::from_utf8_lossy(&merge.stdout),
+            String::from_utf8_lossy(&merge.stderr)
+        );
+        let unmerged = git_output(&git_path, &root, &["ls-files", "-u", "--", "a.txt"]);
+        assert!(
+            unmerged.status.success(),
+            "git ls-files -u failed: {}",
+            String::from_utf8_lossy(&unmerged.stderr)
+        );
+        let unmerged = String::from_utf8(unmerged.stdout).unwrap();
+        assert_eq!(
+            unmerged.lines().count(),
+            3,
+            "expected three unmerged index stages for a.txt, got: {unmerged}"
+        );
+        for stage in 1..=3 {
+            assert!(
+                unmerged.contains(&format!(" {stage}\ta.txt")),
+                "missing unmerged stage {stage} for a.txt: {unmerged}"
+            );
+        }
         let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+        let before = fs::read(root.join("a.txt")).unwrap();
         assert!(policy.prepare(&multi(&root, &["a.txt"])).await.is_err());
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), before);
         git(&git_path, &root, &["merge", "--abort"]);
 
         fs::write(root.join("gitlink"), b"placeholder\n").unwrap();
