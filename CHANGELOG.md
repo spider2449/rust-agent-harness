@@ -1,6 +1,11 @@
 # Changelog
 
-## v0.9.0 — release prepared
+## v0.9.0 — 2026-08-25
+
+Released as `RAH v0.9.0` on 2026-08-25. The immutable annotated tag `v0.9.0`
+has object ID `fbb30c3787911bdb935417bf51d9c0c5f2bdf381` and peels to release
+commit `d971790fd1de7df782a99d2274278a14f1f0066f`. Tag CI run `32824354008`
+completed successfully, and the GitHub Release was published.
 
 ### Added
 
@@ -14,7 +19,7 @@
 
 - Windows certified Codex live validation using exactly `codex-cli 0.149.0`
   emitted the structural marker `RAH_REPO_EDIT_FILES_LIVE_OK`.
-- ADR 0014 is Accepted; Ubuntu deterministic CI is required before tagging.
+- ADR 0014 is Accepted.
 
 ### Security and limitations
 
