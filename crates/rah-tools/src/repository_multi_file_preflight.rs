@@ -1,8 +1,8 @@
 //! Private preparation for the future bounded multi-file edit capability.
 //!
 //! This module deliberately has no `Tool` implementation and no native target
-//! replacement primitive.  Its only filesystem write is an owned temporary
-//! postimage which is verified and removed before `prepare` returns.
+//! replacement primitive.  Task 094B keeps the native commit loop here so it
+//! can consume the retained plan without exposing a new tool surface.
 
 use std::{
     collections::HashSet,
@@ -90,12 +90,30 @@ impl RepositoryMultiFileMutationPolicy {
         Ok(plan.without_temporaries())
     }
 
+    /// Runs the private, one-attempt-per-target native commit loop.  This is
+    /// intentionally crate-private until the separate policy integration task.
+    pub(crate) async fn commit(
+        &self,
+        input: &ToolInput,
+    ) -> Result<MultiFileEditOutcome, PreflightError> {
+        let _lease = self.acquire_lease().await;
+        let plan = self.prepare_retained_locked(input)?;
+        Ok(self.commit_prepared(&plan))
+    }
+
     async fn prepare_retained_inner(
         &self,
         input: &ToolInput,
     ) -> Result<PreparedMultiFilePlan, PreflightError> {
-        let request = MultiFileRequest::parse(input)?;
         let _lease = self.acquire_lease().await;
+        self.prepare_retained_locked(input)
+    }
+
+    fn prepare_retained_locked(
+        &self,
+        input: &ToolInput,
+    ) -> Result<PreparedMultiFilePlan, PreflightError> {
+        let request = MultiFileRequest::parse(input)?;
         self.revalidate_repository()?;
         let repository = self.repository_observation()?;
         let mut seen_logical = HashSet::new();
@@ -211,6 +229,196 @@ impl RepositoryMultiFileMutationPolicy {
         Ok(plan)
     }
 
+    fn commit_prepared(&self, plan: &PreparedMultiFilePlan) -> MultiFileEditOutcome {
+        let mut effects = plan
+            .targets
+            .iter()
+            .map(|target| MultiFileEffect {
+                logical_path: target.canonical_logical.clone(),
+                state: MultiFileEffectState::NotAttempted,
+            })
+            .collect::<Vec<_>>();
+        for index in 0..plan.targets.len() {
+            let committed = index;
+            if self.revalidate_commit_state(plan, committed).is_err() {
+                return self.classify_stop(plan, &mut effects, committed, index, false);
+            }
+            #[cfg(test)]
+            if test_commit_hook::take(&self.root, CommitTestPhase::BeforeNativeReplacement, index) {
+                return self.classify_stop(plan, &mut effects, committed, index, false);
+            }
+            #[cfg(test)]
+            test_commit_hook::attempt(&self.root, index);
+            #[cfg(test)]
+            if test_commit_hook::take(&self.root, CommitTestPhase::KnownNoEffectFailure, index) {
+                effects[index].state = MultiFileEffectState::UnchangedVerified;
+                return self.classify_stop(plan, &mut effects, committed, index, true);
+            }
+
+            let target = &plan.targets[index];
+            let temporary = &plan.temporaries[index];
+            let native = replace_once(&temporary.path, &target.target.path);
+            #[cfg(test)]
+            if test_commit_hook::take(&self.root, CommitTestPhase::UncertainNativeOutcome, index) {
+                return self.uncertain(effects);
+            }
+            if native.is_err() {
+                // A failed native call is not proof of no effect.  Only a full
+                // bounded re-observation may classify it as known unchanged.
+                if self.target_matches(target, &target.original).is_ok()
+                    && temporary.revalidate().is_ok()
+                {
+                    effects[index].state = MultiFileEffectState::UnchangedVerified;
+                    return self.classify_stop(plan, &mut effects, committed, index, true);
+                }
+                return self.uncertain(effects);
+            }
+            #[cfg(test)]
+            if test_commit_hook::take(
+                &self.root,
+                CommitTestPhase::AfterNativeBeforeCertification,
+                index,
+            ) {
+                return self.uncertain(effects);
+            }
+            if self.target_matches(target, &target.postimage).is_err()
+                || self.revalidate_repository().is_err()
+                || self.repository_observation().ok().as_ref() != Some(&plan.repository)
+            {
+                return self.uncertain(effects);
+            }
+            effects[index].state = MultiFileEffectState::CommittedVerified;
+            #[cfg(test)]
+            if test_commit_hook::take(&self.root, CommitTestPhase::AfterCertification, index) {
+                return self.classify_stop(plan, &mut effects, index + 1, index + 1, false);
+            }
+        }
+        MultiFileEditOutcome {
+            status: MultiFileEditStatus::Ok,
+            effects,
+        }
+    }
+
+    fn revalidate_commit_state(
+        &self,
+        plan: &PreparedMultiFilePlan,
+        committed: usize,
+    ) -> Result<(), PreflightError> {
+        self.revalidate_repository()?;
+        if self.repository_observation()? != plan.repository {
+            return Err(PreflightError::Precondition(
+                "repository/index/HEAD/refs changed",
+            ));
+        }
+        for (index, prepared) in plan.targets.iter().enumerate() {
+            prepared.target.revalidate_parent(&self.root)?;
+            let expected = if index < committed {
+                &prepared.postimage
+            } else {
+                &prepared.original
+            };
+            self.target_matches(prepared, expected)?;
+            if index >= committed {
+                self.validate_git_target(&prepared.target)?;
+                plan.temporaries[index].revalidate()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn target_matches(
+        &self,
+        prepared: &PreparedTarget,
+        expected: &[u8],
+    ) -> Result<(), PreflightError> {
+        prepared.target.revalidate_parent(&self.root)?;
+        reject_link_or_reparse(&prepared.target.path, "target")?;
+        let metadata = fs::metadata(&prepared.target.path).map_err(fs_error)?;
+        if !metadata.is_file() || Identity::capture(&prepared.target.path)?.link_count != 1 {
+            return Err(PreflightError::Precondition(
+                "target identity is no longer trusted",
+            ));
+        }
+        #[cfg(unix)]
+        if unix_mode(&metadata) != prepared.target.mode & 0o7777 {
+            return Err(PreflightError::Precondition("target mode changed"));
+        }
+        let current = read_bounded(&prepared.target.path, MAX_FILE_BYTES)
+            .map_err(|_| PreflightError::Precondition("could not reread bounded target"))?;
+        if current != expected {
+            return Err(PreflightError::Precondition("target bytes changed"));
+        }
+        Ok(())
+    }
+
+    fn classify_stop(
+        &self,
+        plan: &PreparedMultiFilePlan,
+        effects: &mut [MultiFileEffect],
+        committed: usize,
+        stopped: usize,
+        native_failed: bool,
+    ) -> MultiFileEditOutcome {
+        if !self.prove_inventory(plan, effects, committed, stopped) {
+            return self.uncertain(effects.to_vec());
+        }
+        if !cleanup_uncommitted_temporaries(plan, committed) {
+            return self.uncertain(effects.to_vec());
+        }
+        let status = if committed == 0 && native_failed {
+            MultiFileEditStatus::FailedKnownNoEffect
+        } else if committed == 0 {
+            MultiFileEditStatus::PreconditionFailed
+        } else {
+            MultiFileEditStatus::PartialEffect
+        };
+        MultiFileEditOutcome {
+            status,
+            effects: effects.to_vec(),
+        }
+    }
+
+    fn prove_inventory(
+        &self,
+        plan: &PreparedMultiFilePlan,
+        effects: &mut [MultiFileEffect],
+        committed: usize,
+        stopped: usize,
+    ) -> bool {
+        if self.revalidate_repository().is_err()
+            || self.repository_observation().ok().as_ref() != Some(&plan.repository)
+        {
+            return false;
+        }
+        for (index, prepared) in plan.targets.iter().enumerate() {
+            let expected = if index < committed {
+                &prepared.postimage
+            } else {
+                &prepared.original
+            };
+            if self.target_matches(prepared, expected).is_err() {
+                return false;
+            }
+            if index >= committed && index <= stopped {
+                effects[index].state = MultiFileEffectState::UnchangedVerified;
+            }
+        }
+        true
+    }
+
+    fn uncertain(&self, mut effects: Vec<MultiFileEffect>) -> MultiFileEditOutcome {
+        for effect in &mut effects {
+            if effect.state == MultiFileEffectState::NotAttempted {
+                effect.state = MultiFileEffectState::Uncertain;
+                break;
+            }
+        }
+        MultiFileEditOutcome {
+            status: MultiFileEditStatus::Uncertain,
+            effects,
+        }
+    }
+
     #[cfg(test)]
     async fn prepare_retained_for_test(
         &self,
@@ -316,6 +524,18 @@ impl RepositoryMultiFileMutationPolicy {
     }
 }
 
+fn cleanup_uncommitted_temporaries(plan: &PreparedMultiFilePlan, committed: usize) -> bool {
+    plan.temporaries[committed..]
+        .iter()
+        .all(|temporary| temporary.remove().is_ok())
+}
+
+#[cfg(unix)]
+fn unix_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode() & 0o7777
+}
+
 fn is_supported_index_tag(tag: &[u8]) -> bool {
     tag.starts_with(b"H ")
 }
@@ -324,6 +544,37 @@ fn is_supported_index_tag(tag: &[u8]) -> bool {
 pub(crate) enum PreflightError {
     InvalidTarget(&'static str),
     Precondition(&'static str),
+}
+
+/// Private result carried to the later policy integration layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MultiFileEditOutcome {
+    pub(crate) status: MultiFileEditStatus,
+    pub(crate) effects: Vec<MultiFileEffect>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MultiFileEditStatus {
+    Ok,
+    InvalidTarget,
+    PreconditionFailed,
+    FailedKnownNoEffect,
+    PartialEffect,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MultiFileEffect {
+    pub(crate) logical_path: String,
+    pub(crate) state: MultiFileEffectState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MultiFileEffectState {
+    CommittedVerified,
+    UnchangedVerified,
+    NotAttempted,
+    Uncertain,
 }
 struct MultiFileRequest {
     targets: Vec<RequestTarget>,
@@ -644,6 +895,20 @@ impl SafeTarget {
             Ok(())
         }
     }
+
+    fn revalidate_parent(&self, root: &Path) -> Result<(), PreflightError> {
+        reject_reparse_ancestry(&self.parent, "target parent ancestry")?;
+        let parent = canonical_directory(&self.parent, "target parent")?;
+        if !is_beneath(root, &parent)
+            || !paths_equivalent(&parent, &self.parent)
+            || Identity::capture(&parent)? != self.parent_identity
+        {
+            return Err(PreflightError::Precondition(
+                "target parent identity changed",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_snapshot(bytes: &[u8], request: &RequestTarget) -> Result<(), PreflightError> {
@@ -899,6 +1164,122 @@ impl OwnedTemporary {
         self.revalidate()?;
         fs::remove_file(&self.path)
             .map_err(|_| PreflightError::Precondition("temporary safe cleanup failed"))
+    }
+}
+
+/// Performs precisely one per-target native replacement. It is deliberately
+/// private so no other capability can gain generic filesystem-write authority.
+fn replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        windows_replace_once(temporary, target)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, target)
+    }
+}
+
+#[cfg(windows)]
+fn windows_replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // This native invocation is the commit point and is never retried.
+    if unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitTestPhase {
+    BeforeNativeReplacement,
+    KnownNoEffectFailure,
+    UncertainNativeOutcome,
+    AfterNativeBeforeCertification,
+    AfterCertification,
+}
+
+#[cfg(test)]
+mod test_commit_hook {
+    use super::CommitTestPhase;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static HOOKS: OnceLock<Mutex<Vec<(PathBuf, CommitTestPhase, usize)>>> = OnceLock::new();
+    static ATTEMPTS: OnceLock<Mutex<HashMap<(PathBuf, usize), usize>>> = OnceLock::new();
+
+    pub(super) fn install(root: &Path, phase: CommitTestPhase, index: usize) {
+        HOOKS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push((root.to_path_buf(), phase, index));
+    }
+    pub(super) fn take(root: &Path, phase: CommitTestPhase, index: usize) -> bool {
+        let mut hooks = HOOKS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
+        if let Some(position) = hooks
+            .iter()
+            .position(|hook| hook == &(root.to_path_buf(), phase, index))
+        {
+            hooks.remove(position);
+            true
+        } else {
+            false
+        }
+    }
+    pub(super) fn attempt(root: &Path, index: usize) {
+        *ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .entry((root.to_path_buf(), index))
+            .or_default() += 1;
+    }
+    pub(super) fn attempts(root: &Path, index: usize) -> usize {
+        *ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&(root.to_path_buf(), index))
+            .unwrap_or(&0)
+    }
+    pub(super) fn clear(root: &Path) {
+        HOOKS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .retain(|(path, _, _)| path != root);
+        ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .retain(|(path, _), _| path != root);
     }
 }
 
@@ -2009,6 +2390,168 @@ mod tests {
             },
             #[cfg(unix)]
             mode: 0o100644,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_commit_is_ordered_one_attempt_and_preserves_repository_metadata() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+        let before = state(&root);
+        let outcome = policy
+            .commit(&multi(&root, &["z.txt", "a.txt", "m.txt"]))
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, MultiFileEditStatus::Ok);
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|effect| effect.logical_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "m.txt", "z.txt"]
+        );
+        assert!(
+            outcome
+                .effects
+                .iter()
+                .all(|effect| effect.state == MultiFileEffectState::CommittedVerified)
+        );
+        for index in 0..3 {
+            assert_eq!(test_commit_hook::attempts(&policy.root, index), 1);
+        }
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A new\n");
+        assert_eq!(fs::read(root.join("m.txt")).unwrap(), b"M new\n");
+        assert_eq!(fs::read(root.join("z.txt")).unwrap(), b"Z new\n");
+        let after = state(&root);
+        assert_eq!(after.1, before.1, "raw index must remain unchanged");
+        assert_eq!(after.2, before.2, "HEAD must remain unchanged");
+        assert_eq!(after.3, before.3, "refs must remain unchanged");
+        test_commit_hook::clear(&policy.root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_commit_supports_one_two_and_four_targets() {
+        for paths in [vec!["a.txt"], vec!["a.txt", "m.txt"]] {
+            let (_base, git_path, root) = TestDirectory::repository();
+            let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+            assert_eq!(
+                policy.commit(&multi(&root, &paths)).await.unwrap().status,
+                MultiFileEditStatus::Ok
+            );
+        }
+        let (_base, git_path, root) = TestDirectory::repository();
+        fs::write(root.join("b.txt"), b"B old\n").unwrap();
+        git(&git_path, &root, &["add", "--", "b.txt"]);
+        git(
+            &git_path,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "four target fixture",
+            ],
+        );
+        let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+        let outcome = policy
+            .commit(&multi(&root, &["z.txt", "b.txt", "a.txt", "m.txt"]))
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, MultiFileEditStatus::Ok);
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|effect| effect.logical_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt", "m.txt", "z.txt"]
+        );
+        for index in 0..4 {
+            assert_eq!(test_commit_hook::attempts(&policy.root, index), 1);
+        }
+        test_commit_hook::clear(&policy.root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn known_no_effect_failures_produce_verified_prefix_without_rollback() {
+        for (failed, expected_status) in [
+            (0, MultiFileEditStatus::FailedKnownNoEffect),
+            (1, MultiFileEditStatus::PartialEffect),
+            (2, MultiFileEditStatus::PartialEffect),
+        ] {
+            let (_base, git_path, root) = TestDirectory::repository();
+            let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+            test_commit_hook::install(&policy.root, CommitTestPhase::KnownNoEffectFailure, failed);
+            let outcome = policy
+                .commit(&multi(&root, &["a.txt", "m.txt", "z.txt"]))
+                .await
+                .unwrap();
+            assert_eq!(outcome.status, expected_status);
+            for index in 0..failed {
+                assert_eq!(
+                    outcome.effects[index].state,
+                    MultiFileEffectState::CommittedVerified
+                );
+                assert_eq!(test_commit_hook::attempts(&policy.root, index), 1);
+            }
+            assert_eq!(
+                outcome.effects[failed].state,
+                MultiFileEffectState::UnchangedVerified
+            );
+            assert_eq!(
+                test_commit_hook::attempts(&policy.root, failed),
+                1,
+                "known native failure has one attempt"
+            );
+            for index in failed + 1..3 {
+                assert_eq!(
+                    outcome.effects[index].state,
+                    MultiFileEffectState::NotAttempted
+                );
+                assert_eq!(test_commit_hook::attempts(&policy.root, index), 0);
+            }
+            assert_eq!(
+                fs::read(root.join("a.txt")).unwrap(),
+                if failed > 0 { b"A new\n" } else { b"A old\n" }
+            );
+            test_commit_hook::clear(&policy.root);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertain_native_and_lost_certification_stop_without_retry_or_rollback() {
+        for phase in [
+            CommitTestPhase::UncertainNativeOutcome,
+            CommitTestPhase::AfterNativeBeforeCertification,
+        ] {
+            for failed in 0..3 {
+                let (_base, git_path, root) = TestDirectory::repository();
+                let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+                test_commit_hook::install(&policy.root, phase, failed);
+                let outcome = policy
+                    .commit(&multi(&root, &["a.txt", "m.txt", "z.txt"]))
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.status, MultiFileEditStatus::Uncertain);
+                for index in 0..=failed {
+                    assert_eq!(test_commit_hook::attempts(&policy.root, index), 1);
+                }
+                for index in failed + 1..3 {
+                    assert_eq!(test_commit_hook::attempts(&policy.root, index), 0);
+                }
+                for index in 0..failed {
+                    assert_eq!(
+                        fs::read(root.join(["a.txt", "m.txt", "z.txt"][index])).unwrap()[2..5],
+                        *b"new"
+                    );
+                }
+                test_commit_hook::clear(&policy.root);
+            }
         }
     }
 }
