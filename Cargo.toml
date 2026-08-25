@@ -2,6 +2,7 @@
 members = [
     "crates/rah-cli",
     "crates/rah-core",
+    "crates/rah-desktop",
     "crates/rah-model",
     "crates/rah-protocol",
     "crates/rah-runtime",
