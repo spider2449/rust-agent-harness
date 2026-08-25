@@ -60,8 +60,8 @@ pub use shell_exec::ShellExecTool;
 pub use trusted_profile::{
     EffectiveCapability, EffectiveProfile, EffectiveProvider, McpExpectedToolProfile,
     McpProviderProfile, ProcessPluginExpectedToolProfile, ProcessPluginProfile, ProfileError,
-    RepositoryFileCreationProfile, RepositoryObserverProfile, RepositoryWorktreePatchProfile,
-    TrustedStaticProfile,
+    RepositoryFileCreationProfile, RepositoryMultiFileEditProfile, RepositoryObserverProfile,
+    RepositoryWorktreePatchProfile, TrustedStaticProfile,
 };
 
 /// Neutral execution context supplied by the runtime to a tool.

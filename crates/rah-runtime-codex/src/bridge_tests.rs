@@ -246,6 +246,80 @@ struct RepositoryCreateFileFixture {
     profile: PathBuf,
 }
 
+struct RepositoryMultiFileEditFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    a: PathBuf,
+    b: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryMultiFileEditFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).expect("repository directory should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(
+            &root,
+            &["config", "user.name", "RAH multi-file bridge test"],
+        );
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        fs::write(&a, b"alpha old\n").expect("a target should be written");
+        fs::write(&b, b"beta old\n").expect("b target should be written");
+        git(&root, &["add", "--", "a.txt", "b.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task095-multi-file-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "repo": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.edit-files", "enabled": true, "permission": "execute",
+                "executable": "git", "repository": "repo"
+            }]
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap()).unwrap();
+        Self {
+            _base: base,
+            root,
+            a,
+            b,
+            profile,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        compose(TrustedStaticProfile::load(&self.profile).expect("profile should load"))
+            .await
+            .expect("effective profile should compose")
+    }
+
+    fn request(&self) -> Value {
+        let target = |path: &Path, logical: &str, old: &str, new: &str| {
+            let bytes = fs::read(path).unwrap();
+            json!({"path":logical,"expected_file_sha256":sha256_hex(&bytes),"expected_file_byte_length":bytes.len(),"replacements":[{"expected_old_text":old,"replacement_text":new}]})
+        };
+        json!({"targets":[
+            target(&self.b, "b.txt", "beta old", "beta new"),
+            target(&self.a, "a.txt", "alpha old", "alpha new")
+        ]})
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            git_output(&self.root, &["rev-parse", "HEAD"]),
+            git_output(&self.root, &["show-ref"]),
+            fs::read(self.root.join(".git/index")).unwrap(),
+        )
+    }
+}
+
 impl RepositoryCreateFileFixture {
     fn new(label: &str) -> Self {
         let base = TestDirectory::new();
@@ -1386,6 +1460,155 @@ async fn trusted_profile_composed_repo_create_file_requires_execute_before_mutat
         ));
         assert!(!fixture.target.exists());
         fixture.assert_metadata_unchanged(&before);
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_edit_files_uses_generic_bridge_dispatch_once() {
+    let fixture = RepositoryMultiFileEditFixture::new("edit-files-success");
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .next()
+        .expect("effective composer should publish repo.edit-files");
+    assert_eq!(definition.name, ToolName::new("repo.edit-files"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema["properties"]["targets"]["maxItems"],
+        4
+    );
+    assert!(
+        !format!("{:?}", composition.effective_profile())
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+
+    let executions = Arc::new(AtomicUsize::new(0));
+    let registry =
+        counting_composed_registry(&composition, "repo.edit-files", Arc::clone(&executions));
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(alias, "rah_tool_0");
+    assert_ne!(alias, "repo.edit-files");
+    assert_eq!(
+        thread["params"]["dynamicTools"][0]["inputSchema"],
+        definition.input_schema
+    );
+
+    let request = fixture.request();
+    for id in [json!(950), json!("duplicate-delivery")] {
+        peer.send(tool_request(
+            id,
+            "private-thread",
+            "private-turn",
+            "edit-files-once",
+            &alias,
+            request.clone(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let visible = first["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(visible).unwrap(),
+        json!({"status":"ok","effects":[
+            {"path":"a.txt","state":"committed_verified"},
+            {"path":"b.txt","state":"committed_verified"}
+        ]})
+    );
+    assert!(!visible.contains(fixture.root.to_string_lossy().as_ref()));
+    assert_eq!(fs::read(&fixture.a).unwrap(), b"alpha new\n");
+    assert_eq!(fs::read(&fixture.b).unwrap(), b"beta new\n");
+    assert_eq!(fixture.snapshot(), before);
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(tool_event_count(&events), 3);
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_edit_files_requires_execute_and_forwards_refusals() {
+    let fixture = RepositoryMultiFileEditFixture::new("edit-files-refusal");
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let (runtime, mut peer, _) =
+        connected_bridge(composition.registry_handle(), vec![PermissionLevel::Read]).await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    peer.send(tool_request(
+        json!(951),
+        "private-thread",
+        "private-turn",
+        "denied",
+        "rah_tool_0",
+        fixture.request(),
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], false);
+    assert_eq!(fs::read(&fixture.a).unwrap(), b"alpha old\n");
+    assert_eq!(fs::read(&fixture.b).unwrap(), b"beta old\n");
+    assert_eq!(fixture.snapshot(), before);
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.respond("turn/interrupt", json!({})).await;
+    let _ = collecting.await.unwrap();
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_edit_files_forwards_invalid_and_precondition_statuses() {
+    for (label, mutate) in [("invalid", false), ("stale", true)] {
+        let fixture = RepositoryMultiFileEditFixture::new(label);
+        let before = fixture.snapshot();
+        let composition = fixture.compose().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry =
+            counting_composed_registry(&composition, "repo.edit-files", Arc::clone(&executions));
+        let (runtime, mut peer, _) =
+            connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        let mut request = fixture.request();
+        let expected_status = if mutate {
+            request["targets"][0]["expected_file_sha256"] = json!("0".repeat(64));
+            "precondition_failed"
+        } else {
+            request["targets"] = json!([]);
+            "invalid_target"
+        };
+        peer.send(tool_request(
+            json!(952),
+            "private-thread",
+            "private-turn",
+            label,
+            "rah_tool_0",
+            request,
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                response["result"]["contentItems"][0]["text"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"status": expected_status})
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(&fixture.a).unwrap(), b"alpha old\n");
+        assert_eq!(fs::read(&fixture.b).unwrap(), b"beta old\n");
+        assert_eq!(fixture.snapshot(), before);
+        finish_turn(&peer, "completed");
+        let _ = handle.into_events().collect::<Vec<_>>().await;
         runtime.shutdown().await.unwrap();
         composition.shutdown().await;
     }

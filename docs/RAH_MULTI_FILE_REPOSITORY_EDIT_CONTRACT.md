@@ -122,13 +122,19 @@ Use `git_stage::repository_lease` keyed by canonical root from mutation-sensitiv
 
 Capture raw `.git/index` bytes, HEAD, and bounded refs during preflight; compare before each commit, after each success, and in final result. Mismatch stops future commits or is `uncertain` after a commit. Tool invokes no Git mutation and preserves index, HEAD, refs.
 
-## 19. Trusted Profile integration (deferred)
+## 19. Trusted Profile integration
 
-`profile_version = 1` remains unchanged. Task 095 will add a closed symbolic `repo.edit-files` capability with existing `executable`/`repository` resources and `Execute`; Task 094C makes no profile schema, static inventory, effective-composer, CLI, or publication change.
+`profile_version = 1` remains unchanged. Trusted Profile v1 accepts the closed
+symbolic `repo.edit-files` declaration with existing `executable`/`repository`
+resources and `Execute`. Static validation records it as configured and
+unregistered without constructing the tool or inspecting/mutating the
+repository. Effective composition constructs it into a fresh registry and
+promotes its redacted symbolic inventory to validated/registered only after
+complete success.
 
-## 20. Generic Tool Bridge impact (deferred composition evidence)
+## 20. Generic Tool Bridge impact
 
-No production bridge semantic change. Alias mapping, Execute enforcement, ToolRegistry dispatch, dedupe, cancellation/disconnect, response translation, bounds, and no replay remain capability-agnostic adapter behavior. No bridge branch was added; full Trusted Profile-to-bridge composition evidence is Task 095.
+No production bridge semantic change. Alias mapping, Execute enforcement, ToolRegistry dispatch, dedupe, cancellation/disconnect, response translation, bounds, and no replay remain capability-agnostic adapter behavior. Deterministic Trusted Profile-to-bridge coverage proves advertisement, refusal before entry, ordered success, and duplicate-call reuse. Certified Codex live evidence remains deferred.
 
 ## 21. Permission/security model
 

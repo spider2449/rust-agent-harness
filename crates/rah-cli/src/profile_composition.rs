@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, RepositoryDiffStagedTool,
-    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
+    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool,
+    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry,
+    TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -86,6 +87,21 @@ pub async fn compose(
         registry
             .register(Arc::new(
                 RepositoryFileCreationTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for edit in profile.repository_multi_file_edits() {
+        let executable = profile
+            .executable_resource(edit.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(edit.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(
+                RepositoryMultiFileEditTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
@@ -207,7 +223,7 @@ pub async fn compose(
         if capability.enabled
             && (matches!(
                 capability.capability_id.as_str(),
-                "repo.patch" | "repo.create-file"
+                "repo.patch" | "repo.create-file" | "repo.edit-files"
             ) || matches!(
                 capability.capability_id.as_str(),
                 "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
@@ -474,6 +490,7 @@ mod tests {
                 {"name":"fs.read", "enabled":true, "permission":"read", "workspace":"workspace", "max_bytes":1024},
                 {"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.create-file", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.edit-files", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.file-info", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.diff", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
@@ -529,7 +546,7 @@ mod tests {
         let definitions = composition.registry().definitions();
         assert_eq!(
             definitions.len(),
-            9,
+            10,
             "built-ins, repository tools, and exactly admitted external tools are published"
         );
         for name in [
@@ -560,6 +577,14 @@ mod tests {
                 .iter()
                 .find(|definition| definition.name == ToolName::new("repo.create-file"))
                 .expect("repo.create-file should be registered through ToolRegistry")
+                .permission,
+            PermissionLevel::Execute
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == ToolName::new("repo.edit-files"))
+                .expect("repo.edit-files should be registered through ToolRegistry")
                 .permission,
             PermissionLevel::Execute
         );
@@ -608,6 +633,16 @@ mod tests {
         assert_eq!(repo_create_file.permission, PermissionLevel::Execute);
         assert_eq!(repo_create_file.resources, ["git", "workspace"]);
         assert_eq!(repo_create_file.validation, "validated");
+        let repo_edit_files = composition
+            .effective_profile()
+            .capabilities
+            .iter()
+            .find(|capability| capability.capability_id == "repo.edit-files")
+            .expect("redacted inventory should include repo.edit-files");
+        assert!(repo_edit_files.registered);
+        assert_eq!(repo_edit_files.permission, PermissionLevel::Execute);
+        assert_eq!(repo_edit_files.resources, ["git", "workspace"]);
+        assert_eq!(repo_edit_files.validation, "validated");
         for name in [
             "repo.file-info",
             "repo.status",

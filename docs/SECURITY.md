@@ -37,8 +37,10 @@ ADR 0014 separately grants `repo.edit-files` only through private host-bound
 UTF-8 files, deterministic host order, and no cross-file transaction. Its
 outer permission is `Execute`; it grants no rollback, retry, replay, staging,
 history/ref, or network Git authority. Bounded `partial_effect` and `uncertain`
-results retain only logical target inventory. Trusted Profile availability is
-not yet claimed.
+results retain only logical target inventory. Trusted Profile v1 static
+validation is nonmutating and deferred; effective composition host-constructs
+and registers the capability only after complete success. Generic Tool Bridge
+uses ordinary generic dispatch. Codex live certification remains deferred.
 
 Repository observation remains fixed read-only: `repo.file-info`,
 `repo.status`, `repo.diff`, and `repo.diff-staged`. The host fixes executable,

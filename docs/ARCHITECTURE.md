@@ -37,8 +37,11 @@ ADR 0014 adds `repo.edit-files` as a separate host-constructed capability with
 private `RepositoryMultiFileMutationPolicy`: it edits one through four existing
 clean tracked UTF-8 files in deterministic host order. `Execute` is its outer
 permission only; it makes no cross-file transaction, rollback, retry, or replay
-claim and classifies bounded partial or uncertain effects. Trusted Profile
-publication remains deferred.
+claim and classifies bounded partial or uncertain effects. Trusted Profile v1
+static validation records only symbolic bindings without
+constructing it; effective composition constructs and publishes it through a
+fresh registry on complete success. Generic Tool Bridge dispatch remains
+capability-agnostic. Codex live certification remains deferred.
 
 The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
 executable and repository root. Its closed request schema permits only a
