@@ -15,8 +15,9 @@ validation remain deferred.
 - 085C complete: the deterministic integration audit accepted ADR 0013. Its
   checklist and evidence are recorded in
   `2026-08-25-repository-file-creation-integration-audit.md`.
-- Task 086 remains deferred: trusted-profile and Generic Tool Bridge
-  composition only, with no live Codex validation.
+- Task 086 complete: trusted-profile and Generic Tool Bridge deterministic
+  composition validates the unchanged generic path, with no live Codex
+  validation.
 - Task 087 remains deferred: separately authorized certified live Codex gate.
 
 ## Implementation strategy

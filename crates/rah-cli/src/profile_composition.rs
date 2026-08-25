@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, RepositoryDiffStagedTool,
-    RepositoryDiffTool, RepositoryFileInfoTool, RepositoryStatusTool, RepositoryWorktreePatchTool,
-    ToolRegistry, TrustedStaticProfile,
+    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -71,6 +71,21 @@ pub async fn compose(
         registry
             .register(Arc::new(
                 RepositoryWorktreePatchTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for creation in profile.repository_file_creations() {
+        let executable = profile
+            .executable_resource(creation.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(creation.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(
+                RepositoryFileCreationTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
@@ -190,11 +205,13 @@ pub async fn compose(
     let mut effective = profile.effective_profile().clone();
     for capability in &mut effective.capabilities {
         if capability.enabled
-            && (capability.capability_id == "repo.patch"
-                || matches!(
-                    capability.capability_id.as_str(),
-                    "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
-                ))
+            && (matches!(
+                capability.capability_id.as_str(),
+                "repo.patch" | "repo.create-file"
+            ) || matches!(
+                capability.capability_id.as_str(),
+                "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
+            ))
         {
             capability.registered = true;
             capability.validation = "validated";
@@ -456,6 +473,7 @@ mod tests {
             "capabilities": [
                 {"name":"fs.read", "enabled":true, "permission":"read", "workspace":"workspace", "max_bytes":1024},
                 {"name":"repo.patch", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.create-file", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.file-info", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.diff", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
@@ -511,7 +529,7 @@ mod tests {
         let definitions = composition.registry().definitions();
         assert_eq!(
             definitions.len(),
-            8,
+            9,
             "built-ins, repository tools, and exactly admitted external tools are published"
         );
         for name in [
@@ -534,6 +552,14 @@ mod tests {
                 .iter()
                 .find(|definition| definition.name == ToolName::new("repo.patch"))
                 .expect("repo.patch should be registered through ToolRegistry")
+                .permission,
+            PermissionLevel::Execute
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == ToolName::new("repo.create-file"))
+                .expect("repo.create-file should be registered through ToolRegistry")
                 .permission,
             PermissionLevel::Execute
         );
@@ -572,6 +598,16 @@ mod tests {
         assert_eq!(repo_patch.permission, PermissionLevel::Execute);
         assert_eq!(repo_patch.resources, ["git", "workspace"]);
         assert_eq!(repo_patch.validation, "validated");
+        let repo_create_file = composition
+            .effective_profile()
+            .capabilities
+            .iter()
+            .find(|capability| capability.capability_id == "repo.create-file")
+            .expect("redacted inventory should include repo.create-file");
+        assert!(repo_create_file.registered);
+        assert_eq!(repo_create_file.permission, PermissionLevel::Execute);
+        assert_eq!(repo_create_file.resources, ["git", "workspace"]);
+        assert_eq!(repo_create_file.validation, "validated");
         for name in [
             "repo.file-info",
             "repo.status",

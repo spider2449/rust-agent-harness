@@ -182,11 +182,18 @@ and emit `RAH_CREATE_FILE_LIVE_OK`.
 | rollback | no | no |
 | uncertain effect | possible | possible, including partial new file |
 
-Likely implementation: `crates/rah-tools/src/` near
-`repository_worktree_patch.rs` and `trusted_profile.rs`, with effective
-construction in `crates/rah-cli/src/profile_composition.rs`. Forecast: a Tool
-type/constructor and private policy, no public core API or bridge change, and
-no dependency by default. Platform-native hardening could require existing
-`windows-sys` support already present in `rah-tools`; Task 085 must decide from
-implementation evidence whether those existing bindings suffice, before adding
-anything.
+Implementation: `repo.create-file` is a closed `profile_version = 1` Trusted
+Profile capability. Static validation accepts only symbolic `git` executable
+and repository resource references and never constructs the tool or creates a
+file. Effective composition resolves those host resources, constructs the
+private host-bound tool, and registers it in a fresh `ToolRegistry`; it still
+does not create a target. Only ordinary `Tool` execution may perform the one
+authorized native creation.
+
+The Generic Tool Bridge remains unchanged. It exposes the canonical closed
+`{path, content}` schema through its private alias mechanism and relies on its
+ordinary permission, dispatch, cancellation, deduplication, and output
+translation behavior. Task 086 added deterministic coverage for composition,
+redacted inventory, Execute gating, one successful bridge dispatch, and
+no-replay treatment of uncertain and known write-failure outcomes. Certified
+live Codex validation remains deferred to Task 087.

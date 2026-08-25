@@ -238,6 +238,80 @@ impl RepositoryFixture {
     }
 }
 
+struct RepositoryCreateFileFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    target: PathBuf,
+    unrelated: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryCreateFileFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).expect("repository directory should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(
+            &root,
+            &["config", "user.name", "RAH create-file bridge test"],
+        );
+        fs::create_dir(root.join("src")).expect("existing target parent should be created");
+        let unrelated = root.join("unrelated.txt");
+        fs::write(&unrelated, b"unrelated\n").expect("sentinel should be written");
+        git(&root, &["add", "--", "unrelated.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task086-create-file-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "worktree": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.create-file",
+                "enabled": true,
+                "permission": "execute",
+                "executable": "git",
+                "repository": "worktree"
+            }]
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap()).unwrap();
+        Self {
+            _base: base,
+            target: root.join("src").join("created.rah"),
+            root,
+            unrelated,
+            profile,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        compose(TrustedStaticProfile::load(&self.profile).expect("profile should load"))
+            .await
+            .expect("effective profile should compose")
+    }
+
+    fn request(&self) -> Value {
+        json!({"path":"src/created.rah","content":"created by deterministic bridge\n"})
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            git_output(&self.root, &["rev-parse", "HEAD"]),
+            git_output(&self.root, &["show-ref"]),
+            fs::read(self.root.join(".git").join("index")).unwrap(),
+        )
+    }
+
+    fn assert_metadata_unchanged(&self, before: &(Vec<u8>, Vec<u8>, Vec<u8>)) {
+        assert_eq!(self.snapshot(), *before);
+        assert_eq!(fs::read(&self.unrelated).unwrap(), b"unrelated\n");
+    }
+}
+
 struct RepositoryObserverFixture {
     _base: TestDirectory,
     root: PathBuf,
@@ -335,6 +409,32 @@ struct GatedComposedPatch {
 struct UncertainAfterComposedPatch {
     inner: Arc<dyn Tool>,
     executions: Arc<AtomicUsize>,
+}
+
+struct ForcedComposedCreateFileResult {
+    inner: Arc<dyn Tool>,
+    executions: Arc<AtomicUsize>,
+    status: &'static str,
+}
+
+#[async_trait]
+impl Tool for ForcedComposedCreateFileResult {
+    fn definition(&self) -> ToolDefinition {
+        self.inner.definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.inner.execute(input, context).await?;
+        Ok(ToolOutput {
+            content: vec![ToolContent::Json(json!({"status": self.status}))],
+            is_error: true,
+        })
+    }
 }
 
 #[async_trait]
@@ -1145,6 +1245,205 @@ async fn disconnect_cancels_pending_execution_without_replay() {
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     drop(runtime);
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_create_file_preserves_schema_permission_dedupe_and_metadata()
+{
+    let fixture = RepositoryCreateFileFixture::new("success");
+    let before = fixture.snapshot();
+    let composition = fixture.compose().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .next()
+        .expect("effective composer should publish repo.create-file");
+    assert_eq!(definition.name, ToolName::new("repo.create-file"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema,
+        json!({"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}})
+    );
+    assert!(
+        !format!("{:?}", composition.effective_profile())
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+    assert!(
+        !fixture.target.exists(),
+        "effective composition must not create a target"
+    );
+
+    let executions = Arc::new(AtomicUsize::new(0));
+    let registry =
+        counting_composed_registry(&composition, "repo.create-file", Arc::clone(&executions));
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let dynamic = &thread["params"]["dynamicTools"][0];
+    let alias = dynamic["name"].as_str().unwrap();
+    assert_eq!(alias, "rah_tool_0");
+    assert_eq!(dynamic["inputSchema"], definition.input_schema);
+    assert_restrictions(&thread["params"]);
+
+    for id in [json!(860), json!("duplicate-create-file-delivery")] {
+        peer.send(tool_request(
+            id,
+            "private-thread",
+            "private-turn",
+            "create-file-once",
+            alias,
+            fixture.request(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true, "{first}");
+    let visible = first["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(visible).unwrap(),
+        json!({
+            "status":"ok",
+            "path":"src/created.rah",
+            "length":32,
+            "sha256":sha256_hex(b"created by deterministic bridge\n")
+        })
+    );
+    assert!(!visible.contains(fixture.root.to_string_lossy().as_ref()));
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fs::read(&fixture.target).unwrap(),
+        b"created by deterministic bridge\n"
+    );
+    assert!(
+        git_output(
+            &fixture.root,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )
+        .windows(b"?? src/created.rah\n".len())
+        .any(|line| line == b"?? src/created.rah\n")
+    );
+    fixture.assert_metadata_unchanged(&before);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_create_file_requires_execute_before_mutation() {
+    for allowed in [
+        vec![PermissionLevel::None],
+        vec![PermissionLevel::Read],
+        vec![PermissionLevel::Write],
+    ] {
+        let fixture = RepositoryCreateFileFixture::new("permission-denied");
+        let before = fixture.snapshot();
+        let composition = fixture.compose().await;
+        let (runtime, mut peer, _) = connected_bridge(composition.registry_handle(), allowed).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        peer.send(tool_request(
+            json!(861),
+            "private-thread",
+            "private-turn",
+            "denied-create-file",
+            "rah_tool_0",
+            fixture.request(),
+        ));
+        assert_eq!(peer.next_sent().await["result"]["success"], false);
+        let collecting =
+            tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+        peer.respond("turn/interrupt", json!({})).await;
+        let events = collecting.await.unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Failed {
+                code: rah_protocol::AgentErrorCode::PermissionDenied,
+                ..
+            })
+        ));
+        assert!(!fixture.target.exists());
+        fixture.assert_metadata_unchanged(&before);
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn repo_create_file_uncertain_and_write_failure_results_are_not_replayed() {
+    for status in ["uncertain", "write_failed_known"] {
+        let fixture = RepositoryCreateFileFixture::new(status);
+        let before = fixture.snapshot();
+        let composition = fixture.compose().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let inner = composition
+            .registry()
+            .get(&ToolName::new("repo.create-file"))
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(ForcedComposedCreateFileResult {
+                inner,
+                executions: Arc::clone(&executions),
+                status,
+            }))
+            .unwrap();
+        let (runtime, mut peer, _) =
+            connected_bridge(Arc::new(registry), vec![PermissionLevel::Execute]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+        for id in [json!(862), json!("same-logical-create-file")] {
+            peer.send(tool_request(
+                id,
+                "private-thread",
+                "private-turn",
+                "no-replay",
+                "rah_tool_0",
+                fixture.request(),
+            ));
+        }
+        let first = peer.next_sent().await;
+        let second = peer.next_sent().await;
+        assert_eq!(first["result"], second["result"]);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                first["result"]["contentItems"][0]["text"].as_str().unwrap()
+            )
+            .unwrap(),
+            json!({"status":status})
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(
+            fixture.target.exists(),
+            "no failure cleanup or replay is permitted"
+        );
+        fixture.assert_metadata_unchanged(&before);
+        finish_turn(&peer, "completed");
+        let _ = handle.into_events().collect::<Vec<_>>().await;
+        runtime.shutdown().await.unwrap();
+        composition.shutdown().await;
+    }
 }
 
 #[tokio::test]
