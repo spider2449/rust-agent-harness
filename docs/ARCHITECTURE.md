@@ -1,4 +1,4 @@
-# RAH v0.6 Architecture
+# RAH v0.8 Milestone Architecture
 
 ## Ownership boundaries
 
@@ -25,6 +25,14 @@ It is deliberately separate from ADR 0010's index-only
 worktree content mutation != index mutation != history/ref mutation
 ```
 
+ADR 0013 establishes a separate private, host-owned
+`RepositoryFileCreationPolicy` for `repo.create-file`. It authorizes only one
+exclusive creation of one absent UTF-8 file under a host-bound repository; it
+does not grant generic `fs.write`, overwrite, directory creation, staging, or
+index/history/ref authority. `repo.patch` and `repo.create-file` share the
+same per-repository mutation lease, so they cannot independently widen mutation
+concurrency or authority.
+
 The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
 executable and repository root. Its closed request schema permits only a
 logical relative path, complete-file SHA-256 and byte-length preconditions, one
@@ -33,7 +41,7 @@ performs all repository eligibility, identity, replacement, and uncertainty
 handling; model requests and `PermissionLevel::Execute` remain insufficient
 authority by themselves.
 
-v0.6 adds four separate, host-constructed repository-observation tools:
+The repository-observation tools are four separate, host-constructed tools:
 `repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. They use
 a crate-private fixed-command observer envelope with host-selected executable
 and repository identities, fixed cwd/environment, bounds, and the existing RAH
@@ -42,7 +50,7 @@ filesystem, or mutation authority. This bounded observation work neither
 extends ADR 0010 index mutation nor ADR 0012 worktree mutation; ADR 0011 alone
 governs trusted-profile composition.
 
-## v0.4 trusted capability profile (preserved in v0.6)
+## Trusted capability profile
 
 ADR 0011 defines trusted profile source validation and the explicitly selected
 trusted static profile as a host-only authority-composition boundary. The profile
@@ -78,7 +86,7 @@ select providers or profile authority.
 ### Public / host capabilities
 
 The host-owned Execute surface includes `host.cargo.version`, `host.git.status`,
-`host.git.stage`, `host.git.unstage`, and the v0.6 fixed observers
+`host.git.stage`, `host.git.unstage`, `repo.create-file`, and the fixed observers
 `repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. The first
 two and the observers are fixed, host-constructed inspection capabilities.
 Stage and unstage use the private `RepositoryMutationPolicy` to prove one

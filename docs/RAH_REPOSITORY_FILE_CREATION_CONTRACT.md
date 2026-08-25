@@ -130,17 +130,17 @@ replacement authority. `PermissionLevel::Execute` is the declared outer
 dispatcher gate, not generic writing permission. `Write` does not imply this
 capability.
 
-Not yet implemented: trusted-profile validation and effective composition for
-this capability. A future additive binding must supply the existing symbolic
-repository resource and Execute permission, construct/register the same
-host-owned policy, and create nothing during static validation or composition.
-It should retain closed `capabilities[]` and `profile_version = 1` if compatible.
-Inventory must remain redacted.
+Trusted-profile validation and effective composition are implemented additively
+under the closed `capabilities[]` schema and `profile_version = 1`. The binding
+accepts only the existing symbolic repository resource and an `Execute`
+permission; static validation never constructs the tool or creates a file, and
+effective composition constructs/registers the same host-owned policy in a
+fresh `ToolRegistry`. Inventory remains redacted.
 
-Not yet implemented: Generic Tool Bridge composition validation and certified
-Codex live validation. The bridge requires no production special case: alias
-mapping, permission, ToolRegistry dispatch, dedupe, cancellation, and no replay
-remain generic. Do not amend ADR 0012 as if it granted new-path authority.
+Generic Tool Bridge composition validation and certified Codex live validation
+are complete. The bridge has no production special case: alias mapping,
+permission, ToolRegistry dispatch, dedupe, cancellation, and no replay remain
+generic. Do not amend ADR 0012 as if it granted new-path authority.
 
 ## Test and live-validation matrix
 
@@ -172,7 +172,7 @@ must call creation exactly once, observers/host checks prove content, untracked
 state and unchanged index/HEAD/refs/sentinel, then confirm Completed, cleanup,
 and emit `RAH_CREATE_FILE_LIVE_OK`.
 
-| Property | `repo.patch` | proposed `repo.create-file` |
+| Property | `repo.patch` | `repo.create-file` |
 | --- | --- | --- |
 | target initially | clean HEAD-tracked file | absent from HEAD/index/worktree |
 | overwrite | bounded replacement | forbidden |

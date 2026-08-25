@@ -1,9 +1,9 @@
-# RAH v0.6 Security Model
+# RAH v0.8 Milestone Security Model
 
-## v0.6 boundary and preserved v0.3/v0.4/v0.5 capabilities
+## v0.8 boundary and preserved capabilities
 
 The public/host Execute capabilities include `host.cargo.version`,
-`host.git.status`, `host.git.stage`, `host.git.unstage`, and the v0.6 fixed
+`host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`, and the fixed
 repository observers `repo.file-info`, `repo.status`, `repo.diff`, and
 `repo.diff-staged`. They are
 host-constructed, capability-specific tools, not generic model-selected process
@@ -13,15 +13,26 @@ infrastructure, not public capabilities. `host.fixture.echo` does not exist.
 
 The v0.3 boundary excludes arbitrary `shell.exec` and `process.exec`,
 model-selected executable/argv/cwd/environment, worktree restore, arbitrary
-file mutation outside the accepted bounded `repo.patch` policy,
+file mutation outside the accepted bounded `repo.patch` and `repo.create-file`
+policies,
 commit/history/ref operations, reset/clean/checkout/switch/stash,
 merge/rebase, push/pull/fetch, network Git, and credential-bearing Git
-execution. ADR 0012 grants the only worktree-content exception: one conditional
+execution. ADR 0012 grants the existing-worktree-content exception: one conditional
 literal replacement in one existing HEAD-tracked, unstaged strict-UTF-8 file
 under a private host-owned `RepositoryWorktreeMutationPolicy`. It does not
 grant generic write, index, history/ref, network, rollback, or replay authority.
 
-v0.6 adds only fixed read-only repository observation: `repo.file-info`,
+ADR 0013 separately grants bounded new-path creation through `repo.create-file`:
+one absent UTF-8 regular file, at a model-selected validated repository-relative
+path, in a host-bound repository. It requires an existing real parent, rejects
+link/reparse traversal, ignored/index/HEAD/submodule/sparse targets, and uses
+exclusive native creation. It grants no generic filesystem write, overwrite,
+mkdir, append, delete, rename, chmod, staging, index/history/ref mutation,
+rollback, or replay authority. A possible partial write is retained and
+classified conservatively rather than deleted or replayed. `repo.patch` and
+`repo.create-file` share the per-repository mutation lease.
+
+Repository observation remains fixed read-only: `repo.file-info`,
 `repo.status`, `repo.diff`, and `repo.diff-staged`. The host fixes executable,
 repository, cwd, argv, environment, limits, and diff baseline; model input
 cannot choose any of them. Cleared Git environments disable system/global

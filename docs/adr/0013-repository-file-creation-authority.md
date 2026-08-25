@@ -26,9 +26,9 @@ changes permissions. A repository lease, immediate revalidation, exclusive
 native creation as commit point, exact post-observation, redacted outcomes, and
 no replay after a possible effect are mandatory.
 
-`PermissionLevel::Execute` remains an outer gate only. A future trusted
-profile may additively bind this implemented capability to the existing symbolic
-repository resource under `profile_version = 1`; it cannot create authority.
+`PermissionLevel::Execute` remains an outer gate only. The trusted profile
+additively binds this implemented capability to the existing symbolic repository
+resource under `profile_version = 1`; it cannot create authority.
 Generic Tool Bridge production behavior remains unchanged.
 
 ## Implementation evidence
@@ -37,8 +37,9 @@ Task 085C accepted this ADR after deterministic implementation and audit
 coverage in `crates/rah-tools/src/repository_create_file.rs`,
 `crates/rah-tools/src/native_repository_create.rs`, and their tests. The audit
 record is `docs/plans/2026-08-25-repository-file-creation-integration-audit.md`.
-Trusted-profile composition, Generic Tool Bridge composition validation, and a
-certified live Codex invocation remain deferred and do not enlarge this ADR.
+Task 086 completed trusted-profile and Generic Tool Bridge composition
+validation; Task 087 completed the certified live Codex invocation. Neither
+enlarges this ADR.
 
 ## Consequences
 

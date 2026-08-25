@@ -37,10 +37,18 @@ for diagnosis; model prose cannot certify the gate.
 ## Results and limitations
 
 Pre-commit result: 3/3 fresh successful runs through
-`scripts/codex-live-gate.ps1`; each advertised `repo.create-file -> rah_tool_0`,
-`repo.file-info -> rah_tool_1`, and `repo.status -> rah_tool_2`, with one
-request/start/finish per tool. The post-commit three-run result is recorded in
-the Task 087 completion report after exact-head Ubuntu CI.
+`scripts/codex-live-gate.ps1`; post-commit result: 3/3 fresh successful runs
+after exact-head Ubuntu CI run `32802774113` completed successfully. Each of
+the six runs used a fresh app-server, thread, and repository; each advertised
+`repo.create-file -> rah_tool_0`, `repo.file-info -> rah_tool_1`, and
+`repo.status -> rah_tool_2`, with one request/start/finish per tool.
+
+Every recorded run created exactly `src/live_marker.rs`, a regular non-reparse
+untracked file of 81 bytes with SHA-256
+`8cd485928d7faeded7a85802d96e91220ab27feffa1e0761eeab6c949996345b`.
+There was one native successful create. Raw index bytes, HEAD, refs, and the
+sentinel were unchanged; the terminal event was `Completed`, and cleanup
+succeeded.
 
 The capability provides no overwrite, mkdir, delete, rename, append, binary
 file creation, multi-file transaction, staging, commit/history/ref mutation,

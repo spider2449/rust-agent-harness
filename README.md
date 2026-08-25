@@ -5,9 +5,9 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.7 bounded repository patching and workflow inspection
+## v0.8 milestone: bounded repository mutation and workflow inspection
 
-RAH v0.7 retains the v0.4 trusted-host static capability profile and the v0.5
+RAH retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
 conditionally perform a legacy single exact replacement or one to sixteen
 bounded exact replacements within one existing, HEAD-tracked, unstaged,
@@ -18,7 +18,7 @@ required, and the operation does not stage changes. The capability is
 host-constructed through a private `RepositoryWorktreeMutationPolicy`; it is
 not generic filesystem write, shell/process, index, or Git history authority.
 
-v0.7 additionally provides four host-fixed, read-only repository observers:
+RAH additionally provides four host-fixed, read-only repository observers:
 `repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. They
 inspect one validated repository-relative path, normalized repository status,
 unstaged worktree-versus-index changes, and staged index-versus-HEAD changes.
@@ -26,6 +26,14 @@ They are `Execute`-gated subprocess capabilities, not generic Git or filesystem
 authority; model input cannot select their executable, argv, cwd, environment,
 repository, refs, or baselines. Their precise claim is **no intentional
 repository mutation**, not zero incidental filesystem writes.
+
+The unreleased v0.8 milestone adds `repo.create-file`: one host-authorized
+exclusive creation of one absent UTF-8 file at a model-selected, validated
+repository-relative path. It uses a separate private
+`RepositoryFileCreationPolicy` (ADR 0013), requires an existing real parent,
+rejects links/reparse traversal, ignored/index/HEAD/submodule/sparse targets,
+and never overwrites, creates directories, appends, stages, or mutates Git
+history or refs. It is not generic filesystem-write authority.
 
 ```text
 Built-in Tool -----------\
@@ -252,6 +260,32 @@ policy internals, or environment. ADR 0012 is accepted; its worktree authority
 remains separate from ADR 0010's index-only policy and ADR 0011's
 composition-only profile boundary.
 
+### Trusted `repo.create-file` profile binding
+
+`repo.create-file` uses the same closed symbolic-resource shape as
+`repo.patch`, but it constructs its separate private creation policy under
+accepted ADR 0013:
+
+```json
+{
+  "capabilities": [
+    {
+      "name": "repo.create-file",
+      "enabled": true,
+      "permission": "execute",
+      "executable": "git",
+      "repository": "worktree"
+    }
+  ]
+}
+```
+
+The model supplies only the closed `{ "path", "content" }` request. Static
+profile validation and effective composition are non-mutating; the latter
+creates a fresh `ToolRegistry`. `Execute` is only the outer dispatch gate, and
+neither model/provider metadata nor the profile can supply a repository root or
+escalate creation authority.
+
 ## Run opt-in live Codex validation
 
 These examples require the exactly supported Codex CLI version, configured live
@@ -304,6 +338,9 @@ cargo run -p rah-runtime-codex --example live_trusted_profile_bridge
 
 # Bounded repository worktree replacement (opt-in live validation)
 cargo run -p rah-runtime-codex --example live_trusted_profile_repo_patch_bridge
+
+# Bounded repository file creation (opt-in certified live validation)
+cargo run -p rah-runtime-codex --example live_trusted_profile_create_file_bridge
 ```
 
 The MCP and process-plugin commands exercise RAH-owned adapters. They do not
@@ -313,7 +350,8 @@ enable Codex-owned MCP, shell, or file capabilities.
 
 Live examples record final assistant text as diagnostic output, but it is not
 release-gate authority. A marker such as `RAH_ECHO_BRIDGE_OK`,
-`RAH_REPOSITORY_OBSERVERS_LIVE_OK`, or `RAH_MULTI_PATCH_LIVE_OK` is emitted by
+`RAH_REPOSITORY_OBSERVERS_LIVE_OK`, `RAH_MULTI_PATCH_LIVE_OK`, or
+`RAH_CREATE_FILE_LIVE_OK` is emitted by
 the host harness only after it has observed the required tool lifecycle,
 validated tool outputs and state postconditions, observed `Completed`, and
 cleaned up the app-server child. Model-generated marker text is weaker than
@@ -334,7 +372,7 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
-## v0.7 limitations and explicit deferrals
+## v0.8 milestone limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile
   validation, not provider/profile auto-discovery or model-facing profile APIs.
@@ -355,6 +393,12 @@ Codex executable, network access, credentials, a paid API, or a real model.
   push, pull, fetch, network Git, or credential-bearing Git execution authority.
   Destructive worktree authority remains constrained by the private policy
   described in accepted ADR 0012; ADR 0011 is composition-only.
+- `repo.create-file` creates only one previously absent UTF-8 file per call at
+  an existing validated parent. It has no overwrite, mkdir, append, delete,
+  rename, chmod, binary-file, multi-file transaction, staging, commit/history/
+  ref mutation, rollback, or automatic replay authority. Partial files can
+  remain after a possible effect and are reported conservatively; ADR 0013 is
+  the separate accepted creation authority.
 - Repository observers are best-effort point-in-time observations, not a
   snapshot transaction or cross-process lock. They provide no intentional
   mutation authority, file creation/deletion/rename, generic patches/hunks,
