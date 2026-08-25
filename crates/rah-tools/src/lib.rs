@@ -20,6 +20,8 @@ mod repository_create_file;
 mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
+#[allow(dead_code)]
+mod repository_multi_file_preflight;
 mod repository_mutation;
 mod repository_observer;
 mod repository_status;
