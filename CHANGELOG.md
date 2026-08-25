@@ -1,9 +1,10 @@
 # Changelog
 
-## v0.8.0 — Prepared 2026-08-25
+## v0.8.0 — 2026-08-25
 
-Release preparation for `RAH v0.8.0` is complete. This entry does not mark the
-release as tagged or published.
+Released as `RAH v0.8.0` on 2026-08-25. The immutable annotated tag `v0.8.0`
+has object ID `198eccd34a8ae76b9235736c3d1a64173692c351` and peels to release
+commit `0b12d5448dcea89b158e4941e7b741b7539c8894`.
 
 ### Added
 
@@ -17,6 +18,9 @@ release as tagged or published.
 
 - Deterministic Windows and Linux coverage, plus certified Codex live
   validation using exactly `codex-cli 0.149.0`.
+- The release-preparation CI run `32804191964` and tag CI run `32804873958`
+  completed successfully. The GitHub Release was published at
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.8.0>.
 
 ### Limitations
 
