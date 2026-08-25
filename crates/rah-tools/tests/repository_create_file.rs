@@ -187,8 +187,15 @@ fn rejects_tracked_indexed_ignored_and_invalid_targets() {
         "../escape",
         "C:drive",
         "//server/share",
+        r"\\server\share",
+        r"\\?\C:\verbatim",
+        r"\\.\NUL",
+        "file:stream",
         ".git/config",
         "CON",
+        "COM1.txt",
+        "src//repeated",
+        "src\\backslash",
         "src/",
     ] {
         assert_ne!(
@@ -203,6 +210,14 @@ fn rejects_tracked_indexed_ignored_and_invalid_targets() {
         result(&tool, json!({"path":"staged.rs","content":"x"}))["status"],
         "precondition_failed"
     );
+    fs::create_dir(fixture.root.join("directory-target")).unwrap();
+    fs::write(fixture.root.join("regular-parent"), b"x").unwrap();
+    for path in ["directory-target", "regular-parent/child"] {
+        assert_eq!(
+            result(&tool, json!({"path":path,"content":"x"}))["status"],
+            "precondition_failed"
+        );
+    }
 }
 #[test]
 fn enforces_content_and_serialized_request_bounds() {
@@ -234,6 +249,57 @@ fn enforces_content_and_serialized_request_bounds() {
         result(&tool, json!({"path":"src/nul","content":"a\u{0000}"}))["status"],
         "invalid_target"
     );
+}
+
+#[test]
+fn rejects_noncanonical_schema_without_leaking_host_paths() {
+    let fixture = Fixture::new();
+    let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+    let root = fixture.root.to_string_lossy().into_owned();
+    assert_eq!(
+        tool.definition().permission,
+        rah_protocol::PermissionLevel::Execute
+    );
+    assert_eq!(
+        tool.definition().input_schema,
+        json!({"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}})
+    );
+    for input in [
+        json!({"path":"src/missing-content"}),
+        json!({"content":"x"}),
+        json!({"path":"src/extra","content":"x","repository":"workspace"}),
+        json!({"path":["src/alternate"],"content":"x"}),
+    ] {
+        let value = result(&tool, input);
+        assert_eq!(value, json!({"status":"invalid_target"}));
+        assert!(!value.to_string().contains(&root));
+    }
+}
+
+#[test]
+fn preserves_unrelated_dirty_worktree_content() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("sentinel.txt"),
+        b"user-owned dirty change\n",
+    )
+    .unwrap();
+    let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+
+    assert_eq!(
+        result(&tool, json!({"path":"src/dirty-safe.rs","content":"new"}))["status"],
+        "ok"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("sentinel.txt")).unwrap(),
+        b"user-owned dirty change\n"
+    );
+    let output = Command::new(&fixture.git)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(&fixture.root)
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, b" M sentinel.txt\n?? src/dirty-safe.rs\n");
 }
 
 #[test]
@@ -296,20 +362,23 @@ fn rejects_real_submodule_sparse_intent_and_conflict_index_targets() {
     );
     assert_snapshot(&fixture, &before);
     let hash = git_hash(&fixture.git, &fixture.root, b"conflict");
-    let record = format!("100644 {hash} 1\tconflict.rs\0");
-    run_input(
-        &fixture.git,
-        &fixture.root,
-        &["update-index", "-z", "--index-info"],
-        record.as_bytes(),
-    );
-    let before = snapshot(&fixture);
-    assert_eq!(
-        result(&tool, json!({"path":"conflict.rs","content":"x"}))["status"],
-        "precondition_failed"
-    );
-    assert!(!fixture.root.join("conflict.rs").exists());
-    assert_snapshot(&fixture, &before);
+    for stage in 1..=3 {
+        let path = format!("conflict-{stage}.rs");
+        let record = format!("100644 {hash} {stage}\t{path}\0");
+        run_input(
+            &fixture.git,
+            &fixture.root,
+            &["update-index", "-z", "--index-info"],
+            record.as_bytes(),
+        );
+        let before = snapshot(&fixture);
+        assert_eq!(
+            result(&tool, json!({"path":path,"content":"x"}))["status"],
+            "precondition_failed"
+        );
+        assert!(!fixture.root.join(path).exists());
+        assert_snapshot(&fixture, &before);
+    }
     let _ = fs::remove_dir_all(&child);
 }
 

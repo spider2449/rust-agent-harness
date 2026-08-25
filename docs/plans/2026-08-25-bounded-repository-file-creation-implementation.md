@@ -2,17 +2,31 @@
 
 ## Scope
 
-Task 085 adds only the `rah-tools` core primitive for `repo.create-file`.
+Task 085 added only the `rah-tools` core primitive for `repo.create-file`.
 Trusted-profile composition, Generic Tool Bridge integration, and live Codex
 validation remain deferred.
+
+## Status
+
+- 085A complete: descriptor/handle-relative exclusive native creation is in
+  `native_repository_create.rs`.
+- 085B complete: the closed `repo.create-file` schema and private host-owned
+  policy are in `repository_create_file.rs`.
+- 085C complete: the deterministic integration audit accepted ADR 0013. Its
+  checklist and evidence are recorded in
+  `2026-08-25-repository-file-creation-integration-audit.md`.
+- Task 086 remains deferred: trusted-profile and Generic Tool Bridge
+  composition only, with no live Codex validation.
+- Task 087 remains deferred: separately authorized certified live Codex gate.
 
 ## Implementation strategy
 
 - Keep a private host-owned `RepositoryFileCreationPolicy` separate from the
   existing replacement policy and acquire the existing per-repository mutation
   lease before mutation-sensitive validation.
-- Parse a closed request containing the existing symbolic repository resource,
-  a slash-separated repository-relative path, and UTF-8 text content.
+- Parse a closed `path`/`content` request containing a slash-separated
+  repository-relative path and UTF-8 text content; the host owns the repository
+  binding.
 - Reject administrative, ignored, indexed, HEAD-present, sparse unsupported,
   submodule, link/reparse, and invalid namespace targets before the commit
   point. Revalidate those facts immediately before it.

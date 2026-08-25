@@ -23,7 +23,7 @@ use crate::{
 pub const REPOSITORY_CREATE_FILE_TOOL_NAME: &str = "repo.create-file";
 const MAX_CONTENT_BYTES: usize = 256 * 1024;
 const MAX_REQUEST_BYTES: usize = 320 * 1024;
-const MAX_PATH_BYTES: usize = 4096;
+const MAX_PATH_BYTES: usize = 1024;
 
 /// Host-configured capability for one exclusive create-new operation.
 pub struct RepositoryFileCreationTool {
@@ -104,7 +104,17 @@ impl Tool for RepositoryFileCreationTool {
                 return Ok(output("create_failed_known", None, None, None));
             }
             Err(NativeCreateError::WriteFailed(_)) => {
-                return Ok(output("write_failed_known", None, None, None));
+                let status = if self
+                    .policy
+                    .verify_known_partial(&request, &pre)
+                    .await
+                    .is_ok()
+                {
+                    "write_failed_known"
+                } else {
+                    "uncertain"
+                };
+                return Ok(output(status, None, None, None));
             }
             Err(_) => return Ok(output("create_failed_known", None, None, None)),
         }
@@ -211,10 +221,7 @@ impl RepositoryFileCreationPolicy {
                 .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
                 .await
                 .map_err(|_| ())?,
-            index: self
-                .git_output(&["ls-files", "-s", "-z"])
-                .await
-                .map_err(|_| ())?,
+            index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
         })
     }
     async fn revalidate(&self, request: &CreateRequest) -> Result<NativeParent, ()> {
@@ -290,11 +297,41 @@ impl RepositoryFileCreationPolicy {
                 .await
                 .map_err(|_| ())?
                 != pre.refs
+            || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
+        {
+            return Err(());
+        }
+        Ok(())
+    }
+    async fn verify_known_partial(
+        &self,
+        request: &CreateRequest,
+        pre: &PreState,
+    ) -> Result<(), ()> {
+        self.revalidate_root()?;
+        let parent = pre.path.parent().ok_or(())?;
+        if !parent_beneath_real(&self.root, parent) {
+            return Err(());
+        }
+        let metadata = fs::symlink_metadata(&pre.path).map_err(|_| ())?;
+        let bytes = fs::read(&pre.path).map_err(|_| ())?;
+        if !metadata.is_file()
+            || is_link_or_reparse(&pre.path)
+            || !request.content.as_bytes().starts_with(&bytes)
+        {
+            return Err(());
+        }
+        if self
+            .git_output(&["rev-parse", "--verify", "HEAD"])
+            .await
+            .map_err(|_| ())?
+            != pre.head
             || self
-                .git_output(&["ls-files", "-s", "-z"])
+                .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
                 .await
                 .map_err(|_| ())?
-                != pre.index
+                != pre.refs
+            || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
         {
             return Err(());
         }
@@ -603,6 +640,16 @@ mod tests {
             snapshot.2
         );
         assert_eq!(fs::read(fixture.root.join("sentinel")).unwrap(), snapshot.3);
+    }
+
+    #[test]
+    fn request_path_limit_is_measured_in_utf8_bytes() {
+        let exact = "\u{03bb}".repeat(512);
+        let over = "\u{03bb}".repeat(513);
+        assert_eq!(exact.len(), 1024);
+        assert!(CreateRequest::parse(&ToolInput(json!({"path":exact,"content":""}))).is_ok());
+        assert_eq!(over.len(), 1026);
+        assert!(CreateRequest::parse(&ToolInput(json!({"path":over,"content":""}))).is_err());
     }
 
     #[test]

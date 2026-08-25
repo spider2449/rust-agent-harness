@@ -1,8 +1,8 @@
 # Repository File Creation Contract
 
-Status: Task 084 research/design only
+Status: Core implementation accepted by ADR 0013
 Date: 2026-08-25
-Baseline: Task 083 `de13d8eb458e34bbf8161bb815fadc0bc562af71`
+Baseline: Task 085C
 
 ## Definitive contract
 
@@ -21,16 +21,16 @@ directory entry and bounded bytes, not namespace management or an edit API.
 Use a model-selected **validated repository-relative path**, not a
 symbolic-target-only model. A symbolic target/path prefix makes ordinary source,
 test, and configuration creation profile-specific with little added protection.
-The host instead binds the canonical non-bare repository resource and private
-policy; the model never supplies a root, native path, parent, temporary name,
-or mode. The request is:
+The host binds the canonical non-bare repository root and private policy; the
+model never supplies a root, native path, parent, temporary name, mode, or
+Git executable identity. The closed request is:
 
 ```json
-{"repository":"workspace","path":"src/new_module.rs","content":"pub mod new_module;\n"}
+{"path":"src/new_module.rs","content":"pub mod new_module;\n"}
 ```
 
-`repository` is an exact symbolic resource ID bound by the host profile, not a
-path. The schema is closed. `path` is 1--1024 UTF-8 bytes. `content` is UTF-8,
+The host-selected repository is not an input field. The schema is closed.
+`path` is 1--1024 UTF-8 bytes. `content` is UTF-8,
 contains no NUL, and is 0--262144 bytes; empty content is allowed. The full
 serialized JSON request is at most **320 KiB** (327680 bytes). Content is exact:
 no BOM, newline, Unicode-normalization, encoding, template, append, or final-
@@ -124,26 +124,23 @@ absolute paths, native identities, usernames, content, or diagnostics.
 
 ## Profile, permission, bridge, and ADR
 
-Define a private `RepositoryFileCreationPolicy`, rather than extending ADR
-0012's `RepositoryWorktreeMutationPolicy`; creation is distinct from replacement
-authority. Retain `PermissionLevel::Execute`: it is the outer dispatcher gate,
-not generic writing permission. `Write` would incorrectly imply broad write
-authority and needs no change.
+The implemented private `RepositoryFileCreationPolicy` remains separate from
+ADR 0012's `RepositoryWorktreeMutationPolicy`; creation is distinct from
+replacement authority. `PermissionLevel::Execute` is the declared outer
+dispatcher gate, not generic writing permission. `Write` does not imply this
+capability.
 
-Static trusted-profile validation may accept only known, enabled
-`repo.create-file` with Execute and the existing symbolic repository resource;
-it rejects unknown/duplicate/malformed bindings and creates nothing. Effective
-composition resolves that resource, constructs/registers the policy/tool, and
-also creates nothing. Reuse closed `capabilities[]` and `profile_version = 1`
-if additive capability-name admission remains schema-compatible; v0.8 needs no
-new policy/profile fields. Inventory stays redacted to canonical capability,
-Execute, symbolic resource, validation and registration state.
+Not yet implemented: trusted-profile validation and effective composition for
+this capability. A future additive binding must supply the existing symbolic
+repository resource and Execute permission, construct/register the same
+host-owned policy, and create nothing during static validation or composition.
+It should retain closed `capabilities[]` and `profile_version = 1` if compatible.
+Inventory must remain redacted.
 
-The Generic Tool Bridge needs no production change: alias mapping, permission,
-ToolRegistry dispatch, dedupe, cancellation, and no replay are already generic.
-Special handling would be a design failure. Create **ADR 0013 — Repository File
-Creation Authority** as Proposed now; obtain acceptance before Task 085. Do not
-amend ADR 0012 as if it already granted new-path authority.
+Not yet implemented: Generic Tool Bridge composition validation and certified
+Codex live validation. The bridge requires no production special case: alias
+mapping, permission, ToolRegistry dispatch, dedupe, cancellation, and no replay
+remain generic. Do not amend ADR 0012 as if it granted new-path authority.
 
 ## Test and live-validation matrix
 

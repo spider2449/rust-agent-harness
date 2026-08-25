@@ -1,6 +1,6 @@
 # ADR 0013 — Repository File Creation Authority
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -11,7 +11,7 @@ writing or Git-state authority.
 
 ## Proposed decision
 
-Authorize a future private host-owned `RepositoryFileCreationPolicy` and
+Authorize a private host-owned `RepositoryFileCreationPolicy` and
 canonical `repo.create-file`, subject to the complete Task 084 contract in
 `docs/RAH_REPOSITORY_FILE_CREATION_CONTRACT.md`. It is one exclusive
 create-new attempt for one bounded UTF-8 non-executable regular file at one
@@ -30,6 +30,15 @@ no replay after a possible effect are mandatory.
 profile may additively bind this implemented capability to the existing symbolic
 repository resource under `profile_version = 1`; it cannot create authority.
 Generic Tool Bridge production behavior remains unchanged.
+
+## Implementation evidence
+
+Task 085C accepted this ADR after deterministic implementation and audit
+coverage in `crates/rah-tools/src/repository_create_file.rs`,
+`crates/rah-tools/src/native_repository_create.rs`, and their tests. The audit
+record is `docs/plans/2026-08-25-repository-file-creation-integration-audit.md`.
+Trusted-profile composition, Generic Tool Bridge composition validation, and a
+certified live Codex invocation remain deferred and do not enlarge this ADR.
 
 ## Consequences
 

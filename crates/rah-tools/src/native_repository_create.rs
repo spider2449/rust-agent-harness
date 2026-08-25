@@ -439,4 +439,23 @@ mod tests {
         );
         fs::remove_dir_all(root).expect("cleanup");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_handle_walk_rejects_junction_parent() {
+        use std::process::Command;
+
+        let root = root("windows-junction");
+        let target = root.join("parent");
+        let junction = root.join("junction");
+        let status = Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("mklink command should start");
+        assert!(status.success(), "junction fixture should be created");
+        assert!(NativeParent::open(&root, PathBuf::from("junction").as_path()).is_err());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }
