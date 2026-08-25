@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.9.0 — release prepared
+
+### Added
+
+- `repo.edit-files` bounded multi-file repository edit authority for up to four
+  existing, clean, tracked UTF-8 files, with exact original-snapshot
+  replacements and deterministic host-owned commit order.
+- Verified partial-effect and uncertain-outcome semantics, Trusted Profile v1
+  composition, and Generic Tool Bridge integration.
+
+### Verified
+
+- Windows certified Codex live validation using exactly `codex-cli 0.149.0`
+  emitted the structural marker `RAH_REPO_EDIT_FILES_LIVE_OK`.
+- ADR 0014 is Accepted; Ubuntu deterministic CI is required before tagging.
+
+### Security and limitations
+
+- `repo.edit-files` is not a cross-file transaction and provides no rollback
+  or replay.
+- It grants no generic filesystem write; it cannot create, delete, or rename
+  files, and grants no staging, commit, history, ref, or network Git authority.
+- Unix live Codex validation is not claimed.
+
 ## v0.8.0 — 2026-08-25
 
 Released as `RAH v0.8.0` on 2026-08-25. The immutable annotated tag `v0.8.0`

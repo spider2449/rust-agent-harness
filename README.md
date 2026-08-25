@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.8 release candidate: bounded repository mutation and workflow inspection
+## v0.9 release candidate: bounded repository mutation and workflow inspection
 
 RAH retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
@@ -36,6 +36,14 @@ and never overwrites, creates directories, appends, stages, or mutates Git
 history or refs. One call creates one file only: paths are limited to 1024
 UTF-8 bytes, content to 256 KiB, and the serialized request to 320 KiB. It is
 not generic filesystem-write authority and provides no rollback or replay.
+
+RAH v0.9.0 adds `repo.edit-files`: one through four existing, clean,
+HEAD-tracked strict-UTF-8 files with exact SHA-256 and byte-length
+preconditions, all replacements resolved against original snapshots, and
+deterministic host-owned commit order. It is not transactional and provides no
+rollback or replay. The capability is composed through Trusted Profile v1 and
+the Generic Tool Bridge; certified Windows live validation using exactly
+`codex-cli 0.149.0` emitted `RAH_REPO_EDIT_FILES_LIVE_OK`.
 
 ```text
 Built-in Tool -----------\

@@ -34,7 +34,7 @@ This does not widen ADR 0012: one-file replacement has a simpler authority/failu
 
 Exclude creation, deletion, rename, directories, chmod/mode changes, binary edits, generic write, shell/process authority, staging, commit/history/refs/network, rollback, replay, journal, OS sandboxing, and cross-file transaction semantics. `repo.patch` stays supported for smaller one-file authority; `repo.create-file` is not a target form.
 
-Acceptance is supported by Task 094A deterministic all-target preflight and shared-lease evidence, Task 094B native fault, partial/uncertain, Git-invariant, Windows, and Unix evidence, and Task 094C direct host-constructed Tool, output-redaction, and generic ToolRegistry evidence. The implementation remains non-transactional: it has no rollback, retry, or replay. Trusted Profile integration and Generic Tool Bridge composition evidence remain deferred to Task 095; live Codex certification remains separately deferred and requires exact Windows `codex-cli 0.149.0`.
+Acceptance is supported by Task 094A deterministic all-target preflight and shared-lease evidence, Task 094B native fault, partial/uncertain, Git-invariant, Windows, and Unix evidence, and Task 094C direct host-constructed Tool, output-redaction, and generic ToolRegistry evidence. Task 095 completed Trusted Profile v1 and Generic Tool Bridge composition; Task 096 completed Windows live Codex certification using exactly `codex-cli 0.149.0` and emitted `RAH_REPO_EDIT_FILES_LIVE_OK`. The implementation remains non-transactional: it has no rollback, retry, or replay.
 
 ## Alternatives rejected
 

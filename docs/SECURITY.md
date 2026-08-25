@@ -1,6 +1,6 @@
-# RAH v0.8 Milestone Security Model
+# RAH v0.9 Milestone Security Model
 
-## v0.8 boundary and preserved capabilities
+## v0.9 boundary and preserved capabilities
 
 The public/host Execute capabilities include `host.cargo.version`,
 `host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed
@@ -38,9 +38,11 @@ UTF-8 files, deterministic host order, and no cross-file transaction. Its
 outer permission is `Execute`; it grants no rollback, retry, replay, staging,
 history/ref, or network Git authority. Bounded `partial_effect` and `uncertain`
 results retain only logical target inventory. Trusted Profile v1 static
-validation is nonmutating and deferred; effective composition host-constructs
-and registers the capability only after complete success. Generic Tool Bridge
-uses ordinary generic dispatch. Codex live certification remains deferred.
+validation is nonmutating; effective composition host-constructs and registers
+the capability only after complete success. Generic Tool Bridge uses ordinary
+generic dispatch. Certified Windows live validation using exactly `codex-cli
+0.149.0` emitted `RAH_REPO_EDIT_FILES_LIVE_OK`; Unix live Codex validation is
+not claimed.
 
 Repository observation remains fixed read-only: `repo.file-info`,
 `repo.status`, `repo.diff`, and `repo.diff-staged`. The host fixes executable,
