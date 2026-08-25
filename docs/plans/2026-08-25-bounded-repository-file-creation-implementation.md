@@ -3,8 +3,8 @@
 ## Scope
 
 Task 085 added only the `rah-tools` core primitive for `repo.create-file`.
-Trusted-profile composition, Generic Tool Bridge integration, and live Codex
-validation remain deferred.
+Trusted-profile composition, Generic Tool Bridge integration, and certified live
+Codex validation are completed by Tasks 086 and 087.
 
 ## Status
 
@@ -18,7 +18,8 @@ validation remain deferred.
 - Task 086 complete: trusted-profile and Generic Tool Bridge deterministic
   composition validates the unchanged generic path, with no live Codex
   validation.
-- Task 087 remains deferred: separately authorized certified live Codex gate.
+- Task 087 complete: the separately authorized certified live Codex gate has
+  verified the unchanged integration path.
 
 ## Implementation strategy
 
@@ -53,4 +54,5 @@ and an unobservable post-commit verification failure.
 ## Deferred work
 
 Task 086 composes the primitive through trusted profiles and the unchanged
-Generic Tool Bridge. Task 087 adds the separately authorized live Codex gate.
+Generic Tool Bridge. Task 087 completed the separately authorized live Codex
+gate. Task 088 is the next milestone audit.

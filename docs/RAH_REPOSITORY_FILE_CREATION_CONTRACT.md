@@ -1,6 +1,6 @@
 # Repository File Creation Contract
 
-Status: Core implementation accepted by ADR 0013
+Status: Core implementation accepted by ADR 0013; certified live integration complete
 Date: 2026-08-25
 Baseline: Task 085C
 
@@ -196,4 +196,4 @@ ordinary permission, dispatch, cancellation, deduplication, and output
 translation behavior. Task 086 added deterministic coverage for composition,
 redacted inventory, Execute gating, one successful bridge dispatch, and
 no-replay treatment of uncertain and known write-failure outcomes. Certified
-live Codex validation remains deferred to Task 087.
+live Codex validation is complete under Task 087.

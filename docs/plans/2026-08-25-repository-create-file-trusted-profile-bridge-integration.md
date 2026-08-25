@@ -41,5 +41,5 @@ Bridge. This task is deterministic only and does not run Codex.
 
 ## Deferred
 
-Task 087 owns certified live Codex validation. This task does not change the
-Codex baseline, invoke a model, or claim live evidence.
+Task 087 owns the separately certified live Codex validation. This task did not
+change the Codex baseline, invoke a model, or claim live evidence.
