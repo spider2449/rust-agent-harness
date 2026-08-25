@@ -28,6 +28,8 @@ const MAX_PATH_BYTES: usize = 4096;
 /// Host-configured capability for one exclusive create-new operation.
 pub struct RepositoryFileCreationTool {
     policy: RepositoryFileCreationPolicy,
+    #[cfg(test)]
+    test_hook: Arc<TestHook>,
 }
 
 impl RepositoryFileCreationTool {
@@ -41,6 +43,8 @@ impl RepositoryFileCreationTool {
                 git_executable.as_ref(),
                 repository_root.as_ref(),
             )?,
+            #[cfg(test)]
+            test_hook: Arc::new(TestHook::default()),
         })
     }
 }
@@ -75,7 +79,26 @@ impl Tool for RepositoryFileCreationTool {
             Ok(value) => value,
             Err(()) => return Ok(output("precondition_failed", None, None, None)),
         };
-        match create_new(&parent, &request.name, request.content.as_bytes(), None) {
+        #[cfg(test)]
+        self.test_hook.before_native_create(&pre.path);
+        #[cfg(test)]
+        self.test_hook.record_native_attempt();
+        let fail_after = {
+            #[cfg(test)]
+            {
+                self.test_hook.write_fail_after()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
+        match create_new(
+            &parent,
+            &request.name,
+            request.content.as_bytes(),
+            fail_after,
+        ) {
             Ok(()) => {}
             Err(NativeCreateError::AlreadyExists) => {
                 return Ok(output("create_failed_known", None, None, None));
@@ -84,6 +107,10 @@ impl Tool for RepositoryFileCreationTool {
                 return Ok(output("write_failed_known", None, None, None));
             }
             Err(_) => return Ok(output("create_failed_known", None, None, None)),
+        }
+        #[cfg(test)]
+        if self.test_hook.force_post_verification_failure() {
+            return Ok(output("uncertain", None, None, None));
         }
         if self.policy.verify_post(&request, &pre).await.is_err() {
             return Ok(output("uncertain", None, None, None));
@@ -94,6 +121,44 @@ impl Tool for RepositoryFileCreationTool {
             Some(request.content.len()),
             Some(sha256_hex(request.content.as_bytes())),
         ))
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestHook {
+    create_target_before_native: std::sync::atomic::AtomicBool,
+    write_fail_after: std::sync::atomic::AtomicUsize,
+    force_post_verification_failure: std::sync::atomic::AtomicBool,
+    native_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestHook {
+    fn before_native_create(&self, path: &Path) {
+        if self
+            .create_target_before_native
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            fs::write(path, b"external target").expect("race fixture should create target");
+        }
+    }
+
+    fn write_fail_after(&self) -> Option<usize> {
+        let value = self
+            .write_fail_after
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if value == 0 { None } else { Some(value - 1) }
+    }
+
+    fn record_native_attempt(&self) {
+        self.native_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn force_post_verification_failure(&self) -> bool {
+        self.force_post_verification_failure
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -415,5 +480,183 @@ fn output(
     ToolOutput {
         content: vec![ToolContent::Json(Value::Object(object))],
         is_error: status != "ok",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        process::Command,
+        sync::atomic::Ordering,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct Fixture {
+        root: PathBuf,
+        git: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rah-create-file-fault-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(root.join("src")).unwrap();
+            let git = native_git();
+            for args in [
+                ["init", "--quiet"].as_slice(),
+                ["config", "user.name", "RAH Test"].as_slice(),
+                ["config", "user.email", "rah@example.invalid"].as_slice(),
+            ] {
+                run(&git, &root, args);
+            }
+            fs::write(root.join("sentinel"), b"unchanged").unwrap();
+            run(&git, &root, &["add", "sentinel"]);
+            run(&git, &root, &["commit", "--quiet", "-m", "base"]);
+            Self { root, git }
+        }
+        fn snapshot(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+            (
+                fs::read(self.root.join(".git/HEAD")).unwrap(),
+                fs::read(self.root.join(".git/index")).unwrap(),
+                git_stdout(
+                    &self.git,
+                    &self.root,
+                    &["for-each-ref", "--format=%(refname)%00%(objectname)%00"],
+                ),
+                fs::read(self.root.join("sentinel")).unwrap(),
+            )
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    fn native_git() -> PathBuf {
+        #[cfg(windows)]
+        let command = ("where.exe", "git.exe");
+        #[cfg(not(windows))]
+        let command = ("which", "git");
+        let output = Command::new(command.0).arg(command.1).output().unwrap();
+        fs::canonicalize(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    fn run(git: &Path, root: &Path, args: &[&str]) {
+        assert!(
+            Command::new(git)
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success(),
+            "{args:?}"
+        );
+    }
+    fn git_stdout(git: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new(git)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        output.stdout
+    }
+    fn execute(tool: &RepositoryFileCreationTool, input: Value) -> Value {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = runtime
+            .block_on(tool.execute(ToolInput(input), ToolContext::default()))
+            .unwrap();
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("JSON result required")
+        };
+        value.clone()
+    }
+    fn assert_snapshot(fixture: &Fixture, snapshot: &(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)) {
+        assert_eq!(
+            fs::read(fixture.root.join(".git/HEAD")).unwrap(),
+            snapshot.0
+        );
+        assert_eq!(
+            fs::read(fixture.root.join(".git/index")).unwrap(),
+            snapshot.1
+        );
+        assert_eq!(
+            git_stdout(
+                &fixture.git,
+                &fixture.root,
+                &["for-each-ref", "--format=%(refname)%00%(objectname)%00"]
+            ),
+            snapshot.2
+        );
+        assert_eq!(fs::read(fixture.root.join("sentinel")).unwrap(), snapshot.3);
+    }
+
+    #[test]
+    fn target_race_uses_one_exclusive_create_without_overwrite_or_retry() {
+        let fixture = Fixture::new();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+        let snapshot = fixture.snapshot();
+        tool.test_hook
+            .create_target_before_native
+            .store(true, Ordering::SeqCst);
+        let value = execute(&tool, json!({"path":"src/race.rs","content":"wanted"}));
+        assert_eq!(value["status"], "create_failed_known");
+        assert_eq!(
+            fs::read(fixture.root.join("src/race.rs")).unwrap(),
+            b"external target"
+        );
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+        assert_snapshot(&fixture, &snapshot);
+    }
+
+    #[test]
+    fn partial_write_is_retained_and_reported_once() {
+        let fixture = Fixture::new();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+        let snapshot = fixture.snapshot();
+        tool.test_hook.write_fail_after.store(3, Ordering::SeqCst);
+        let value = execute(&tool, json!({"path":"src/partial.rs","content":"abcdef"}));
+        assert_eq!(value["status"], "write_failed_known");
+        assert_eq!(
+            fs::read(fixture.root.join("src/partial.rs")).unwrap(),
+            b"ab"
+        );
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+        assert_snapshot(&fixture, &snapshot);
+    }
+
+    #[test]
+    fn lost_post_create_certification_is_uncertain_without_replay_or_cleanup() {
+        let fixture = Fixture::new();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+        let snapshot = fixture.snapshot();
+        tool.test_hook
+            .force_post_verification_failure
+            .store(true, Ordering::SeqCst);
+        let value = execute(
+            &tool,
+            json!({"path":"src/uncertain.rs","content":"committed"}),
+        );
+        assert_eq!(value["status"], "uncertain");
+        assert_eq!(
+            fs::read(fixture.root.join("src/uncertain.rs")).unwrap(),
+            b"committed"
+        );
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+        assert_snapshot(&fixture, &snapshot);
     }
 }

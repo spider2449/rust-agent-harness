@@ -73,6 +73,58 @@ fn run(git: &Path, root: &Path, args: &[&str]) {
         "{args:?}"
     );
 }
+fn run_input(git: &Path, root: &Path, args: &[&str], input: &[u8]) {
+    use std::io::Write as _;
+    let mut child = Command::new(git)
+        .args(args)
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    assert!(child.wait().unwrap().success(), "{args:?}");
+}
+fn git_hash(git: &Path, root: &Path, bytes: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new(git)
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    String::from_utf8(child.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+fn snapshot(fixture: &Fixture) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let refs = Command::new(&fixture.git)
+        .args(["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
+        .current_dir(&fixture.root)
+        .output()
+        .unwrap()
+        .stdout;
+    (
+        fs::read(fixture.root.join(".git/HEAD")).unwrap(),
+        fs::read(fixture.root.join(".git/index")).unwrap(),
+        refs,
+    )
+}
+fn assert_snapshot(fixture: &Fixture, before: &(Vec<u8>, Vec<u8>, Vec<u8>)) {
+    assert_eq!(fs::read(fixture.root.join(".git/HEAD")).unwrap(), before.0);
+    assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), before.1);
+    assert_eq!(
+        Command::new(&fixture.git)
+            .args(["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
+            .current_dir(&fixture.root)
+            .output()
+            .unwrap()
+            .stdout,
+        before.2
+    );
+}
 fn result(tool: &RepositoryFileCreationTool, input: Value) -> Value {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -180,6 +232,133 @@ fn enforces_content_and_serialized_request_bounds() {
     );
     assert_eq!(
         result(&tool, json!({"path":"src/nul","content":"a\u{0000}"}))["status"],
+        "invalid_target"
+    );
+}
+
+#[test]
+fn rejects_real_submodule_sparse_intent_and_conflict_index_targets() {
+    let fixture = Fixture::new();
+    let child = fixture.root.parent().unwrap().join("rah-create-file-child");
+    let _ = fs::remove_dir_all(&child);
+    fs::create_dir(&child).unwrap();
+    run(&fixture.git, &child, &["init", "--quiet"]);
+    run(&fixture.git, &child, &["config", "user.name", "RAH Test"]);
+    run(
+        &fixture.git,
+        &child,
+        &["config", "user.email", "rah@example.invalid"],
+    );
+    fs::write(child.join("base"), "base").unwrap();
+    run(&fixture.git, &child, &["add", "base"]);
+    run(&fixture.git, &child, &["commit", "--quiet", "-m", "base"]);
+    run(
+        &fixture.git,
+        &fixture.root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            child.to_str().unwrap(),
+            "submodule_dir",
+        ],
+    );
+    let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+    let before = snapshot(&fixture);
+    assert_eq!(
+        result(&tool, json!({"path":"submodule_dir/new.rs","content":"x"}))["status"],
+        "precondition_failed"
+    );
+    assert!(!fixture.root.join("submodule_dir/new.rs").exists());
+    assert_snapshot(&fixture, &before);
+    run(
+        &fixture.git,
+        &fixture.root,
+        &["sparse-checkout", "init", "--cone"],
+    );
+    let before = snapshot(&fixture);
+    assert_eq!(
+        result(&tool, json!({"path":"src/sparse.rs","content":"x"}))["status"],
+        "precondition_failed"
+    );
+    assert!(!fixture.root.join("src/sparse.rs").exists());
+    assert_snapshot(&fixture, &before);
+    run(&fixture.git, &fixture.root, &["sparse-checkout", "disable"]);
+    fs::write(fixture.root.join("intent.rs"), "x").unwrap();
+    run(&fixture.git, &fixture.root, &["add", "-N", "intent.rs"]);
+    fs::remove_file(fixture.root.join("intent.rs")).unwrap();
+    let before = snapshot(&fixture);
+    assert_eq!(
+        result(&tool, json!({"path":"intent.rs","content":"x"}))["status"],
+        "precondition_failed"
+    );
+    assert_snapshot(&fixture, &before);
+    let hash = git_hash(&fixture.git, &fixture.root, b"conflict");
+    let record = format!("100644 {hash} 1\tconflict.rs\0");
+    run_input(
+        &fixture.git,
+        &fixture.root,
+        &["update-index", "-z", "--index-info"],
+        record.as_bytes(),
+    );
+    let before = snapshot(&fixture);
+    assert_eq!(
+        result(&tool, json!({"path":"conflict.rs","content":"x"}))["status"],
+        "precondition_failed"
+    );
+    assert!(!fixture.root.join("conflict.rs").exists());
+    assert_snapshot(&fixture, &before);
+    let _ = fs::remove_dir_all(&child);
+}
+
+#[test]
+fn measures_exact_serialized_request_bytes_including_path_and_escapes() {
+    let fixture = Fixture::new();
+    let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+    let path = "src/request-bound";
+    let mut content = "\n".repeat(160 * 1024);
+    while serde_json::to_vec(&json!({"path":path,"content":content}))
+        .unwrap()
+        .len()
+        > 320 * 1024
+    {
+        content.pop();
+    }
+    while serde_json::to_vec(&json!({"path":path,"content":content}))
+        .unwrap()
+        .len()
+        < 320 * 1024
+    {
+        content.push('x');
+    }
+    assert_eq!(
+        serde_json::to_vec(&json!({"path":path,"content":content}))
+            .unwrap()
+            .len(),
+        320 * 1024
+    );
+    assert_eq!(
+        result(&tool, json!({"path":path,"content":content}))["status"],
+        "ok"
+    );
+    let over_path = "src/request-boundx";
+    assert_eq!(
+        serde_json::to_vec(&json!({"path":over_path,"content":content}))
+            .unwrap()
+            .len(),
+        320 * 1024 + 1
+    );
+    assert_eq!(
+        result(&tool, json!({"path":over_path,"content":content}))["status"],
+        "invalid_target"
+    );
+    assert_eq!(
+        result(
+            &tool,
+            json!({"path":"src/escaped","content":"\n".repeat(200 * 1024)})
+        )["status"],
         "invalid_target"
     );
 }
