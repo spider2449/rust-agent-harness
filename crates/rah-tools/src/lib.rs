@@ -15,6 +15,7 @@ mod git_status;
 mod git_support;
 mod git_unstage;
 mod host_execute;
+mod native_repository_create;
 mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
