@@ -1,0 +1,66 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 2rem;
+}
+
+.status-card {
+  width: min(100%, 42rem);
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 0.75rem;
+  padding: clamp(2rem, 6vw, 4rem);
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  color: color-mix(in srgb, CanvasText 65%, transparent);
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+dl {
+  display: grid;
+  gap: 1rem;
+  margin: 3rem 0 0;
+}
+
+dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+dt {
+  color: color-mix(in srgb, CanvasText 65%, transparent);
+}
+
+dd {
+  margin: 0;
+  font-weight: 600;
+}

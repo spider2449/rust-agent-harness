@@ -1,0 +1,11 @@
+[package]
+name = "rah-desktop"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+tauri-build = { version = "2" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri = { version = "2" }
