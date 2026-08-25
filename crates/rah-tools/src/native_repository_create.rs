@@ -15,6 +15,7 @@ pub(crate) enum NativeCreateError {
     InvalidParent,
     InvalidName,
     AlreadyExists,
+    WriteFailed(io::Error),
     Io(io::Error),
 }
 
@@ -160,13 +161,13 @@ mod unix {
         use io::Write as _;
         let count = fail_after.unwrap_or(content.len()).min(content.len());
         file.write_all(&content[..count])
-            .map_err(NativeCreateError::Io)?;
+            .map_err(NativeCreateError::WriteFailed)?;
         if fail_after.is_some() {
-            return Err(NativeCreateError::Io(io::Error::other(
+            return Err(NativeCreateError::WriteFailed(io::Error::other(
                 "injected write failure",
             )));
         }
-        file.sync_all().map_err(NativeCreateError::Io)
+        file.sync_all().map_err(NativeCreateError::WriteFailed)
     }
 }
 
@@ -326,13 +327,14 @@ mod windows {
         let mut f = unsafe { fs::File::from_raw_handle(out) };
         use io::Write as _;
         let n = fail_after.unwrap_or(content.len()).min(content.len());
-        f.write_all(&content[..n]).map_err(NativeCreateError::Io)?;
+        f.write_all(&content[..n])
+            .map_err(NativeCreateError::WriteFailed)?;
         if fail_after.is_some() {
-            return Err(NativeCreateError::Io(io::Error::other(
+            return Err(NativeCreateError::WriteFailed(io::Error::other(
                 "injected write failure",
             )));
         };
-        f.sync_all().map_err(NativeCreateError::Io)
+        f.sync_all().map_err(NativeCreateError::WriteFailed)
     }
 }
 
@@ -390,7 +392,7 @@ mod tests {
         );
         assert!(matches!(
             create_new(&parent, "partial.txt", b"abcdef", Some(3)),
-            Err(NativeCreateError::Io(_))
+            Err(NativeCreateError::WriteFailed(_))
         ));
         assert_eq!(
             fs::read(root.join("parent/partial.txt")).expect("partial"),
