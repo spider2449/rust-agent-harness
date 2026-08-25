@@ -157,6 +157,8 @@ impl RepositoryMultiFileMutationPolicy {
         });
         let mut temporaries = Vec::with_capacity(targets.len());
         for (_index, prepared) in targets.iter().enumerate() {
+            #[cfg(not(test))]
+            let _ = _index;
             #[cfg(test)]
             test_hook::check(&self.root, TestPhase::BeforeTemporaryCreate, _index)?;
             match OwnedTemporary::create(&prepared.target, &prepared.postimage) {
@@ -1927,6 +1929,11 @@ mod tests {
             canonical_logical: "target.txt".into(),
             identity: Identity::capture(&target_path).unwrap(),
             parent_identity: Identity::capture(&base).unwrap(),
+            #[cfg(unix)]
+            mode: {
+                use std::os::unix::fs::MetadataExt;
+                fs::metadata(&target_path).unwrap().mode()
+            },
         };
         let temporary = OwnedTemporary::create(&target, b"new").unwrap();
         assert_eq!(temporary.path.parent(), Some(base.as_path()));
