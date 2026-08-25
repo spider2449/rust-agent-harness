@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.8 milestone: bounded repository mutation and workflow inspection
+## v0.8 release candidate: bounded repository mutation and workflow inspection
 
 RAH retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
@@ -27,13 +27,15 @@ authority; model input cannot select their executable, argv, cwd, environment,
 repository, refs, or baselines. Their precise claim is **no intentional
 repository mutation**, not zero incidental filesystem writes.
 
-The unreleased v0.8 milestone adds `repo.create-file`: one host-authorized
+RAH v0.8.0 adds `repo.create-file`: one host-authorized
 exclusive creation of one absent UTF-8 file at a model-selected, validated
 repository-relative path. It uses a separate private
 `RepositoryFileCreationPolicy` (ADR 0013), requires an existing real parent,
 rejects links/reparse traversal, ignored/index/HEAD/submodule/sparse targets,
 and never overwrites, creates directories, appends, stages, or mutates Git
-history or refs. It is not generic filesystem-write authority.
+history or refs. One call creates one file only: paths are limited to 1024
+UTF-8 bytes, content to 256 KiB, and the serialized request to 320 KiB. It is
+not generic filesystem-write authority and provides no rollback or replay.
 
 ```text
 Built-in Tool -----------\

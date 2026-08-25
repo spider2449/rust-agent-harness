@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.8.0 — Prepared 2026-08-25
+
+Release preparation for `RAH v0.8.0` is complete. This entry does not mark the
+release as tagged or published.
+
+### Added
+
+- Bounded repository file creation through `repo.create-file`: one
+  host-authorized UTF-8 file at an existing parent directory per call.
+- Native exclusive creation with no overwrite, composed through the Trusted
+  Profile and the Generic Tool Bridge while retaining host-bound repository
+  authority.
+
+### Verified
+
+- Deterministic Windows and Linux coverage, plus certified Codex live
+  validation using exactly `codex-cli 0.149.0`.
+
+### Limitations
+
+- No overwrite, delete, rename, directory creation, binary creation, staging,
+  commit/history authority, multi-file transaction, rollback, or replay.
+- `repo.create-file` creates one file per call and requires its parent to
+  already exist.
+
 ## v0.7.0 — 2026-08-24
 
 Released as `RAH v0.7.0` on 2026-08-24. The immutable annotated tag `v0.7.0`
