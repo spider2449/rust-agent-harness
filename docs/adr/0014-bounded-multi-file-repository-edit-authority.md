@@ -1,6 +1,6 @@
 # ADR 0014 — Bounded multi-file repository edit authority
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -8,7 +8,7 @@ ADR 0012 authorizes one clean tracked-file replacement through private `Reposito
 
 ## Decision
 
-Propose `repo.edit-files`, backed by separate private host-owned `RepositoryMultiFileMutationPolicy`. It binds one canonical non-bare repository and may replace complete postimages for one through four existing clean HEAD-tracked regular strict-UTF-8 files. Host owns repository, Git executable, lease, limits, canonical identities, temporary names, and native calls. `PermissionLevel::Execute` remains outer gate only.
+`repo.edit-files`, backed by separate private host-owned `RepositoryMultiFileMutationPolicy`, binds one canonical non-bare repository and may replace complete postimages for one through four existing clean HEAD-tracked regular strict-UTF-8 files. Host owns repository, Git executable, lease, limits, canonical identities, temporary names, and native calls. `PermissionLevel::Execute` remains outer gate only.
 
 Each target supplies logical relative path, expected complete SHA-256, expected byte length, and one through sixteen exact literal replacements. Every match resolves exactly once against original snapshot; duplicate/overlap reject, adjacency is permitted, one deterministic postimage results. There is no legacy single-replacement form, regex, glob, line/range, or unified-diff semantics.
 
@@ -34,7 +34,7 @@ This does not widen ADR 0012: one-file replacement has a simpler authority/failu
 
 Exclude creation, deletion, rename, directories, chmod/mode changes, binary edits, generic write, shell/process authority, staging, commit/history/refs/network, rollback, replay, journal, OS sandboxing, and cross-file transaction semantics. `repo.patch` stays supported for smaller one-file authority; `repo.create-file` is not a target form.
 
-Acceptance requires deterministic all-target preflight, native fault, partial/uncertain, Git invariant, shared-lease, Windows, and Unix evidence. Separately authorized live proof uses exact Windows `codex-cli 0.149.0`; Ubuntu/Linux remains deterministic evidence only.
+Acceptance is supported by Task 094A deterministic all-target preflight and shared-lease evidence, Task 094B native fault, partial/uncertain, Git-invariant, Windows, and Unix evidence, and Task 094C direct host-constructed Tool, output-redaction, and generic ToolRegistry evidence. The implementation remains non-transactional: it has no rollback, retry, or replay. Trusted Profile integration and Generic Tool Bridge composition evidence remain deferred to Task 095; live Codex certification remains separately deferred and requires exact Windows `codex-cli 0.149.0`.
 
 ## Alternatives rejected
 

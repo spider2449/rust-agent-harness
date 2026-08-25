@@ -3,7 +3,7 @@
 ## v0.8 boundary and preserved capabilities
 
 The public/host Execute capabilities include `host.cargo.version`,
-`host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`, and the fixed
+`host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed
 repository observers `repo.file-info`, `repo.status`, `repo.diff`, and
 `repo.diff-staged`. They are
 host-constructed, capability-specific tools, not generic model-selected process
@@ -13,7 +13,7 @@ infrastructure, not public capabilities. `host.fixture.echo` does not exist.
 
 The v0.3 boundary excludes arbitrary `shell.exec` and `process.exec`,
 model-selected executable/argv/cwd/environment, worktree restore, arbitrary
-file mutation outside the accepted bounded `repo.patch` and `repo.create-file`
+file mutation outside the accepted bounded `repo.patch`, `repo.create-file`, and `repo.edit-files`
 policies,
 commit/history/ref operations, reset/clean/checkout/switch/stash,
 merge/rebase, push/pull/fetch, network Git, and credential-bearing Git
@@ -31,6 +31,14 @@ mkdir, append, delete, rename, chmod, staging, index/history/ref mutation,
 rollback, or replay authority. A possible partial write is retained and
 classified conservatively rather than deleted or replayed. `repo.patch` and
 `repo.create-file` share the per-repository mutation lease.
+
+ADR 0014 separately grants `repo.edit-files` only through private host-bound
+`RepositoryMultiFileMutationPolicy`: one through four existing clean tracked
+UTF-8 files, deterministic host order, and no cross-file transaction. Its
+outer permission is `Execute`; it grants no rollback, retry, replay, staging,
+history/ref, or network Git authority. Bounded `partial_effect` and `uncertain`
+results retain only logical target inventory. Trusted Profile availability is
+not yet claimed.
 
 Repository observation remains fixed read-only: `repo.file-info`,
 `repo.status`, `repo.diff`, and `repo.diff-staged`. The host fixes executable,

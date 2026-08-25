@@ -20,7 +20,7 @@ mod repository_create_file;
 mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
-#[allow(dead_code)]
+mod repository_multi_file_edit;
 mod repository_multi_file_preflight;
 mod repository_mutation;
 mod repository_observer;
@@ -44,6 +44,9 @@ pub use repository_create_file::{REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryFil
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};
 pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInfoTool};
+pub use repository_multi_file_edit::{
+    REPOSITORY_EDIT_FILES_TOOL_NAME, RepositoryMultiFileEditTool,
+};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{

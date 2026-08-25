@@ -1,10 +1,10 @@
 # RAH Bounded Multi-File Repository Edit Contract
 
-Status: Proposed for Task 094A+ implementation
+Status: Implemented through Task 094C; Trusted Profile and live certification deferred
 
 ## 1. Scope
 
-`repo.edit-files` is a proposed logical bounded edit across existing clean HEAD-tracked UTF-8 files in one host-authorized repository. It is not a transaction and makes no cross-file atomicity, crash-durability, rollback, recovery, retry, or replay claim. Task 093 implements no authority.
+`repo.edit-files` is a logical bounded edit across existing clean HEAD-tracked UTF-8 files in one host-authorized repository. It is not a transaction and makes no cross-file atomicity, crash-durability, rollback, recovery, retry, or replay claim. Task 094C exposes it only as a direct host-constructed `rah-tools` Tool backed by its private authority engine.
 
 ## 2. Terminology
 
@@ -19,13 +19,13 @@ Status: Proposed for Task 094A+ implementation
 
 ADR 0012 authorizes `repo.patch`, one clean existing tracked file, through private `RepositoryWorktreeMutationPolicy`. It resolves up to sixteen exact replacements against one snapshot, creates a same-parent temporary, attempts replacement once, verifies Git/target state, preserves Unix mode, and makes lost post-observation uncertain. ADR 0013 authorizes `repo.create-file`, one exclusive new file, with materially different partial-write semantics. `repo.patch`, `repo.create-file`, `host.git.stage`, and `host.git.unstage` share one per-repository mutation lease. `PermissionLevel::Execute` is an outer gate only; model data does not select authority.
 
-## 4. New authority boundary
+## 4. Authority boundary
 
 The proposed public name is `repo.edit-files`; private policy is `RepositoryMultiFileMutationPolicy`. Host construction binds one canonical non-bare repository, Git/repository identities, shared lease, fixed limits, and temporary names. One request may edit **one through four** files. Four is deliberately small: one-file patch already has 1 MiB/16-replacement bounds, while four bounds images, temporary artifacts, attempts, inventory, and partial-state reasoning without claiming atomicity.
 
 Targets must be existing regular HEAD-tracked files with one normal stage-0 index entry equal to the HEAD regular blob, clean worktree state, strict NUL-free UTF-8, no symlink/reparse/hard-link, and no sparse, submodule, gitlink, intent-to-add, staged, unmerged, ignored, or untracked ambiguity. No creation, deletion, rename, directory creation, mode/ACL/attribute mutation, binary edit, staging, Git history/ref/network, shell/process, generic `fs.write`, rollback, or replay is granted.
 
-## 5. Request schema proposal
+## 5. Request schema
 
 ```json
 {"targets":[{"path":"src/example.rs","expected_file_sha256":"lowercase-64-hex-digest","expected_file_byte_length":123,"replacements":[{"expected_old_text":"old","replacement_text":"new"}]}]}
@@ -89,7 +89,7 @@ First persistent side effect is first native replace-once invocation. Each targe
 
 ## 13. Result taxonomy
 
-Redacted JSON output contains `status`, `reason`, `committed_count`, `target_count`, and permitted logical-path inventory; never absolute paths, temporary names, image text, native error details, or policy internals.
+Redacted JSON output contains only `status` and, for commit-engine outcomes, ordered `effects` inventory. Each effect contains only the logical `path` and state. It never contains a reason, count, absolute path, temporary name, image text, native error detail, or policy internal.
 
 | Status | Meaning |
 | --- | --- |
@@ -122,13 +122,13 @@ Use `git_stage::repository_lease` keyed by canonical root from mutation-sensitiv
 
 Capture raw `.git/index` bytes, HEAD, and bounded refs during preflight; compare before each commit, after each success, and in final result. Mismatch stops future commits or is `uncertain` after a commit. Tool invokes no Git mutation and preserves index, HEAD, refs.
 
-## 19. Trusted Profile integration
+## 19. Trusted Profile integration (deferred)
 
-Keep `profile_version = 1`. Add closed symbolic `repo.edit-files` with existing `executable`/`repository` resources and `Execute`. Static loading performs no spawn, filesystem mutation, or effectful authority resolution and produces redacted inventory. Effective composition resolves host identity, constructs private policy, and publishes to fresh registry only after complete success. No absolute root is model-visible.
+`profile_version = 1` remains unchanged. Task 095 will add a closed symbolic `repo.edit-files` capability with existing `executable`/`repository` resources and `Execute`; Task 094C makes no profile schema, static inventory, effective-composer, CLI, or publication change.
 
-## 20. Generic Tool Bridge impact
+## 20. Generic Tool Bridge impact (deferred composition evidence)
 
-No production bridge semantic change. Alias mapping, Execute enforcement, ToolRegistry dispatch, dedupe, cancellation/disconnect, response translation, bounds, and no replay remain capability-agnostic adapter behavior. No bridge branch.
+No production bridge semantic change. Alias mapping, Execute enforcement, ToolRegistry dispatch, dedupe, cancellation/disconnect, response translation, bounds, and no replay remain capability-agnostic adapter behavior. No bridge branch was added; full Trusted Profile-to-bridge composition evidence is Task 095.
 
 ## 21. Permission/security model
 

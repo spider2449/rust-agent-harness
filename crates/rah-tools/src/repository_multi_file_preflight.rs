@@ -81,6 +81,7 @@ impl RepositoryMultiFileMutationPolicy {
 
     /// Fully preflights and constructs all postimages.  It never replaces a
     /// target; owned temporaries are checked then removed before return.
+    #[allow(dead_code)]
     pub(crate) async fn prepare(
         &self,
         input: &ToolInput,
@@ -101,6 +102,7 @@ impl RepositoryMultiFileMutationPolicy {
         Ok(self.commit_prepared(&plan))
     }
 
+    #[allow(dead_code)]
     async fn prepare_retained_inner(
         &self,
         input: &ToolInput,
@@ -427,6 +429,11 @@ impl RepositoryMultiFileMutationPolicy {
         self.prepare_retained_inner(input).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_root(&self) -> &Path {
+        &self.root
+    }
+
     /// The Task 094B commit loop calls this before every native commit. It has
     /// no replacement operation and is exercised by `prepare` above.
     pub(crate) fn revalidate_pre_commit(
@@ -546,6 +553,21 @@ pub(crate) enum PreflightError {
     Precondition(&'static str),
 }
 
+impl PreflightError {
+    pub(crate) fn public_status(self) -> &'static str {
+        match self {
+            Self::InvalidTarget(reason) => {
+                let _ = reason;
+                "invalid_target"
+            }
+            Self::Precondition(reason) => {
+                let _ = reason;
+                "precondition_failed"
+            }
+        }
+    }
+}
+
 /// Private result carried to the later policy integration layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MultiFileEditOutcome {
@@ -556,7 +578,9 @@ pub(crate) struct MultiFileEditOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MultiFileEditStatus {
     Ok,
+    #[allow(dead_code)]
     InvalidTarget,
+    #[allow(dead_code)]
     PreconditionFailed,
     FailedKnownNoEffect,
     PartialEffect,
@@ -981,6 +1005,7 @@ struct PreparedTarget {
     target: SafeTarget,
     original: Vec<u8>,
     postimage: Vec<u8>,
+    #[allow(dead_code)]
     replacements: Vec<Replacement>,
 }
 pub(crate) struct PreparedMultiFilePlan {
@@ -994,6 +1019,7 @@ impl PreparedMultiFilePlan {
             let _ = temp.remove();
         }
     }
+    #[allow(dead_code)]
     fn without_temporaries(mut self) -> Self {
         self.temporaries.clear();
         self
@@ -1214,7 +1240,7 @@ fn windows_replace_once(temporary: &Path, target: &Path) -> Result<(), std::io::
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommitTestPhase {
+pub(crate) enum CommitTestPhase {
     BeforeNativeReplacement,
     KnownNoEffectFailure,
     UncertainNativeOutcome,
@@ -1223,7 +1249,7 @@ enum CommitTestPhase {
 }
 
 #[cfg(test)]
-mod test_commit_hook {
+pub(crate) mod test_commit_hook {
     use super::CommitTestPhase;
     use std::{
         collections::HashMap,
@@ -1234,7 +1260,7 @@ mod test_commit_hook {
     static HOOKS: OnceLock<Mutex<Vec<(PathBuf, CommitTestPhase, usize)>>> = OnceLock::new();
     static ATTEMPTS: OnceLock<Mutex<HashMap<(PathBuf, usize), usize>>> = OnceLock::new();
 
-    pub(super) fn install(root: &Path, phase: CommitTestPhase, index: usize) {
+    pub(crate) fn install(root: &Path, phase: CommitTestPhase, index: usize) {
         HOOKS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
@@ -1261,7 +1287,7 @@ mod test_commit_hook {
             .entry((root.to_path_buf(), index))
             .or_default() += 1;
     }
-    pub(super) fn attempts(root: &Path, index: usize) -> usize {
+    pub(crate) fn attempts(root: &Path, index: usize) -> usize {
         *ATTEMPTS
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -1269,7 +1295,7 @@ mod test_commit_hook {
             .get(&(root.to_path_buf(), index))
             .unwrap_or(&0)
     }
-    pub(super) fn clear(root: &Path) {
+    pub(crate) fn clear(root: &Path) {
         HOOKS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()

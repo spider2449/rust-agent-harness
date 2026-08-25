@@ -33,6 +33,13 @@ index/history/ref authority. `repo.patch` and `repo.create-file` share the
 same per-repository mutation lease, so they cannot independently widen mutation
 concurrency or authority.
 
+ADR 0014 adds `repo.edit-files` as a separate host-constructed capability with
+private `RepositoryMultiFileMutationPolicy`: it edits one through four existing
+clean tracked UTF-8 files in deterministic host order. `Execute` is its outer
+permission only; it makes no cross-file transaction, rollback, retry, or replay
+claim and classifies bounded partial or uncertain effects. Trusted Profile
+publication remains deferred.
+
 The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
 executable and repository root. Its closed request schema permits only a
 logical relative path, complete-file SHA-256 and byte-length preconditions, one
@@ -86,7 +93,7 @@ select providers or profile authority.
 ### Public / host capabilities
 
 The host-owned Execute surface includes `host.cargo.version`, `host.git.status`,
-`host.git.stage`, `host.git.unstage`, `repo.create-file`, and the fixed observers
+`host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed observers
 `repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. The first
 two and the observers are fixed, host-constructed inspection capabilities.
 Stage and unstage use the private `RepositoryMutationPolicy` to prove one
