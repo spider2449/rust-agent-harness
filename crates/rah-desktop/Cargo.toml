@@ -12,6 +12,7 @@ futures.workspace = true
 rah-protocol = { path = "../rah-protocol" }
 rah-runtime = { path = "../rah-runtime" }
 rah-runtime-codex = { path = "../rah-runtime-codex" }
+rah-tools = { path = "../rah-tools" }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2" }

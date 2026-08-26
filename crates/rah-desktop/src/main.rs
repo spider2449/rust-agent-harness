@@ -4,12 +4,15 @@
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
 use rah_protocol::{
-    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId,
+    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
+    RequestId,
 };
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
 #[cfg(target_os = "windows")]
 use rah_runtime_codex::{CodexAdapterError, CodexRuntime, SUPPORTED_CODEX_VERSION};
+#[cfg(target_os = "windows")]
+use rah_tools::{EchoTool, ToolError, ToolRegistry};
 #[cfg(target_os = "windows")]
 use serde::Serialize;
 #[cfg(target_os = "windows")]
@@ -26,6 +29,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 #[cfg(target_os = "windows")]
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
+#[cfg(target_os = "windows")]
+const DESKTOP_TOOL_NAME: &str = "echo";
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize)]
@@ -156,6 +161,7 @@ enum FrontendError {
     CodexSchemaIncompatible,
     CodexStartFailed,
     CodexConnectionFailed,
+    ToolRegistryFailed,
     ChatEmptyPrompt,
     ChatPromptTooLarge,
     CodexNotConnected,
@@ -174,6 +180,29 @@ enum ChatEvent {
     Completed,
     Failed { code: FrontendError },
     Cancelled { code: FrontendError },
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ActivityEvent {
+    #[serde(rename = "tool_requested")]
+    Requested { tool: &'static str },
+    #[serde(rename = "tool_started")]
+    Started { tool: &'static str },
+    #[serde(rename = "tool_finished")]
+    Finished {
+        tool: &'static str,
+        result: ActivityResult,
+    },
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ActivityResult {
+    Success,
+    Failed,
 }
 
 #[cfg(target_os = "windows")]
@@ -266,6 +295,13 @@ fn selected_codex_executable() -> OsString {
 }
 
 #[cfg(target_os = "windows")]
+fn desktop_tool_registry() -> Result<Arc<ToolRegistry>, ToolError> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool::new()))?;
+    Ok(Arc::new(registry))
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
@@ -282,7 +318,26 @@ async fn connect_codex(
         }
     }
 
-    match CodexRuntime::connect(selected_codex_executable()).await {
+    let registry = match desktop_tool_registry() {
+        Ok(registry) => registry,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to construct desktop tool registry");
+            let mut connection = state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *connection = ConnectionState::Error(FrontendError::ToolRegistryFailed);
+            return Err(FrontendError::ToolRegistryFailed);
+        }
+    };
+
+    match CodexRuntime::connect_tool_bridge(
+        selected_codex_executable(),
+        registry,
+        vec![PermissionLevel::None],
+    )
+    .await
+    {
         Ok(runtime) => {
             let mut connection = state
                 .connection
@@ -382,6 +437,38 @@ fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
 }
 
 #[cfg(target_os = "windows")]
+fn activity_event(event: &AgentEvent) -> Option<ActivityEvent> {
+    match event {
+        AgentEvent::ToolRequested { tool_call, .. }
+            if tool_call.name.as_str() == DESKTOP_TOOL_NAME =>
+        {
+            Some(ActivityEvent::Requested {
+                tool: DESKTOP_TOOL_NAME,
+            })
+        }
+        AgentEvent::ToolStarted { .. } => Some(ActivityEvent::Started {
+            tool: DESKTOP_TOOL_NAME,
+        }),
+        AgentEvent::ToolFinished { output, .. } => Some(ActivityEvent::Finished {
+            tool: DESKTOP_TOOL_NAME,
+            result: if output.is_error {
+                ActivityResult::Failed
+            } else {
+                ActivityResult::Success
+            },
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
+    if let Err(error) = app.emit("activity_event", event) {
+        tracing::warn!(error = %error, "failed to emit desktop activity event");
+    }
+}
+
+#[cfg(target_os = "windows")]
 async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
     let request = AgentRequest {
         request_id: RequestId::new(),
@@ -413,6 +500,9 @@ async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
     let mut terminal = false;
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
+        if let Some(activity) = activity_event(&event) {
+            emit_activity_event(&app, activity);
+        }
         match event {
             AgentEvent::ModelDelta { delta, .. } => {
                 emit_chat_event(&app, ChatEvent::Delta { text: delta })
@@ -536,9 +626,12 @@ fn main() {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::{
-        ChatEvent, ChatState, ConnectRequest, ConnectionState, FrontendError, MAX_PROMPT_BYTES,
-        begin_chat, current_app_status, frontend_error, request_connect, validate_prompt,
+        ActivityEvent, ActivityResult, ChatEvent, ChatState, ConnectRequest, ConnectionState,
+        DESKTOP_TOOL_NAME, FrontendError, MAX_PROMPT_BYTES, activity_event, begin_chat,
+        current_app_status, desktop_tool_registry, frontend_error, request_connect,
+        validate_prompt,
     };
+    use rah_protocol::{AgentEvent, SessionId, ToolCallId, ToolOutput};
     use rah_runtime_codex::CodexAdapterError;
     use std::path::PathBuf;
 
@@ -628,6 +721,58 @@ mod tests {
         assert!(!serialized.contains("session"));
         assert!(!serialized.contains("thread"));
         assert!(!serialized.contains("path"));
+    }
+
+    #[test]
+    fn desktop_registry_contains_only_permission_free_echo() {
+        let registry = desktop_tool_registry().expect("desktop registry should build");
+        let definitions = registry.definitions();
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name.as_str(), DESKTOP_TOOL_NAME);
+        assert_eq!(
+            definitions[0].permission,
+            rah_protocol::PermissionLevel::None
+        );
+    }
+
+    #[test]
+    fn serialized_activity_events_expose_only_tool_lifecycle() {
+        let event = ActivityEvent::Finished {
+            tool: DESKTOP_TOOL_NAME,
+            result: ActivityResult::Success,
+        };
+        let serialized = serde_json::to_string(&event).expect("activity event serializes");
+
+        assert_eq!(
+            serialized,
+            r#"{"kind":"tool_finished","tool":"echo","result":"success"}"#
+        );
+        for forbidden in [
+            "call", "thread", "turn", "session", "request", "input", "output",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn failed_tool_output_is_sanitized_to_failed_activity() {
+        let event = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: ToolCallId::new(),
+            output: ToolOutput {
+                content: vec![],
+                is_error: true,
+            },
+        };
+
+        assert_eq!(
+            activity_event(&event),
+            Some(ActivityEvent::Finished {
+                tool: DESKTOP_TOOL_NAME,
+                result: ActivityResult::Failed,
+            })
+        );
     }
 
     #[test]

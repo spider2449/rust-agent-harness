@@ -14,6 +14,7 @@ const runtimeRows = [
 
 let chatRunning = false;
 let activeAssistant = null;
+const maxActivityEntries = 100;
 
 const tauriApiRetryDelayMs = 100;
 const tauriApiRetryAttempts = 20;
@@ -45,6 +46,7 @@ function errorMessage(error) {
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",
     codex_connection_failed: "Codex connection failed",
+    tool_registry_failed: "Desktop tool registry unavailable",
     chat_empty_prompt: "Enter a message before sending",
     chat_prompt_too_large: "Message is too large",
     codex_not_connected: "Connect Codex to chat",
@@ -54,6 +56,29 @@ function errorMessage(error) {
     chat_cancelled: "Chat was cancelled",
   };
   return messages[error] ?? "Desktop frontend unavailable";
+}
+
+function appendActivity(payload) {
+  const entries = document.querySelector("#activity-entries");
+  const entry = document.createElement("article");
+  const tool = document.createElement("strong");
+  const state = document.createElement("span");
+  const labels = {
+    tool_requested: "Requested",
+    tool_started: "Running",
+    tool_finished: payload.result === "failed" ? "Failed" : "Completed",
+  };
+
+  entry.className = "activity-entry";
+  entry.dataset.state = payload.kind === "tool_finished" ? payload.result : payload.kind;
+  tool.textContent = payload.tool;
+  state.textContent = labels[payload.kind] ?? "Unknown";
+  entry.append(tool, state);
+  entries.append(entry);
+  while (entries.children.length > maxActivityEntries) {
+    entries.firstElementChild.remove();
+  }
+  entries.scrollTop = entries.scrollHeight;
 }
 
 function showBackendError() {
@@ -171,6 +196,7 @@ async function initializeDesktop() {
   const { listen } = tauri.event;
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
+  await listen("activity_event", (event) => appendActivity(event.payload));
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });
