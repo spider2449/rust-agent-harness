@@ -13,14 +13,17 @@ use rah_runtime::AgentRuntime;
 use rah_runtime_codex::{CodexAdapterError, CodexRuntime, SUPPORTED_CODEX_VERSION};
 #[cfg(target_os = "windows")]
 use rah_tools::{
-    EchoTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryStatusTool, Tool,
-    ToolContext, ToolError, ToolRegistry,
+    EchoTool, FsReadTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
+    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
 use serde::Serialize;
 #[cfg(target_os = "windows")]
 use std::{
+    collections::HashMap,
     ffi::OsString,
+    path::PathBuf,
     process::ExitCode,
     sync::{
         Arc, Mutex,
@@ -35,7 +38,11 @@ use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "windows")]
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
 #[cfg(target_os = "windows")]
+const DESKTOP_FS_READ_MAX_BYTES: usize = 1024 * 1024;
+#[cfg(all(test, target_os = "windows"))]
 const DESKTOP_TOOL_NAME: &str = "echo";
+#[cfg(target_os = "windows")]
+const MAX_TURN_TOOL_CALLS: usize = 64;
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize)]
@@ -53,13 +60,17 @@ struct AppStatus {
     codex_error: Option<FrontendError>,
     profile_status: &'static str,
     repository_status: &'static str,
+    repository_tools_status: &'static str,
 }
 
 #[cfg(target_os = "windows")]
 enum ConnectionState {
     NotConnected,
     Connecting,
-    Connected(Arc<CodexRuntime>),
+    Connected {
+        runtime: Arc<CodexRuntime>,
+        repository_generation: u64,
+    },
     Disconnecting,
     Error(FrontendError),
 }
@@ -82,7 +93,7 @@ enum ConnectRequest {
 #[cfg(target_os = "windows")]
 fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
     match connection {
-        ConnectionState::Connected(_) => ConnectRequest::AlreadyConnected,
+        ConnectionState::Connected { .. } => ConnectRequest::AlreadyConnected,
         ConnectionState::Connecting | ConnectionState::Disconnecting => ConnectRequest::InProgress,
         ConnectionState::NotConnected | ConnectionState::Error(_) => {
             *connection = ConnectionState::Connecting;
@@ -96,6 +107,7 @@ struct DesktopAppState {
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
+    repository_generation: Mutex<u64>,
     close_started: AtomicBool,
 }
 
@@ -106,6 +118,7 @@ impl Default for DesktopAppState {
             connection: Mutex::new(ConnectionState::NotConnected),
             chat: Mutex::new(ChatState::Idle),
             repository: Mutex::new(None),
+            repository_generation: Mutex::new(0),
             close_started: AtomicBool::new(false),
         }
     }
@@ -133,7 +146,11 @@ impl DesktopAppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some();
-        current_app_status(&connection, repository_selected)
+        let repository_generation = *self
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current_app_status(&connection, repository_selected, repository_generation)
     }
 
     fn close_started(&self) -> bool {
@@ -149,7 +166,7 @@ impl DesktopAppState {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match std::mem::replace(&mut *connection, ConnectionState::Disconnecting) {
-                ConnectionState::Connected(runtime) => Some(runtime),
+                ConnectionState::Connected { runtime, .. } => Some(runtime),
                 state => {
                     *connection = state;
                     None
@@ -167,6 +184,8 @@ impl DesktopAppState {
 #[cfg(target_os = "windows")]
 struct DesktopRepository {
     display_path: String,
+    git_executable: PathBuf,
+    root: PathBuf,
     status: Arc<RepositoryStatusTool>,
     worktree_diff: Arc<RepositoryDiffTool>,
     staged_diff: Arc<RepositoryDiffStagedTool>,
@@ -183,6 +202,8 @@ impl DesktopRepository {
         let staged_diff = RepositoryDiffStagedTool::new(git_executable, repository_root)?;
         Ok(Self {
             display_path: repository_root.display().to_string(),
+            git_executable: git_executable.to_path_buf(),
+            root: repository_root.to_path_buf(),
             status: Arc::new(status),
             worktree_diff: Arc::new(worktree_diff),
             staged_diff: Arc::new(staged_diff),
@@ -212,6 +233,7 @@ enum FrontendError {
     RepositoryInvalid,
     RepositoryObservationFailed,
     RepositoryDialogFailed,
+    RepositoryBusy,
 }
 
 #[cfg(target_os = "windows")]
@@ -226,16 +248,16 @@ enum ChatEvent {
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ActivityEvent {
     #[serde(rename = "tool_requested")]
-    Requested { tool: &'static str },
+    Requested { tool: String },
     #[serde(rename = "tool_started")]
-    Started { tool: &'static str },
+    Started { tool: String },
     #[serde(rename = "tool_finished")]
     Finished {
-        tool: &'static str,
+        tool: String,
         result: ActivityResult,
     },
 }
@@ -266,12 +288,16 @@ fn frontend_error(error: &CodexAdapterError) -> FrontendError {
 }
 
 #[cfg(target_os = "windows")]
-fn current_app_status(connection: &ConnectionState, repository_selected: bool) -> AppStatus {
+fn current_app_status(
+    connection: &ConnectionState,
+    repository_selected: bool,
+    repository_generation: u64,
+) -> AppStatus {
     let (runtime_status, codex_status, codex_version, codex_error) = match connection {
         ConnectionState::NotConnected => ("not connected", "not connected", None, None),
         ConnectionState::Error(error) => ("not connected", "error", None, Some(*error)),
         ConnectionState::Connecting => ("not connected", "connecting", None, None),
-        ConnectionState::Connected(_) => (
+        ConnectionState::Connected { .. } => (
             "connected",
             "connected",
             Some(SUPPORTED_CODEX_VERSION),
@@ -294,6 +320,32 @@ fn current_app_status(connection: &ConnectionState, repository_selected: bool) -
         } else {
             "not selected"
         },
+        repository_tools_status: repository_tool_authority(
+            repository_selected,
+            match connection {
+                ConnectionState::Connected {
+                    repository_generation,
+                    ..
+                } => Some(*repository_generation),
+                _ => None,
+            },
+            repository_generation,
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn repository_tool_authority(
+    repository_selected: bool,
+    connection_generation: Option<u64>,
+    repository_generation: u64,
+) -> &'static str {
+    match (repository_selected, connection_generation) {
+        (true, Some(connection_generation)) if connection_generation == repository_generation => {
+            "active"
+        }
+        (true, Some(_)) => "reconnect required",
+        _ => "inactive",
     }
 }
 
@@ -478,6 +530,12 @@ fn choose_repository(
     app: AppHandle,
     state: State<'_, DesktopAppState>,
 ) -> Result<(), FrontendError> {
+    repository_selection_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
     let selected = app.dialog().file().blocking_pick_folder();
     let Some(selected) = selected else {
         return Ok(());
@@ -490,10 +548,20 @@ fn choose_repository(
         tracing::warn!(error = %error, "selected repository is invalid");
         FrontendError::RepositoryInvalid
     })?;
+    repository_selection_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
     *state
         .repository
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(repository));
+    *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
     Ok(())
 }
 
@@ -574,9 +642,37 @@ fn selected_codex_executable() -> OsString {
 }
 
 #[cfg(target_os = "windows")]
-fn desktop_tool_registry() -> Result<Arc<ToolRegistry>, ToolError> {
+fn desktop_tool_registry(
+    repository: Option<&DesktopRepository>,
+) -> Result<Arc<ToolRegistry>, ToolError> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool::new()))?;
+    if let Some(repository) = repository {
+        let fs_read =
+            FsReadTool::new(&repository.root, DESKTOP_FS_READ_MAX_BYTES).map_err(|error| {
+                ToolError::Execution {
+                    message: error.to_string(),
+                }
+            })?;
+        let file_info = RepositoryFileInfoTool::new(&repository.git_executable, &repository.root)?;
+        let status = RepositoryStatusTool::new(&repository.git_executable, &repository.root)?;
+        let diff = RepositoryDiffTool::new(&repository.git_executable, &repository.root)?;
+        let diff_staged =
+            RepositoryDiffStagedTool::new(&repository.git_executable, &repository.root)?;
+        let patch = RepositoryWorktreePatchTool::new(&repository.git_executable, &repository.root)?;
+        let create_file =
+            RepositoryFileCreationTool::new(&repository.git_executable, &repository.root)?;
+        let edit_files =
+            RepositoryMultiFileEditTool::new(&repository.git_executable, &repository.root)?;
+        registry.register(Arc::new(fs_read))?;
+        registry.register(Arc::new(file_info))?;
+        registry.register(Arc::new(status))?;
+        registry.register(Arc::new(diff))?;
+        registry.register(Arc::new(diff_staged))?;
+        registry.register(Arc::new(patch))?;
+        registry.register(Arc::new(create_file))?;
+        registry.register(Arc::new(edit_files))?;
+    }
     Ok(Arc::new(registry))
 }
 
@@ -597,7 +693,19 @@ async fn connect_codex(
         }
     }
 
-    let registry = match desktop_tool_registry() {
+    let (repository, repository_generation) = {
+        let repository = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (repository, generation)
+    };
+    let registry = match desktop_tool_registry(repository.as_deref()) {
         Ok(registry) => registry,
         Err(error) => {
             tracing::error!(error = %error, "failed to construct desktop tool registry");
@@ -613,7 +721,15 @@ async fn connect_codex(
     match CodexRuntime::connect_tool_bridge(
         selected_codex_executable(),
         registry,
-        vec![PermissionLevel::None],
+        if repository.is_some() {
+            vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ]
+        } else {
+            vec![PermissionLevel::None]
+        },
     )
     .await
     {
@@ -622,7 +738,10 @@ async fn connect_codex(
                 .connection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *connection = ConnectionState::Connected(Arc::new(runtime));
+            *connection = ConnectionState::Connected {
+                runtime: Arc::new(runtime),
+                repository_generation,
+            };
             Ok(ConnectionResult::connected())
         }
         Err(error) => {
@@ -657,7 +776,7 @@ async fn disconnect_codex(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match std::mem::replace(&mut *connection, ConnectionState::Disconnecting) {
-            ConnectionState::Connected(runtime) => Some(runtime),
+            ConnectionState::Connected { runtime, .. } => Some(runtime),
             state => {
                 *connection = state;
                 None
@@ -709,6 +828,15 @@ fn begin_chat(chat: &mut ChatState) -> Result<(), FrontendError> {
 }
 
 #[cfg(target_os = "windows")]
+fn repository_selection_allowed(chat: ChatState) -> Result<(), FrontendError> {
+    if chat == ChatState::Running {
+        Err(FrontendError::RepositoryBusy)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
     if let Err(error) = app.emit("chat_event", event) {
         tracing::warn!(error = %error, "failed to emit desktop chat event");
@@ -716,25 +844,43 @@ fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
 }
 
 #[cfg(target_os = "windows")]
-fn activity_event(event: &AgentEvent) -> Option<ActivityEvent> {
+fn activity_event(
+    event: &AgentEvent,
+    tool_calls: &mut HashMap<rah_protocol::ToolCallId, String>,
+) -> Option<(ActivityEvent, bool)> {
     match event {
-        AgentEvent::ToolRequested { tool_call, .. }
-            if tool_call.name.as_str() == DESKTOP_TOOL_NAME =>
-        {
-            Some(ActivityEvent::Requested {
-                tool: DESKTOP_TOOL_NAME,
-            })
+        AgentEvent::ToolRequested { tool_call, .. } => {
+            if tool_calls.len() >= MAX_TURN_TOOL_CALLS {
+                return None;
+            }
+            let tool = tool_call.name.as_str().to_owned();
+            tool_calls.insert(tool_call.id.clone(), tool.clone());
+            Some((ActivityEvent::Requested { tool }, false))
         }
-        AgentEvent::ToolStarted { .. } => Some(ActivityEvent::Started {
-            tool: DESKTOP_TOOL_NAME,
-        }),
-        AgentEvent::ToolFinished { output, .. } => Some(ActivityEvent::Finished {
-            tool: DESKTOP_TOOL_NAME,
-            result: if output.is_error {
-                ActivityResult::Failed
-            } else {
-                ActivityResult::Success
-            },
+        AgentEvent::ToolStarted { tool_call_id, .. } => tool_calls
+            .get(tool_call_id)
+            .cloned()
+            .map(|tool| (ActivityEvent::Started { tool }, false)),
+        AgentEvent::ToolFinished {
+            tool_call_id,
+            output,
+            ..
+        } => tool_calls.remove(tool_call_id).map(|tool| {
+            let refresh = matches!(
+                tool.as_str(),
+                "repo.patch" | "repo.create-file" | "repo.edit-files"
+            );
+            (
+                ActivityEvent::Finished {
+                    tool,
+                    result: if output.is_error {
+                        ActivityResult::Failed
+                    } else {
+                        ActivityResult::Success
+                    },
+                },
+                refresh,
+            )
         }),
         _ => None,
     }
@@ -744,6 +890,13 @@ fn activity_event(event: &AgentEvent) -> Option<ActivityEvent> {
 fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
     if let Err(error) = app.emit("activity_event", event) {
         tracing::warn!(error = %error, "failed to emit desktop activity event");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_repository_refresh(app: &AppHandle) {
+    if let Err(error) = app.emit("repository_snapshot_refresh", ()) {
+        tracing::warn!(error = %error, "failed to request desktop repository refresh");
     }
 }
 
@@ -777,10 +930,14 @@ async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
 
     emit_chat_event(&app, ChatEvent::Started);
     let mut terminal = false;
+    let mut tool_calls = HashMap::new();
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
-        if let Some(activity) = activity_event(&event) {
+        if let Some((activity, refresh_repository)) = activity_event(&event, &mut tool_calls) {
             emit_activity_event(&app, activity);
+            if refresh_repository {
+                emit_repository_refresh(&app);
+            }
         }
         match event {
             AgentEvent::ModelDelta { delta, .. } => {
@@ -851,7 +1008,7 @@ async fn send_chat(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*connection {
-            ConnectionState::Connected(runtime) => Arc::clone(runtime),
+            ConnectionState::Connected { runtime, .. } => Arc::clone(runtime),
             _ => {
                 state.finish_chat();
                 return Err(FrontendError::CodexNotConnected);
@@ -909,17 +1066,59 @@ fn main() {
 mod tests {
     use super::{
         ActivityEvent, ActivityResult, ChatEvent, ChatState, ConnectRequest, ConnectionState,
-        DESKTOP_TOOL_NAME, FrontendError, MAX_PROMPT_BYTES, activity_event, begin_chat,
-        current_app_status, desktop_tool_registry, frontend_error, request_connect,
-        validate_prompt,
+        DESKTOP_TOOL_NAME, DesktopRepository, FrontendError, MAX_PROMPT_BYTES, activity_event,
+        begin_chat, current_app_status, desktop_tool_registry, frontend_error,
+        repository_selection_allowed, repository_tool_authority, request_connect, validate_prompt,
     };
-    use rah_protocol::{AgentEvent, SessionId, ToolCallId, ToolOutput};
+    use rah_protocol::{
+        AgentEvent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolInput, ToolName,
+        ToolOutput,
+    };
     use rah_runtime_codex::CodexAdapterError;
-    use std::path::PathBuf;
+    use rah_tools::ToolContext;
+    use std::{
+        collections::HashMap,
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestRepository(PathBuf);
+
+    impl TestRepository {
+        fn new() -> Self {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should follow Unix epoch")
+                .as_nanos();
+            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("rah-desktop-tool-registry-{timestamp}-{sequence}"));
+            fs::create_dir(&root).expect("test repository root should be created");
+            fs::create_dir(root.join(".git")).expect("test repository metadata should be created");
+            fs::write(root.join("inside.txt"), "inside").expect("test file should be written");
+            Self(root)
+        }
+
+        fn desktop_repository(&self) -> DesktopRepository {
+            let executable =
+                std::env::current_exe().expect("current test executable should be available");
+            DesktopRepository::new(&executable, &self.0).expect("test repository should construct")
+        }
+    }
+
+    impl Drop for TestRepository {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn status_contains_only_the_desktop_application_state() {
-        let status = current_app_status(&ConnectionState::NotConnected, false);
+        let status = current_app_status(&ConnectionState::NotConnected, false, 0);
 
         assert_eq!(status.app_name, "RAH");
         assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
@@ -931,6 +1130,7 @@ mod tests {
         assert_eq!(status.codex_error, None);
         assert_eq!(status.profile_status, "not loaded");
         assert_eq!(status.repository_status, "not selected");
+        assert_eq!(status.repository_tools_status, "inactive");
 
         let serialized = serde_json::to_string(&status).expect("status serializes");
         assert!(!serialized.contains('\\'));
@@ -939,7 +1139,7 @@ mod tests {
 
     #[test]
     fn status_reflects_connection_transitions_without_exposing_runtime_details() {
-        let connecting = current_app_status(&ConnectionState::Connecting, false);
+        let connecting = current_app_status(&ConnectionState::Connecting, false, 0);
         assert_eq!(connecting.runtime_status, "not connected");
         assert_eq!(connecting.codex_status, "connecting");
         assert_eq!(connecting.codex_version, None);
@@ -948,6 +1148,7 @@ mod tests {
         let error = current_app_status(
             &ConnectionState::Error(FrontendError::CodexConnectionFailed),
             false,
+            0,
         );
         assert_eq!(error.runtime_status, "not connected");
         assert_eq!(error.codex_status, "error");
@@ -974,7 +1175,7 @@ mod tests {
 
     #[test]
     fn repository_status_is_dynamic_without_exposing_repository_details() {
-        let status = current_app_status(&ConnectionState::NotConnected, true);
+        let status = current_app_status(&ConnectionState::NotConnected, true, 1);
         assert_eq!(status.repository_status, "selected");
         let serialized = serde_json::to_string(&status).expect("status serializes");
         assert!(!serialized.contains("git.exe"));
@@ -1046,7 +1247,7 @@ mod tests {
 
     #[test]
     fn desktop_registry_contains_only_permission_free_echo() {
-        let registry = desktop_tool_registry().expect("desktop registry should build");
+        let registry = desktop_tool_registry(None).expect("desktop registry should build");
         let definitions = registry.definitions();
 
         assert_eq!(definitions.len(), 1);
@@ -1057,10 +1258,117 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
+        let fixture = TestRepository::new();
+        let repository = fixture.desktop_repository();
+        let registry = desktop_tool_registry(Some(&repository)).expect("registry should build");
+        let definitions = registry.definitions();
+        let names = definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "echo",
+                "fs.read",
+                "repo.create-file",
+                "repo.diff",
+                "repo.diff-staged",
+                "repo.edit-files",
+                "repo.file-info",
+                "repo.patch",
+                "repo.status",
+            ]
+        );
+        let permissions = definitions
+            .iter()
+            .map(|definition| definition.permission)
+            .collect::<Vec<_>>();
+        assert!(permissions.contains(&PermissionLevel::None));
+        assert!(permissions.contains(&PermissionLevel::Read));
+        assert!(permissions.contains(&PermissionLevel::Execute));
+        assert_eq!(
+            permissions
+                .iter()
+                .filter(|&&permission| permission == PermissionLevel::None)
+                .count(),
+            1
+        );
+        assert_eq!(
+            permissions
+                .iter()
+                .filter(|&&permission| permission == PermissionLevel::Read)
+                .count(),
+            1
+        );
+        assert_eq!(
+            permissions
+                .iter()
+                .filter(|&&permission| permission == PermissionLevel::Execute)
+                .count(),
+            7
+        );
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("fs.read"),
+                    input: ToolInput(serde_json::json!({"path": "inside.txt"})),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("fs.read should use the selected repository root");
+        assert!(!output.is_error);
+        let outside = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("fs.read"),
+                    input: ToolInput(serde_json::json!({"path": "../outside.txt"})),
+                },
+                ToolContext::default(),
+            )
+            .await;
+        assert!(
+            outside.is_err(),
+            "fs.read must not escape the selected root"
+        );
+    }
+
+    #[test]
+    fn repository_authority_requires_reconnect_after_selection_generation_changes() {
+        assert_eq!(repository_tool_authority(false, None, 0), "inactive");
+        assert_eq!(repository_tool_authority(true, Some(4), 4), "active");
+        assert_eq!(
+            repository_tool_authority(true, Some(4), 5),
+            "reconnect required"
+        );
+    }
+
+    #[test]
+    fn repository_tool_construction_failure_returns_no_partial_registry() {
+        let fixture = TestRepository::new();
+        let mut repository = fixture.desktop_repository();
+        repository.root = fixture.0.join("missing-root");
+        assert!(desktop_tool_registry(Some(&repository)).is_err());
+    }
+
+    #[test]
+    fn repository_selection_is_blocked_while_chat_is_running() {
+        assert_eq!(repository_selection_allowed(ChatState::Idle), Ok(()));
+        assert_eq!(
+            repository_selection_allowed(ChatState::Running),
+            Err(FrontendError::RepositoryBusy)
+        );
+    }
+
     #[test]
     fn serialized_activity_events_expose_only_tool_lifecycle() {
         let event = ActivityEvent::Finished {
-            tool: DESKTOP_TOOL_NAME,
+            tool: DESKTOP_TOOL_NAME.to_owned(),
             result: ActivityResult::Success,
         };
         let serialized = serde_json::to_string(&event).expect("activity event serializes");
@@ -1070,29 +1378,75 @@ mod tests {
             r#"{"kind":"tool_finished","tool":"echo","result":"success"}"#
         );
         for forbidden in [
-            "call", "thread", "turn", "session", "request", "input", "output",
+            "tool_call_id",
+            "thread_id",
+            "turn_id",
+            "session_id",
+            "request_id",
+            "input",
+            "output",
         ] {
             assert!(!serialized.contains(forbidden));
         }
     }
 
     #[test]
-    fn failed_tool_output_is_sanitized_to_failed_activity() {
-        let event = AgentEvent::ToolFinished {
+    fn activity_uses_actual_tool_name_and_hides_internal_call_identity() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
             session_id: SessionId::new(),
-            tool_call_id: ToolCallId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.edit-files"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        };
+        let started_id = id.clone();
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
             output: ToolOutput {
                 content: vec![],
                 is_error: true,
             },
         };
-
+        let mut calls = HashMap::new();
+        let requested = activity_event(&requested, &mut calls).expect("requested activity");
         assert_eq!(
-            activity_event(&event),
-            Some(ActivityEvent::Finished {
-                tool: DESKTOP_TOOL_NAME,
-                result: ActivityResult::Failed,
-            })
+            requested.0,
+            ActivityEvent::Requested {
+                tool: "repo.edit-files".to_owned()
+            }
+        );
+        assert_eq!(
+            activity_event(
+                &AgentEvent::ToolStarted {
+                    session_id: SessionId::new(),
+                    tool_call_id: started_id,
+                },
+                &mut calls,
+            ),
+            Some((
+                ActivityEvent::Started {
+                    tool: "repo.edit-files".to_owned(),
+                },
+                false,
+            ))
+        );
+        assert_eq!(
+            activity_event(&finished, &mut calls),
+            Some((
+                ActivityEvent::Finished {
+                    tool: "repo.edit-files".to_owned(),
+                    result: ActivityResult::Failed,
+                },
+                true,
+            ))
+        );
+        let serialized = serde_json::to_string(&requested.0).expect("activity serializes");
+        assert_eq!(
+            serialized,
+            r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
         );
     }
 

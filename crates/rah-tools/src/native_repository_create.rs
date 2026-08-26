@@ -75,8 +75,11 @@ pub(crate) fn create_new(
 
 #[allow(dead_code)]
 fn validate_relative(path: &Path) -> Result<(), NativeCreateError> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
+    if path.is_absolute() {
         return Err(NativeCreateError::InvalidParent);
+    }
+    if path.as_os_str().is_empty() {
+        return Ok(());
     }
     for component in path.components() {
         if !matches!(component, Component::Normal(_)) {
@@ -343,7 +346,7 @@ mod tests {
     use super::{NativeCreateError, NativeParent, create_new};
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -374,6 +377,26 @@ mod tests {
         assert_eq!(
             fs::read(root.join("parent/new.txt")).expect("read"),
             b"exact\\n"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn empty_relative_parent_creates_only_in_the_authorized_root() {
+        let root = root("root-parent");
+        let parent = NativeParent::open(&root, Path::new("")).expect("root parent");
+        create_new(&parent, "root.txt", b"root content", None).expect("root create");
+        assert_eq!(
+            fs::read(root.join("root.txt")).expect("root file"),
+            b"root content"
+        );
+        assert!(matches!(
+            create_new(&parent, "root.txt", b"replacement", None),
+            Err(NativeCreateError::AlreadyExists)
+        ));
+        assert_eq!(
+            fs::read(root.join("root.txt")).expect("unchanged root file"),
+            b"root content"
         );
         fs::remove_dir_all(root).expect("cleanup");
     }

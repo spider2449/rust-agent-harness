@@ -238,6 +238,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn rejects_a_fresh_snapshot_of_an_externally_dirty_target_without_a_native_attempt() {
+        let (_fixture, git, root) = Fixture::new();
+        let dirty = b"A old\nexternal dirty\n";
+        fs::write(root.join("a.rs"), dirty).unwrap();
+        let before = git_state(&git, &root);
+        let tool = RepositoryMultiFileEditTool::new(&git, &root).unwrap();
+        let policy_root = tool.policy.test_root();
+        let output = run(&tool, request(&root, &["a.rs"])).await;
+
+        assert_closed_status(&output, "precondition_failed");
+        assert_eq!(fs::read(root.join("a.rs")).unwrap(), dirty);
+        let after = git_state(&git, &root);
+        assert_eq!(after.0, before.0, "raw index changed");
+        assert_eq!(after.1, before.1, "HEAD changed");
+        assert_eq!(after.2, before.2, "refs changed");
+        assert_eq!(test_commit_hook::attempts(policy_root, 0), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn invalid_and_precondition_failures_are_closed_and_effect_free() {
         let (_fixture, git, root) = Fixture::new();
         let tool = RepositoryMultiFileEditTool::new(&git, &root).unwrap();

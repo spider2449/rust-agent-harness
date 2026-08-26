@@ -140,6 +140,7 @@ impl RepositoryMultiFileMutationPolicy {
                 ));
             }
             self.validate_git_target(&target)?;
+            self.validate_worktree_clean(&target)?;
             let original = read_bounded(&target.path, MAX_FILE_BYTES)
                 .map_err(|_| PreflightError::Precondition("could not read bounded target"))?;
             validate_snapshot(&original, &request_target)?;
@@ -322,6 +323,7 @@ impl RepositoryMultiFileMutationPolicy {
             self.target_matches(prepared, expected)?;
             if index >= committed {
                 self.validate_git_target(&prepared.target)?;
+                self.validate_worktree_clean(&prepared.target)?;
                 plan.temporaries[index].revalidate()?;
             }
         }
@@ -454,6 +456,7 @@ impl RepositoryMultiFileMutationPolicy {
                 return Err(PreflightError::Precondition("target preimage changed"));
             }
             self.validate_git_target(&prepared.target)?;
+            self.validate_worktree_clean(&prepared.target)?;
         }
         for temporary in &plan.temporaries {
             temporary.revalidate()?;
@@ -512,6 +515,19 @@ impl RepositoryMultiFileMutationPolicy {
             ));
         }
         Ok(())
+    }
+
+    /// Uses a fixed host-owned Git command. `git diff-files --quiet` returns
+    /// one for a dirty worktree target, which fails closed through `git_output`.
+    fn validate_worktree_clean(&self, target: &SafeTarget) -> Result<(), PreflightError> {
+        self.git_output(&[
+            "--literal-pathspecs",
+            "diff-files",
+            "--quiet",
+            "--",
+            target.canonical_logical.as_str(),
+        ])
+        .map(|_| ())
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, PreflightError> {
@@ -1986,9 +2002,7 @@ mod tests {
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), before.0[0]);
         assert_eq!(fs::read(root.join("z.txt")).unwrap(), before.0[2]);
         plan.cleanup_temporaries();
-        fs::write(root.join("identity-source.txt"), b"A old\n").unwrap();
-        fs::remove_file(root.join("a.txt")).unwrap();
-        fs::rename(root.join("identity-source.txt"), root.join("a.txt")).unwrap();
+        fs::write(root.join("m.txt"), &before.0[1]).unwrap();
         let plan = policy
             .prepare_retained_for_test(&multi(&root, &["a.txt"]))
             .await

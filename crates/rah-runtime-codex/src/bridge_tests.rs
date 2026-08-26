@@ -1848,16 +1848,13 @@ async fn trusted_profile_bridge_applies_multi_replacement_once_and_preserves_inv
         "rah_tool_0",
         legacy_after_multi,
     ));
-    assert_eq!(peer.next_sent().await["result"]["success"], true);
+    assert_eq!(peer.next_sent().await["result"]["success"], false);
     assert_eq!(
         executions.load(Ordering::SeqCst),
         2,
         "a new call ID is distinct"
     );
-    assert_eq!(
-        fs::read(&fixture.target).unwrap(),
-        b"alpha = 100\nbeta = 20\ngamma = 30\nsentinel = unchanged\n"
-    );
+    assert_eq!(fs::read(&fixture.target).unwrap(), expected);
     finish_turn(&peer, "completed");
     let events = handle.into_events().collect::<Vec<_>>().await;
     assert_eq!(tool_event_count(&events), 6);

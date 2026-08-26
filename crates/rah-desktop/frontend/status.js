@@ -10,6 +10,7 @@ const runtimeRows = [
   ["Codex version", "codexVersion"],
   ["Profile", "profileStatus"],
   ["Repository", "repositoryStatus"],
+  ["Repository tools", "repositoryToolsStatus"],
 ];
 
 let chatRunning = false;
@@ -59,6 +60,7 @@ function errorMessage(error) {
     repository_invalid: "Selected folder is not a valid repository root",
     repository_observation_failed: "Repository observation failed",
     repository_dialog_failed: "Repository picker failed",
+    repository_busy: "Repository selection is unavailable while chat is running",
   };
   return messages[error] ?? "Desktop frontend unavailable";
 }
@@ -242,6 +244,9 @@ async function initializeDesktop() {
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));
+  await listen("repository_snapshot_refresh", () => {
+    void refreshRepository(invoke);
+  });
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });

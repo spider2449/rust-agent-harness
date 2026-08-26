@@ -653,6 +653,38 @@ mod tests {
     }
 
     #[test]
+    fn root_level_create_preserves_git_state_and_remains_untracked() {
+        let fixture = Fixture::new();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+        let snapshot = fixture.snapshot();
+        let value = execute(&tool, json!({"path":"root.txt","content":"root content"}));
+
+        assert_eq!(value["status"], "ok");
+        assert_eq!(
+            fs::read(fixture.root.join("root.txt")).unwrap(),
+            b"root content"
+        );
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+        assert_snapshot(&fixture, &snapshot);
+        assert_eq!(
+            git_stdout(
+                &fixture.git,
+                &fixture.root,
+                &["status", "--porcelain=v1", "-z"]
+            ),
+            b"?? root.txt\0"
+        );
+        let repeated = execute(&tool, json!({"path":"root.txt","content":"replacement"}));
+        assert_eq!(repeated["status"], "precondition_failed");
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fs::read(fixture.root.join("root.txt")).unwrap(),
+            b"root content"
+        );
+        assert_snapshot(&fixture, &snapshot);
+    }
+
+    #[test]
     fn target_race_uses_one_exclusive_create_without_overwrite_or_retry() {
         let fixture = Fixture::new();
         let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();

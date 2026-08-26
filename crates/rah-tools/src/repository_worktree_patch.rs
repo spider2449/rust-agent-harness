@@ -12,6 +12,7 @@ use std::fs::File;
 use async_trait::async_trait;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
+use rah_sandbox::HostProcessOutput;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -342,6 +343,9 @@ impl RepositoryWorktreeMutationPolicy {
             .git_state(&target)
             .await
             .map_err(RefusalReason::Repository)?;
+        self.git_worktree_clean(&target)
+            .await
+            .map_err(RefusalReason::Repository)?;
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterGitValidation, &target.path, None);
@@ -386,6 +390,9 @@ impl RepositoryWorktreeMutationPolicy {
                 "repository state changed before replacement",
             )));
         }
+        self.git_worktree_clean(&pre.target)
+            .await
+            .map_err(RefusalReason::Repository)?;
         let current = read_bounded(&pre.target.path, self.limits.max_file_bytes)
             .map_err(|_| RefusalReason::Precondition("could not reread bounded target preimage"))?;
         if current != pre.bytes {
@@ -602,6 +609,16 @@ impl RepositoryWorktreeMutationPolicy {
     }
 
     async fn git_output(&self, arguments: Vec<&str>) -> Result<Vec<u8>, ToolError> {
+        let output = self.git_process(arguments).await?;
+        if output.exit_code != Some(0) {
+            return Err(git_error(
+                "bounded Git state observation did not complete successfully",
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    async fn git_process(&self, arguments: Vec<&str>) -> Result<HostProcessOutput, ToolError> {
         self.revalidate_git()?;
         let policy = HostExecutionPolicy::new(
             &self.git,
@@ -611,12 +628,33 @@ impl RepositoryWorktreeMutationPolicy {
         )?
         .with_environment(git_environment())?;
         let output = policy.execute_process(&ToolInput(json!({}))).await?;
-        if output.exit_code != Some(0) || output.timed_out || output.overflow.is_some() {
+        if output.timed_out || output.overflow.is_some() {
             return Err(git_error(
                 "bounded Git state observation did not complete successfully",
             ));
         }
-        Ok(output.stdout)
+        Ok(output)
+    }
+
+    /// Checks only the host-selected target using a fixed Git observation.
+    /// A nonzero result is deliberately not exposed outside this policy.
+    async fn git_worktree_clean(&self, target: &Target) -> Result<(), ToolError> {
+        let output = self
+            .git_process(vec![
+                "--literal-pathspecs",
+                "diff-files",
+                "--quiet",
+                "--",
+                &target.git_path,
+            ])
+            .await?;
+        match output.exit_code {
+            Some(0) => Ok(()),
+            Some(1) => Err(policy_error("target has unstaged worktree changes")),
+            _ => Err(git_error(
+                "bounded Git worktree observation did not complete successfully",
+            )),
+        }
     }
 
     fn revalidate_git(&self) -> Result<(), ToolError> {
@@ -1801,6 +1839,7 @@ mod tests {
             git(&root, &["init", "--quiet"]);
             git(&root, &["config", "user.name", "RAH Test"]);
             git(&root, &["config", "user.email", "rah@example.invalid"]);
+            git(&root, &["config", "core.autocrlf", "false"]);
             fs::write(root.join("target.txt"), b"alpha\nold\nomega\n")
                 .expect("target should be written");
             fs::write(root.join("other.txt"), b"other\n").expect("other should be written");
@@ -1838,6 +1877,46 @@ mod tests {
         assert_eq!(
             tool.definition().name.as_str(),
             REPOSITORY_WORKTREE_PATCH_TOOL_NAME
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_a_fresh_snapshot_of_an_externally_dirty_target_without_attempting_replacement()
+    {
+        let base = TestDirectory::new("dirty-fresh-snapshot");
+        let root = base.repository();
+        let dirty = b"alpha\nold\nexternal dirty\n";
+        fs::write(root.join("target.txt"), dirty).unwrap();
+        let before_index = git_output(&root, &["ls-files", "-s", "-z"]);
+        let before_head = git_output(&root, &["rev-parse", "--verify", "HEAD"]);
+        let before_refs = git_output(
+            &root,
+            &["for-each-ref", "--format=%(refname)%00%(objectname)%00"],
+        );
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+
+        let output = run(&tool, request("target.txt", dirty, "old", "new")).await;
+
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), dirty);
+        assert_eq!(git_output(&root, &["ls-files", "-s", "-z"]), before_index);
+        assert_eq!(
+            git_output(&root, &["rev-parse", "--verify", "HEAD"]),
+            before_head
+        );
+        assert_eq!(
+            git_output(
+                &root,
+                &["for-each-ref", "--format=%(refname)%00%(objectname)%00"]
+            ),
+            before_refs
+        );
+        assert_eq!(
+            tool.policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
         );
     }
 
