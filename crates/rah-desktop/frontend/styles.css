@@ -90,3 +90,25 @@ dd[data-status^="not "] {
   color: #a11b1b;
   font-weight: 700;
 }
+
+.connection-error {
+  color: #a11b1b;
+  font-weight: 600;
+}
+
+button {
+  margin-top: 1.5rem;
+  padding: 0.65rem 1rem;
+  border: 1px solid currentColor;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
