@@ -1,6 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(target_os = "windows")]
+use futures::StreamExt;
+#[cfg(target_os = "windows")]
+use rah_protocol::{
+    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId,
+};
+#[cfg(target_os = "windows")]
+use rah_runtime::AgentRuntime;
+#[cfg(target_os = "windows")]
 use rah_runtime_codex::{CodexAdapterError, CodexRuntime, SUPPORTED_CODEX_VERSION};
 #[cfg(target_os = "windows")]
 use serde::Serialize;
@@ -9,12 +17,15 @@ use std::{
     ffi::OsString,
     process::ExitCode,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 #[cfg(target_os = "windows")]
-use tauri::{Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+
+#[cfg(target_os = "windows")]
+const MAX_PROMPT_BYTES: usize = 32 * 1024;
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize)]
@@ -38,9 +49,16 @@ struct AppStatus {
 enum ConnectionState {
     NotConnected,
     Connecting,
-    Connected(CodexRuntime),
+    Connected(Arc<CodexRuntime>),
     Disconnecting,
     Error(FrontendError),
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatState {
+    Idle,
+    Running,
 }
 
 #[cfg(target_os = "windows")]
@@ -66,6 +84,7 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 #[cfg(target_os = "windows")]
 struct DesktopAppState {
     connection: Mutex<ConnectionState>,
+    chat: Mutex<ChatState>,
     close_started: AtomicBool,
 }
 
@@ -74,8 +93,19 @@ impl Default for DesktopAppState {
     fn default() -> Self {
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
+            chat: Mutex::new(ChatState::Idle),
             close_started: AtomicBool::new(false),
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl DesktopAppState {
+    fn finish_chat(&self) {
+        *self
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
     }
 }
 
@@ -126,6 +156,24 @@ enum FrontendError {
     CodexSchemaIncompatible,
     CodexStartFailed,
     CodexConnectionFailed,
+    ChatEmptyPrompt,
+    ChatPromptTooLarge,
+    CodexNotConnected,
+    ChatAlreadyRunning,
+    ChatStartFailed,
+    ChatRuntimeFailed,
+    ChatCancelled,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ChatEvent {
+    Started,
+    Delta { text: String },
+    Completed,
+    Failed { code: FrontendError },
+    Cancelled { code: FrontendError },
 }
 
 #[cfg(target_os = "windows")]
@@ -240,7 +288,7 @@ async fn connect_codex(
                 .connection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *connection = ConnectionState::Connected(runtime);
+            *connection = ConnectionState::Connected(Arc::new(runtime));
             Ok(ConnectionResult::connected())
         }
         Err(error) => {
@@ -261,6 +309,14 @@ async fn connect_codex(
 async fn disconnect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
+    if *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == ChatState::Running
+    {
+        return Err(FrontendError::ChatAlreadyRunning);
+    }
     let runtime = {
         let mut connection = state
             .connection
@@ -299,13 +355,153 @@ async fn disconnect_codex(
 }
 
 #[cfg(target_os = "windows")]
+fn validate_prompt(prompt: &str) -> Result<(), FrontendError> {
+    if prompt.trim().is_empty() {
+        return Err(FrontendError::ChatEmptyPrompt);
+    }
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(FrontendError::ChatPromptTooLarge);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn begin_chat(chat: &mut ChatState) -> Result<(), FrontendError> {
+    if *chat == ChatState::Running {
+        return Err(FrontendError::ChatAlreadyRunning);
+    }
+    *chat = ChatState::Running;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
+    if let Err(error) = app.emit("chat_event", event) {
+        tracing::warn!(error = %error, "failed to emit desktop chat event");
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
+    let request = AgentRequest {
+        request_id: RequestId::new(),
+        input: AgentInput {
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: prompt,
+            }],
+        },
+        options: AgentOptions::default(),
+    };
+
+    let handle = match runtime.start(request).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::warn!(error = %error, "desktop chat turn failed to start");
+            emit_chat_event(
+                &app,
+                ChatEvent::Failed {
+                    code: FrontendError::ChatStartFailed,
+                },
+            );
+            app.state::<DesktopAppState>().finish_chat();
+            return;
+        }
+    };
+
+    emit_chat_event(&app, ChatEvent::Started);
+    let mut terminal = false;
+    let mut events = handle.into_events();
+    while let Some(event) = events.next().await {
+        match event {
+            AgentEvent::ModelDelta { delta, .. } => {
+                emit_chat_event(&app, ChatEvent::Delta { text: delta })
+            }
+            AgentEvent::Completed { .. } => {
+                emit_chat_event(&app, ChatEvent::Completed);
+                terminal = true;
+                break;
+            }
+            AgentEvent::Failed { .. } => {
+                emit_chat_event(
+                    &app,
+                    ChatEvent::Failed {
+                        code: FrontendError::ChatRuntimeFailed,
+                    },
+                );
+                terminal = true;
+                break;
+            }
+            AgentEvent::Cancelled { .. } => {
+                emit_chat_event(
+                    &app,
+                    ChatEvent::Cancelled {
+                        code: FrontendError::ChatCancelled,
+                    },
+                );
+                terminal = true;
+                break;
+            }
+            AgentEvent::Started { .. }
+            | AgentEvent::ModelRequestStarted { .. }
+            | AgentEvent::ToolRequested { .. }
+            | AgentEvent::ToolStarted { .. }
+            | AgentEvent::ToolFinished { .. }
+            | AgentEvent::ApprovalRequired { .. } => {}
+        }
+    }
+    if !terminal {
+        emit_chat_event(
+            &app,
+            ChatEvent::Failed {
+                code: FrontendError::ChatRuntimeFailed,
+            },
+        );
+    }
+    app.state::<DesktopAppState>().finish_chat();
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn send_chat(
+    prompt: String,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    validate_prompt(&prompt)?;
+    {
+        let mut chat = state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        begin_chat(&mut chat)?;
+    }
+    let runtime = {
+        let connection = state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*connection {
+            ConnectionState::Connected(runtime) => Arc::clone(runtime),
+            _ => {
+                state.finish_chat();
+                return Err(FrontendError::CodexNotConnected);
+            }
+        }
+    };
+    tauri::async_runtime::spawn(run_chat(app, runtime, prompt));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn main() -> ExitCode {
     match tauri::Builder::default()
         .manage(DesktopAppState::default())
         .invoke_handler(tauri::generate_handler![
             app_status,
             connect_codex,
-            disconnect_codex
+            disconnect_codex,
+            send_chat
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -340,8 +536,8 @@ fn main() {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::{
-        ConnectRequest, ConnectionState, FrontendError, current_app_status, frontend_error,
-        request_connect,
+        ChatEvent, ChatState, ConnectRequest, ConnectionState, FrontendError, MAX_PROMPT_BYTES,
+        begin_chat, current_app_status, frontend_error, request_connect, validate_prompt,
     };
     use rah_runtime_codex::CodexAdapterError;
     use std::path::PathBuf;
@@ -407,5 +603,43 @@ mod tests {
         assert!(matches!(connection, ConnectionState::Connecting));
         assert_eq!(request_connect(&mut connection), ConnectRequest::InProgress);
         assert!(matches!(connection, ConnectionState::Connecting));
+    }
+
+    #[test]
+    fn chat_prompt_validation_is_bounded_and_preserves_input() {
+        assert_eq!(
+            validate_prompt(" \n\t "),
+            Err(FrontendError::ChatEmptyPrompt)
+        );
+        assert_eq!(
+            validate_prompt(&"a".repeat(MAX_PROMPT_BYTES + 1)),
+            Err(FrontendError::ChatPromptTooLarge)
+        );
+        assert_eq!(validate_prompt("  keep these spaces  "), Ok(()));
+    }
+
+    #[test]
+    fn serialized_chat_events_expose_only_the_closed_frontend_contract() {
+        let event = ChatEvent::Delta {
+            text: "hello".to_owned(),
+        };
+        let serialized = serde_json::to_string(&event).expect("chat event serializes");
+        assert_eq!(serialized, r#"{"kind":"delta","text":"hello"}"#);
+        assert!(!serialized.contains("session"));
+        assert!(!serialized.contains("thread"));
+        assert!(!serialized.contains("path"));
+    }
+
+    #[test]
+    fn chat_state_rejects_duplicate_active_turns_and_returns_to_idle() {
+        let mut state = ChatState::Idle;
+        assert_eq!(begin_chat(&mut state), Ok(()));
+        assert_eq!(state, ChatState::Running);
+        assert_eq!(
+            begin_chat(&mut state),
+            Err(FrontendError::ChatAlreadyRunning)
+        );
+        state = ChatState::Idle;
+        assert_eq!(state, ChatState::Idle);
     }
 }

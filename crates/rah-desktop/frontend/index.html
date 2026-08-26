@@ -24,6 +24,17 @@
           <p id="connection-error" class="connection-error" hidden></p>
           <button id="codex-connection" type="button">Connect Codex</button>
         </section>
+        <section class="chat" aria-labelledby="chat-title">
+          <h2 id="chat-title">Chat</h2>
+          <p id="chat-hint">Connect Codex to chat</p>
+          <p id="chat-error" class="connection-error" hidden></p>
+          <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+          <form id="chat-form">
+            <label class="visually-hidden" for="chat-prompt">Type a message</label>
+            <textarea id="chat-prompt" rows="4" placeholder="Type a message..." disabled></textarea>
+            <button id="chat-send" type="submit" disabled>Send</button>
+          </form>
+        </section>
       </section>
     </main>
     <script src="status.js"></script>

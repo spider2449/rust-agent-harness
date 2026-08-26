@@ -12,6 +12,9 @@ const runtimeRows = [
   ["Repository", "repositoryStatus"],
 ];
 
+let chatRunning = false;
+let activeAssistant = null;
+
 function renderRows(element, rows, status) {
   element.replaceChildren(
     ...rows.filter(([, field]) => status[field]).map(([label, field]) => {
@@ -35,6 +38,13 @@ function errorMessage(error) {
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",
     codex_connection_failed: "Codex connection failed",
+    chat_empty_prompt: "Enter a message before sending",
+    chat_prompt_too_large: "Message is too large",
+    codex_not_connected: "Connect Codex to chat",
+    chat_already_running: "A chat turn is already running",
+    chat_start_failed: "Chat could not start",
+    chat_runtime_failed: "Chat failed",
+    chat_cancelled: "Chat was cancelled",
   };
   return messages[error] ?? "Codex connection failed";
 }
@@ -48,8 +58,14 @@ async function loadStatus() {
     renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
     const button = document.querySelector("#codex-connection");
     const connectionError = document.querySelector("#connection-error");
-    button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting";
+    button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
     button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
+    const connected = status.codexStatus === "connected";
+    const prompt = document.querySelector("#chat-prompt");
+    const send = document.querySelector("#chat-send");
+    document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
+    prompt.disabled = !connected || chatRunning;
+    send.disabled = !connected || chatRunning;
     if (status.codexError) {
       connectionError.textContent = errorMessage(status.codexError);
       connectionError.hidden = false;
@@ -60,6 +76,61 @@ async function loadStatus() {
     error.hidden = false;
   }
 }
+
+function appendMessage(role, text) {
+  const messages = document.querySelector("#chat-messages");
+  const message = document.createElement("article");
+  const label = document.createElement("strong");
+  const content = document.createElement("p");
+  message.className = "chat-message";
+  label.textContent = role;
+  content.textContent = text;
+  message.append(label, content);
+  messages.append(message);
+  messages.scrollTop = messages.scrollHeight;
+  return content;
+}
+
+function showChatError(code) {
+  const error = document.querySelector("#chat-error");
+  error.textContent = errorMessage(code);
+  error.hidden = false;
+}
+
+window.__TAURI_INTERNALS__.listen("chat_event", (event) => {
+  const payload = event.payload;
+  if (payload.kind === "started") {
+    activeAssistant = appendMessage("RAH", "");
+  } else if (payload.kind === "delta" && activeAssistant) {
+    activeAssistant.textContent += payload.text;
+  } else if (payload.kind === "failed") {
+    showChatError(payload.code);
+  } else if (payload.kind === "cancelled") {
+    showChatError(payload.code);
+  }
+  if (["completed", "failed", "cancelled"].includes(payload.kind)) {
+    chatRunning = false;
+    activeAssistant = null;
+    void loadStatus();
+  }
+});
+
+document.querySelector("#chat-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (chatRunning) return;
+  const prompt = document.querySelector("#chat-prompt");
+  const chatError = document.querySelector("#chat-error");
+  chatError.hidden = true;
+  try {
+    await window.__TAURI_INTERNALS__.invoke("send_chat", { prompt: prompt.value });
+    appendMessage("You", prompt.value);
+    prompt.value = "";
+    chatRunning = true;
+    await loadStatus();
+  } catch (error) {
+    showChatError(error);
+  }
+});
 
 async function toggleCodexConnection() {
   const button = document.querySelector("#codex-connection");

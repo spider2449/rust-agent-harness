@@ -8,6 +8,9 @@ build = "build.rs"
 tauri-build = { version = "2" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+futures.workspace = true
+rah-protocol = { path = "../rah-protocol" }
+rah-runtime = { path = "../rah-runtime" }
 rah-runtime-codex = { path = "../rah-runtime-codex" }
 serde.workspace = true
 serde_json.workspace = true

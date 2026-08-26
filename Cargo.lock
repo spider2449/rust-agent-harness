@@ -2605,6 +2605,9 @@ version = "0.9.0"
 name = "rah-desktop"
 version = "0.9.0"
 dependencies = [
+ "futures",
+ "rah-protocol",
+ "rah-runtime",
  "rah-runtime-codex",
  "serde",
  "serde_json",
