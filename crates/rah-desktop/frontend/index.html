@@ -11,17 +11,19 @@
       <section class="status-card">
         <p class="eyebrow">RAH</p>
         <h1 id="application-title">Rust Agent Harness</h1>
-        <dl>
-          <div>
-            <dt>Version</dt>
-            <dd>0.9.0</dd>
-          </div>
-          <div>
-            <dt>Desktop shell</dt>
-            <dd>ready</dd>
-          </div>
-        </dl>
+        <p id="backend-error" class="backend-error" hidden>
+          Desktop backend unavailable
+        </p>
+        <section aria-labelledby="application-status-title">
+          <h2 id="application-status-title">Application</h2>
+          <dl id="application-status"></dl>
+        </section>
+        <section aria-labelledby="runtime-status-title">
+          <h2 id="runtime-status-title">Runtime</h2>
+          <dl id="runtime-status"></dl>
+        </section>
       </section>
     </main>
+    <script src="status.js"></script>
   </body>
 </html>

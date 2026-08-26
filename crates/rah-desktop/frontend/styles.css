@@ -45,7 +45,19 @@ h1 {
 dl {
   display: grid;
   gap: 1rem;
+  margin: 1rem 0 0;
+}
+
+section + section {
+  margin-top: 2.5rem;
+}
+
+h2 {
   margin: 3rem 0 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 dl div {
@@ -63,4 +75,18 @@ dt {
 dd {
   margin: 0;
   font-weight: 600;
+}
+
+dd[data-status="ready"] {
+  color: #16713d;
+}
+
+dd[data-status^="not "] {
+  color: #8a5b00;
+}
+
+.backend-error {
+  margin: 2rem 0 0;
+  color: #a11b1b;
+  font-weight: 700;
 }
