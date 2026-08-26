@@ -15,6 +15,13 @@ const runtimeRows = [
 let chatRunning = false;
 let activeAssistant = null;
 
+const tauriApiRetryDelayMs = 100;
+const tauriApiRetryAttempts = 20;
+
+function setFrontendBootStatus(message) {
+  document.querySelector("#frontend-boot-status").textContent = message;
+}
+
 function renderRows(element, rows, status) {
   element.replaceChildren(
     ...rows.filter(([, field]) => status[field]).map(([label, field]) => {
@@ -46,34 +53,55 @@ function errorMessage(error) {
     chat_runtime_failed: "Chat failed",
     chat_cancelled: "Chat was cancelled",
   };
-  return messages[error] ?? "Codex connection failed";
+  return messages[error] ?? "Desktop frontend unavailable";
 }
 
-async function loadStatus() {
+function showBackendError() {
   const error = document.querySelector("#backend-error");
+  error.textContent = "Desktop backend unavailable";
+  error.hidden = false;
+  document.querySelector("#codex-connection").disabled = true;
+}
 
-  try {
-    const status = await window.__TAURI_INTERNALS__.invoke("app_status");
-    renderRows(document.querySelector("#application-status"), applicationRows, status);
-    renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
-    const button = document.querySelector("#codex-connection");
-    const connectionError = document.querySelector("#connection-error");
-    button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
-    button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
-    const connected = status.codexStatus === "connected";
-    const prompt = document.querySelector("#chat-prompt");
-    const send = document.querySelector("#chat-send");
-    document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
-    prompt.disabled = !connected || chatRunning;
-    send.disabled = !connected || chatRunning;
-    if (status.codexError) {
-      connectionError.textContent = errorMessage(status.codexError);
-      connectionError.hidden = false;
-    } else {
-      connectionError.hidden = true;
-    }
-  } catch (_error) {
-    error.hidden = false;
+function waitForTauriApi() {
+  return new Promise((resolve) => {
+    let attempts = 0;
+    const check = () => {
+      const tauri = window.__TAURI__;
+      if (tauri?.core?.invoke && tauri?.event?.listen) {
+        resolve(tauri);
+        return;
+      }
+      attempts += 1;
+      if (attempts >= tauriApiRetryAttempts) {
+        resolve(null);
+        return;
+      }
+      window.setTimeout(check, tauriApiRetryDelayMs);
+    };
+    check();
+  });
+}
+
+async function loadStatus(invoke) {
+  const status = await invoke("app_status");
+  renderRows(document.querySelector("#application-status"), applicationRows, status);
+  renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
+  const button = document.querySelector("#codex-connection");
+  const connectionError = document.querySelector("#connection-error");
+  button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
+  button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
+  const connected = status.codexStatus === "connected";
+  const prompt = document.querySelector("#chat-prompt");
+  const send = document.querySelector("#chat-send");
+  document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
+  prompt.disabled = !connected || chatRunning;
+  send.disabled = !connected || chatRunning;
+  if (status.codexError) {
+    connectionError.textContent = errorMessage(status.codexError);
+    connectionError.hidden = false;
+  } else {
+    connectionError.hidden = true;
   }
 }
 
@@ -97,61 +125,89 @@ function showChatError(code) {
   error.hidden = false;
 }
 
-window.__TAURI_INTERNALS__.listen("chat_event", (event) => {
+function handleChatEvent(invoke, event) {
   const payload = event.payload;
   if (payload.kind === "started") {
     activeAssistant = appendMessage("RAH", "");
   } else if (payload.kind === "delta" && activeAssistant) {
     activeAssistant.textContent += payload.text;
-  } else if (payload.kind === "failed") {
-    showChatError(payload.code);
-  } else if (payload.kind === "cancelled") {
+  } else if (payload.kind === "failed" || payload.kind === "cancelled") {
     showChatError(payload.code);
   }
   if (["completed", "failed", "cancelled"].includes(payload.kind)) {
     chatRunning = false;
     activeAssistant = null;
-    void loadStatus();
+    void loadStatus(invoke).catch(() => showBackendError());
   }
-});
+}
 
-document.querySelector("#chat-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (chatRunning) return;
-  const prompt = document.querySelector("#chat-prompt");
-  const chatError = document.querySelector("#chat-error");
-  chatError.hidden = true;
-  try {
-    await window.__TAURI_INTERNALS__.invoke("send_chat", { prompt: prompt.value });
-    appendMessage("You", prompt.value);
-    prompt.value = "";
-    chatRunning = true;
-    await loadStatus();
-  } catch (error) {
-    showChatError(error);
-  }
-});
-
-async function toggleCodexConnection() {
+async function toggleCodexConnection(invoke) {
   const button = document.querySelector("#codex-connection");
   const error = document.querySelector("#connection-error");
   button.disabled = true;
   error.hidden = true;
   try {
-    const status = await window.__TAURI_INTERNALS__.invoke("app_status");
-    await window.__TAURI_INTERNALS__.invoke(
-      status.codexStatus === "connected" ? "disconnect_codex" : "connect_codex",
-    );
+    const status = await invoke("app_status");
+    await invoke(status.codexStatus === "connected" ? "disconnect_codex" : "connect_codex");
   } catch (connectionError) {
     error.textContent = errorMessage(connectionError);
     error.hidden = false;
   } finally {
-    await loadStatus();
+    try {
+      await loadStatus(invoke);
+    } catch (statusError) {
+      console.error("failed to refresh desktop status", statusError);
+      showBackendError();
+    }
   }
 }
 
-document.querySelector("#codex-connection").addEventListener("click", () => {
-  void toggleCodexConnection();
-});
+async function initializeDesktop() {
+  const tauri = await waitForTauriApi();
+  if (!tauri) {
+    throw new Error("supported Tauri global API is unavailable");
+  }
+  const { invoke } = tauri.core;
+  const { listen } = tauri.event;
 
-void loadStatus();
+  await listen("chat_event", (event) => handleChatEvent(invoke, event));
+  document.querySelector("#codex-connection").addEventListener("click", () => {
+    void toggleCodexConnection(invoke);
+  });
+  document.querySelector("#chat-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (chatRunning) return;
+    const prompt = document.querySelector("#chat-prompt");
+    const chatError = document.querySelector("#chat-error");
+    chatError.hidden = true;
+    try {
+      await invoke("send_chat", { prompt: prompt.value });
+      appendMessage("You", prompt.value);
+      prompt.value = "";
+      chatRunning = true;
+      await loadStatus(invoke);
+    } catch (error) {
+      showChatError(error);
+    }
+  });
+  await loadStatus(invoke);
+  setFrontendBootStatus("Desktop UI ready");
+}
+
+function startDesktop() {
+  void initializeDesktop().catch((error) => {
+    console.error("failed to initialize desktop frontend", error);
+    setFrontendBootStatus(
+      error.message === "supported Tauri global API is unavailable"
+        ? "Desktop frontend unavailable"
+        : "Desktop backend unavailable",
+    );
+    showBackendError();
+  });
+}
+
+if (document.readyState === "complete") {
+  startDesktop();
+} else {
+  window.addEventListener("load", startDesktop, { once: true });
+}

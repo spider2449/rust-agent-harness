@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-codex"
+description = "Enables the connect_codex command without any pre-configured scope."
+commands.allow = ["connect_codex"]
+
+[[permission]]
+identifier = "deny-connect-codex"
+description = "Denies the connect_codex command without any pre-configured scope."
+commands.deny = ["connect_codex"]
