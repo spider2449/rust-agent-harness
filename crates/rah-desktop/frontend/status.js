@@ -54,8 +54,53 @@ function errorMessage(error) {
     chat_start_failed: "Chat could not start",
     chat_runtime_failed: "Chat failed",
     chat_cancelled: "Chat was cancelled",
+    git_unavailable: "Git is unavailable",
+    repository_not_selected: "Choose a repository first",
+    repository_invalid: "Selected folder is not a valid repository root",
+    repository_observation_failed: "Repository observation failed",
+    repository_dialog_failed: "Repository picker failed",
   };
   return messages[error] ?? "Desktop frontend unavailable";
+}
+
+function renderRepositorySnapshot(snapshot) {
+  document.querySelector("#repository-path").textContent = snapshot.path;
+  const status = document.querySelector("#repository-status-entries");
+  const renderDiff = (element, files) => {
+    element.replaceChildren(...(files.length ? files.map((file) => {
+      const article = document.createElement("article");
+      const title = document.createElement("strong");
+      const patch = document.createElement("pre");
+      title.textContent = `${file.changeKind} ${file.newPath ?? file.oldPath ?? "[unknown path]"} +${file.addedLines ?? 0} -${file.deletedLines ?? 0}`;
+      patch.textContent = file.patch ?? (file.binary ? "Binary file changed" : "No patch");
+      article.append(title, patch);
+      return article;
+    }) : [emptyEntry("No changes")]));
+  };
+  status.replaceChildren(...(snapshot.statusEntries.length ? snapshot.statusEntries.map((entry) => {
+    const item = document.createElement("article");
+    item.textContent = `${entry.indexState}/${entry.worktreeState} ${entry.path}`;
+    return item;
+  }) : [emptyEntry("Working tree clean")]));
+  renderDiff(document.querySelector("#worktree-diff-entries"), snapshot.worktreeDiff);
+  renderDiff(document.querySelector("#staged-diff-entries"), snapshot.stagedDiff);
+}
+
+function emptyEntry(text) {
+  const item = document.createElement("p");
+  item.textContent = text;
+  return item;
+}
+
+async function refreshRepository(invoke) {
+  const error = document.querySelector("#repository-error");
+  error.hidden = true;
+  try {
+    renderRepositorySnapshot(await invoke("repository_snapshot"));
+  } catch (repositoryError) {
+    error.textContent = errorMessage(repositoryError);
+    error.hidden = false;
+  }
 }
 
 function appendActivity(payload) {
@@ -199,6 +244,21 @@ async function initializeDesktop() {
   await listen("activity_event", (event) => appendActivity(event.payload));
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
+  });
+  document.querySelector("#choose-repository").addEventListener("click", async () => {
+    const error = document.querySelector("#repository-error");
+    error.hidden = true;
+    try {
+      await invoke("choose_repository");
+      await loadStatus(invoke);
+      await refreshRepository(invoke);
+    } catch (repositoryError) {
+      error.textContent = errorMessage(repositoryError);
+      error.hidden = false;
+    }
+  });
+  document.querySelector("#refresh-repository").addEventListener("click", () => {
+    void refreshRepository(invoke);
   });
   document.querySelector("#chat-form").addEventListener("submit", async (event) => {
     event.preventDefault();

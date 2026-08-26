@@ -25,6 +25,21 @@
           <p id="connection-error" class="connection-error" hidden></p>
           <button id="codex-connection" type="button">Connect Codex</button>
         </section>
+        <section class="repository" aria-labelledby="repository-title">
+          <h2 id="repository-title">Repository</h2>
+          <p id="repository-error" class="connection-error" hidden></p>
+          <div class="repository-actions">
+            <button id="choose-repository" type="button">Choose Repository</button>
+            <button id="refresh-repository" type="button">Refresh</button>
+          </div>
+          <p id="repository-path">No repository selected</p>
+          <h3>Status</h3>
+          <div id="repository-status-entries" class="repository-entries"></div>
+          <h3>Worktree Diff</h3>
+          <div id="worktree-diff-entries" class="repository-diff"></div>
+          <h3>Staged Diff</h3>
+          <div id="staged-diff-entries" class="repository-diff"></div>
+        </section>
         <section class="chat" aria-labelledby="chat-title">
           <h2 id="chat-title">Chat</h2>
           <p id="chat-hint">Connect Codex to chat</p>

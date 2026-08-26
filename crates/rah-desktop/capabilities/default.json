@@ -7,8 +7,10 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-app-status",
+    "allow-choose-repository",
     "allow-connect-codex",
     "allow-disconnect-codex",
+    "allow-repository-snapshot",
     "allow-send-chat"
   ]
 }

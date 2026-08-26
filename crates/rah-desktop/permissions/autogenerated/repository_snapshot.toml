@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repository-snapshot"
+description = "Enables the repository_snapshot command without any pre-configured scope."
+commands.allow = ["repository_snapshot"]
+
+[[permission]]
+identifier = "deny-repository-snapshot"
+description = "Denies the repository_snapshot command without any pre-configured scope."
+commands.deny = ["repository_snapshot"]

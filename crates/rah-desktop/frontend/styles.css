@@ -35,6 +35,42 @@ main {
   overflow-y: auto;
 }
 
+.repository-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.repository-actions button {
+  margin-top: 0.5rem;
+}
+
+.repository-entries,
+.repository-diff {
+  display: grid;
+  gap: 0.5rem;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+
+.repository-entries article,
+.repository-diff article {
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, CanvasText 7%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.repository-diff pre {
+  margin: 0.5rem 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+h3 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 0.875rem;
+}
+
 .activity-entries {
   display: grid;
   gap: 0.5rem;

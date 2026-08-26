@@ -3,8 +3,10 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "app_status",
+            "choose_repository",
             "connect_codex",
             "disconnect_codex",
+            "repository_snapshot",
             "send_chat",
         ]),
     ))
