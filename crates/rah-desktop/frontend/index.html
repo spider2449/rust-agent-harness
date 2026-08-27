@@ -62,6 +62,15 @@
           <p id="chat-error" class="connection-error" hidden></p>
           <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
           <button id="new-conversation" type="button" disabled>New Conversation</button>
+          <button id="clear-conversation-history" class="destructive-action" type="button" disabled>Clear Conversation History</button>
+          <dialog id="clear-history-confirmation">
+            <p>Clear all conversation history stored by RAH Desktop?</p>
+            <p>This removes locally stored conversation history and cannot be undone.</p>
+            <form method="dialog">
+              <button value="cancel">Cancel</button>
+              <button id="confirm-clear-history" class="destructive-action" value="confirm">Clear History</button>
+            </form>
+          </dialog>
           <form id="chat-form">
             <label class="visually-hidden" for="chat-prompt">Type a message</label>
             <textarea id="chat-prompt" rows="4" placeholder="Type a message..." disabled></textarea>

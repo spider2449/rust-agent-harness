@@ -384,6 +384,8 @@ enum FrontendError {
     ChatRuntimeFailed,
     ChatCancelled,
     ConversationContextLimit,
+    ConversationHistoryBusy,
+    ConversationHistoryClearFailed,
     GitUnavailable,
     RepositoryNotSelected,
     RepositoryInvalid,
@@ -1459,6 +1461,38 @@ fn new_conversation(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+fn clear_conversation_history(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+    clear_conversation_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    state
+        .persistence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear()
+        .map_err(|_| FrontendError::ConversationHistoryClearFailed)?;
+    state
+        .conversation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .start_new();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn clear_conversation_allowed(chat: ChatState) -> Result<(), FrontendError> {
+    if chat == ChatState::Running {
+        Err(FrontendError::ConversationHistoryBusy)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 fn conversation_transcript(
     state: State<'_, DesktopAppState>,
 ) -> ConversationTranscriptPresentation {
@@ -1488,6 +1522,7 @@ fn main() -> ExitCode {
             repository_snapshot,
             send_chat,
             new_conversation,
+            clear_conversation_history,
             conversation_transcript
         ])
         .on_window_event(|window, event| {
@@ -1528,9 +1563,10 @@ mod tests {
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        SendChatResult, activity_event, apply_model_selection, begin_chat, current_app_status,
-        desktop_tool_registry, frontend_error, model_configuration_status,
-        repository_selection_allowed, repository_tool_authority, request_connect, validate_prompt,
+        SendChatResult, activity_event, apply_model_selection, begin_chat,
+        clear_conversation_allowed, current_app_status, desktop_tool_registry, frontend_error,
+        model_configuration_status, repository_selection_allowed, repository_tool_authority,
+        request_connect, validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
@@ -2212,6 +2248,37 @@ mod tests {
             ),
             Err(())
         );
+    }
+
+    #[test]
+    fn clear_conversation_uses_fresh_replay_context_and_closed_errors() {
+        let mut conversation = DesktopConversationState::default();
+        conversation.reconcile(ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 5,
+        });
+        conversation
+            .commit(
+                0,
+                "old".to_owned(),
+                message(MessageRole::Assistant, "answer"),
+            )
+            .unwrap();
+        conversation.start_new();
+
+        assert_eq!(
+            conversation.request_messages("new"),
+            Ok(vec![message(MessageRole::User, "new")])
+        );
+        assert_eq!(clear_conversation_allowed(ChatState::Idle), Ok(()));
+        assert_eq!(
+            clear_conversation_allowed(ChatState::Running),
+            Err(FrontendError::ConversationHistoryBusy)
+        );
+        let serialized = serde_json::to_string(&FrontendError::ConversationHistoryClearFailed)
+            .expect("clear error serializes");
+        assert_eq!(serialized, r#""conversation_history_clear_failed""#);
+        assert!(!serialized.contains("path"));
     }
 
     #[test]

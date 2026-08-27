@@ -15,6 +15,7 @@
     "allow-repository-snapshot",
     "allow-send-chat",
     "allow-new-conversation",
+    "allow-clear-conversation-history",
     "allow-conversation-transcript"
   ]
 }

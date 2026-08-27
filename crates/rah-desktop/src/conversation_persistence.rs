@@ -6,6 +6,7 @@ use std::{
 };
 
 pub(crate) const SNAPSHOT_FILE: &str = "conversation-transcript-v1.json";
+const CORRUPT_FILE: &str = "conversation-transcript-v1.json.corrupt";
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_RECORDS: usize = 79;
@@ -64,7 +65,7 @@ struct Snapshot {
     records: Vec<Record>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Record {
     CompletedPair { user: String, assistant: String },
@@ -147,6 +148,21 @@ impl Persistence {
     pub(crate) fn append_separator(&mut self, reason: SeparatorReason) -> Result<(), Warning> {
         self.records.push(Record::ContextSeparator { reason });
         self.commit()
+    }
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        let primary = self.directory.join(SNAPSHOT_FILE);
+        match fs::remove_file(&primary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        // The primary snapshot is the clear commit point. Remaining private
+        // diagnostics and stale temps cannot restore history and are best effort.
+        remove_private_secondary(&self.directory);
+        self.records.clear();
+        self.warning = None;
+        Ok(())
     }
     fn commit(&mut self) -> Result<(), Warning> {
         if !trim(&mut self.records) {
@@ -286,8 +302,12 @@ fn cleanup_temps(dir: &Path) {
         }
     }
 }
+fn remove_private_secondary(dir: &Path) {
+    let _ = fs::remove_file(dir.join(CORRUPT_FILE));
+    cleanup_temps(dir);
+}
 fn quarantine(path: &Path) {
-    let target = path.with_file_name(format!("{SNAPSHOT_FILE}.corrupt"));
+    let target = path.with_file_name(CORRUPT_FILE);
     let _ = fs::rename(path, target);
 }
 
@@ -495,5 +515,79 @@ mod tests {
             "conversation-transcript-v1.json.tmp-12-3-extra"
         ));
         assert!(!is_private_temp_name("unrelated.tmp-12-3"));
+    }
+
+    #[test]
+    fn clear_removes_only_private_artifacts_and_resets_presentation() {
+        let dir = std::env::temp_dir().join(format!("rah-clear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SNAPSHOT_FILE), b"snapshot").unwrap();
+        fs::write(dir.join(CORRUPT_FILE), b"corrupt").unwrap();
+        fs::write(dir.join(temp_name(1)), b"temp").unwrap();
+        fs::write(
+            dir.join("conversation-transcript-v1.json.tmp-1-2-extra"),
+            b"keep",
+        )
+        .unwrap();
+        fs::write(dir.join("unrelated.json"), b"keep").unwrap();
+        let mut persistence = Persistence {
+            directory: dir.clone(),
+            records: vec![Record::CompletedPair {
+                user: "u".into(),
+                assistant: "a".into(),
+            }],
+            warning: Some(Warning::SaveFailed),
+            sequence: 0,
+        };
+
+        persistence.clear().unwrap();
+
+        assert!(persistence.records.is_empty());
+        assert_eq!(persistence.warning, None);
+        assert!(!dir.join(SNAPSHOT_FILE).exists());
+        assert!(!dir.join(CORRUPT_FILE).exists());
+        assert!(!dir.join(temp_name(1)).exists());
+        assert!(
+            dir.join("conversation-transcript-v1.json.tmp-1-2-extra")
+                .exists()
+        );
+        assert!(dir.join("unrelated.json").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_is_idempotent_when_snapshot_is_absent() {
+        let dir = std::env::temp_dir().join(format!("rah-clear-absent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut persistence = Persistence::start(dir.clone());
+
+        persistence.clear().unwrap();
+        assert!(persistence.presentation().records.is_empty());
+        assert_eq!(persistence.presentation().warning, None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn primary_clear_failure_preserves_memory() {
+        let dir = std::env::temp_dir().join(format!("rah-clear-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(SNAPSHOT_FILE)).unwrap();
+        let records = vec![Record::CompletedPair {
+            user: "u".into(),
+            assistant: "a".into(),
+        }];
+        let mut persistence = Persistence {
+            directory: dir.clone(),
+            records: records.clone(),
+            warning: Some(Warning::RestoreFailed),
+            sequence: 0,
+        };
+
+        assert!(persistence.clear().is_err());
+        assert_eq!(persistence.records, records);
+        assert_eq!(persistence.warning, Some(Warning::RestoreFailed));
+        let _ = fs::remove_dir_all(dir);
     }
 }

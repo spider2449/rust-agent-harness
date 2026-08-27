@@ -11,6 +11,7 @@ fn main() {
             "repository_snapshot",
             "send_chat",
             "new_conversation",
+            "clear_conversation_history",
             "conversation_transcript",
         ]),
     ))

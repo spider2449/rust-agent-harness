@@ -349,7 +349,10 @@ application-level at-rest encryption; normal Windows user-account filesystem
 protections are the first-version boundary. The Desktop-private schema does not
 intentionally persist credentials, provider-native IDs, ToolRegistry authority,
 repository paths, or tool output. Recovered transcript text is display-only and
-does not restore model, repository, tool, or replay authority.
+does not restore model, repository, tool, or replay authority. Users can
+explicitly clear this locally persisted Desktop conversation transcript; the
+action targets only RAH Desktop conversation persistence artifacts and does not
+delete repository or project files.
 
 - Interactive Codex approvals are unsupported.
 - The Codex adapter and external protocols are exactly pinned compatibility

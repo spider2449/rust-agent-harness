@@ -57,6 +57,8 @@ function errorMessage(error) {
     chat_runtime_failed: "Chat failed",
     chat_cancelled: "Chat was cancelled",
     conversation_context_limit: "Conversation context limit reached; start a new conversation context",
+    conversation_history_busy: "Conversation history cannot be cleared while chat is running.",
+    conversation_history_clear_failed: "Conversation history could not be cleared.",
     git_unavailable: "Git is unavailable",
     repository_not_selected: "Choose a repository first",
     repository_invalid: "Selected folder is not a valid repository root",
@@ -200,6 +202,7 @@ async function loadStatus(invoke) {
   prompt.disabled = !connected || chatRunning;
   send.disabled = !connected || chatRunning;
   document.querySelector("#new-conversation").disabled = chatRunning;
+  document.querySelector("#clear-conversation-history").disabled = chatRunning;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
@@ -350,6 +353,21 @@ async function initializeDesktop() {
     try {
       await invoke("new_conversation");
       appendContextSeparator();
+    } catch (error) {
+      showChatError(error);
+    }
+  });
+  document.querySelector("#clear-conversation-history").addEventListener("click", async () => {
+    document.querySelector("#clear-history-confirmation").showModal();
+  });
+  document.querySelector("#clear-history-confirmation").addEventListener("close", async (event) => {
+    if (event.target.returnValue !== "confirm") return;
+    const chatError = document.querySelector("#chat-error");
+    chatError.hidden = true;
+    try {
+      await invoke("clear_conversation_history");
+      document.querySelector("#chat-messages").replaceChildren();
+      appendMessage("RAH", "Conversation history cleared");
     } catch (error) {
       showChatError(error);
     }
