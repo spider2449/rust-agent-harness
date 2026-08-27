@@ -343,16 +343,20 @@ registry, tool, or sandbox contracts.
 
 ## Known limitations
 
-RAH Desktop v1 stores one bounded archive of completed conversation text in the
-current user's application-local data directory. This snapshot has no
+RAH Desktop stores one bounded archive of completed conversation text in the
+current user's application-local data directory. Legacy v1 snapshots may be
+migrated after a genuine post-start durable mutation to a private v2 snapshot.
+V2 adds only bounded conversation epoch structure and optional lineage fields;
+it does not persist repository, model, provider, tool, or authority metadata.
+This snapshot has no
 application-level at-rest encryption; normal Windows user-account filesystem
 protections are the first-version boundary. The Desktop-private schema does not
 intentionally persist credentials, provider-native IDs, ToolRegistry authority,
 repository paths, or tool output. Recovered transcript text is display-only and
 does not restore model, repository, tool, or replay authority. Users can
 explicitly clear this locally persisted Desktop conversation transcript; the
-action targets only RAH Desktop conversation persistence artifacts and does not
-delete repository or project files.
+action removes both supported v1 and v2 private persistence families and does
+not delete repository or project files.
 
 - Interactive Codex approvals are unsupported.
 - The Codex adapter and external protocols are exactly pinned compatibility
