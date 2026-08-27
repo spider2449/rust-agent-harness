@@ -1262,6 +1262,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn presentation_remains_closed_and_absent_clear_is_idempotent() {
+        let d = directory("closed-presentation");
+        let mut p = Persistence::v1(
+            d.clone(),
+            vec![Record::CompletedPair {
+                user: "u".into(),
+                assistant: "a".into(),
+            }],
+        );
+        p.warning = Some(Warning::SaveFailed);
+        let json = serde_json::to_string(&p.presentation()).unwrap();
+        for forbidden in [
+            "path",
+            "generation",
+            "session",
+            "thread",
+            "request",
+            "endpoint",
+            "credential",
+            "token",
+            "executable",
+            "permission",
+            "registry",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
+        let mut fresh = Persistence::start(d.clone());
+        fresh.clear().unwrap();
+        assert!(fresh.presentation().records.is_empty());
+        assert!(fresh.presentation().warning.is_none());
+        let _ = fs::remove_dir_all(d);
+    }
+
     fn load_v1_from(bytes: &[u8]) -> Result<(), ()> {
         let v: V1 = serde_json::from_slice(bytes).map_err(|_| ())?;
         if v.version != 1 {
