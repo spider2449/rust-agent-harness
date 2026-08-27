@@ -10,10 +10,15 @@ use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{
+    CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider, CodexModelSelection, CodexRuntime,
+    SUPPORTED_CODEX_VERSION,
+};
 
 const DEFAULT_PROMPT: &str = "Reply with exactly: RAH_CODEX_SMOKE_OK";
 const DEFAULT_EXPECTED_TEXT: &str = "RAH_CODEX_SMOKE_OK";
+const LLAMACPP_PROMPT: &str = "Reply exactly:\nRAH_LLAMACPP_CHAT_OK";
+const LLAMACPP_EXPECTED_TEXT: &str = "RAH_LLAMACPP_CHAT_OK";
 
 fn main() -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -40,9 +45,19 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), String> {
-    let prompt = env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_PROMPT.to_owned());
+    let llama_cpp = env::var("RAH_LLAMACPP_LIVE").as_deref() == Ok("1");
+    let expected_text = if llama_cpp {
+        LLAMACPP_EXPECTED_TEXT
+    } else {
+        DEFAULT_EXPECTED_TEXT
+    };
+    let prompt = env::args().nth(1).unwrap_or_else(|| {
+        if llama_cpp {
+            LLAMACPP_PROMPT.to_owned()
+        } else {
+            DEFAULT_PROMPT.to_owned()
+        }
+    });
     let executable = env::var_os("RAH_CODEX_EXECUTABLE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
@@ -53,11 +68,17 @@ async fn run() -> Result<(), String> {
         "PROMPT {}",
         serde_json::to_string(&prompt).map_err(|error| error.to_string())?
     );
+    if llama_cpp {
+        println!("MODEL_CONFIG model=rah-local-model provider=rah-llamacpp");
+    }
 
-    let runtime = CodexRuntime::connect(&executable)
-        .await
-        .map_err(|error| format!("connection failed: {error}"))?;
-    let smoke_result = run_turn(&runtime, &prompt).await;
+    let runtime = if llama_cpp {
+        CodexRuntime::connect_with_model_config(&executable, llama_cpp_model_config()?).await
+    } else {
+        CodexRuntime::connect(&executable).await
+    }
+    .map_err(|error| format!("connection failed: {error}"))?;
+    let smoke_result = run_turn(&runtime, &prompt, expected_text).await;
     let shutdown_result = runtime.shutdown().await;
 
     match &shutdown_result {
@@ -71,7 +92,17 @@ async fn run() -> Result<(), String> {
     smoke_result
 }
 
-async fn run_turn(runtime: &CodexRuntime, prompt: &str) -> Result<(), String> {
+fn llama_cpp_model_config() -> Result<CodexModelConfig, String> {
+    Ok(CodexModelConfig::Explicit(
+        CodexModelSelection::new(
+            "rah-local-model",
+            CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local()),
+        )
+        .map_err(|error| format!("invalid llama.cpp model configuration: {error}"))?,
+    ))
+}
+
+async fn run_turn(runtime: &CodexRuntime, prompt: &str, expected_text: &str) -> Result<(), String> {
     let handle = runtime
         .start(AgentRequest {
             request_id: RequestId::new(),
@@ -128,9 +159,9 @@ async fn run_turn(runtime: &CodexRuntime, prompt: &str) -> Result<(), String> {
             "streamed text did not match Completed output: streamed={streamed_text:?}, completed={completed_text:?}"
         ));
     }
-    if prompt == DEFAULT_PROMPT && completed_text != DEFAULT_EXPECTED_TEXT {
+    if completed_text != expected_text {
         return Err(format!(
-            "unexpected default-prompt response: expected={DEFAULT_EXPECTED_TEXT:?}, actual={completed_text:?}"
+            "unexpected response: expected={expected_text:?}, actual={completed_text:?}"
         ));
     }
 

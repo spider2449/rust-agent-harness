@@ -24,7 +24,10 @@ use rah_protocol::{
     RequestId, ToolContent, ToolInput, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{
+    CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider, CodexModelSelection, CodexRuntime,
+    SUPPORTED_CODEX_VERSION,
+};
 use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
@@ -32,6 +35,9 @@ const EXPECTED_TEXT: &str = "RAH_TOOL_BRIDGE_OK";
 const HOST_MARKER: &str = "RAH_ECHO_BRIDGE_OK";
 const PROMPT: &str = "You have an echo tool.\nCall the echo tool exactly once with:\n{\"text\":\"RAH_TOOL_BRIDGE_OK\"}\nAfter receiving the tool result, respond compactly.";
 const TERMINAL_TIMEOUT: Duration = Duration::from_secs(120);
+const LLAMACPP_EXPECTED_TEXT: &str = "LLAMA BRIDGE PAYLOAD";
+const LLAMACPP_FINAL_MARKER: &str = "RAH_LLAMACPP_TOOL_OK";
+const LLAMACPP_PROMPT: &str = "Use the available echo tool exactly once with the text \"LLAMA BRIDGE PAYLOAD\".\nAfter the tool returns successfully, reply exactly:\nRAH_LLAMACPP_TOOL_OK";
 
 struct CountingEchoTool {
     executions: Arc<AtomicUsize>,
@@ -85,6 +91,13 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), String> {
+    let llama_cpp = env::var("RAH_LLAMACPP_LIVE").as_deref() == Ok("1");
+    let expected_text = if llama_cpp {
+        LLAMACPP_EXPECTED_TEXT
+    } else {
+        EXPECTED_TEXT
+    };
+    let prompt = if llama_cpp { LLAMACPP_PROMPT } else { PROMPT };
     let executable = env::var_os("RAH_CODEX_EXECUTABLE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
@@ -118,19 +131,39 @@ async fn run() -> Result<(), String> {
     println!("EXPECTED_DYNAMIC_TOOL_ALIAS echo -> echo");
     println!(
         "PROMPT {}",
-        serde_json::to_string(PROMPT).map_err(|error| error.to_string())?
+        serde_json::to_string(prompt).map_err(|error| error.to_string())?
     );
+    if llama_cpp {
+        println!("MODEL_CONFIG model=rah-local-model provider=rah-llamacpp");
+    }
 
     let runtime = Arc::new(
-        CodexRuntime::connect_tool_bridge(
-            &executable,
-            Arc::new(registry),
-            vec![PermissionLevel::None],
-        )
-        .await
+        if llama_cpp {
+            CodexRuntime::connect_tool_bridge_with_model_config(
+                &executable,
+                Arc::new(registry),
+                vec![PermissionLevel::None],
+                llama_cpp_model_config()?,
+            )
+            .await
+        } else {
+            CodexRuntime::connect_tool_bridge(
+                &executable,
+                Arc::new(registry),
+                vec![PermissionLevel::None],
+            )
+            .await
+        }
         .map_err(|error| format!("connection failed: {error}"))?,
     );
-    let live_result = run_turn(Arc::clone(&runtime), &executions).await;
+    let live_result = run_turn(
+        Arc::clone(&runtime),
+        &executions,
+        expected_text,
+        llama_cpp.then_some(LLAMACPP_FINAL_MARKER),
+        prompt,
+    )
+    .await;
     let shutdown_result = runtime.shutdown().await;
 
     match &shutdown_result {
@@ -141,14 +174,30 @@ async fn run() -> Result<(), String> {
     live_result
 }
 
-async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Result<(), String> {
+fn llama_cpp_model_config() -> Result<CodexModelConfig, String> {
+    Ok(CodexModelConfig::Explicit(
+        CodexModelSelection::new(
+            "rah-local-model",
+            CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local()),
+        )
+        .map_err(|error| format!("invalid llama.cpp model configuration: {error}"))?,
+    ))
+}
+
+async fn run_turn(
+    runtime: Arc<CodexRuntime>,
+    executions: &AtomicUsize,
+    expected_text: &str,
+    required_final_marker: Option<&str>,
+    prompt: &str,
+) -> Result<(), String> {
     let handle = runtime
         .start(AgentRequest {
             request_id: RequestId::new(),
             input: AgentInput {
                 messages: vec![Message {
                     role: MessageRole::User,
-                    content: PROMPT.to_owned(),
+                    content: prompt.to_owned(),
                 }],
             },
             options: AgentOptions::default(),
@@ -178,7 +227,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
                 AgentEvent::ToolRequested { tool_call, .. } => {
                     requested += 1;
                     if tool_call.name.as_str() != "echo"
-                        || tool_call.input.0 != json!({"text": EXPECTED_TEXT})
+                        || tool_call.input.0 != json!({"text": expected_text})
                     {
                         return Err(format!("unexpected RAH ToolCall: {tool_call:?}"));
                     }
@@ -241,8 +290,15 @@ async fn run_turn(runtime: Arc<CodexRuntime>, executions: &AtomicUsize) -> Resul
     if execution_count != 1 {
         return Err(format!("EchoTool execution count was {execution_count}"));
     }
-    if tool_text.as_deref() != Some(EXPECTED_TEXT) {
+    if tool_text.as_deref() != Some(expected_text) {
         return Err(format!("unexpected returned tool text: {tool_text:?}"));
+    }
+    if let Some(marker) = required_final_marker
+        && final_text != marker
+    {
+        return Err(format!(
+            "unexpected final assistant text: expected={marker:?}, actual={final_text:?}"
+        ));
     }
     if continuation_index.is_none() {
         return Err("no Codex model continuation followed ToolFinished".to_owned());

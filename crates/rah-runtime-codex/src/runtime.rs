@@ -418,14 +418,14 @@ fn restricted_thread_params(
 }
 
 fn verify_effective_model_config(
-    thread: &Value,
+    response: &Value,
     model_config: &CodexModelConfig,
 ) -> Result<(), CodexAdapterError> {
     let CodexModelConfig::Explicit(selection) = model_config else {
         return Ok(());
     };
-    let effective_model = required_string(thread, &["thread", "model"])?;
-    let effective_provider = required_string(thread, &["thread", "modelProvider"])?;
+    let effective_model = required_string(response, &["model"])?;
+    let effective_provider = required_string(response, &["modelProvider"])?;
     let requested_provider = match selection.provider() {
         CodexModelProvider::OpenAi => "openai",
         CodexModelProvider::Ollama => "ollama",
@@ -764,7 +764,7 @@ mod tests {
         CodexModelSelection, test_support::fake_transport,
     };
 
-    use super::{CodexRuntime, restricted_thread_params};
+    use super::{CodexRuntime, restricted_thread_params, verify_effective_model_config};
 
     fn explicit(model: &str, provider: CodexModelProvider) -> CodexModelConfig {
         CodexModelConfig::Explicit(CodexModelSelection::new(model, provider).expect("selection"))
@@ -991,9 +991,16 @@ mod tests {
             let runtime = Arc::clone(&runtime);
             tokio::spawn(async move { runtime.start(sample_request()).await })
         };
-        let thread = peer.respond("thread/start", json!({
-            "thread": { "id": "thread", "model": "rah-local-model", "modelProvider": "rah-llamacpp" }
-        })).await;
+        let thread = peer
+            .respond(
+                "thread/start",
+                json!({
+                    "thread": { "id": "thread" },
+                    "model": "rah-local-model",
+                    "modelProvider": "rah-llamacpp"
+                }),
+            )
+            .await;
         assert_eq!(thread["params"]["modelProvider"], "rah-llamacpp");
         peer.respond("turn/start", json!({ "turn": { "id": "turn" } }))
             .await;
@@ -1019,9 +1026,7 @@ mod tests {
         };
         peer.respond(
             "thread/start",
-            json!({
-                "thread": { "id": "thread", "model": "fallback", "modelProvider": "openai" }
-            }),
+            json!({ "thread": { "id": "thread" }, "model": "fallback", "modelProvider": "openai" }),
         )
         .await;
         let error = match failing.await.expect("start task") {
@@ -1034,5 +1039,63 @@ mod tests {
                 .contains("explicit model/provider mismatch")
         );
         runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn explicit_effective_model_config_requires_matching_top_level_fields() {
+        let config = explicit("deterministic-test-model", CodexModelProvider::OpenAi);
+
+        assert!(
+            verify_effective_model_config(
+                &json!({
+                    "thread": { "id": "private-thread" },
+                    "model": "deterministic-test-model",
+                    "modelProvider": "openai"
+                }),
+                &config,
+            )
+            .is_ok()
+        );
+
+        for response in [
+            json!({
+                "thread": { "id": "private-thread" },
+                "model": "other-model",
+                "modelProvider": "openai"
+            }),
+            json!({
+                "thread": { "id": "private-thread" },
+                "model": "deterministic-test-model",
+                "modelProvider": "other-provider"
+            }),
+            json!({
+                "thread": { "id": "private-thread" },
+                "modelProvider": "openai"
+            }),
+            json!({
+                "thread": { "id": "private-thread" },
+                "model": "deterministic-test-model"
+            }),
+            json!({
+                "thread": {
+                    "id": "private-thread",
+                    "model": "deterministic-test-model",
+                    "modelProvider": "openai"
+                }
+            }),
+        ] {
+            assert!(
+                verify_effective_model_config(&response, &config).is_err(),
+                "explicit verification must fail closed for {response}"
+            );
+        }
+
+        assert!(
+            verify_effective_model_config(
+                &json!({ "thread": { "id": "private-thread" } }),
+                &CodexModelConfig::Inherit,
+            )
+            .is_ok()
+        );
     }
 }
