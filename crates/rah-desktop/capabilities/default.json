@@ -16,6 +16,7 @@
     "allow-send-chat",
     "allow-new-conversation",
     "allow-clear-conversation-history",
+    "allow-resume-previous-conversation",
     "allow-conversation-transcript"
   ]
 }

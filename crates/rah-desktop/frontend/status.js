@@ -16,6 +16,8 @@ const runtimeRows = [
 
 let chatRunning = false;
 let activeAssistant = null;
+let resumeAvailable = false;
+let resumeUsed = false;
 const maxActivityEntries = 100;
 
 const tauriApiRetryDelayMs = 100;
@@ -59,6 +61,12 @@ function errorMessage(error) {
     conversation_context_limit: "Conversation context limit reached; start a new conversation context",
     conversation_history_busy: "Conversation history cannot be cleared while chat is running.",
     conversation_history_clear_failed: "Conversation history could not be cleared.",
+    conversation_resume_unavailable: "Previous conversation is unavailable.",
+    conversation_resume_busy: "Conversation cannot be resumed while chat is running.",
+    conversation_resume_reconnect_required: "Reconnect Codex before resuming this conversation.",
+    conversation_resume_too_large: "Previous conversation exceeds the replay limit. Start a new conversation context.",
+    conversation_resume_persistence_failed: "Previous conversation could not be resumed.",
+    conversation_resume_persistence_incompatible: "Previous conversation is unavailable.",
     git_unavailable: "Git is unavailable",
     repository_not_selected: "Choose a repository first",
     repository_invalid: "Selected folder is not a valid repository root",
@@ -202,6 +210,12 @@ async function loadStatus(invoke) {
   prompt.disabled = !connected || chatRunning;
   send.disabled = !connected || chatRunning;
   document.querySelector("#new-conversation").disabled = chatRunning;
+  document.querySelector("#resume-previous-conversation").disabled = !resumeAvailable
+    || !connected
+    || chatRunning
+    || status.repositoryToolsStatus === "reconnect required"
+    || status.modelConfigurationStatus === "reconnect required"
+    || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
@@ -262,6 +276,7 @@ function showPersistenceWarning(warning) {
 }
 
 function renderTranscript(transcript) {
+  resumeAvailable = transcript.resumeAvailable;
   for (const record of transcript.records) {
     if (record.kind === "completed_message") {
       appendMessage(record.role === "user" ? "You" : "RAH", record.text);
@@ -352,7 +367,9 @@ async function initializeDesktop() {
     chatError.hidden = true;
     try {
       await invoke("new_conversation");
+      resumeUsed = true;
       appendContextSeparator();
+      await loadStatus(invoke);
     } catch (error) {
       showChatError(error);
     }
@@ -366,8 +383,25 @@ async function initializeDesktop() {
     chatError.hidden = true;
     try {
       await invoke("clear_conversation_history");
+      resumeAvailable = false;
+      resumeUsed = true;
       document.querySelector("#chat-messages").replaceChildren();
       appendMessage("RAH", "Conversation history cleared");
+      await loadStatus(invoke);
+    } catch (error) {
+      showChatError(error);
+    }
+  });
+  document.querySelector("#resume-previous-conversation").addEventListener("click", async () => {
+    const chatError = document.querySelector("#chat-error");
+    chatError.hidden = true;
+    try {
+      await invoke("resume_previous_conversation");
+      resumeUsed = true;
+      const success = document.querySelector("#resume-success");
+      success.textContent = "Previous conversation resumed in current context.";
+      success.hidden = false;
+      await loadStatus(invoke);
     } catch (error) {
       showChatError(error);
     }

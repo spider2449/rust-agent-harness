@@ -359,6 +359,14 @@ action removes both supported v1 and v2 private persistence families and does
 not delete repository or project files.
 
 - Interactive Codex approvals are unsupported.
+
+Desktop Resume Previous Conversation is an explicit model-context import, never
+an automatic restart action. It uses only completed persisted text and lineage
+after a fresh current connection is verified; the current host repository,
+model, and tool state remain authoritative. Resume restores neither authority
+nor a native Codex thread, and persistence stores no repository or model
+identity for this feature.
+
 - The Codex adapter and external protocols are exactly pinned compatibility
   boundaries.
 - Cancellation across any external process boundary cannot undo side effects.

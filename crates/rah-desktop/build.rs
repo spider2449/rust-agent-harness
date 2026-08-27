@@ -12,6 +12,7 @@ fn main() {
             "send_chat",
             "new_conversation",
             "clear_conversation_history",
+            "resume_previous_conversation",
             "conversation_transcript",
         ]),
     ))

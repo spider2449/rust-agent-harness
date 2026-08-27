@@ -5,8 +5,8 @@ mod conversation_persistence;
 
 #[cfg(target_os = "windows")]
 use conversation_persistence::{
-    Persistence, Presentation as ConversationTranscriptPresentation, SeparatorReason,
-    Warning as ConversationPersistenceWarning,
+    Persistence, Presentation as ConversationTranscriptPresentation, ResumeError, ResumePair,
+    SeparatorReason, Warning as ConversationPersistenceWarning,
 };
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
@@ -267,6 +267,53 @@ impl DesktopConversationState {
         self.history.push(output);
         Ok(())
     }
+
+    fn resume(
+        &mut self,
+        identity: ConversationContextIdentity,
+        pairs: Vec<ResumePair>,
+    ) -> Result<(), FrontendError> {
+        if !self.history.is_empty() {
+            return Err(FrontendError::ConversationResumeUnavailable);
+        }
+        let messages = pairs
+            .into_iter()
+            .flat_map(|pair| {
+                [
+                    Message {
+                        role: MessageRole::User,
+                        content: pair.user,
+                    },
+                    Message {
+                        role: MessageRole::Assistant,
+                        content: pair.assistant,
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        if messages.is_empty()
+            || messages.len() > MAX_CONVERSATION_REPLAY_MESSAGES
+            || messages
+                .iter()
+                .map(|message| message.content.len())
+                .sum::<usize>()
+                > MAX_CONVERSATION_REPLAY_BYTES
+            || messages.iter().enumerate().any(|(index, message)| {
+                message.role
+                    != if index % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    }
+            })
+        {
+            return Err(FrontendError::ConversationResumeTooLarge);
+        }
+        self.identity = Some(identity);
+        self.history = messages;
+        self.epoch = self.epoch.wrapping_add(1);
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -386,6 +433,12 @@ enum FrontendError {
     ConversationContextLimit,
     ConversationHistoryBusy,
     ConversationHistoryClearFailed,
+    ConversationResumeUnavailable,
+    ConversationResumeBusy,
+    ConversationResumeReconnectRequired,
+    ConversationResumeTooLarge,
+    ConversationResumePersistenceFailed,
+    ConversationResumePersistenceIncompatible,
     GitUnavailable,
     RepositoryNotSelected,
     RepositoryInvalid,
@@ -1492,6 +1545,92 @@ fn clear_conversation_allowed(chat: ChatState) -> Result<(), FrontendError> {
 }
 
 #[cfg(target_os = "windows")]
+fn resume_persistence_error(error: ResumeError) -> FrontendError {
+    match error {
+        ResumeError::Unavailable => FrontendError::ConversationResumeUnavailable,
+        ResumeError::Incompatible => FrontendError::ConversationResumePersistenceIncompatible,
+        ResumeError::SaveFailed => FrontendError::ConversationResumePersistenceFailed,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+    if *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        != ChatState::Idle
+    {
+        return Err(FrontendError::ConversationResumeBusy);
+    }
+    let repository_generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let model_generation = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generation;
+    let identity = {
+        let connection = state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*connection {
+            ConnectionState::Connected {
+                repository_generation: connected_repository_generation,
+                model_generation: connected_model_generation,
+                ..
+            } if *connected_repository_generation == repository_generation
+                && *connected_model_generation == model_generation =>
+            {
+                ConversationContextIdentity {
+                    repository_generation,
+                    model_generation,
+                }
+            }
+            ConnectionState::Connected { .. } => {
+                return Err(FrontendError::ConversationResumeReconnectRequired);
+            }
+            _ => return Err(FrontendError::ConversationResumeUnavailable),
+        }
+    };
+    let mut conversation = state
+        .conversation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !conversation.history.is_empty() {
+        return Err(FrontendError::ConversationResumeUnavailable);
+    }
+    let pairs = {
+        let mut persistence = state
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pairs = persistence
+            .resume_messages()
+            .map_err(resume_persistence_error)?;
+        let message_count = pairs.len().saturating_mul(2);
+        let byte_count = pairs
+            .iter()
+            .map(|pair| pair.user.len() + pair.assistant.len())
+            .sum::<usize>();
+        if message_count > MAX_CONVERSATION_REPLAY_MESSAGES
+            || byte_count > MAX_CONVERSATION_REPLAY_BYTES
+        {
+            return Err(FrontendError::ConversationResumeTooLarge);
+        }
+        persistence
+            .commit_resume_lineage()
+            .map_err(resume_persistence_error)?;
+        pairs
+    };
+    conversation.resume(identity, pairs)
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn conversation_transcript(
     state: State<'_, DesktopAppState>,
@@ -1523,6 +1662,7 @@ fn main() -> ExitCode {
             send_chat,
             new_conversation,
             clear_conversation_history,
+            resume_previous_conversation,
             conversation_transcript
         ])
         .on_window_event(|window, event| {
@@ -1563,7 +1703,7 @@ mod tests {
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        SendChatResult, activity_event, apply_model_selection, begin_chat,
+        ResumePair, SendChatResult, activity_event, apply_model_selection, begin_chat,
         clear_conversation_allowed, current_app_status, desktop_tool_registry, frontend_error,
         model_configuration_status, repository_selection_allowed, repository_tool_authority,
         request_connect, validate_prompt,
@@ -2149,6 +2289,126 @@ mod tests {
                 message(MessageRole::User, "two"),
                 message(MessageRole::Assistant, "answer two"),
             ]
+        );
+    }
+
+    #[test]
+    fn resumed_conversation_imports_exact_pairs_and_next_request_appends_prompt() {
+        let identity = ConversationContextIdentity {
+            repository_generation: 7,
+            model_generation: 9,
+        };
+        let mut conversation = DesktopConversationState::default();
+        conversation
+            .resume(
+                identity,
+                vec![
+                    ResumePair {
+                        user: "one".into(),
+                        assistant: "answer one".into(),
+                    },
+                    ResumePair {
+                        user: "two".into(),
+                        assistant: "answer two".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(conversation.identity, Some(identity));
+        assert_eq!(
+            conversation.request_messages("three").unwrap(),
+            vec![
+                message(MessageRole::User, "one"),
+                message(MessageRole::Assistant, "answer one"),
+                message(MessageRole::User, "two"),
+                message(MessageRole::Assistant, "answer two"),
+                message(MessageRole::User, "three"),
+            ]
+        );
+        assert_eq!(
+            conversation.resume(
+                identity,
+                vec![ResumePair {
+                    user: "x".into(),
+                    assistant: "y".into()
+                }]
+            ),
+            Err(FrontendError::ConversationResumeUnavailable)
+        );
+    }
+
+    #[test]
+    fn resume_replay_limits_are_inclusive_and_context_changes_clear_it() {
+        let identity = ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 1,
+        };
+        let mut exact = DesktopConversationState::default();
+        exact
+            .resume(
+                identity,
+                (0..4)
+                    .map(|_| ResumePair {
+                        user: "u".into(),
+                        assistant: "a".into(),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(exact.history.len(), MAX_CONVERSATION_REPLAY_MESSAGES);
+        assert_eq!(
+            exact.reconcile(ConversationContextIdentity {
+                repository_generation: 2,
+                model_generation: 1,
+            }),
+            Some(ConversationContextChange::Repository)
+        );
+        assert!(exact.history.is_empty());
+        let mut oversized = DesktopConversationState::default();
+        assert_eq!(
+            oversized.resume(
+                identity,
+                (0..5)
+                    .map(|_| ResumePair {
+                        user: "u".into(),
+                        assistant: "a".into()
+                    })
+                    .collect(),
+            ),
+            Err(FrontendError::ConversationResumeTooLarge)
+        );
+
+        let exact_bytes = "x".repeat(MAX_CONVERSATION_REPLAY_BYTES / 8);
+        let mut byte_boundary = DesktopConversationState::default();
+        byte_boundary
+            .resume(
+                identity,
+                (0..4)
+                    .map(|_| ResumePair {
+                        user: exact_bytes.clone(),
+                        assistant: exact_bytes.clone(),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(
+            byte_boundary
+                .history
+                .iter()
+                .map(|message| message.content.len())
+                .sum::<usize>(),
+            MAX_CONVERSATION_REPLAY_BYTES
+        );
+        let mut byte_overflow = DesktopConversationState::default();
+        assert_eq!(
+            byte_overflow.resume(
+                identity,
+                vec![ResumePair {
+                    user: "x".repeat(MAX_CONVERSATION_REPLAY_BYTES),
+                    assistant: "x".into(),
+                }],
+            ),
+            Err(FrontendError::ConversationResumeTooLarge)
         );
     }
 

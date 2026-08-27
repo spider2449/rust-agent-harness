@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-previous-conversation"
+description = "Enables the resume_previous_conversation command without any pre-configured scope."
+commands.allow = ["resume_previous_conversation"]
+
+[[permission]]
+identifier = "deny-resume-previous-conversation"
+description = "Denies the resume_previous_conversation command without any pre-configured scope."
+commands.deny = ["resume_previous_conversation"]

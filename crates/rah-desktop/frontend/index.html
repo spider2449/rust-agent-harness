@@ -59,9 +59,12 @@
         <section class="chat" aria-labelledby="chat-title">
           <h2 id="chat-title">Chat</h2>
           <p id="chat-hint">Connect Codex to chat</p>
+          <p id="resume-success" hidden></p>
           <p id="chat-error" class="connection-error" hidden></p>
           <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
           <button id="new-conversation" type="button" disabled>New Conversation</button>
+          <button id="resume-previous-conversation" type="button" disabled>Resume Previous Conversation</button>
+          <p id="resume-conversation-hint">Previous messages will be sent to the currently connected model context. Repository, model, and tool state are not restored from history.</p>
           <button id="clear-conversation-history" class="destructive-action" type="button" disabled>Clear Conversation History</button>
           <dialog id="clear-history-confirmation">
             <p>Clear all conversation history stored by RAH Desktop?</p>

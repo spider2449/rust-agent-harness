@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -16,7 +16,7 @@ const MAX_PAIRS: usize = 64;
 const MAX_EPOCHS: usize = 16;
 
 #[cfg(test)]
-static TEST_FAULT: AtomicU8 = AtomicU8::new(0);
+static TEST_FAULT: OnceLock<Mutex<Option<(PathBuf, u8)>>> = OnceLock::new();
 #[cfg(test)]
 const FAIL_CREATE: u8 = 1;
 #[cfg(test)]
@@ -25,6 +25,32 @@ const FAIL_REPLACE: u8 = 2;
 const FAIL_REMOVE_V1: u8 = 3;
 #[cfg(test)]
 const FAIL_REMOVE_V2: u8 = 4;
+
+#[cfg(test)]
+fn set_test_fault(path: PathBuf, fault: u8) {
+    *TEST_FAULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path, fault));
+}
+
+#[cfg(test)]
+fn clear_test_fault() {
+    *TEST_FAULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+#[cfg(test)]
+fn test_fault(path: &Path) -> Option<u8> {
+    TEST_FAULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|(target, fault)| (target == path).then_some(*fault))
+}
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -36,8 +62,20 @@ pub(crate) enum Warning {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Presentation {
     pub records: Vec<PresentationRecord>,
+    pub resume_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<Warning>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumePair {
+    pub user: String,
+    pub assistant: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeError {
+    Unavailable,
+    Incompatible,
+    SaveFailed,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -219,8 +257,42 @@ impl Persistence {
         };
         Presentation {
             records,
+            resume_available: self.resume_available(),
             warning: self.warning,
         }
+    }
+    pub(crate) fn resume_available(&self) -> bool {
+        matches!(&self.backing, Backing::V2(v) if resume_source(v).is_ok())
+    }
+
+    /// Returns only complete user/assistant pairs from the durable restart lineage.
+    /// Epoch IDs and storage details deliberately remain private to this module.
+    pub(crate) fn resume_messages(&self) -> Result<Vec<ResumePair>, ResumeError> {
+        let Backing::V2(v) = &self.backing else {
+            return Err(ResumeError::Unavailable);
+        };
+        let source = resume_source(v)?;
+        reconstruct_resume(v, source)
+    }
+
+    /// Durably links the current recovered restart epoch to its selected source.
+    /// The in-memory graph changes only after the atomic replacement succeeds.
+    pub(crate) fn commit_resume_lineage(&mut self) -> Result<(), ResumeError> {
+        let Backing::V2(v) = &self.backing else {
+            return Err(ResumeError::Unavailable);
+        };
+        let source = resume_source(v)?;
+        let mut candidate = v.clone();
+        let current = candidate
+            .epochs
+            .last_mut()
+            .ok_or(ResumeError::Incompatible)?;
+        current.parent_epoch_id = Some(source);
+        validate_v2(&candidate).map_err(|_| ResumeError::Incompatible)?;
+        let sequence = self.next();
+        write_v2(&self.directory, &candidate, sequence).map_err(|_| ResumeError::SaveFailed)?;
+        self.backing = Backing::V2(candidate);
+        Ok(())
     }
     pub(crate) fn append_pair(&mut self, user: String, assistant: String) -> Result<(), Warning> {
         self.mutate(Some(Pair { user, assistant }), None)
@@ -251,7 +323,10 @@ impl Persistence {
             unreachable!()
         };
         apply_v2(v, pair, separator)?;
-        if !trim_v2(v) || self.save().is_err() {
+        if !trim_v2(v) {
+            return Err(Warning::SaveFailed);
+        }
+        if self.save().is_err() {
             Err(Warning::SaveFailed)
         } else {
             Ok(())
@@ -294,6 +369,80 @@ fn apply_v1(records: &mut Vec<Record>, pair: Option<&Pair>, separator: Option<Se
         records.push(Record::ContextSeparator { reason });
     }
 }
+
+fn resume_source(v: &V2) -> Result<u64, ResumeError> {
+    let current = v.epochs.last().ok_or(ResumeError::Unavailable)?;
+    if current.boundary != Some(SeparatorReason::ApplicationRestarted)
+        || current.parent_epoch_id.is_some()
+        || current.history_trimmed_before
+    {
+        return Err(ResumeError::Unavailable);
+    }
+    for epoch in v.epochs[..v.epochs.len() - 1].iter().rev() {
+        if epoch.history_trimmed_before {
+            return Err(ResumeError::Incompatible);
+        }
+        if epoch.pairs.is_empty() && epoch.boundary == Some(SeparatorReason::ApplicationRestarted) {
+            continue;
+        }
+        if matches!(
+            epoch.boundary,
+            Some(
+                SeparatorReason::NewConversation
+                    | SeparatorReason::RepositoryChanged
+                    | SeparatorReason::ModelConfigurationChanged
+                    | SeparatorReason::RepositoryAndModelChanged
+                    | SeparatorReason::HistoryTrimmed
+            )
+        ) {
+            return Err(ResumeError::Unavailable);
+        }
+        return if epoch.pairs.is_empty() {
+            Err(ResumeError::Unavailable)
+        } else {
+            Ok(epoch.id)
+        };
+    }
+    Err(ResumeError::Unavailable)
+}
+
+fn reconstruct_resume(v: &V2, source: u64) -> Result<Vec<ResumePair>, ResumeError> {
+    let mut chain = vec![];
+    let mut next = Some(source);
+    while let Some(id) = next {
+        let epoch = v
+            .epochs
+            .iter()
+            .find(|epoch| epoch.id == id)
+            .ok_or(ResumeError::Incompatible)?;
+        if epoch.history_trimmed_before
+            || matches!(
+                epoch.boundary,
+                Some(
+                    SeparatorReason::NewConversation
+                        | SeparatorReason::RepositoryChanged
+                        | SeparatorReason::ModelConfigurationChanged
+                        | SeparatorReason::RepositoryAndModelChanged
+                        | SeparatorReason::HistoryTrimmed
+                )
+            )
+        {
+            return Err(ResumeError::Incompatible);
+        }
+        chain.push(epoch);
+        next = epoch.parent_epoch_id;
+    }
+    chain.reverse();
+    Ok(chain
+        .into_iter()
+        .flat_map(|epoch| epoch.pairs.iter())
+        .map(|pair| ResumePair {
+            user: pair.user.clone(),
+            assistant: pair.assistant.clone(),
+        })
+        .collect())
+}
+
 fn apply_v2(
     v: &mut V2,
     pair: Option<Pair>,
@@ -577,9 +726,9 @@ fn cleanup_temps(d: &Path) {
 fn remove(path: &Path) -> io::Result<()> {
     #[cfg(test)]
     if (path.file_name().and_then(|name| name.to_str()) == Some(SNAPSHOT_FILE)
-        && TEST_FAULT.load(Ordering::SeqCst) == FAIL_REMOVE_V1)
+        && test_fault(path) == Some(FAIL_REMOVE_V1))
         || (path.file_name().and_then(|name| name.to_str()) == Some(V2_FILE)
-            && TEST_FAULT.load(Ordering::SeqCst) == FAIL_REMOVE_V2)
+            && test_fault(path) == Some(FAIL_REMOVE_V2))
     {
         return Err(io::Error::other("injected removal failure"));
     }
@@ -621,8 +770,8 @@ fn atomic(d: &Path, name: &str, bytes: &[u8], n: u64) -> io::Result<()> {
     f.sync_all()?;
     drop(f);
     #[cfg(test)]
-    if (!dst.exists() && TEST_FAULT.load(Ordering::SeqCst) == FAIL_CREATE)
-        || (dst.exists() && TEST_FAULT.load(Ordering::SeqCst) == FAIL_REPLACE)
+    if (!dst.exists() && test_fault(&dst) == Some(FAIL_CREATE))
+        || (dst.exists() && test_fault(&dst) == Some(FAIL_REPLACE))
     {
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::other("injected atomic replacement failure"));
@@ -659,7 +808,27 @@ fn replace(d: &Path, t: &Path) -> io::Result<()> {
     {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+        {
+            return Err(error);
+        }
+        // Some Windows configurations reject ReplaceFileW for a destination
+        // created by the initial MoveFileExW. This remains one native,
+        // replace-existing operation; it never deletes the destination first.
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                t.as_ptr(),
+                d.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }
 #[cfg(target_os = "windows")]
@@ -1070,7 +1239,7 @@ mod tests {
         )
         .unwrap();
         let mut p = Persistence::start(d.clone());
-        TEST_FAULT.store(FAIL_CREATE, Ordering::SeqCst);
+        set_test_fault(d.join(V2_FILE), FAIL_CREATE);
         assert_eq!(
             p.append_pair("current".into(), "a".into()),
             Err(Warning::SaveFailed)
@@ -1078,7 +1247,7 @@ mod tests {
         assert!(load_v1(&d.join(SNAPSHOT_FILE)).unwrap().is_some());
         assert!(!d.join(V2_FILE).exists());
         assert!(matches!(p.backing, Backing::V1(_)));
-        TEST_FAULT.store(0, Ordering::SeqCst);
+        clear_test_fault();
         p.append_pair("retry".into(), "a".into()).unwrap();
         assert!(matches!(p.backing, Backing::V2(_)));
         let recovered = load_v2(&d.join(V2_FILE)).unwrap();
@@ -1098,13 +1267,13 @@ mod tests {
             },
         );
         p.append_pair("one".into(), "a".into()).unwrap();
-        TEST_FAULT.store(FAIL_REPLACE, Ordering::SeqCst);
+        set_test_fault(d.join(V2_FILE), FAIL_REPLACE);
         assert_eq!(
             p.append_pair("two".into(), "a".into()),
             Err(Warning::SaveFailed)
         );
         assert_eq!(load_v2(&d.join(V2_FILE)).unwrap().epochs[0].pairs.len(), 1);
-        TEST_FAULT.store(0, Ordering::SeqCst);
+        clear_test_fault();
         p.append_pair("three".into(), "a".into()).unwrap();
         assert_eq!(load_v2(&d.join(V2_FILE)).unwrap().epochs[0].pairs.len(), 3);
         let _ = fs::remove_dir_all(d);
@@ -1248,7 +1417,14 @@ mod tests {
             )
             .unwrap();
             let mut p = Persistence::start(d.clone());
-            TEST_FAULT.store(fault, Ordering::SeqCst);
+            set_test_fault(
+                d.join(if fault == FAIL_REMOVE_V1 {
+                    SNAPSHOT_FILE
+                } else {
+                    V2_FILE
+                }),
+                fault,
+            );
             assert!(p.clear().is_err());
             assert!(!p.presentation().records.is_empty());
             if fault == FAIL_REMOVE_V1 {
@@ -1257,7 +1433,7 @@ mod tests {
             if fault == FAIL_REMOVE_V2 {
                 assert!(!d.join(SNAPSHOT_FILE).exists() && d.join(V2_FILE).exists());
             }
-            TEST_FAULT.store(0, Ordering::SeqCst);
+            clear_test_fault();
             let _ = fs::remove_dir_all(d);
         }
     }
@@ -1293,6 +1469,185 @@ mod tests {
         fresh.clear().unwrap();
         assert!(fresh.presentation().records.is_empty());
         assert!(fresh.presentation().warning.is_none());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn resume_selects_previous_restart_conversation_and_skips_empty_restarts() {
+        let mut a = e(1, None, None);
+        a.pairs.push(pair("a"));
+        let v = V2 {
+            version: 2,
+            epochs: vec![
+                a,
+                e(2, Some(SeparatorReason::ApplicationRestarted), None),
+                e(3, Some(SeparatorReason::ApplicationRestarted), None),
+            ],
+        };
+        assert_eq!(resume_source(&v), Ok(1));
+        assert_eq!(
+            reconstruct_resume(&v, 1),
+            Ok(vec![ResumePair {
+                user: "a".into(),
+                assistant: "a".into()
+            }])
+        );
+    }
+
+    #[test]
+    fn resume_stops_at_fresh_boundaries_and_trim() {
+        for boundary in [
+            SeparatorReason::NewConversation,
+            SeparatorReason::RepositoryChanged,
+            SeparatorReason::ModelConfigurationChanged,
+            SeparatorReason::RepositoryAndModelChanged,
+        ] {
+            let mut a = e(1, None, None);
+            a.pairs.push(pair("a"));
+            let v = V2 {
+                version: 2,
+                epochs: vec![
+                    a,
+                    e(2, Some(boundary), None),
+                    e(3, Some(SeparatorReason::ApplicationRestarted), None),
+                ],
+            };
+            assert_eq!(resume_source(&v), Err(ResumeError::Unavailable));
+        }
+        let mut a = e(1, None, None);
+        a.pairs.push(pair("a"));
+        a.history_trimmed_before = true;
+        let v = V2 {
+            version: 2,
+            epochs: vec![a, e(2, Some(SeparatorReason::ApplicationRestarted), None)],
+        };
+        assert_eq!(resume_source(&v), Err(ResumeError::Incompatible));
+    }
+
+    #[test]
+    fn resume_reconstructs_transitive_lineage_and_commits_only_parent_link() {
+        let d = directory("resume-lineage");
+        let mut a = e(1, None, None);
+        a.pairs.push(pair("a"));
+        let mut b = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
+        b.pairs.push(pair("b"));
+        let v = V2 {
+            version: 2,
+            epochs: vec![
+                a,
+                b,
+                e(3, Some(SeparatorReason::ApplicationRestarted), None),
+            ],
+        };
+        let mut persistence = Persistence::v2(d.clone(), v);
+        assert_eq!(
+            persistence.resume_messages().unwrap(),
+            vec![
+                ResumePair {
+                    user: "a".into(),
+                    assistant: "a".into()
+                },
+                ResumePair {
+                    user: "b".into(),
+                    assistant: "b".into()
+                },
+            ]
+        );
+        persistence.commit_resume_lineage().unwrap();
+        let Backing::V2(graph) = persistence.backing else {
+            unreachable!()
+        };
+        assert_eq!(graph.epochs[2].parent_epoch_id, Some(2));
+        assert!(graph.epochs[2].pairs.is_empty());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn resume_lineage_is_not_committed_when_its_atomic_write_fails() {
+        let _lock = fault_lock();
+        let d = directory("resume-lineage-failure");
+        let mut source = e(1, None, None);
+        source.pairs.push(pair("source"));
+        let mut persistence = Persistence::v2(
+            d.clone(),
+            V2 {
+                version: 2,
+                epochs: vec![
+                    source,
+                    e(2, Some(SeparatorReason::ApplicationRestarted), None),
+                ],
+            },
+        );
+        persistence.save().unwrap();
+        assert_eq!(persistence.resume_messages().unwrap().len(), 1);
+        set_test_fault(d.join(V2_FILE), FAIL_REPLACE);
+        assert_eq!(
+            persistence.commit_resume_lineage(),
+            Err(ResumeError::SaveFailed)
+        );
+        let Backing::V2(current) = &persistence.backing else {
+            unreachable!()
+        };
+        assert_eq!(current.epochs[1].parent_epoch_id, None);
+        assert_eq!(
+            load_v2(&d.join(V2_FILE)).unwrap().epochs[1].parent_epoch_id,
+            None
+        );
+        clear_test_fault();
+        persistence.commit_resume_lineage().unwrap();
+        let Backing::V2(current) = &persistence.backing else {
+            unreachable!()
+        };
+        assert_eq!(current.epochs[1].parent_epoch_id, Some(1));
+        assert_eq!(
+            load_v2(&d.join(V2_FILE)).unwrap().epochs[1].parent_epoch_id,
+            Some(1)
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn post_resume_pair_stays_in_the_linked_epoch_for_the_next_restart() {
+        let d = directory("resume-follow-up");
+        let mut first = e(1, None, None);
+        first.pairs.push(pair("first"));
+        let mut second = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
+        second.pairs.push(pair("second"));
+        let mut persistence = Persistence::v2(
+            d.clone(),
+            V2 {
+                version: 2,
+                epochs: vec![
+                    first,
+                    second,
+                    e(3, Some(SeparatorReason::ApplicationRestarted), None),
+                ],
+            },
+        );
+        persistence.commit_resume_lineage().unwrap();
+        persistence
+            .append_pair("third".into(), "third".into())
+            .unwrap();
+        persistence
+            .append_separator(SeparatorReason::ApplicationRestarted)
+            .unwrap();
+        assert_eq!(
+            persistence.resume_messages().unwrap(),
+            vec![
+                ResumePair {
+                    user: "first".into(),
+                    assistant: "first".into(),
+                },
+                ResumePair {
+                    user: "second".into(),
+                    assistant: "second".into(),
+                },
+                ResumePair {
+                    user: "third".into(),
+                    assistant: "third".into(),
+                },
+            ]
+        );
         let _ = fs::remove_dir_all(d);
     }
 
