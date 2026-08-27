@@ -382,6 +382,16 @@ The normal suite uses `MockBackend`, deterministic local fixtures, fake Codex
 transport, and captured Codex 0.149.0 schema/JSON fixtures. It does not require a
 Codex executable, network access, credentials, a paid API, or a real model.
 
+## Actions Cleanup
+
+The repository-owned [Actions Cleanup](.github/workflows/actions-cleanup.yml)
+workflow runs weekly on Sunday at 03:00 UTC. It retains the newest 20 completed
+runs for each workflow and preserves runs whose head commit is tagged. Run it
+manually with **Actions Cleanup** > **Run workflow**; `dry_run` defaults to true
+and lists candidate run IDs without deleting them. Scheduled runs delete eligible
+old records. The workflow uses only the repository `GITHUB_TOKEN` with
+`actions: write` and `contents: read` permissions.
+
 ## v0.8 milestone limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile

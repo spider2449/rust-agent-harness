@@ -1,0 +1,119 @@
+name: Actions Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List eligible workflow runs without deleting them
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    - cron: "0 3 * * 0"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      CURRENT_RUN_ID: ${{ github.run_id }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      RETENTION_COUNT: "20"
+    steps:
+      - name: Remove old completed workflow runs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${REPOSITORY:?GitHub repository identity is required}"
+          : "${CURRENT_RUN_ID:?Current workflow run ID is required}"
+
+          temporary_directory="$(mktemp -d)"
+          trap 'rm -rf "$temporary_directory"' EXIT
+          tags_file="$temporary_directory/tagged-commits"
+          workflows_file="$temporary_directory/workflows"
+
+          echo "Collecting tagged commits for ${REPOSITORY}."
+          if ! gh api --paginate \
+            "/repos/${REPOSITORY}/tags?per_page=100" >"$tags_file"; then
+            echo "Failed to enumerate repository tags; refusing to delete workflow runs." >&2
+            exit 1
+          fi
+          if ! jq -s -e 'all(.[]; type == "array")' "$tags_file" >/dev/null; then
+            echo "Repository tag response was incomplete or malformed; refusing to delete workflow runs." >&2
+            exit 1
+          fi
+          jq -r '.[] | .[] | .commit.sha' "$tags_file" | sort -u >"$temporary_directory/tagged-shas"
+
+          echo "Collecting workflows for ${REPOSITORY}."
+          if ! gh api --paginate \
+            "/repos/${REPOSITORY}/actions/workflows?per_page=100" >"$workflows_file"; then
+            echo "Failed to enumerate workflows; refusing to delete workflow runs." >&2
+            exit 1
+          fi
+          if ! jq -s -e 'all(.[]; (.workflows | type) == "array")' "$workflows_file" >/dev/null; then
+            echo "Workflow response was incomplete or malformed; refusing to delete workflow runs." >&2
+            exit 1
+          fi
+
+          mapfile -t workflow_ids < <(jq -r '.workflows[] | .id' "$workflows_file")
+          for workflow_id in "${workflow_ids[@]}"; do
+            runs_file="$temporary_directory/runs-${workflow_id}"
+            if ! gh api --paginate \
+              "/repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=completed&per_page=100" >"$runs_file"; then
+              echo "Failed to enumerate completed runs for workflow ${workflow_id}; refusing further deletions." >&2
+              exit 1
+            fi
+            if ! jq -s -e 'all(.[]; (.workflow_runs | type) == "array")' "$runs_file" >/dev/null; then
+              echo "Completed-run response for workflow ${workflow_id} was incomplete or malformed; refusing further deletions." >&2
+              exit 1
+            fi
+          done
+
+          # Complete all reads before deleting anything so an API or pagination
+          # failure cannot be reinterpreted as an empty workflow/run collection.
+          for workflow_id in "${workflow_ids[@]}"; do
+            runs_file="$temporary_directory/runs-${workflow_id}"
+            mapfile -t runs < <(jq -s -r '
+              map(.workflow_runs[]) | sort_by(.created_at) | reverse | .[]
+              | [.id, .name, .created_at, .head_sha] | @tsv
+            ' "$runs_file")
+
+            retained=0
+            for run in "${runs[@]}"; do
+              IFS=$'\t' read -r run_id workflow_name created_at head_sha <<<"$run"
+
+              if [[ "$run_id" == "$CURRENT_RUN_ID" ]]; then
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} retain=current_run"
+                continue
+              fi
+
+              if (( retained < RETENTION_COUNT )); then
+                retained=$((retained + 1))
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} retain=newest_${RETENTION_COUNT}"
+                continue
+              fi
+
+              if grep -Fxq "$head_sha" "$temporary_directory/tagged-shas"; then
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} retain=tagged_commit"
+                continue
+              fi
+
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} delete=dry_run"
+              else
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} delete=attempt"
+                if ! gh api --method DELETE \
+                  "/repos/${REPOSITORY}/actions/runs/${run_id}"; then
+                  echo "Failed to delete workflow run ${run_id} for workflow ${workflow_name}." >&2
+                  exit 1
+                fi
+                echo "workflow=${workflow_name} run_id=${run_id} created_at=${created_at} head_sha=${head_sha} delete=complete"
+              fi
+            done
+          done
