@@ -7,6 +7,7 @@ const applicationRows = [
 const runtimeRows = [
   ["RAH Runtime", "runtimeStatus"],
   ["Codex", "codexStatus"],
+  ["Codex source", "codexSource"],
   ["Codex version", "codexVersion"],
   ["Profile", "profileStatus"],
   ["Repository", "repositoryStatus"],
@@ -35,7 +36,11 @@ function renderRows(element, rows, status) {
       const detail = document.createElement("dd");
 
       term.textContent = label;
-      detail.textContent = status[field];
+      detail.textContent = field === "codexSource" ? ({
+        override: "Explicit override",
+        certified_baseline: "Certified baseline",
+        path: "PATH compatibility fallback",
+      }[status[field]] ?? status[field]) : status[field];
       detail.dataset.status = status[field];
       row.append(term, detail);
       return row;
@@ -46,6 +51,8 @@ function renderRows(element, rows, status) {
 function errorMessage(error) {
   const messages = {
     codex_not_found: "Codex executable not found",
+    codex_baseline_invalid: "Certified Codex baseline is invalid",
+    codex_host_unsupported: "Certified Codex baseline requires Windows x64",
     unsupported_codex_version: "Unsupported Codex version",
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",

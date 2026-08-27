@@ -1,8 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(target_os = "windows")]
+mod codex_baseline;
+#[cfg(target_os = "windows")]
 mod conversation_persistence;
 
+#[cfg(target_os = "windows")]
+use codex_baseline::{BaselineError, CodexExecutableSource, resolve as resolve_codex_executable};
 #[cfg(target_os = "windows")]
 use conversation_persistence::{
     Persistence, Presentation as ConversationTranscriptPresentation, ResumeError, ResumePair,
@@ -33,7 +37,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use std::{
     collections::HashMap,
-    ffi::OsString,
+    future::Future,
     path::PathBuf,
     process::ExitCode,
     sync::{
@@ -72,6 +76,8 @@ struct AppStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     codex_version: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    codex_source: Option<CodexExecutableSourcePresentation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     codex_error: Option<FrontendError>,
     profile_status: &'static str,
     repository_status: &'static str,
@@ -85,6 +91,7 @@ enum ConnectionState {
     Connecting,
     Connected {
         runtime: Arc<CodexRuntime>,
+        source: CodexExecutableSource,
         repository_generation: u64,
         model_generation: u64,
     },
@@ -418,6 +425,8 @@ impl DesktopRepository {
 #[serde(rename_all = "snake_case")]
 enum FrontendError {
     CodexNotFound,
+    CodexBaselineInvalid,
+    CodexHostUnsupported,
     UnsupportedCodexVersion,
     CodexSchemaIncompatible,
     CodexStartFailed,
@@ -447,6 +456,26 @@ enum FrontendError {
     RepositoryBusy,
     ModelConfigurationInvalid,
     ModelConfigurationBusy,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CodexExecutableSourcePresentation {
+    Override,
+    CertifiedBaseline,
+    Path,
+}
+
+#[cfg(target_os = "windows")]
+impl From<CodexExecutableSource> for CodexExecutableSourcePresentation {
+    fn from(source: CodexExecutableSource) -> Self {
+        match source {
+            CodexExecutableSource::Override => Self::Override,
+            CodexExecutableSource::CertifiedBaseline => Self::CertifiedBaseline,
+            CodexExecutableSource::Path => Self::Path,
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -591,17 +620,19 @@ fn current_app_status(
     repository_generation: u64,
     model_generation: u64,
 ) -> AppStatus {
-    let (runtime_status, codex_status, codex_version, codex_error) = match connection {
-        ConnectionState::NotConnected => ("not connected", "not connected", None, None),
-        ConnectionState::Error(error) => ("not connected", "error", None, Some(*error)),
-        ConnectionState::Connecting => ("not connected", "connecting", None, None),
-        ConnectionState::Connected { .. } => (
+    let (runtime_status, codex_status, codex_version, codex_source, codex_error) = match connection
+    {
+        ConnectionState::NotConnected => ("not connected", "not connected", None, None, None),
+        ConnectionState::Error(error) => ("not connected", "error", None, None, Some(*error)),
+        ConnectionState::Connecting => ("not connected", "connecting", None, None, None),
+        ConnectionState::Connected { source, .. } => (
             "connected",
             "connected",
             Some(SUPPORTED_CODEX_VERSION),
+            Some((*source).into()),
             None,
         ),
-        ConnectionState::Disconnecting => ("connected", "disconnecting", None, None),
+        ConnectionState::Disconnecting => ("connected", "disconnecting", None, None, None),
     };
     AppStatus {
         app_name: "RAH",
@@ -611,6 +642,7 @@ fn current_app_status(
         runtime_status,
         codex_status,
         codex_version,
+        codex_source,
         codex_error,
         profile_status: "not loaded",
         repository_status: if repository_selected {
@@ -996,6 +1028,18 @@ struct ConnectionResult {
     version: Option<&'static str>,
 }
 
+/// One host-owned set of inputs for a single Codex connection attempt.
+///
+/// The executable source is presentation-only metadata. It must not choose a
+/// model, bridge, or runtime-construction branch.
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct PreparedCodexConnection {
+    executable: std::ffi::OsString,
+    model_config: CodexModelConfig,
+    source: CodexExecutableSource,
+}
+
 #[cfg(target_os = "windows")]
 impl ConnectionResult {
     fn connected() -> Self {
@@ -1018,11 +1062,6 @@ impl ConnectionResult {
             version: None,
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn selected_codex_executable() -> OsString {
-    std::env::var_os("RAH_CODEX_EXECUTABLE").unwrap_or_else(|| OsString::from("codex"))
 }
 
 #[cfg(target_os = "windows")]
@@ -1058,6 +1097,60 @@ fn desktop_tool_registry(
         registry.register(Arc::new(edit_files))?;
     }
     Ok(Arc::new(registry))
+}
+
+/// Resolves host executable selection and combines it with the already chosen,
+/// host-owned model configuration. Presentation must use only `source` and
+/// never perform a second resolution.
+#[cfg(target_os = "windows")]
+fn prepare_codex_connection<R>(
+    resolver: R,
+    model_config: CodexModelConfig,
+) -> Result<PreparedCodexConnection, FrontendError>
+where
+    R: FnOnce() -> Result<codex_baseline::CodexExecutableSelection, BaselineError>,
+{
+    let selection = match resolver() {
+        Ok(selection) => selection,
+        Err(BaselineError::Invalid) => return Err(FrontendError::CodexBaselineInvalid),
+        Err(BaselineError::UnsupportedHost) => return Err(FrontendError::CodexHostUnsupported),
+    };
+    Ok(PreparedCodexConnection {
+        executable: selection.executable,
+        model_config,
+        source: selection.source,
+    })
+}
+
+/// Passes one prepared host-owned connection value through the sole Desktop
+/// runtime-construction seam.
+#[cfg(target_os = "windows")]
+async fn connect_prepared_codex<T, F, Fut>(
+    prepared: PreparedCodexConnection,
+    runtime_factory: F,
+) -> Result<(T, CodexExecutableSource), FrontendError>
+where
+    F: FnOnce(PreparedCodexConnection) -> Fut,
+    Fut: Future<Output = Result<T, FrontendError>>,
+{
+    let source = prepared.source;
+    let runtime = runtime_factory(prepared).await?;
+    Ok((runtime, source))
+}
+
+#[cfg(target_os = "windows")]
+async fn resolve_prepare_and_connect_codex<T, R, F, Fut>(
+    resolver: R,
+    model_config: CodexModelConfig,
+    runtime_factory: F,
+) -> Result<(T, CodexExecutableSource), FrontendError>
+where
+    R: FnOnce() -> Result<codex_baseline::CodexExecutableSelection, BaselineError>,
+    F: FnOnce(PreparedCodexConnection) -> Fut,
+    Fut: Future<Output = Result<T, FrontendError>>,
+{
+    let prepared = prepare_codex_connection(resolver, model_config)?;
+    connect_prepared_codex(prepared, runtime_factory).await
 }
 
 #[cfg(target_os = "windows")]
@@ -1106,50 +1199,51 @@ async fn connect_codex(
             }
         }
     };
-    let registry = match desktop_tool_registry(repository.as_deref()) {
-        Ok(registry) => registry,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to construct desktop tool registry");
-            let mut connection = state
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *connection = ConnectionState::Error(FrontendError::ToolRegistryFailed);
-            return Err(FrontendError::ToolRegistryFailed);
-        }
-    };
-
-    match CodexRuntime::connect_tool_bridge_with_model_config(
-        selected_codex_executable(),
-        registry,
-        if repository.is_some() {
-            vec![
-                PermissionLevel::None,
-                PermissionLevel::Read,
-                PermissionLevel::Execute,
-            ]
-        } else {
-            vec![PermissionLevel::None]
-        },
+    match resolve_prepare_and_connect_codex(
+        resolve_codex_executable,
         model_config,
+        |prepared| async move {
+            let registry = desktop_tool_registry(repository.as_deref()).map_err(|error| {
+                tracing::error!(error = %error, "failed to construct desktop tool registry");
+                FrontendError::ToolRegistryFailed
+            })?;
+            CodexRuntime::connect_tool_bridge_with_model_config(
+                prepared.executable,
+                registry,
+                if repository.is_some() {
+                    vec![
+                        PermissionLevel::None,
+                        PermissionLevel::Read,
+                        PermissionLevel::Execute,
+                    ]
+                } else {
+                    vec![PermissionLevel::None]
+                },
+                prepared.model_config,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "Codex desktop connection failed");
+                frontend_error(&error)
+            })
+        },
     )
     .await
     {
-        Ok(runtime) => {
+        Ok((runtime, source)) => {
             let mut connection = state
                 .connection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *connection = ConnectionState::Connected {
                 runtime: Arc::new(runtime),
+                source,
                 repository_generation,
                 model_generation,
             };
             Ok(ConnectionResult::connected())
         }
-        Err(error) => {
-            tracing::warn!(error = %error, "Codex desktop connection failed");
-            let frontend_error = frontend_error(&error);
+        Err(frontend_error) => {
             let mut connection = state
                 .connection
                 .lock()
@@ -1433,6 +1527,7 @@ async fn send_chat(
                 runtime,
                 repository_generation,
                 model_generation,
+                ..
             } => (
                 Arc::clone(runtime),
                 ConversationContextIdentity {
@@ -1697,16 +1792,18 @@ fn main() {
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
+    use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
     use super::{
-        ActivityEvent, ActivityResult, ChatEvent, ChatState, ConnectRequest, ConnectionState,
-        ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME,
-        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
-        DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
+        ActivityEvent, ActivityResult, ChatEvent, ChatState, CodexExecutableSourcePresentation,
+        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
+        DESKTOP_TOOL_NAME, DesktopConversationState, DesktopModelProvider, DesktopModelSelection,
+        DesktopModelState, DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
         ResumePair, SendChatResult, activity_event, apply_model_selection, begin_chat,
-        clear_conversation_allowed, current_app_status, desktop_tool_registry, frontend_error,
-        model_configuration_status, repository_selection_allowed, repository_tool_authority,
-        request_connect, validate_prompt,
+        clear_conversation_allowed, connect_prepared_codex, current_app_status,
+        desktop_tool_registry, frontend_error, model_configuration_status,
+        prepare_codex_connection, repository_selection_allowed, repository_tool_authority,
+        request_connect, resolve_prepare_and_connect_codex, validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
@@ -1718,9 +1815,13 @@ mod tests {
     use rah_tools::ToolContext;
     use std::{
         collections::HashMap,
+        ffi::OsString,
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1732,6 +1833,108 @@ mod tests {
     }
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn desktop_connect_preparation_keeps_equivalent_auto_and_override_inputs_identical() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct RuntimeFactoryInput {
+            executable: OsString,
+            model_config: CodexModelConfig,
+            connection_mode: &'static str,
+        }
+
+        let certified_executable = OsString::from(
+            r"C:\Users\morefunfun11\AppData\Local\codex-baselines\0.149.0\codex.exe",
+        );
+        let cases = [
+            (
+                "automatic certified baseline",
+                CodexExecutableSelection {
+                    executable: certified_executable.clone(),
+                    source: CodexExecutableSource::CertifiedBaseline,
+                },
+                CodexExecutableSource::CertifiedBaseline,
+            ),
+            (
+                "explicit override of the same certified executable",
+                CodexExecutableSelection {
+                    executable: certified_executable.clone(),
+                    source: CodexExecutableSource::Override,
+                },
+                CodexExecutableSource::Override,
+            ),
+        ];
+
+        let observed = cases.map(|(name, selection, expected_source)| {
+            let prepared =
+                prepare_codex_connection(move || Ok(selection), CodexModelConfig::Inherit)
+                    .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert_eq!(prepared.source, expected_source, "{name}");
+            let observed_by_factory = Arc::new(Mutex::new(None));
+            let factory_input = Arc::clone(&observed_by_factory);
+            let (runtime, source) = futures::executor::block_on(connect_prepared_codex(
+                prepared,
+                move |prepared| async move {
+                    *factory_input
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(RuntimeFactoryInput {
+                            executable: prepared.executable,
+                            model_config: prepared.model_config,
+                            connection_mode: "tool_bridge",
+                        });
+                    Ok::<_, FrontendError>(())
+                },
+            ))
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+
+            assert_eq!(runtime, ());
+            assert_eq!(source, expected_source, "{name}");
+            observed_by_factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(|| panic!("{name}: factory was not invoked"))
+        });
+
+        assert_eq!(observed[0], observed[1]);
+        assert_eq!(observed[0].executable, certified_executable);
+        assert_eq!(observed[0].model_config, CodexModelConfig::Inherit);
+        assert_eq!(observed[0].connection_mode, "tool_bridge");
+    }
+
+    #[test]
+    fn desktop_connect_preparation_preserves_path_fallback_input() {
+        let prepared = prepare_codex_connection(
+            || {
+                Ok(CodexExecutableSelection {
+                    executable: OsString::from("codex"),
+                    source: CodexExecutableSource::Path,
+                })
+            },
+            CodexModelConfig::Inherit,
+        )
+        .expect("PATH fallback should prepare");
+        assert_eq!(prepared.executable, OsString::from("codex"));
+        assert_eq!(prepared.source, CodexExecutableSource::Path);
+    }
+
+    #[test]
+    fn desktop_connect_does_not_invoke_the_runtime_factory_for_invalid_baseline() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let invoked_by_factory = Arc::clone(&invoked);
+        let result = futures::executor::block_on(resolve_prepare_and_connect_codex(
+            || Err(BaselineError::Invalid),
+            CodexModelConfig::Inherit,
+            move |_| async move {
+                invoked_by_factory.store(true, Ordering::Relaxed);
+                Ok::<_, FrontendError>(())
+            },
+        ));
+
+        assert_eq!(result, Err(FrontendError::CodexBaselineInvalid));
+        assert!(!invoked.load(Ordering::Relaxed));
+    }
 
     struct TestRepository(PathBuf);
 
@@ -1820,6 +2023,42 @@ mod tests {
         assert_eq!(serialized, "\"codex_not_found\"");
         assert!(!serialized.contains("private"));
         assert!(!serialized.contains("codex.exe"));
+    }
+
+    #[test]
+    fn unsupported_codex_version_frontend_error_has_one_adapter_origin() {
+        let mismatch = CodexAdapterError::VersionMismatch {
+            expected: "codex-cli 0.149.0",
+            actual: "codex-cli 0.148.0".to_owned(),
+        };
+        assert_eq!(
+            frontend_error(&mismatch),
+            FrontendError::UnsupportedCodexVersion
+        );
+        for error in [
+            CodexAdapterError::SchemaMismatch {
+                missing: "method".to_owned(),
+            },
+            CodexAdapterError::ProcessStartup {
+                path: PathBuf::from(r"C:\\private\\codex.exe"),
+                source: std::io::Error::other("not started"),
+            },
+        ] {
+            assert_ne!(
+                frontend_error(&error),
+                FrontendError::UnsupportedCodexVersion
+            );
+        }
+    }
+
+    #[test]
+    fn codex_source_presentation_is_closed_and_never_contains_host_details() {
+        let source = serde_json::to_string(&CodexExecutableSourcePresentation::CertifiedBaseline)
+            .expect("source serializes");
+        assert_eq!(source, "\"certified_baseline\"");
+        for forbidden in ["\\", "/", ":", "sha", "manifest", "package"] {
+            assert!(!source.contains(forbidden));
+        }
     }
 
     #[test]
