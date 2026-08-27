@@ -36,6 +36,27 @@ function Assert-Version([string]$Value) {
     }
 }
 
+function Test-WindowsX64Host {
+    if ($env:OS -ne 'Windows_NT' -or [Environment]::Is64BitOperatingSystem -ne $true) {
+        return $false
+    }
+
+    $runtimeInformationType = [Runtime.InteropServices.RuntimeInformation]
+    $osArchitectureProperty = $runtimeInformationType.GetProperty(
+        'OSArchitecture',
+        [Reflection.BindingFlags]'Public, Static'
+    )
+    if ($null -ne $osArchitectureProperty) {
+        return ([string]$osArchitectureProperty.GetValue($null) -eq 'X64')
+    }
+
+    $architecture = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = $env:PROCESSOR_ARCHITECTURE
+    }
+    return ($architecture -eq 'AMD64')
+}
+
 function Get-StoreRoot {
     if (-not [string]::IsNullOrWhiteSpace($StorePath)) {
         return [IO.Path]::GetFullPath($StorePath)
@@ -182,7 +203,7 @@ function Read-Manifest([string]$ManifestPath) {
 
 function Verify-Baseline([string]$RequestedVersion) {
     Assert-Version $RequestedVersion
-    if ($env:OS -ne 'Windows_NT' -or [Environment]::Is64BitOperatingSystem -ne $true -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'X64') {
+    if (-not (Test-WindowsX64Host)) {
         Fail 'Windows x64 baseline verification is required for this baseline store'
     }
     $directory = Join-Path (Get-StoreRoot) $RequestedVersion
