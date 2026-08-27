@@ -10,6 +10,7 @@ fn main() {
             "disconnect_codex",
             "repository_snapshot",
             "send_chat",
+            "new_conversation",
         ]),
     ))
     .expect("failed to build Tauri desktop command permissions");

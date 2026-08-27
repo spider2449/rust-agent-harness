@@ -56,6 +56,7 @@ function errorMessage(error) {
     chat_start_failed: "Chat could not start",
     chat_runtime_failed: "Chat failed",
     chat_cancelled: "Chat was cancelled",
+    conversation_context_limit: "Conversation context limit reached; start a new conversation context",
     git_unavailable: "Git is unavailable",
     repository_not_selected: "Choose a repository first",
     repository_invalid: "Selected folder is not a valid repository root",
@@ -198,6 +199,7 @@ async function loadStatus(invoke) {
   document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
   prompt.disabled = !connected || chatRunning;
   send.disabled = !connected || chatRunning;
+  document.querySelector("#new-conversation").disabled = chatRunning;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
@@ -223,6 +225,24 @@ function appendMessage(role, text) {
   messages.append(message);
   messages.scrollTop = messages.scrollHeight;
   return content;
+}
+
+function appendContextSeparator(reason) {
+  const messages = document.querySelector("#chat-messages");
+  const separator = document.createElement("section");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const labels = {
+    repository_changed: "Repository changed",
+    model_configuration_changed: "Model configuration changed",
+    repository_and_model_changed: "Repository and model configuration changed",
+  };
+  separator.className = "conversation-context-separator";
+  title.textContent = "New conversation context";
+  detail.textContent = labels[reason] ?? "New conversation context";
+  separator.append(title, detail);
+  messages.append(separator);
+  messages.scrollTop = messages.scrollHeight;
 }
 
 function showChatError(code) {
@@ -299,6 +319,16 @@ async function initializeDesktop() {
   document.querySelector("#refresh-repository").addEventListener("click", () => {
     void refreshRepository(invoke);
   });
+  document.querySelector("#new-conversation").addEventListener("click", async () => {
+    const chatError = document.querySelector("#chat-error");
+    chatError.hidden = true;
+    try {
+      await invoke("new_conversation");
+      appendContextSeparator();
+    } catch (error) {
+      showChatError(error);
+    }
+  });
   document.querySelector("#model-provider").addEventListener("change", () => {
     const provider = document.querySelector("#model-provider");
     const model = document.querySelector("#model-identifier");
@@ -333,7 +363,8 @@ async function initializeDesktop() {
     const chatError = document.querySelector("#chat-error");
     chatError.hidden = true;
     try {
-      await invoke("send_chat", { prompt: prompt.value });
+      const result = await invoke("send_chat", { prompt: prompt.value });
+      if (result.contextChange) appendContextSeparator(result.contextChange);
       appendMessage("You", prompt.value);
       prompt.value = "";
       chatRunning = true;

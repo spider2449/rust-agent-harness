@@ -13,6 +13,7 @@
     "allow-connect-codex",
     "allow-disconnect-codex",
     "allow-repository-snapshot",
-    "allow-send-chat"
+    "allow-send-chat",
+    "allow-new-conversation"
   ]
 }

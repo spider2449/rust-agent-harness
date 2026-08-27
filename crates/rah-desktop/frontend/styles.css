@@ -114,6 +114,16 @@ h3 {
   background: color-mix(in srgb, CanvasText 7%, transparent);
 }
 
+.conversation-context-separator {
+  padding: 0.75rem;
+  border-block: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  color: color-mix(in srgb, CanvasText 75%, Canvas);
+}
+
+.conversation-context-separator p {
+  margin: 0.3rem 0 0;
+}
+
 .chat-message p {
   margin: 0.4rem 0 0;
   overflow-wrap: anywhere;

@@ -41,6 +41,10 @@ use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "windows")]
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
 #[cfg(target_os = "windows")]
+const MAX_CONVERSATION_REPLAY_MESSAGES: usize = 8;
+#[cfg(target_os = "windows")]
+const MAX_CONVERSATION_REPLAY_BYTES: usize = 32 * 1024;
+#[cfg(target_os = "windows")]
 const DESKTOP_FS_READ_MAX_BYTES: usize = 1024 * 1024;
 #[cfg(all(test, target_os = "windows"))]
 const DESKTOP_TOOL_NAME: &str = "echo";
@@ -114,6 +118,7 @@ struct DesktopAppState {
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     model: Mutex<DesktopModelState>,
+    conversation: Mutex<DesktopConversationState>,
     close_started: AtomicBool,
 }
 
@@ -126,8 +131,103 @@ impl Default for DesktopAppState {
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             model: Mutex::new(DesktopModelState::default()),
+            conversation: Mutex::new(DesktopConversationState::default()),
             close_started: AtomicBool::new(false),
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConversationContextIdentity {
+    repository_generation: u64,
+    model_generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ConversationContextChange {
+    #[serde(rename = "repository_changed")]
+    Repository,
+    #[serde(rename = "model_configuration_changed")]
+    ModelConfiguration,
+    #[serde(rename = "repository_and_model_changed")]
+    RepositoryAndModel,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+struct DesktopConversationState {
+    identity: Option<ConversationContextIdentity>,
+    history: Vec<Message>,
+    epoch: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl DesktopConversationState {
+    fn reconcile(
+        &mut self,
+        identity: ConversationContextIdentity,
+    ) -> Option<ConversationContextChange> {
+        let Some(previous) = self.identity else {
+            self.identity = Some(identity);
+            return None;
+        };
+        if previous == identity {
+            return None;
+        }
+        self.history.clear();
+        self.identity = Some(identity);
+        self.epoch = self.epoch.wrapping_add(1);
+        Some(
+            match (
+                previous.repository_generation != identity.repository_generation,
+                previous.model_generation != identity.model_generation,
+            ) {
+                (true, true) => ConversationContextChange::RepositoryAndModel,
+                (true, false) => ConversationContextChange::Repository,
+                (false, true) => ConversationContextChange::ModelConfiguration,
+                (false, false) => unreachable!("changed conversation identity must differ"),
+            },
+        )
+    }
+
+    fn start_new(&mut self) {
+        self.history.clear();
+        self.identity = None;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    fn request_messages(&self, prompt: &str) -> Result<Vec<Message>, FrontendError> {
+        if self.history.len() > MAX_CONVERSATION_REPLAY_MESSAGES
+            || self
+                .history
+                .iter()
+                .map(|message| message.content.len())
+                .sum::<usize>()
+                > MAX_CONVERSATION_REPLAY_BYTES
+        {
+            return Err(FrontendError::ConversationContextLimit);
+        }
+        let mut messages = self.history.clone();
+        messages.push(Message {
+            role: MessageRole::User,
+            content: prompt.to_owned(),
+        });
+        Ok(messages)
+    }
+
+    fn commit(&mut self, epoch: u64, prompt: String, output: Message) -> Result<(), ()> {
+        if self.epoch != epoch || output.role != MessageRole::Assistant {
+            return Err(());
+        }
+        self.history.push(Message {
+            role: MessageRole::User,
+            content: prompt,
+        });
+        self.history.push(output);
+        Ok(())
     }
 }
 
@@ -245,6 +345,7 @@ enum FrontendError {
     ChatStartFailed,
     ChatRuntimeFailed,
     ChatCancelled,
+    ConversationContextLimit,
     GitUnavailable,
     RepositoryNotSelected,
     RepositoryInvalid,
@@ -337,6 +438,14 @@ enum ChatEvent {
     Completed,
     Failed { code: FrontendError },
     Cancelled { code: FrontendError },
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SendChatResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_change: Option<ConversationContextChange>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1102,18 +1211,13 @@ fn emit_repository_refresh(app: &AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
-async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
-    let request = AgentRequest {
-        request_id: RequestId::new(),
-        input: AgentInput {
-            messages: vec![Message {
-                role: MessageRole::User,
-                content: prompt,
-            }],
-        },
-        options: AgentOptions::default(),
-    };
-
+async fn run_chat(
+    app: AppHandle,
+    runtime: Arc<CodexRuntime>,
+    request: AgentRequest,
+    prompt: String,
+    conversation_epoch: u64,
+) {
     let handle = match runtime.start(request).await {
         Ok(handle) => handle,
         Err(error) => {
@@ -1144,7 +1248,23 @@ async fn run_chat(app: AppHandle, runtime: Arc<CodexRuntime>, prompt: String) {
             AgentEvent::ModelDelta { delta, .. } => {
                 emit_chat_event(&app, ChatEvent::Delta { text: delta })
             }
-            AgentEvent::Completed { .. } => {
+            AgentEvent::Completed { output, .. } => {
+                let committed = app
+                    .state::<DesktopAppState>()
+                    .conversation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .commit(conversation_epoch, prompt.clone(), output.message);
+                if committed.is_err() {
+                    emit_chat_event(
+                        &app,
+                        ChatEvent::Failed {
+                            code: FrontendError::ChatRuntimeFailed,
+                        },
+                    );
+                    terminal = true;
+                    break;
+                }
                 emit_chat_event(&app, ChatEvent::Completed);
                 terminal = true;
                 break;
@@ -1194,7 +1314,7 @@ async fn send_chat(
     prompt: String,
     app: AppHandle,
     state: State<'_, DesktopAppState>,
-) -> Result<(), FrontendError> {
+) -> Result<SendChatResult, FrontendError> {
     validate_prompt(&prompt)?;
     {
         let mut chat = state
@@ -1203,20 +1323,72 @@ async fn send_chat(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         begin_chat(&mut chat)?;
     }
-    let runtime = {
+    let (runtime, identity) = {
         let connection = state
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*connection {
-            ConnectionState::Connected { runtime, .. } => Arc::clone(runtime),
+            ConnectionState::Connected {
+                runtime,
+                repository_generation,
+                model_generation,
+            } => (
+                Arc::clone(runtime),
+                ConversationContextIdentity {
+                    repository_generation: *repository_generation,
+                    model_generation: *model_generation,
+                },
+            ),
             _ => {
                 state.finish_chat();
                 return Err(FrontendError::CodexNotConnected);
             }
         }
     };
-    tauri::async_runtime::spawn(run_chat(app, runtime, prompt));
+    let (request, conversation_epoch, context_change) = {
+        let mut conversation = state
+            .conversation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let context_change = conversation.reconcile(identity);
+        let messages = match conversation.request_messages(&prompt) {
+            Ok(messages) => messages,
+            Err(error) => {
+                state.finish_chat();
+                return Err(error);
+            }
+        };
+        (
+            AgentRequest {
+                request_id: RequestId::new(),
+                input: AgentInput { messages },
+                options: AgentOptions::default(),
+            },
+            conversation.epoch,
+            context_change,
+        )
+    };
+    tauri::async_runtime::spawn(run_chat(app, runtime, request, prompt, conversation_epoch));
+    Ok(SendChatResult { context_change })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn new_conversation(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+    if *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == ChatState::Running
+    {
+        return Err(FrontendError::ChatAlreadyRunning);
+    }
+    state
+        .conversation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .start_new();
     Ok(())
 }
 
@@ -1233,7 +1405,8 @@ fn main() -> ExitCode {
             connect_codex,
             disconnect_codex,
             repository_snapshot,
-            send_chat
+            send_chat,
+            new_conversation
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -1269,15 +1442,17 @@ fn main() {
 mod tests {
     use super::{
         ActivityEvent, ActivityResult, ChatEvent, ChatState, ConnectRequest, ConnectionState,
-        DESKTOP_TOOL_NAME, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
-        DesktopRepository, FrontendError, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        activity_event, apply_model_selection, begin_chat, current_app_status,
+        ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME,
+        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
+        DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
+        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        SendChatResult, activity_event, apply_model_selection, begin_chat, current_app_status,
         desktop_tool_registry, frontend_error, model_configuration_status,
         repository_selection_allowed, repository_tool_authority, request_connect, validate_prompt,
     };
     use rah_protocol::{
-        AgentEvent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolInput, ToolName,
-        ToolOutput,
+        AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
+        ToolInput, ToolName, ToolOutput,
     };
     use rah_runtime_codex::{
         CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
@@ -1290,6 +1465,13 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    fn message(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: content.to_owned(),
+        }
+    }
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -1803,5 +1985,206 @@ mod tests {
             "reconnect required"
         );
         assert_eq!(model_configuration_status(Some(5), 5), "active");
+    }
+
+    #[test]
+    fn conversation_builds_and_commits_only_complete_alternating_pairs() {
+        let mut conversation = DesktopConversationState::default();
+        let identity = ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 5,
+        };
+        assert_eq!(conversation.reconcile(identity), None);
+        assert_eq!(
+            conversation.request_messages("one"),
+            Ok(vec![message(MessageRole::User, "one")])
+        );
+        assert_eq!(
+            conversation.commit(
+                0,
+                "one".to_owned(),
+                message(MessageRole::Assistant, "answer one")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            conversation.request_messages("two"),
+            Ok(vec![
+                message(MessageRole::User, "one"),
+                message(MessageRole::Assistant, "answer one"),
+                message(MessageRole::User, "two"),
+            ])
+        );
+        assert_eq!(
+            conversation.commit(
+                0,
+                "two".to_owned(),
+                message(MessageRole::Assistant, "answer two")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            conversation.history,
+            vec![
+                message(MessageRole::User, "one"),
+                message(MessageRole::Assistant, "answer one"),
+                message(MessageRole::User, "two"),
+                message(MessageRole::Assistant, "answer two"),
+            ]
+        );
+    }
+
+    #[test]
+    fn conversation_never_commits_failed_cancelled_start_or_incomplete_turns() {
+        let mut conversation = DesktopConversationState::default();
+        conversation.reconcile(ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 5,
+        });
+        let before = conversation.history.clone();
+        assert_eq!(
+            conversation.request_messages("pending"),
+            Ok(vec![message(MessageRole::User, "pending")])
+        );
+        assert_eq!(conversation.history, before);
+        assert_eq!(
+            conversation.commit(
+                0,
+                "pending".to_owned(),
+                message(MessageRole::Tool, "tool output")
+            ),
+            Err(())
+        );
+        assert_eq!(conversation.history, before);
+    }
+
+    #[test]
+    fn conversation_context_changes_clear_history_with_closed_reasons_and_same_context_keeps_it() {
+        let mut conversation = DesktopConversationState::default();
+        let original = ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 5,
+        };
+        conversation.reconcile(original);
+        conversation
+            .commit(
+                0,
+                "one".to_owned(),
+                message(MessageRole::Assistant, "answer"),
+            )
+            .unwrap();
+        assert_eq!(conversation.reconcile(original), None);
+        assert_eq!(conversation.history.len(), 2);
+        assert_eq!(
+            conversation.reconcile(ConversationContextIdentity {
+                repository_generation: 2,
+                model_generation: 5
+            }),
+            Some(ConversationContextChange::Repository)
+        );
+        assert!(conversation.history.is_empty());
+        conversation
+            .commit(
+                1,
+                "two".to_owned(),
+                message(MessageRole::Assistant, "answer"),
+            )
+            .unwrap();
+        assert_eq!(
+            conversation.reconcile(ConversationContextIdentity {
+                repository_generation: 2,
+                model_generation: 6
+            }),
+            Some(ConversationContextChange::ModelConfiguration)
+        );
+        assert_eq!(
+            conversation.reconcile(ConversationContextIdentity {
+                repository_generation: 3,
+                model_generation: 7
+            }),
+            Some(ConversationContextChange::RepositoryAndModel)
+        );
+    }
+
+    #[test]
+    fn new_conversation_clears_history_and_invalidates_stale_completion() {
+        let mut conversation = DesktopConversationState::default();
+        conversation.reconcile(ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 5,
+        });
+        conversation
+            .commit(
+                0,
+                "one".to_owned(),
+                message(MessageRole::Assistant, "answer"),
+            )
+            .unwrap();
+        conversation.start_new();
+        assert!(conversation.history.is_empty());
+        assert_eq!(
+            conversation.commit(
+                0,
+                "stale".to_owned(),
+                message(MessageRole::Assistant, "answer")
+            ),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn conversation_replay_limits_are_closed_and_inclusive() {
+        let mut conversation = DesktopConversationState {
+            history: (0..MAX_CONVERSATION_REPLAY_MESSAGES)
+                .map(|_| message(MessageRole::User, "x"))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(conversation.request_messages("next").is_ok());
+        conversation
+            .history
+            .push(message(MessageRole::Assistant, "x"));
+        assert_eq!(
+            conversation.request_messages("next"),
+            Err(FrontendError::ConversationContextLimit)
+        );
+        let mut byte_limited = DesktopConversationState {
+            history: vec![message(
+                MessageRole::User,
+                &"x".repeat(MAX_CONVERSATION_REPLAY_BYTES),
+            )],
+            ..Default::default()
+        };
+        assert!(byte_limited.request_messages("next").is_ok());
+        byte_limited
+            .history
+            .push(message(MessageRole::Assistant, "x"));
+        assert_eq!(
+            byte_limited.request_messages("next"),
+            Err(FrontendError::ConversationContextLimit)
+        );
+    }
+
+    #[test]
+    fn send_chat_result_serializes_only_the_closed_context_change_contract() {
+        let serialized = serde_json::to_string(&SendChatResult {
+            context_change: Some(ConversationContextChange::RepositoryAndModel),
+        })
+        .unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"contextChange":"repository_and_model_changed"}"#
+        );
+        for forbidden in [
+            "generation",
+            "session",
+            "thread",
+            "path",
+            "endpoint",
+            "credential",
+            "token",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 }
