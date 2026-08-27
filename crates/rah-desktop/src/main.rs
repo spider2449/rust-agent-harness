@@ -273,6 +273,9 @@ enum ActivityResult {
 #[cfg(target_os = "windows")]
 fn frontend_error(error: &CodexAdapterError) -> FrontendError {
     match error {
+        CodexAdapterError::InvalidModelProviderConfig { .. } => {
+            FrontendError::CodexConnectionFailed
+        }
         CodexAdapterError::ExecutableDiscovery { .. } => FrontendError::CodexNotFound,
         CodexAdapterError::VersionMismatch { .. } => FrontendError::UnsupportedCodexVersion,
         CodexAdapterError::SchemaInspection { .. } | CodexAdapterError::SchemaMismatch { .. } => {

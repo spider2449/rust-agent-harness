@@ -27,6 +27,7 @@ use crate::{
     CodexAdapterError,
     bridge::{BridgeConfig, BridgeControl, ToolSnapshot, run_bridge, snapshot_tools},
     connection::{AppServerConnection, ConnectionEvent},
+    model_config::{CodexModelConfig, CodexModelProvider},
     process::ProcessTransport,
     transport::AppServerTransport,
 };
@@ -69,6 +70,7 @@ pub struct CodexRuntime {
     connection: Arc<AppServerConnection>,
     sessions: Arc<Mutex<HashMap<SessionId, SessionRecord>>>,
     bridge: Option<BridgeMode>,
+    model_config: CodexModelConfig,
 }
 
 impl CodexRuntime {
@@ -76,6 +78,15 @@ impl CodexRuntime {
     pub async fn connect(executable: impl AsRef<Path>) -> Result<Self, CodexAdapterError> {
         let transport = ProcessTransport::start(executable.as_ref(), false).await?;
         Self::from_transport(transport).await
+    }
+
+    /// Starts Codex with an immutable explicit or inherited model configuration.
+    pub async fn connect_with_model_config(
+        executable: impl AsRef<Path>,
+        model_config: CodexModelConfig,
+    ) -> Result<Self, CodexAdapterError> {
+        let transport = ProcessTransport::start(executable.as_ref(), false).await?;
+        Self::from_transport_with_model_config(transport, model_config).await
     }
 
     /// Starts Codex with the experimental RAH Tool Bridge explicitly enabled.
@@ -88,10 +99,34 @@ impl CodexRuntime {
         Self::from_transport_bridge(transport, registry, allowed_permissions).await
     }
 
+    /// Starts Codex with the RAH Tool Bridge and an immutable model configuration.
+    pub async fn connect_tool_bridge_with_model_config(
+        executable: impl AsRef<Path>,
+        registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
+        model_config: CodexModelConfig,
+    ) -> Result<Self, CodexAdapterError> {
+        let transport = ProcessTransport::start(executable.as_ref(), true).await?;
+        Self::from_transport_bridge_with_model_config(
+            transport,
+            registry,
+            allowed_permissions,
+            model_config,
+        )
+        .await
+    }
+
     pub(crate) async fn from_transport(
         transport: impl AppServerTransport,
     ) -> Result<Self, CodexAdapterError> {
-        Self::from_transport_mode(transport, None).await
+        Self::from_transport_with_model_config(transport, CodexModelConfig::Inherit).await
+    }
+
+    pub(crate) async fn from_transport_with_model_config(
+        transport: impl AppServerTransport,
+        model_config: CodexModelConfig,
+    ) -> Result<Self, CodexAdapterError> {
+        Self::from_transport_mode(transport, None, model_config).await
     }
 
     pub(crate) async fn from_transport_bridge(
@@ -99,12 +134,28 @@ impl CodexRuntime {
         registry: Arc<ToolRegistry>,
         allowed_permissions: Vec<PermissionLevel>,
     ) -> Result<Self, CodexAdapterError> {
+        Self::from_transport_bridge_with_model_config(
+            transport,
+            registry,
+            allowed_permissions,
+            CodexModelConfig::Inherit,
+        )
+        .await
+    }
+
+    pub(crate) async fn from_transport_bridge_with_model_config(
+        transport: impl AppServerTransport,
+        registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
+        model_config: CodexModelConfig,
+    ) -> Result<Self, CodexAdapterError> {
         Self::from_transport_mode(
             transport,
             Some(BridgeConfig {
                 registry,
                 allowed_permissions: Arc::new(allowed_permissions),
             }),
+            model_config,
         )
         .await
     }
@@ -112,6 +163,7 @@ impl CodexRuntime {
     async fn from_transport_mode(
         transport: impl AppServerTransport,
         bridge_config: Option<BridgeConfig>,
+        model_config: CodexModelConfig,
     ) -> Result<Self, CodexAdapterError> {
         let bridge_enabled = bridge_config.is_some();
         let connection =
@@ -143,6 +195,7 @@ impl CodexRuntime {
             connection,
             sessions,
             bridge,
+            model_config,
         })
     }
 
@@ -183,11 +236,11 @@ impl AgentRuntime for CodexRuntime {
         let receiver = self.connection.subscribe();
         let (thread_params, bridge_tools, bridge_aliases) = if let Some(bridge) = &self.bridge {
             let snapshot = snapshot_tools(&bridge.config.registry);
-            let params = restricted_thread_params(Some(snapshot.dynamic_tools));
+            let params = restricted_thread_params(Some(snapshot.dynamic_tools), &self.model_config);
             (params, snapshot.by_alias, snapshot.by_name)
         } else {
             (
-                restricted_thread_params(None),
+                restricted_thread_params(None, &self.model_config),
                 HashMap::new(),
                 HashMap::new(),
             )
@@ -198,6 +251,7 @@ impl AgentRuntime for CodexRuntime {
             .await
             .map_err(agent_error)?;
         let thread_id = required_string(&thread, &["thread", "id"]).map_err(agent_error)?;
+        verify_effective_model_config(&thread, &self.model_config).map_err(agent_error)?;
         let turn = self
             .connection
             .request(
@@ -302,7 +356,10 @@ impl AgentRuntime for CodexRuntime {
     }
 }
 
-fn restricted_thread_params(dynamic_tools: Option<Vec<Value>>) -> Value {
+fn restricted_thread_params(
+    dynamic_tools: Option<Vec<Value>>,
+    model_config: &CodexModelConfig,
+) -> Value {
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "read-only",
@@ -317,7 +374,74 @@ fn restricted_thread_params(dynamic_tools: Option<Vec<Value>>) -> Value {
     if let Some(dynamic_tools) = dynamic_tools {
         params["dynamicTools"] = Value::Array(dynamic_tools);
     }
+    if let CodexModelConfig::Explicit(selection) = model_config {
+        params["model"] = Value::String(selection.model().to_owned());
+        match selection.provider() {
+            CodexModelProvider::OpenAi => {
+                params["modelProvider"] = Value::String("openai".to_owned())
+            }
+            CodexModelProvider::Ollama => {
+                params["modelProvider"] = Value::String("ollama".to_owned())
+            }
+            CodexModelProvider::LmStudio => {
+                params["modelProvider"] = Value::String("lmstudio".to_owned())
+            }
+            CodexModelProvider::LlamaCpp(provider) => {
+                params["modelProvider"] = Value::String("rah-llamacpp".to_owned());
+                let mut definition = json!({
+                    "name": "RAH llama.cpp",
+                    "base_url": provider.base_url(),
+                    "wire_api": "responses",
+                    "requires_openai_auth": false,
+                });
+                if let Some(environment_variable) = provider.credential_environment_variable() {
+                    definition["env_key"] = Value::String(environment_variable.to_owned());
+                }
+                params["config"]["model_providers"]["rah-llamacpp"] = definition;
+            }
+            CodexModelProvider::Custom(provider) => {
+                params["modelProvider"] = Value::String("rah-custom".to_owned());
+                let mut definition = json!({
+                    "name": "RAH custom Responses provider",
+                    "base_url": provider.base_url(),
+                    "wire_api": "responses",
+                    "requires_openai_auth": provider.credential_environment_variable().is_some(),
+                });
+                if let Some(environment_variable) = provider.credential_environment_variable() {
+                    definition["env_key"] = Value::String(environment_variable.to_owned());
+                }
+                params["config"]["model_providers"]["rah-custom"] = definition;
+            }
+        }
+    }
     params
+}
+
+fn verify_effective_model_config(
+    thread: &Value,
+    model_config: &CodexModelConfig,
+) -> Result<(), CodexAdapterError> {
+    let CodexModelConfig::Explicit(selection) = model_config else {
+        return Ok(());
+    };
+    let effective_model = required_string(thread, &["thread", "model"])?;
+    let effective_provider = required_string(thread, &["thread", "modelProvider"])?;
+    let requested_provider = match selection.provider() {
+        CodexModelProvider::OpenAi => "openai",
+        CodexModelProvider::Ollama => "ollama",
+        CodexModelProvider::LmStudio => "lmstudio",
+        CodexModelProvider::LlamaCpp(_) => "rah-llamacpp",
+        CodexModelProvider::Custom(_) => "rah-custom",
+    };
+    if effective_model != selection.model() || effective_provider != requested_provider {
+        return Err(CodexAdapterError::ProtocolViolation {
+            message: format!(
+                "explicit model/provider mismatch: requested model `{}` provider `{requested_provider}`, effective model `{effective_model}` provider `{effective_provider}`",
+                selection.model()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn translate_input(request: &AgentRequest) -> Vec<Value> {
@@ -635,9 +759,138 @@ mod tests {
     use rah_runtime::AgentRuntime;
     use serde_json::json;
 
-    use crate::test_support::fake_transport;
+    use crate::{
+        CodexCustomProvider, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
+        CodexModelSelection, test_support::fake_transport,
+    };
 
-    use super::CodexRuntime;
+    use super::{CodexRuntime, restricted_thread_params};
+
+    fn explicit(model: &str, provider: CodexModelProvider) -> CodexModelConfig {
+        CodexModelConfig::Explicit(CodexModelSelection::new(model, provider).expect("selection"))
+    }
+
+    fn sample_request() -> AgentRequest {
+        AgentRequest {
+            request_id: RequestId::new(),
+            input: AgentInput {
+                messages: vec![Message {
+                    role: MessageRole::User,
+                    content: "test prompt".to_owned(),
+                }],
+            },
+            options: AgentOptions::default(),
+        }
+    }
+
+    #[test]
+    fn inherited_model_config_preserves_the_task_106_thread_shape() {
+        assert_eq!(
+            restricted_thread_params(None, &CodexModelConfig::Inherit),
+            json!({
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "serviceName": "rah-runtime-codex",
+                "config": {
+                    "features": { "shell_tool": false, "unified_exec": false },
+                    "tools": { "web_search": false, "view_image": false },
+                    "apps": { "_default": { "enabled": false } },
+                    "mcp_servers": {}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_builtin_provider_ids_are_translated_without_provider_definitions() {
+        for (provider, provider_id) in [
+            (CodexModelProvider::OpenAi, "openai"),
+            (CodexModelProvider::Ollama, "ollama"),
+            (CodexModelProvider::LmStudio, "lmstudio"),
+        ] {
+            let params = restricted_thread_params(None, &explicit("host-model", provider));
+            assert_eq!(params["model"], "host-model");
+            assert_eq!(params["modelProvider"], provider_id);
+            assert!(params["config"].get("model_providers").is_none());
+        }
+    }
+
+    #[test]
+    fn llama_cpp_and_custom_providers_are_responses_only_private_providers() {
+        let llama = restricted_thread_params(
+            None,
+            &explicit(
+                "rah-local-model",
+                CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default()),
+            ),
+        );
+        assert_eq!(llama["modelProvider"], "rah-llamacpp");
+        assert_eq!(
+            llama["config"]["model_providers"]["rah-llamacpp"],
+            json!({
+                "name": "RAH llama.cpp",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "wire_api": "responses",
+                "requires_openai_auth": false
+            })
+        );
+        let custom = restricted_thread_params(
+            None,
+            &explicit(
+                "custom-model",
+                CodexModelProvider::Custom(
+                    CodexCustomProvider::new(
+                        "https://example.test/v1",
+                        Some("CUSTOM_TOKEN".to_owned()),
+                    )
+                    .expect("provider"),
+                ),
+            ),
+        );
+        assert_eq!(custom["modelProvider"], "rah-custom");
+        assert_eq!(
+            custom["config"]["model_providers"]["rah-custom"]["wire_api"],
+            "responses"
+        );
+        assert_eq!(
+            custom["config"]["model_providers"]["rah-custom"]["env_key"],
+            "CUSTOM_TOKEN"
+        );
+    }
+
+    #[test]
+    fn invalid_model_provider_configuration_is_rejected_without_storing_secrets() {
+        for model in [
+            "".to_owned(),
+            "  ".to_owned(),
+            "bad\0model".to_owned(),
+            "x".repeat(257),
+        ] {
+            assert!(CodexModelSelection::new(model, CodexModelProvider::OpenAi).is_err());
+        }
+        for url in [
+            "".to_owned(),
+            "ftp://example.test".to_owned(),
+            "https://bad\0.test".to_owned(),
+            format!("https://{}", "a".repeat(2_050)),
+        ] {
+            assert!(CodexCustomProvider::new(url, None).is_err());
+        }
+        for environment_variable in [
+            "1TOKEN".to_owned(),
+            "TOKEN-NAME".to_owned(),
+            "".to_owned(),
+            "A".repeat(129),
+        ] {
+            assert!(
+                CodexLlamaCppProvider::new(
+                    "http://127.0.0.1:8080/v1",
+                    Some(environment_variable.to_owned())
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn start_streams_restricted_agent_lifecycle() {
@@ -718,5 +971,68 @@ mod tests {
 
         runtime.shutdown().await.expect("shutdown");
         assert!(peer.stopped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn explicit_effective_model_and_provider_must_match() {
+        let (transport, mut peer) = fake_transport();
+        let config = explicit(
+            "rah-local-model",
+            CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default()),
+        );
+        let connecting = tokio::spawn(CodexRuntime::from_transport_with_model_config(
+            transport, config,
+        ));
+        peer.respond("initialize", json!({})).await;
+        peer.expect_notification("initialized").await;
+        let runtime = Arc::new(connecting.await.expect("connection task").expect("runtime"));
+
+        let starting = {
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move { runtime.start(sample_request()).await })
+        };
+        let thread = peer.respond("thread/start", json!({
+            "thread": { "id": "thread", "model": "rah-local-model", "modelProvider": "rah-llamacpp" }
+        })).await;
+        assert_eq!(thread["params"]["modelProvider"], "rah-llamacpp");
+        peer.respond("turn/start", json!({ "turn": { "id": "turn" } }))
+            .await;
+        let handle = starting
+            .await
+            .expect("start task")
+            .expect("matching selection");
+        peer.notify("turn/completed", json!({ "threadId": "thread", "turn": { "id": "turn", "status": "completed", "items": [] } }));
+        let _ = handle.into_events().collect::<Vec<_>>().await;
+        runtime.shutdown().await.expect("shutdown");
+
+        let (transport, mut peer) = fake_transport();
+        let connecting = tokio::spawn(CodexRuntime::from_transport_with_model_config(
+            transport,
+            explicit("selected", CodexModelProvider::OpenAi),
+        ));
+        peer.respond("initialize", json!({})).await;
+        peer.expect_notification("initialized").await;
+        let runtime = Arc::new(connecting.await.expect("connection task").expect("runtime"));
+        let failing = {
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move { runtime.start(sample_request()).await })
+        };
+        peer.respond(
+            "thread/start",
+            json!({
+                "thread": { "id": "thread", "model": "fallback", "modelProvider": "openai" }
+            }),
+        )
+        .await;
+        let error = match failing.await.expect("start task") {
+            Ok(_) => panic!("mismatch must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("explicit model/provider mismatch")
+        );
+        runtime.shutdown().await.expect("shutdown");
     }
 }

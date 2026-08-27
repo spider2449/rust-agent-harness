@@ -3,6 +3,7 @@
 mod bridge;
 mod connection;
 mod errors;
+mod model_config;
 mod process;
 mod protocol;
 mod runtime;
@@ -16,6 +17,10 @@ mod runtime_tests;
 mod test_support;
 
 pub use errors::CodexAdapterError;
+pub use model_config::{
+    CodexCustomProvider, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
+    CodexModelSelection,
+};
 pub use runtime::CodexRuntime;
 
 /// Exact Codex CLI version supported by this adapter release.

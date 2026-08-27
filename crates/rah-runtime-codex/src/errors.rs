@@ -5,6 +5,12 @@ use thiserror::Error;
 /// Typed failures produced by the private Codex app-server adapter.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// Host-owned model/provider selection failed validation.
+    #[error("invalid Codex model/provider configuration: {message}")]
+    InvalidModelProviderConfig {
+        /// Validation failure detail without credential values.
+        message: String,
+    },
     /// The configured executable could not be found or invoked.
     #[error("failed to discover Codex executable `{path}`: {source}")]
     ExecutableDiscovery {
