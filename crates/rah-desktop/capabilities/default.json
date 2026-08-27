@@ -7,6 +7,8 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-app-status",
+    "allow-model-configuration",
+    "allow-set-model-configuration",
     "allow-choose-repository",
     "allow-connect-codex",
     "allow-disconnect-codex",

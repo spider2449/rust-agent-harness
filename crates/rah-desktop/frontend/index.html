@@ -25,6 +25,22 @@
           <p id="connection-error" class="connection-error" hidden></p>
           <button id="codex-connection" type="button">Connect Codex</button>
         </section>
+        <section class="model" aria-labelledby="model-title">
+          <h2 id="model-title">Model</h2>
+          <p id="model-error" class="connection-error" hidden></p>
+          <label for="model-provider">Model Provider</label>
+          <select id="model-provider">
+            <option value="inherit">Use Codex configuration</option>
+            <option value="openai">OpenAI</option>
+            <option value="ollama">Ollama</option>
+            <option value="lm_studio">LM Studio</option>
+            <option value="llama_cpp">llama.cpp</option>
+          </select>
+          <label for="model-identifier">Model</label>
+          <input id="model-identifier" type="text" maxlength="256" />
+          <p id="model-hint" class="model-hint"></p>
+          <button id="apply-model-configuration" type="button">Apply Model Configuration</button>
+        </section>
         <section class="repository" aria-labelledby="repository-title">
           <h2 id="repository-title">Repository</h2>
           <p id="repository-error" class="connection-error" hidden></p>

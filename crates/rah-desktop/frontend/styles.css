@@ -136,6 +136,28 @@ textarea {
   font: inherit;
 }
 
+select,
+input {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid currentColor;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.model label {
+  display: block;
+  margin-top: 1rem;
+  font-weight: 600;
+}
+
+.model-hint {
+  color: color-mix(in srgb, CanvasText 65%, transparent);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

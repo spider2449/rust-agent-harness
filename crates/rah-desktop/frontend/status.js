@@ -11,6 +11,7 @@ const runtimeRows = [
   ["Profile", "profileStatus"],
   ["Repository", "repositoryStatus"],
   ["Repository tools", "repositoryToolsStatus"],
+  ["Model configuration", "modelConfigurationStatus"],
 ];
 
 let chatRunning = false;
@@ -61,8 +62,36 @@ function errorMessage(error) {
     repository_observation_failed: "Repository observation failed",
     repository_dialog_failed: "Repository picker failed",
     repository_busy: "Repository selection is unavailable while chat is running",
+    model_configuration_invalid: "Invalid model configuration",
+    model_configuration_busy: "Model configuration is unavailable while chat is running",
   };
   return messages[error] ?? "Desktop frontend unavailable";
+}
+
+function modelHint(provider) {
+  const hints = {
+    inherit: "Uses Codex host configuration",
+    openai: "Codex built-in OpenAI provider",
+    ollama: "Codex built-in Ollama provider",
+    lm_studio: "Codex built-in LM Studio provider",
+    llama_cpp: "Local endpoint: http://127.0.0.1:8080/v1",
+  };
+  return hints[provider] ?? "Invalid model configuration";
+}
+
+function renderModelConfiguration(configuration) {
+  const provider = document.querySelector("#model-provider");
+  const model = document.querySelector("#model-identifier");
+  provider.value = configuration.provider;
+  model.value = configuration.model ?? "";
+  model.disabled = configuration.provider === "inherit" || chatRunning;
+  provider.disabled = chatRunning;
+  document.querySelector("#apply-model-configuration").disabled = chatRunning;
+  document.querySelector("#model-hint").textContent = modelHint(configuration.provider);
+}
+
+async function refreshModelConfiguration(invoke) {
+  renderModelConfiguration(await invoke("model_configuration"));
 }
 
 function renderRepositorySnapshot(snapshot) {
@@ -169,6 +198,11 @@ async function loadStatus(invoke) {
   document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
   prompt.disabled = !connected || chatRunning;
   send.disabled = !connected || chatRunning;
+  const model = document.querySelector("#model-identifier");
+  const provider = document.querySelector("#model-provider");
+  document.querySelector("#apply-model-configuration").disabled = chatRunning;
+  provider.disabled = chatRunning;
+  model.disabled = chatRunning || provider.value === "inherit";
   if (status.codexError) {
     connectionError.textContent = errorMessage(status.codexError);
     connectionError.hidden = false;
@@ -265,6 +299,33 @@ async function initializeDesktop() {
   document.querySelector("#refresh-repository").addEventListener("click", () => {
     void refreshRepository(invoke);
   });
+  document.querySelector("#model-provider").addEventListener("change", () => {
+    const provider = document.querySelector("#model-provider");
+    const model = document.querySelector("#model-identifier");
+    model.disabled = chatRunning || provider.value === "inherit";
+    document.querySelector("#model-hint").textContent = modelHint(provider.value);
+  });
+  document.querySelector("#apply-model-configuration").addEventListener("click", async () => {
+    const error = document.querySelector("#model-error");
+    error.hidden = true;
+    const provider = document.querySelector("#model-provider").value;
+    const model = document.querySelector("#model-identifier").value;
+    try {
+      await invoke("set_model_configuration", {
+        provider,
+        model: provider === "inherit" ? null : model,
+      });
+      await refreshModelConfiguration(invoke);
+      await loadStatus(invoke);
+      if ((await invoke("model_configuration")).status === "reconnect required") {
+        error.textContent = "Reconnect Codex to activate this model configuration.";
+        error.hidden = false;
+      }
+    } catch (modelError) {
+      error.textContent = errorMessage(modelError);
+      error.hidden = false;
+    }
+  });
   document.querySelector("#chat-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (chatRunning) return;
@@ -282,6 +343,7 @@ async function initializeDesktop() {
     }
   });
   await loadStatus(invoke);
+  await refreshModelConfiguration(invoke);
   setFrontendBootStatus("Desktop UI ready");
 }
 

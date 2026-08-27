@@ -10,7 +10,10 @@ use rah_protocol::{
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
 #[cfg(target_os = "windows")]
-use rah_runtime_codex::{CodexAdapterError, CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{
+    CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
+    CodexModelSelection, CodexRuntime, SUPPORTED_CODEX_VERSION,
+};
 #[cfg(target_os = "windows")]
 use rah_tools::{
     EchoTool, FsReadTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
@@ -18,7 +21,7 @@ use rah_tools::{
     RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use std::{
     collections::HashMap,
@@ -61,6 +64,7 @@ struct AppStatus {
     profile_status: &'static str,
     repository_status: &'static str,
     repository_tools_status: &'static str,
+    model_configuration_status: &'static str,
 }
 
 #[cfg(target_os = "windows")]
@@ -70,6 +74,7 @@ enum ConnectionState {
     Connected {
         runtime: Arc<CodexRuntime>,
         repository_generation: u64,
+        model_generation: u64,
     },
     Disconnecting,
     Error(FrontendError),
@@ -108,6 +113,7 @@ struct DesktopAppState {
     chat: Mutex<ChatState>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
+    model: Mutex<DesktopModelState>,
     close_started: AtomicBool,
 }
 
@@ -119,6 +125,7 @@ impl Default for DesktopAppState {
             chat: Mutex::new(ChatState::Idle),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
+            model: Mutex::new(DesktopModelState::default()),
             close_started: AtomicBool::new(false),
         }
     }
@@ -150,7 +157,17 @@ impl DesktopAppState {
             .repository_generation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        current_app_status(&connection, repository_selected, repository_generation)
+        let model_generation = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
+        current_app_status(
+            &connection,
+            repository_selected,
+            repository_generation,
+            model_generation,
+        )
     }
 
     fn close_started(&self) -> bool {
@@ -234,6 +251,81 @@ enum FrontendError {
     RepositoryObservationFailed,
     RepositoryDialogFailed,
     RepositoryBusy,
+    ModelConfigurationInvalid,
+    ModelConfigurationBusy,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DesktopModelProvider {
+    Inherit,
+    #[serde(rename = "openai")]
+    OpenAi,
+    Ollama,
+    LmStudio,
+    LlamaCpp,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesktopModelSelection {
+    provider: DesktopModelProvider,
+    model: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl Default for DesktopModelSelection {
+    fn default() -> Self {
+        Self {
+            provider: DesktopModelProvider::Inherit,
+            model: None,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl DesktopModelSelection {
+    fn codex_model_config(&self) -> Result<CodexModelConfig, FrontendError> {
+        let provider = match self.provider {
+            DesktopModelProvider::Inherit => {
+                return if self.model.is_none() {
+                    Ok(CodexModelConfig::Inherit)
+                } else {
+                    Err(FrontendError::ModelConfigurationInvalid)
+                };
+            }
+            DesktopModelProvider::OpenAi => CodexModelProvider::OpenAi,
+            DesktopModelProvider::Ollama => CodexModelProvider::Ollama,
+            DesktopModelProvider::LmStudio => CodexModelProvider::LmStudio,
+            DesktopModelProvider::LlamaCpp => {
+                CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local())
+            }
+        };
+        let model = self
+            .model
+            .as_deref()
+            .ok_or(FrontendError::ModelConfigurationInvalid)?;
+        CodexModelSelection::new(model, provider)
+            .map(CodexModelConfig::Explicit)
+            .map_err(|_| FrontendError::ModelConfigurationInvalid)
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+struct DesktopModelState {
+    selection: DesktopModelSelection,
+    generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ModelConfigurationPresentation {
+    provider: DesktopModelProvider,
+    model: Option<String>,
+    status: &'static str,
 }
 
 #[cfg(target_os = "windows")]
@@ -295,6 +387,7 @@ fn current_app_status(
     connection: &ConnectionState,
     repository_selected: bool,
     repository_generation: u64,
+    model_generation: u64,
 ) -> AppStatus {
     let (runtime_status, codex_status, codex_version, codex_error) = match connection {
         ConnectionState::NotConnected => ("not connected", "not connected", None, None),
@@ -334,6 +427,27 @@ fn current_app_status(
             },
             repository_generation,
         ),
+        model_configuration_status: model_configuration_status(
+            match connection {
+                ConnectionState::Connected {
+                    model_generation, ..
+                } => Some(*model_generation),
+                _ => None,
+            },
+            model_generation,
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn model_configuration_status(
+    connection_generation: Option<u64>,
+    model_generation: u64,
+) -> &'static str {
+    match connection_generation {
+        Some(connection_generation) if connection_generation == model_generation => "active",
+        Some(_) => "reconnect required",
+        None => "inactive",
     }
 }
 
@@ -356,6 +470,71 @@ fn repository_tool_authority(
 #[tauri::command]
 fn app_status(state: State<'_, DesktopAppState>) -> AppStatus {
     state.status()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationPresentation {
+    let (selection, generation) = {
+        let model = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (model.selection.clone(), model.generation)
+    };
+    let connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ModelConfigurationPresentation {
+        provider: selection.provider,
+        model: selection.model,
+        status: model_configuration_status(
+            match &*connection {
+                ConnectionState::Connected {
+                    model_generation, ..
+                } => Some(*model_generation),
+                _ => None,
+            },
+            generation,
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_model_configuration(
+    state: State<'_, DesktopAppState>,
+    provider: DesktopModelProvider,
+    model: Option<String>,
+) -> Result<(), FrontendError> {
+    let chat = *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let selection = DesktopModelSelection { provider, model };
+    let mut current = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_model_selection(&mut current, chat, selection)
+}
+
+#[cfg(target_os = "windows")]
+fn apply_model_selection(
+    current: &mut DesktopModelState,
+    chat: ChatState,
+    selection: DesktopModelSelection,
+) -> Result<(), FrontendError> {
+    if chat == ChatState::Running {
+        return Err(FrontendError::ModelConfigurationBusy);
+    }
+    selection.codex_model_config()?;
+    if current.selection != selection {
+        current.selection = selection;
+        current.generation += 1;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -708,6 +887,23 @@ async fn connect_codex(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (repository, generation)
     };
+    let (model_config, model_generation) = {
+        let model = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match model.selection.codex_model_config() {
+            Ok(config) => (config, model.generation),
+            Err(error) => {
+                let mut connection = state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *connection = ConnectionState::Error(error);
+                return Err(error);
+            }
+        }
+    };
     let registry = match desktop_tool_registry(repository.as_deref()) {
         Ok(registry) => registry,
         Err(error) => {
@@ -721,7 +917,7 @@ async fn connect_codex(
         }
     };
 
-    match CodexRuntime::connect_tool_bridge(
+    match CodexRuntime::connect_tool_bridge_with_model_config(
         selected_codex_executable(),
         registry,
         if repository.is_some() {
@@ -733,6 +929,7 @@ async fn connect_codex(
         } else {
             vec![PermissionLevel::None]
         },
+        model_config,
     )
     .await
     {
@@ -744,6 +941,7 @@ async fn connect_codex(
             *connection = ConnectionState::Connected {
                 runtime: Arc::new(runtime),
                 repository_generation,
+                model_generation,
             };
             Ok(ConnectionResult::connected())
         }
@@ -1029,6 +1227,8 @@ fn main() -> ExitCode {
         .manage(DesktopAppState::default())
         .invoke_handler(tauri::generate_handler![
             app_status,
+            model_configuration,
+            set_model_configuration,
             choose_repository,
             connect_codex,
             disconnect_codex,
@@ -1069,15 +1269,19 @@ fn main() {
 mod tests {
     use super::{
         ActivityEvent, ActivityResult, ChatEvent, ChatState, ConnectRequest, ConnectionState,
-        DESKTOP_TOOL_NAME, DesktopRepository, FrontendError, MAX_PROMPT_BYTES, activity_event,
-        begin_chat, current_app_status, desktop_tool_registry, frontend_error,
+        DESKTOP_TOOL_NAME, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
+        DesktopRepository, FrontendError, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        activity_event, apply_model_selection, begin_chat, current_app_status,
+        desktop_tool_registry, frontend_error, model_configuration_status,
         repository_selection_allowed, repository_tool_authority, request_connect, validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolInput, ToolName,
         ToolOutput,
     };
-    use rah_runtime_codex::CodexAdapterError;
+    use rah_runtime_codex::{
+        CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
+    };
     use rah_tools::ToolContext;
     use std::{
         collections::HashMap,
@@ -1121,7 +1325,7 @@ mod tests {
 
     #[test]
     fn status_contains_only_the_desktop_application_state() {
-        let status = current_app_status(&ConnectionState::NotConnected, false, 0);
+        let status = current_app_status(&ConnectionState::NotConnected, false, 0, 0);
 
         assert_eq!(status.app_name, "RAH");
         assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
@@ -1134,6 +1338,7 @@ mod tests {
         assert_eq!(status.profile_status, "not loaded");
         assert_eq!(status.repository_status, "not selected");
         assert_eq!(status.repository_tools_status, "inactive");
+        assert_eq!(status.model_configuration_status, "inactive");
 
         let serialized = serde_json::to_string(&status).expect("status serializes");
         assert!(!serialized.contains('\\'));
@@ -1142,7 +1347,7 @@ mod tests {
 
     #[test]
     fn status_reflects_connection_transitions_without_exposing_runtime_details() {
-        let connecting = current_app_status(&ConnectionState::Connecting, false, 0);
+        let connecting = current_app_status(&ConnectionState::Connecting, false, 0, 0);
         assert_eq!(connecting.runtime_status, "not connected");
         assert_eq!(connecting.codex_status, "connecting");
         assert_eq!(connecting.codex_version, None);
@@ -1151,6 +1356,7 @@ mod tests {
         let error = current_app_status(
             &ConnectionState::Error(FrontendError::CodexConnectionFailed),
             false,
+            0,
             0,
         );
         assert_eq!(error.runtime_status, "not connected");
@@ -1178,7 +1384,7 @@ mod tests {
 
     #[test]
     fn repository_status_is_dynamic_without_exposing_repository_details() {
-        let status = current_app_status(&ConnectionState::NotConnected, true, 1);
+        let status = current_app_status(&ConnectionState::NotConnected, true, 1, 0);
         assert_eq!(status.repository_status, "selected");
         let serialized = serde_json::to_string(&status).expect("status serializes");
         assert!(!serialized.contains("git.exe"));
@@ -1464,5 +1670,138 @@ mod tests {
         );
         state = ChatState::Idle;
         assert_eq!(state, ChatState::Idle);
+    }
+
+    #[test]
+    fn desktop_model_state_defaults_to_inherit_without_a_model() {
+        let state = DesktopModelState::default();
+        assert_eq!(state.selection.provider, DesktopModelProvider::Inherit);
+        assert_eq!(state.selection.model, None);
+        assert_eq!(state.generation, 0);
+    }
+
+    #[test]
+    fn desktop_model_selection_maps_only_closed_provider_choices() {
+        let inherit = DesktopModelSelection::default().codex_model_config();
+        assert_eq!(inherit, Ok(CodexModelConfig::Inherit));
+        for (provider, expected) in [
+            (DesktopModelProvider::OpenAi, CodexModelProvider::OpenAi),
+            (DesktopModelProvider::Ollama, CodexModelProvider::Ollama),
+            (DesktopModelProvider::LmStudio, CodexModelProvider::LmStudio),
+            (
+                DesktopModelProvider::LlamaCpp,
+                CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local()),
+            ),
+        ] {
+            let selection = DesktopModelSelection {
+                provider,
+                model: Some("exact-model".to_owned()),
+            };
+            assert_eq!(
+                selection.codex_model_config(),
+                Ok(CodexModelConfig::Explicit(
+                    rah_runtime_codex::CodexModelSelection::new("exact-model", expected)
+                        .expect("test selection")
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_model_selection_rejects_invalid_or_inherit_model_values() {
+        for selection in [
+            DesktopModelSelection {
+                provider: DesktopModelProvider::OpenAi,
+                model: None,
+            },
+            DesktopModelSelection {
+                provider: DesktopModelProvider::Ollama,
+                model: Some("   ".to_owned()),
+            },
+            DesktopModelSelection {
+                provider: DesktopModelProvider::Inherit,
+                model: Some("not-allowed".to_owned()),
+            },
+        ] {
+            assert_eq!(
+                selection.codex_model_config(),
+                Err(FrontendError::ModelConfigurationInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn model_configuration_presentation_is_closed_and_sanitized() {
+        let presentation = ModelConfigurationPresentation {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("rah-local-model".to_owned()),
+            status: "active",
+        };
+        let serialized = serde_json::to_string(&presentation).expect("presentation serializes");
+        assert_eq!(
+            serialized,
+            r#"{"provider":"llama_cpp","model":"rah-local-model","status":"active"}"#
+        );
+        for forbidden in [
+            "base_url",
+            "env_key",
+            "credential",
+            "api_key",
+            "authorization",
+            "executable",
+            "provider_map",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn model_selection_changes_generation_only_when_effective_selection_changes() {
+        let mut state = DesktopModelState::default();
+        let selection = DesktopModelSelection {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("rah-local-model".to_owned()),
+        };
+        assert_eq!(
+            apply_model_selection(&mut state, ChatState::Idle, selection.clone()),
+            Ok(())
+        );
+        assert_eq!(state.generation, 1);
+        assert_eq!(
+            apply_model_selection(&mut state, ChatState::Idle, selection),
+            Ok(())
+        );
+        assert_eq!(state.generation, 1);
+    }
+
+    #[test]
+    fn model_selection_is_rejected_while_chat_is_running() {
+        let mut state = DesktopModelState::default();
+        assert_eq!(
+            apply_model_selection(
+                &mut state,
+                ChatState::Running,
+                DesktopModelSelection {
+                    provider: DesktopModelProvider::OpenAi,
+                    model: Some("test-model".to_owned()),
+                },
+            ),
+            Err(FrontendError::ModelConfigurationBusy)
+        );
+        assert_eq!(state.generation, 0);
+    }
+
+    #[test]
+    fn model_and_repository_connection_generations_are_independent() {
+        assert_eq!(model_configuration_status(None, 0), "inactive");
+        assert_eq!(model_configuration_status(Some(4), 4), "active");
+        assert_eq!(model_configuration_status(Some(4), 5), "reconnect required");
+        assert_eq!(repository_tool_authority(true, Some(4), 4), "active");
+        assert_eq!(model_configuration_status(Some(4), 5), "reconnect required");
+        assert_eq!(
+            repository_tool_authority(true, Some(4), 5),
+            "reconnect required"
+        );
+        assert_eq!(model_configuration_status(Some(5), 5), "active");
     }
 }
