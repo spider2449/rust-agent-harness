@@ -343,6 +343,14 @@ registry, tool, or sandbox contracts.
 
 ## Known limitations
 
+RAH Desktop v1 stores one bounded archive of completed conversation text in the
+current user's application-local data directory. This snapshot has no
+application-level at-rest encryption; normal Windows user-account filesystem
+protections are the first-version boundary. The Desktop-private schema does not
+intentionally persist credentials, provider-native IDs, ToolRegistry authority,
+repository paths, or tool output. Recovered transcript text is display-only and
+does not restore model, repository, tool, or replay authority.
+
 - Interactive Codex approvals are unsupported.
 - The Codex adapter and external protocols are exactly pinned compatibility
   boundaries.

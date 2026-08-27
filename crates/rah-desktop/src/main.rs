@@ -1,6 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(target_os = "windows")]
+mod conversation_persistence;
+
+#[cfg(target_os = "windows")]
+use conversation_persistence::{
+    Persistence, Presentation as ConversationTranscriptPresentation, SeparatorReason,
+    Warning as ConversationPersistenceWarning,
+};
+#[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
 use rah_protocol::{
@@ -119,12 +127,34 @@ struct DesktopAppState {
     repository_generation: Mutex<u64>,
     model: Mutex<DesktopModelState>,
     conversation: Mutex<DesktopConversationState>,
+    persistence: Mutex<Persistence>,
     close_started: AtomicBool,
 }
 
 #[cfg(target_os = "windows")]
-impl Default for DesktopAppState {
-    fn default() -> Self {
+impl DesktopAppState {
+    fn persist_separator(
+        &self,
+        reason: SeparatorReason,
+    ) -> Result<(), ConversationPersistenceWarning> {
+        self.persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append_separator(reason)
+    }
+
+    fn persist_completed_pair(
+        &self,
+        prompt: String,
+        assistant: String,
+    ) -> Result<(), ConversationPersistenceWarning> {
+        self.persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append_pair(prompt, assistant)
+    }
+
+    fn new(storage_directory: PathBuf) -> Self {
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
             chat: Mutex::new(ChatState::Idle),
@@ -132,8 +162,16 @@ impl Default for DesktopAppState {
             repository_generation: Mutex::new(0),
             model: Mutex::new(DesktopModelState::default()),
             conversation: Mutex::new(DesktopConversationState::default()),
+            persistence: Mutex::new(Persistence::start(storage_directory)),
             close_started: AtomicBool::new(false),
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_persistence_warning(app: &AppHandle, warning: ConversationPersistenceWarning) {
+    if let Err(error) = app.emit("conversation_persistence_warning", warning) {
+        tracing::warn!(error = %error, "failed to emit conversation persistence warning");
     }
 }
 
@@ -1249,6 +1287,7 @@ async fn run_chat(
                 emit_chat_event(&app, ChatEvent::Delta { text: delta })
             }
             AgentEvent::Completed { output, .. } => {
+                let assistant_text = output.message.content.clone();
                 let committed = app
                     .state::<DesktopAppState>()
                     .conversation
@@ -1264,6 +1303,12 @@ async fn run_chat(
                     );
                     terminal = true;
                     break;
+                }
+                if let Err(warning) = app
+                    .state::<DesktopAppState>()
+                    .persist_completed_pair(prompt.clone(), assistant_text)
+                {
+                    emit_persistence_warning(&app, warning);
                 }
                 emit_chat_event(&app, ChatEvent::Completed);
                 terminal = true;
@@ -1369,13 +1414,30 @@ async fn send_chat(
             context_change,
         )
     };
+    if let Some(context_change) = context_change {
+        let reason = match context_change {
+            ConversationContextChange::Repository => SeparatorReason::RepositoryChanged,
+            ConversationContextChange::ModelConfiguration => {
+                SeparatorReason::ModelConfigurationChanged
+            }
+            ConversationContextChange::RepositoryAndModel => {
+                SeparatorReason::RepositoryAndModelChanged
+            }
+        };
+        if let Err(warning) = state.persist_separator(reason) {
+            emit_persistence_warning(&app, warning);
+        }
+    }
     tauri::async_runtime::spawn(run_chat(app, runtime, request, prompt, conversation_epoch));
     Ok(SendChatResult { context_change })
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn new_conversation(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+fn new_conversation(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
     if *state
         .chat
         .lock()
@@ -1389,14 +1451,33 @@ fn new_conversation(state: State<'_, DesktopAppState>) -> Result<(), FrontendErr
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .start_new();
+    if let Err(warning) = state.persist_separator(SeparatorReason::NewConversation) {
+        emit_persistence_warning(&app, warning);
+    }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn conversation_transcript(
+    state: State<'_, DesktopAppState>,
+) -> ConversationTranscriptPresentation {
+    state
+        .persistence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .presentation()
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> ExitCode {
     match tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(DesktopAppState::default())
+        .setup(|app| {
+            let storage_directory = app.path().app_local_data_dir()?;
+            app.manage(DesktopAppState::new(storage_directory));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_status,
             model_configuration,
@@ -1406,7 +1487,8 @@ fn main() -> ExitCode {
             disconnect_codex,
             repository_snapshot,
             send_chat,
-            new_conversation
+            new_conversation,
+            conversation_transcript
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

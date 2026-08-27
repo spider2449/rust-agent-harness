@@ -19,3 +19,4 @@ tauri = { version = "2" }
 tauri-plugin-dialog = "2"
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

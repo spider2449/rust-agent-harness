@@ -233,16 +233,40 @@ function appendContextSeparator(reason) {
   const title = document.createElement("strong");
   const detail = document.createElement("p");
   const labels = {
+    new_conversation: "New conversation context",
     repository_changed: "Repository changed",
     model_configuration_changed: "Model configuration changed",
     repository_and_model_changed: "Repository and model configuration changed",
+    application_restarted: "Application restarted",
+    history_trimmed: "Earlier conversation history was trimmed",
   };
   separator.className = "conversation-context-separator";
-  title.textContent = "New conversation context";
+  title.textContent = reason === "history_trimmed" ? "Conversation history" : "New conversation context";
   detail.textContent = labels[reason] ?? "New conversation context";
   separator.append(title, detail);
   messages.append(separator);
   messages.scrollTop = messages.scrollHeight;
+}
+
+function showPersistenceWarning(warning) {
+  const messages = {
+    restore_failed: "Previous conversation could not be restored.",
+    save_failed: "Conversation history could not be saved.",
+  };
+  const error = document.querySelector("#chat-error");
+  error.textContent = messages[warning] ?? "Conversation history could not be saved.";
+  error.hidden = false;
+}
+
+function renderTranscript(transcript) {
+  for (const record of transcript.records) {
+    if (record.kind === "completed_message") {
+      appendMessage(record.role === "user" ? "You" : "RAH", record.text);
+    } else if (record.kind === "context_separator") {
+      appendContextSeparator(record.reason);
+    }
+  }
+  if (transcript.warning) showPersistenceWarning(transcript.warning);
 }
 
 function showChatError(code) {
@@ -298,6 +322,7 @@ async function initializeDesktop() {
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));
+  await listen("conversation_persistence_warning", (event) => showPersistenceWarning(event.payload));
   await listen("repository_snapshot_refresh", () => {
     void refreshRepository(invoke);
   });
@@ -374,6 +399,7 @@ async function initializeDesktop() {
     }
   });
   await loadStatus(invoke);
+  renderTranscript(await invoke("conversation_transcript"));
   await refreshModelConfiguration(invoke);
   setFrontendBootStatus("Desktop UI ready");
 }

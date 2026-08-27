@@ -14,6 +14,7 @@
     "allow-disconnect-codex",
     "allow-repository-snapshot",
     "allow-send-chat",
-    "allow-new-conversation"
+    "allow-new-conversation",
+    "allow-conversation-transcript"
   ]
 }

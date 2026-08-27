@@ -11,6 +11,7 @@ fn main() {
             "repository_snapshot",
             "send_chat",
             "new_conversation",
+            "conversation_transcript",
         ]),
     ))
     .expect("failed to build Tauri desktop command permissions");
