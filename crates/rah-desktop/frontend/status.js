@@ -84,6 +84,7 @@ function errorMessage(error) {
     repository_busy: "Repository selection is unavailable while chat is running",
     model_configuration_invalid: "Invalid model configuration",
     model_configuration_busy: "Model configuration is unavailable while chat is running",
+    preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
 }
@@ -127,6 +128,7 @@ function renderModelConfiguration(configuration) {
   document.querySelector("#llama-cpp-readiness").textContent = readiness[configuration.readiness] ?? "Not tested";
   document.querySelector("#test-llama-cpp-endpoint").disabled = !llama || chatRunning || configuration.readiness === "checking";
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
+  document.querySelector("#reset-model-preferences").disabled = chatRunning;
   document.querySelector("#model-hint").textContent = modelHint(configuration.provider);
 }
 
@@ -251,6 +253,7 @@ async function loadStatus(invoke) {
   const provider = document.querySelector("#model-provider");
   const endpointControls = document.querySelector("#llama-cpp-endpoint");
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
+  document.querySelector("#reset-model-preferences").disabled = chatRunning;
   provider.disabled = chatRunning;
   model.disabled = chatRunning || provider.value === "inherit";
   for (const element of endpointControls.querySelectorAll("select, input")) {
@@ -375,6 +378,11 @@ async function initializeDesktop() {
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));
   await listen("conversation_persistence_warning", (event) => showPersistenceWarning(event.payload));
+  await listen("desktop_preferences_warning", (event) => {
+    const error = document.querySelector("#model-error");
+    error.textContent = event.payload === "preferences_restore_failed" ? "Model preferences could not be restored." : "Model preferences could not be saved.";
+    error.hidden = false;
+  });
   await listen("repository_snapshot_refresh", () => {
     void refreshRepository(invoke);
   });
@@ -474,6 +482,18 @@ async function initializeDesktop() {
       error.hidden = false;
     }
   });
+  document.querySelector("#reset-model-preferences").addEventListener("click", async () => {
+    const error = document.querySelector("#model-error");
+    error.hidden = true;
+    try {
+      await invoke("reset_model_preferences");
+      await refreshModelConfiguration(invoke);
+      await loadStatus(invoke);
+    } catch (resetError) {
+      error.textContent = errorMessage(resetError);
+      error.hidden = false;
+    }
+  });
   document.querySelector("#test-llama-cpp-endpoint").addEventListener("click", async () => {
     const error = document.querySelector("#model-error");
     error.hidden = true;
@@ -526,6 +546,12 @@ async function initializeDesktop() {
   await loadStatus(invoke);
   renderTranscript(await invoke("conversation_transcript"));
   await refreshModelConfiguration(invoke);
+  const preferencesWarning = await invoke("desktop_preferences_warning");
+  if (preferencesWarning) {
+    const error = document.querySelector("#model-error");
+    error.textContent = preferencesWarning === "preferences_restore_failed" ? "Model preferences could not be restored." : "Model preferences could not be saved.";
+    error.hidden = false;
+  }
   setFrontendBootStatus("Desktop UI ready");
 }
 

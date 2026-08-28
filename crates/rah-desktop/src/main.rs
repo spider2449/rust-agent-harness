@@ -4,6 +4,8 @@
 mod codex_baseline;
 #[cfg(target_os = "windows")]
 mod conversation_persistence;
+#[cfg(target_os = "windows")]
+mod desktop_preferences;
 
 #[cfg(target_os = "windows")]
 use codex_baseline::{BaselineError, CodexExecutableSource, resolve as resolve_codex_executable};
@@ -12,6 +14,8 @@ use conversation_persistence::{
     Persistence, Presentation as ConversationTranscriptPresentation, ResumeError, ResumePair,
     SeparatorReason, Warning as ConversationPersistenceWarning,
 };
+#[cfg(target_os = "windows")]
+use desktop_preferences::{Preferences, Warning as PreferencesWarning};
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
@@ -34,6 +38,8 @@ use rah_tools::{
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
+#[cfg(all(test, target_os = "windows"))]
+use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use std::{
     collections::HashMap,
@@ -74,6 +80,45 @@ const READINESS_BODY_LIMIT: usize = 4 * 1024;
 const CANCEL_GRACEFUL_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "windows")]
 const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Test-only evidence that constructing Desktop state does not activate optional authorities.
+#[cfg(all(test, target_os = "windows"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StartupActivationCounters {
+    codex_resolver: u64,
+    codex_runtime_construction: u64,
+    readiness_probe: u64,
+    tool_registry: u64,
+    repository_composition: u64,
+    conversation_resume: u64,
+}
+
+#[cfg(all(test, target_os = "windows"))]
+static STARTUP_ACTIVATION_COUNTERS: OnceLock<Mutex<StartupActivationCounters>> = OnceLock::new();
+#[cfg(all(test, target_os = "windows"))]
+static STARTUP_COUNTER_TRACKING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(test, target_os = "windows"))]
+fn startup_activation_counters() -> &'static Mutex<StartupActivationCounters> {
+    STARTUP_ACTIVATION_COUNTERS.get_or_init(|| Mutex::new(StartupActivationCounters::default()))
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn reset_startup_activation_counters() {
+    *startup_activation_counters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = StartupActivationCounters::default();
+    STARTUP_COUNTER_TRACKING.store(true, Ordering::SeqCst);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn startup_activation_snapshot() -> StartupActivationCounters {
+    let snapshot = *startup_activation_counters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    STARTUP_COUNTER_TRACKING.store(false, Ordering::SeqCst);
+    snapshot
+}
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize)]
@@ -252,6 +297,8 @@ struct DesktopAppState {
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     model: Mutex<DesktopModelState>,
+    preferences: Mutex<Preferences>,
+    model_apply_persistence: Mutex<()>,
     conversation: Mutex<DesktopConversationState>,
     persistence: Mutex<Persistence>,
     close_started: AtomicBool,
@@ -281,6 +328,7 @@ impl DesktopAppState {
     }
 
     fn new(storage_directory: PathBuf) -> Self {
+        let (preferences, selection) = Preferences::start(storage_directory.clone());
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
             chat: Mutex::new(ChatState::Idle),
@@ -288,11 +336,30 @@ impl DesktopAppState {
             next_chat_generation: Mutex::new(0),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
-            model: Mutex::new(DesktopModelState::default()),
+            model: Mutex::new(DesktopModelState {
+                selection,
+                generation: 0,
+                readiness: ReadinessState::NotTested,
+            }),
+            preferences: Mutex::new(preferences),
+            model_apply_persistence: Mutex::new(()),
             conversation: Mutex::new(DesktopConversationState::default()),
             persistence: Mutex::new(Persistence::start(storage_directory)),
             close_started: AtomicBool::new(false),
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_preferences_warning(app: &AppHandle, warning: PreferencesWarning) {
+    if let Err(error) = app.emit(
+        "desktop_preferences_warning",
+        match warning {
+            PreferencesWarning::RestoreFailed => "preferences_restore_failed",
+            PreferencesWarning::SaveFailed => "preferences_save_failed",
+        },
+    ) {
+        tracing::warn!(error = %error, "failed to emit desktop preferences warning");
     }
 }
 
@@ -401,6 +468,13 @@ impl DesktopConversationState {
         identity: ConversationContextIdentity,
         pairs: Vec<ResumePair>,
     ) -> Result<(), FrontendError> {
+        #[cfg(test)]
+        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+            startup_activation_counters()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .conversation_resume += 1;
+        }
         if !self.history.is_empty() {
             return Err(FrontendError::ConversationResumeUnavailable);
         }
@@ -747,6 +821,13 @@ impl DesktopRepository {
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
     ) -> Result<Self, ToolError> {
+        #[cfg(test)]
+        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+            startup_activation_counters()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .repository_composition += 1;
+        }
         let status = RepositoryStatusTool::new(git_executable, repository_root)?;
         let worktree_diff = RepositoryDiffTool::new(git_executable, repository_root)?;
         let staged_diff = RepositoryDiffStagedTool::new(git_executable, repository_root)?;
@@ -764,7 +845,7 @@ impl DesktopRepository {
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum FrontendError {
+pub(crate) enum FrontendError {
     CodexNotFound,
     CodexBaselineInvalid,
     CodexHostUnsupported,
@@ -823,7 +904,7 @@ impl From<CodexExecutableSource> for CodexExecutableSourcePresentation {
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum DesktopModelProvider {
+pub(crate) enum DesktopModelProvider {
     Inherit,
     #[serde(rename = "openai")]
     OpenAi,
@@ -836,14 +917,14 @@ enum DesktopModelProvider {
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ProviderScheme {
+pub(crate) enum ProviderScheme {
     Http,
     Https,
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ProviderHost {
+pub(crate) enum ProviderHost {
     Ip(IpAddr),
     Dns(String),
 }
@@ -851,10 +932,10 @@ enum ProviderHost {
 /// A normalized initial endpoint selected only by the Desktop host.
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ProviderEndpoint {
-    scheme: ProviderScheme,
-    host: ProviderHost,
-    port: u16,
+pub(crate) struct ProviderEndpoint {
+    pub(crate) scheme: ProviderScheme,
+    pub(crate) host: ProviderHost,
+    pub(crate) port: u16,
 }
 
 #[cfg(target_os = "windows")]
@@ -936,10 +1017,10 @@ fn normalize_dns_hostname(host: &str) -> Result<String, FrontendError> {
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DesktopModelSelection {
-    provider: DesktopModelProvider,
-    model: Option<String>,
-    llama_cpp_endpoint: Option<ProviderEndpoint>,
+pub(crate) struct DesktopModelSelection {
+    pub(crate) provider: DesktopModelProvider,
+    pub(crate) model: Option<String>,
+    pub(crate) llama_cpp_endpoint: Option<ProviderEndpoint>,
 }
 
 #[cfg(target_os = "windows")]
@@ -955,7 +1036,36 @@ impl Default for DesktopModelSelection {
 
 #[cfg(target_os = "windows")]
 impl DesktopModelSelection {
+    pub(crate) fn validate(&self) -> Result<(), FrontendError> {
+        match self.provider {
+            DesktopModelProvider::Inherit
+                if self.model.is_none() && self.llama_cpp_endpoint.is_none() =>
+            {
+                Ok(())
+            }
+            DesktopModelProvider::OpenAi
+            | DesktopModelProvider::Ollama
+            | DesktopModelProvider::LmStudio
+                if self.llama_cpp_endpoint.is_none() =>
+            {
+                validate_model_identifier(
+                    self.model
+                        .as_deref()
+                        .ok_or(FrontendError::ModelConfigurationInvalid)?,
+                )
+            }
+            DesktopModelProvider::LlamaCpp if self.llama_cpp_endpoint.is_some() => {
+                validate_model_identifier(
+                    self.model
+                        .as_deref()
+                        .ok_or(FrontendError::ModelConfigurationInvalid)?,
+                )
+            }
+            _ => Err(FrontendError::ModelConfigurationInvalid),
+        }
+    }
     fn codex_model_config(&self) -> Result<CodexModelConfig, FrontendError> {
+        self.validate()?;
         let provider = match self.provider {
             DesktopModelProvider::Inherit => {
                 return if self.model.is_none() && self.llama_cpp_endpoint.is_none() {
@@ -992,6 +1102,21 @@ impl DesktopModelSelection {
         CodexModelSelection::new(model, provider)
             .map(CodexModelConfig::Explicit)
             .map_err(|_| FrontendError::ModelConfigurationInvalid)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn validate_model_identifier(value: &str) -> Result<(), FrontendError> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.contains('\0')
+        || value.chars().any(|c| c.is_control())
+        || value.chars().next().is_some_and(char::is_whitespace)
+        || value.chars().next_back().is_some_and(char::is_whitespace)
+    {
+        Err(FrontendError::ModelConfigurationInvalid)
+    } else {
+        Ok(())
     }
 }
 
@@ -1253,12 +1378,31 @@ fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationP
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+fn desktop_preferences_warning(state: State<'_, DesktopAppState>) -> Option<&'static str> {
+    state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_warning()
+        .map(|warning| match warning {
+            PreferencesWarning::RestoreFailed => "preferences_restore_failed",
+            PreferencesWarning::SaveFailed => "preferences_save_failed",
+        })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 fn set_model_configuration(
+    app: AppHandle,
     state: State<'_, DesktopAppState>,
     provider: DesktopModelProvider,
     model: Option<String>,
     llama_cpp_endpoint: Option<ProviderEndpointInput>,
 ) -> Result<(), FrontendError> {
+    let _ordering = state
+        .model_apply_persistence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let chat = *state
         .chat
         .lock()
@@ -1275,7 +1419,50 @@ fn set_model_configuration(
         .model
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    apply_model_selection(&mut current, chat, selection)
+    apply_model_selection(&mut current, chat, selection.clone())?;
+    drop(current);
+    if state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .save(&selection)
+        .is_err()
+    {
+        emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn reset_model_preferences(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    let _ordering = state
+        .model_apply_persistence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let chat = *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut current = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_model_selection(&mut current, chat, DesktopModelSelection::default())?;
+    drop(current);
+    if state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reset()
+        .is_err()
+    {
+        emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1303,6 +1490,13 @@ struct LlamaCppReadinessProbe;
 #[cfg(target_os = "windows")]
 impl LlamaCppReadinessProbe {
     async fn check(endpoint: &ProviderEndpoint) -> ReadinessState {
+        #[cfg(test)]
+        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+            startup_activation_counters()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .readiness_probe += 1;
+        }
         let client = match reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -1718,6 +1912,13 @@ impl ConnectionResult {
 fn desktop_tool_registry(
     repository: Option<&DesktopRepository>,
 ) -> Result<Arc<ToolRegistry>, ToolError> {
+    #[cfg(test)]
+    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        startup_activation_counters()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tool_registry += 1;
+    }
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool::new()))?;
     if let Some(repository) = repository {
@@ -1760,6 +1961,13 @@ fn prepare_codex_connection<R>(
 where
     R: FnOnce() -> Result<codex_baseline::CodexExecutableSelection, BaselineError>,
 {
+    #[cfg(test)]
+    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        startup_activation_counters()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .codex_resolver += 1;
+    }
     let selection = match resolver() {
         Ok(selection) => selection,
         Err(BaselineError::Invalid) => return Err(FrontendError::CodexBaselineInvalid),
@@ -1783,6 +1991,13 @@ where
     F: FnOnce(PreparedCodexConnection) -> Fut,
     Fut: Future<Output = Result<T, FrontendError>>,
 {
+    #[cfg(test)]
+    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        startup_activation_counters()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .codex_runtime_construction += 1;
+    }
     let source = prepared.source;
     let runtime = runtime_factory(prepared).await?;
     Ok((runtime, source))
@@ -2502,7 +2717,9 @@ fn main() -> ExitCode {
         .invoke_handler(tauri::generate_handler![
             app_status,
             model_configuration,
+            desktop_preferences_warning,
             set_model_configuration,
+            reset_model_preferences,
             test_llama_cpp_endpoint,
             choose_repository,
             connect_codex,
@@ -2555,15 +2772,15 @@ mod tests {
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
         LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
-        MAX_PROMPT_BYTES, ModelConfigurationPresentation, ProviderEndpoint, ProviderEndpointInput,
-        ProviderEndpointPresentation, ProviderScheme, READINESS_BODY_LIMIT,
-        READINESS_TOTAL_TIMEOUT, ReadinessState, ResumePair, SendChatResult, TerminalOwnership,
-        activity_event, apply_model_selection, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, clear_conversation_allowed, connect_prepared_codex,
-        current_app_status, desktop_tool_registry, frontend_error, model_configuration_status,
-        prepare_codex_connection, publish_readiness_result, repository_selection_allowed,
-        repository_tool_authority, request_connect, resolve_prepare_and_connect_codex, same_arc,
-        validate_prompt,
+        MAX_PROMPT_BYTES, ModelConfigurationPresentation, Preferences, PreferencesWarning,
+        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState, ResumePair, SendChatResult,
+        TerminalOwnership, activity_event, apply_model_selection, await_cancel_recovery,
+        await_graceful_cancel, await_hard_shutdown, begin_chat, clear_conversation_allowed,
+        connect_prepared_codex, current_app_status, desktop_tool_registry, frontend_error,
+        model_configuration_status, prepare_codex_connection, publish_readiness_result,
+        repository_selection_allowed, repository_tool_authority, request_connect,
+        resolve_prepare_and_connect_codex, same_arc, validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
@@ -4295,6 +4512,472 @@ mod tests {
             "token",
         ] {
             assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn preference_restore_initializes_only_inactive_desired_state() {
+        let storage = TestRepository::new();
+        let selection = DesktopModelSelection {
+            provider: DesktopModelProvider::Ollama,
+            model: Some("restored-model".to_owned()),
+            llama_cpp_endpoint: None,
+        };
+        let mut preferences = Preferences::start(storage.0.clone()).0;
+        preferences.save(&selection).unwrap();
+        let state = DesktopAppState::new(storage.0.clone());
+        let model = state.model.lock().unwrap();
+        assert_eq!(model.selection, selection);
+        assert_eq!(model.generation, 0);
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert!(state.repository.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_preference_restore_defaults_without_connection_or_transcript_mutation() {
+        let storage = TestRepository::new();
+        let preferences_path = storage.0.join("desktop-preferences.json");
+        let transcript_path = storage.0.join("conversation-transcript.json");
+        fs::write(&preferences_path, b"{").unwrap();
+        let state = DesktopAppState::new(storage.0.clone());
+        let model = state.model.lock().unwrap();
+        assert_eq!(model.selection, DesktopModelSelection::default());
+        assert_eq!(model.generation, 0);
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert_eq!(fs::read(&preferences_path).unwrap(), b"{");
+        assert!(!transcript_path.exists());
+    }
+
+    #[test]
+    fn apply_and_reset_save_failures_do_not_roll_back_current_desired_state() {
+        use super::desktop_preferences::{TestFault, clear_test_state, set_test_fault, test_lock};
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let durable = DesktopModelSelection {
+            provider: DesktopModelProvider::OpenAi,
+            model: Some("A".into()),
+            llama_cpp_endpoint: None,
+        };
+        let applied = DesktopModelSelection {
+            provider: DesktopModelProvider::Ollama,
+            model: Some("B".into()),
+            llama_cpp_endpoint: None,
+        };
+        let mut preferences = Preferences::start(storage.0.clone()).0;
+        preferences.save(&durable).unwrap();
+        let disk = fs::read(storage.0.join("desktop-preferences.json")).unwrap();
+        let mut model = DesktopModelState {
+            selection: durable,
+            generation: 4,
+            readiness: ReadinessState::Ready,
+        };
+        apply_model_selection(&mut model, ChatState::Idle, applied.clone()).unwrap();
+        set_test_fault(
+            storage.0.join("desktop-preferences.json"),
+            TestFault::ReplaceOther,
+        );
+        assert_eq!(
+            preferences.save(&applied),
+            Err(PreferencesWarning::SaveFailed)
+        );
+        assert_eq!(model.selection, applied);
+        assert_eq!(model.generation, 5);
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+        assert_eq!(
+            fs::read(storage.0.join("desktop-preferences.json")).unwrap(),
+            disk
+        );
+        clear_test_state();
+        let later = DesktopModelSelection {
+            provider: DesktopModelProvider::LmStudio,
+            model: Some("C".into()),
+            llama_cpp_endpoint: None,
+        };
+        apply_model_selection(&mut model, ChatState::Idle, later.clone()).unwrap();
+        preferences.save(&later).unwrap();
+        assert_eq!(
+            fs::read(storage.0.join("desktop-preferences.json")).unwrap(),
+            super::desktop_preferences::test_canonical(&later).unwrap()
+        );
+
+        set_test_fault(
+            storage.0.join("desktop-preferences.json"),
+            TestFault::ReplaceOther,
+        );
+        apply_model_selection(
+            &mut model,
+            ChatState::Idle,
+            DesktopModelSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(preferences.reset(), Err(PreferencesWarning::SaveFailed));
+        assert_eq!(model.selection, DesktopModelSelection::default());
+        assert_eq!(model.generation, 7);
+        assert_eq!(
+            fs::read(storage.0.join("desktop-preferences.json")).unwrap(),
+            super::desktop_preferences::test_canonical(&later).unwrap()
+        );
+        clear_test_state();
+    }
+
+    #[test]
+    fn reset_is_idle_only_and_changes_no_conversation_state() {
+        let selection = DesktopModelSelection {
+            provider: DesktopModelProvider::OpenAi,
+            model: Some("model".into()),
+            llama_cpp_endpoint: None,
+        };
+        for busy in [ChatState::Running, ChatState::CancelRequested] {
+            let mut model = DesktopModelState {
+                selection: selection.clone(),
+                generation: 9,
+                readiness: ReadinessState::Ready,
+            };
+            assert_eq!(
+                apply_model_selection(&mut model, busy, DesktopModelSelection::default()),
+                Err(FrontendError::ModelConfigurationBusy)
+            );
+            assert_eq!(model.selection, selection);
+            assert_eq!(model.generation, 9);
+        }
+        let mut model = DesktopModelState::default();
+        apply_model_selection(
+            &mut model,
+            ChatState::Idle,
+            DesktopModelSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(model.generation, 0);
+    }
+
+    #[test]
+    fn startup_preference_matrix_restores_only_inactive_state_without_activation() {
+        use super::desktop_preferences::{clear_test_state, test_lock};
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let valid = DesktopModelSelection {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("loopback".into()),
+            llama_cpp_endpoint: Some(default_test_endpoint()),
+        };
+        for (stored, expected, warning) in [
+            (None, DesktopModelSelection::default(), None),
+            (
+                Some(super::desktop_preferences::test_canonical(&valid).unwrap()),
+                valid,
+                None,
+            ),
+            (
+                Some(b"{".to_vec()),
+                DesktopModelSelection::default(),
+                Some(PreferencesWarning::RestoreFailed),
+            ),
+            (
+                Some(b"{\"version\":2,\"model\":{\"provider\":\"inherit\"}}".to_vec()),
+                DesktopModelSelection::default(),
+                Some(PreferencesWarning::RestoreFailed),
+            ),
+        ] {
+            let storage = TestRepository::new();
+            if let Some(bytes) = stored {
+                fs::write(storage.0.join("desktop-preferences.json"), bytes).unwrap();
+            }
+            clear_test_state();
+            super::reset_startup_activation_counters();
+            let state = DesktopAppState::new(storage.0.clone());
+            let model = state.model.lock().unwrap();
+            assert_eq!(model.selection, expected);
+            assert_eq!(model.generation, 0);
+            assert_eq!(model.readiness, ReadinessState::NotTested);
+            drop(model);
+            assert!(matches!(
+                *state.connection.lock().unwrap(),
+                ConnectionState::NotConnected
+            ));
+            assert_eq!(
+                state.preferences.lock().unwrap().take_warning(),
+                warning,
+                "only invalid existing files warn"
+            );
+            assert_eq!(
+                super::startup_activation_snapshot(),
+                super::StartupActivationCounters::default()
+            );
+            assert!(state.conversation.lock().unwrap().history.is_empty());
+        }
+        clear_test_state();
+    }
+
+    #[test]
+    fn preference_write_matrix_excludes_all_non_apply_reset_events() {
+        use super::desktop_preferences::{
+            clear_test_state, reset_test_accounting, test_lock, test_write_accounting,
+        };
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let preference_path = storage.0.join("desktop-preferences.json");
+        reset_test_accounting();
+
+        // Read/presentation, readiness results (including stale discard), status polling,
+        // chat bookkeeping, repository generation, and conversation presentation/actions.
+        let _ = state.status();
+        let _ = model_configuration_status(None, 0);
+        let _ = state.persistence.lock().unwrap().presentation();
+        let endpoint = default_test_endpoint();
+        for result in [
+            ReadinessState::Checking,
+            ReadinessState::Ready,
+            ReadinessState::Loading,
+            ReadinessState::Unreachable,
+            ReadinessState::TlsFailure,
+            ReadinessState::CheckFailed,
+        ] {
+            publish_readiness_result(&state, 0, &endpoint, result);
+        }
+        publish_readiness_result(&state, 1, &endpoint, ReadinessState::Ready);
+        let generation = state.start_chat().unwrap();
+        state.finish_chat(generation);
+        *state.repository_generation.lock().unwrap() += 1;
+        state.conversation.lock().unwrap().start_new();
+        state
+            .persist_completed_pair("user".into(), "assistant".into())
+            .unwrap();
+        let mut resumed = DesktopConversationState::default();
+        resumed
+            .resume(
+                ConversationContextIdentity {
+                    repository_generation: 1,
+                    model_generation: 0,
+                },
+                vec![ResumePair {
+                    user: "prior user".into(),
+                    assistant: "prior assistant".into(),
+                }],
+            )
+            .unwrap();
+        let mut model = state.model.lock().unwrap();
+        apply_model_selection(
+            &mut model,
+            ChatState::Idle,
+            DesktopModelSelection {
+                provider: DesktopModelProvider::OpenAi,
+                model: Some("process-local".into()),
+                llama_cpp_endpoint: None,
+            },
+        )
+        .unwrap();
+        drop(model);
+
+        assert_eq!(
+            test_write_accounting(&preference_path),
+            super::desktop_preferences::TestWriteAccounting::default()
+        );
+        clear_test_state();
+    }
+
+    #[test]
+    fn only_apply_and_reset_create_one_preference_transaction_and_identical_apply_skips_it() {
+        use super::desktop_preferences::{
+            clear_test_state, reset_test_accounting, test_lock, test_write_accounting,
+        };
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let path = storage.0.join("desktop-preferences.json");
+        let mut preferences = Preferences::start(storage.0.clone()).0;
+        let applied = DesktopModelSelection {
+            provider: DesktopModelProvider::OpenAi,
+            model: Some("applied".into()),
+            llama_cpp_endpoint: None,
+        };
+        reset_test_accounting();
+        preferences.save(&applied).unwrap();
+        let apply = test_write_accounting(&path);
+        assert_eq!(apply.destination_write_attempts, 1);
+        assert_eq!(apply.temp_creations, 1);
+        assert_eq!(apply.native_replacements_or_moves, 1);
+
+        reset_test_accounting();
+        preferences.save(&applied).unwrap();
+        assert_eq!(test_write_accounting(&path), Default::default());
+
+        reset_test_accounting();
+        preferences.reset().unwrap();
+        let reset = test_write_accounting(&path);
+        assert_eq!(reset.destination_write_attempts, 1);
+        assert_eq!(reset.temp_creations, 1);
+        assert_eq!(reset.native_replacements_or_moves, 1);
+        clear_test_state();
+    }
+
+    #[test]
+    fn non_loopback_apply_changes_current_state_without_preference_filesystem_activity() {
+        use super::desktop_preferences::{
+            clear_test_state, reset_test_accounting, test_lock, test_write_accounting,
+        };
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let path = storage.0.join("desktop-preferences.json");
+        let durable = DesktopModelSelection {
+            provider: DesktopModelProvider::OpenAi,
+            model: Some("A".into()),
+            llama_cpp_endpoint: None,
+        };
+        let remote = DesktopModelSelection {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("B".into()),
+            llama_cpp_endpoint: Some(
+                ProviderEndpoint::parse(ProviderEndpointInput {
+                    scheme: ProviderScheme::Http,
+                    host: "192.168.1.10".into(),
+                    port: 8080,
+                })
+                .unwrap(),
+            ),
+        };
+        let mut preferences = Preferences::start(storage.0.clone()).0;
+        preferences.save(&durable).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut model = DesktopModelState {
+            selection: durable,
+            generation: 4,
+            readiness: ReadinessState::Ready,
+        };
+        reset_test_accounting();
+        apply_model_selection(&mut model, ChatState::Idle, remote.clone()).unwrap();
+        assert_eq!(
+            preferences.save(&remote),
+            Err(PreferencesWarning::SaveFailed)
+        );
+        assert_eq!(model.selection, remote);
+        assert_eq!(model.generation, 5);
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(test_write_accounting(&path), Default::default());
+        clear_test_state();
+    }
+
+    #[test]
+    fn reset_and_restore_keep_preference_and_conversation_persistence_separate() {
+        let storage = TestRepository::new();
+        let preference_path = storage.0.join("desktop-preferences.json");
+        let transcript_path = storage.0.join("conversation-transcript.json");
+        let non_default = DesktopModelSelection {
+            provider: DesktopModelProvider::Ollama,
+            model: Some("non-default".into()),
+            llama_cpp_endpoint: None,
+        };
+        let mut preferences = Preferences::start(storage.0.clone()).0;
+        preferences.save(&non_default).unwrap();
+        {
+            let mut persistence = super::Persistence::start(storage.0.clone());
+            persistence
+                .append_pair("user".into(), "assistant".into())
+                .unwrap();
+        }
+        let state = DesktopAppState::new(storage.0.clone());
+        let transcript_after_startup = fs::read(&transcript_path).unwrap();
+        let preference_after_startup = fs::read(&preference_path).unwrap();
+        let presentation_after_startup =
+            serde_json::to_vec(&state.persistence.lock().unwrap().presentation()).unwrap();
+        assert_eq!(state.model.lock().unwrap().selection, non_default);
+        assert!(
+            !state
+                .persistence
+                .lock()
+                .unwrap()
+                .presentation()
+                .records
+                .is_empty()
+        );
+
+        let mut model = state.model.lock().unwrap();
+        apply_model_selection(
+            &mut model,
+            ChatState::Idle,
+            DesktopModelSelection::default(),
+        )
+        .unwrap();
+        drop(model);
+        state.preferences.lock().unwrap().reset().unwrap();
+        assert_eq!(
+            fs::read(&transcript_path).unwrap(),
+            transcript_after_startup
+        );
+        assert_eq!(
+            serde_json::to_vec(&state.persistence.lock().unwrap().presentation()).unwrap(),
+            presentation_after_startup
+        );
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert_eq!(
+            fs::read(&preference_path).unwrap(),
+            super::desktop_preferences::test_canonical(&DesktopModelSelection::default()).unwrap()
+        );
+
+        let restored = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            restored.model.lock().unwrap().selection,
+            DesktopModelSelection::default()
+        );
+        assert_eq!(
+            fs::read(&preference_path).unwrap(),
+            super::desktop_preferences::test_canonical(&DesktopModelSelection::default()).unwrap()
+        );
+        assert_ne!(
+            preference_after_startup,
+            fs::read(&preference_path).unwrap()
+        );
+        assert!(
+            !restored
+                .persistence
+                .lock()
+                .unwrap()
+                .presentation()
+                .records
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preference_and_conversation_warning_domains_do_not_cross() {
+        let preferences = [
+            PreferencesWarning::RestoreFailed,
+            PreferencesWarning::SaveFailed,
+        ]
+        .map(|warning| match warning {
+            PreferencesWarning::RestoreFailed => "preferences_restore_failed",
+            PreferencesWarning::SaveFailed => "preferences_save_failed",
+        });
+        assert_eq!(
+            preferences,
+            ["preferences_restore_failed", "preferences_save_failed"]
+        );
+        for warning in [
+            super::ConversationPersistenceWarning::RestoreFailed,
+            super::ConversationPersistenceWarning::SaveFailed,
+        ] {
+            let serialized = serde_json::to_string(&warning).unwrap();
+            assert!(!preferences.iter().any(|name| serialized.contains(name)));
         }
     }
 }

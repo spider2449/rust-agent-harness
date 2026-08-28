@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-preferences-warning"
+description = "Enables the desktop_preferences_warning command without any pre-configured scope."
+commands.allow = ["desktop_preferences_warning"]
+
+[[permission]]
+identifier = "deny-desktop-preferences-warning"
+description = "Denies the desktop_preferences_warning command without any pre-configured scope."
+commands.deny = ["desktop_preferences_warning"]

@@ -9,6 +9,8 @@
     "allow-app-status",
     "allow-model-configuration",
     "allow-set-model-configuration",
+    "allow-reset-model-preferences",
+    "allow-desktop-preferences-warning",
     "allow-test-llama-cpp-endpoint",
     "allow-choose-repository",
     "allow-connect-codex",

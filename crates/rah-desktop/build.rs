@@ -6,6 +6,8 @@ fn main() {
             "app_status",
             "model_configuration",
             "set_model_configuration",
+            "reset_model_preferences",
+            "desktop_preferences_warning",
             "test_llama_cpp_endpoint",
             "choose_repository",
             "connect_codex",
@@ -28,7 +30,12 @@ fn main() {
 /// generated permissions are inert until the Desktop capability opts into them.
 #[cfg(target_os = "windows")]
 fn validate_task120_capability() {
-    const TASK120_FRONTEND_COMMANDS: &[&str] = &["test_llama_cpp_endpoint", "cancel_chat"];
+    const TASK120_FRONTEND_COMMANDS: &[&str] = &[
+        "test_llama_cpp_endpoint",
+        "cancel_chat",
+        "reset_model_preferences",
+        "desktop_preferences_warning",
+    ];
     let capability_path = "capabilities/default.json";
     println!("cargo:rerun-if-changed={capability_path}");
     let capability = std::fs::read_to_string(capability_path)
