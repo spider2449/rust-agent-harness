@@ -25,6 +25,15 @@ research/implementation candidate, not a reason to widen Task 117.
 **Explicitly defer RAH-owned llama.cpp process launch.** It is a separate
 host-runtime-management authority, not merely a different endpoint field.
 
+Task 118 supersedes the earlier port-only loopback proposal: llama.cpp can be
+an already-running LAN or explicitly configured remote network service. Strict
+loopback-only remains the narrow no-new-authority case, but non-loopback
+selection determines where model input can leave the Desktop machine. It is a
+distinct bounded model-provider outbound-network authority and implementation
+must wait for ADR 0015 — Bounded Model Provider Network Endpoint Authority.
+The anticipated form is a structured host-selected configuration (closed
+scheme, explicit host, bounded port, fixed `/v1` path), not arbitrary URL text.
+
 ## Audited starting state
 
 This roadmap starts from clean `master` at
