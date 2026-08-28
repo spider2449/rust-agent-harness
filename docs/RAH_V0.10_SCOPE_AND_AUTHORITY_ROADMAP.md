@@ -34,6 +34,21 @@ must wait for ADR 0015 — Bounded Model Provider Network Endpoint Authority.
 The anticipated form is a structured host-selected configuration (closed
 scheme, explicit host, bounded port, fixed `/v1` path), not arbitrary URL text.
 
+## ADR 0015 acceptance and Task 120 authority
+
+**ADR 0015 — Bounded Model Provider Network Endpoint Authority is accepted.**
+It grants only a trusted human/Desktop host selection of one structured initial
+`llama_cpp` provider endpoint for one explicit connection: closed HTTP/HTTPS
+scheme, validated IPv4/IPv6/DNS host, bounded numeric port, and Rust-synthesized
+fixed `/v1` path. It is not generic network, ToolRegistry, MCP, Git, browser,
+process, credential, redirect, proxy, discovery, or provider-lifecycle
+authority.
+
+**Task 120 is authorized only to implement that Desktop-private boundary.** It
+must keep credentials `None`, use closed Rust validation and endpoint synthesis,
+retain explicit reconnect/model-generation semantics, and add neither endpoint
+persistence nor transport-confinement claims.
+
 ## Audited starting state
 
 This roadmap starts from clean `master` at
