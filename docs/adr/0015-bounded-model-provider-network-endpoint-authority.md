@@ -147,8 +147,25 @@ revalidates current fields, captures a fresh immutable snapshot, and creates a
 runtime from it.
 
 This authority connects only to an already-running service. It does not find,
-launch, stop, restart, probe, install, download, update, or supervise
+launch, stop, restart, install, download, update, or supervise
 `llama-server`, select a GGUF, or set GPU/context/server flags.
+
+### Explicit Desktop readiness exception
+
+RAH does not automatically probe providers; this explicit bounded readiness
+operation is the sole v0.10 exception. A trusted human may invoke one
+Desktop-private readiness check for the currently selected valid `llama_cpp`
+endpoint. Rust derives exactly `<scheme>://<host>:<port>/v1/health`; the action
+is GET-only, has no body, credentials, configurable headers, configurable path,
+discovery, fallback, automatic scheduling, retry, redirect following, or proxy
+use. It has fixed bounded connect and whole-operation deadlines and a bounded
+response body.
+
+The result is diagnostic state only. It does not validate or invalidate
+endpoint syntax, change endpoint/model generation, connect Codex, create or
+recreate a runtime, grant provider identity, prove future reachability or
+provider correctness, or grant generic network authority. A stale result is
+discarded when the effective endpoint/model generation changes.
 
 ### Failure and replay semantics
 

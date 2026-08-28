@@ -13,10 +13,11 @@ rah-protocol = { path = "../rah-protocol" }
 rah-runtime = { path = "../rah-runtime" }
 rah-runtime-codex = { path = "../rah-runtime-codex" }
 rah-tools = { path = "../rah-tools" }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2" }
 tauri-plugin-dialog = "2"
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["macros", "sync", "test-util", "time"] }
 tracing.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

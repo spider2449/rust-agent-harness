@@ -17,7 +17,7 @@ use futures::StreamExt;
 #[cfg(target_os = "windows")]
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-    RequestId, ToolContent, ToolInput,
+    RequestId, SessionId, ToolContent, ToolInput,
 };
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
@@ -38,12 +38,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     future::Future,
+    net::IpAddr,
     path::PathBuf,
     process::ExitCode,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 #[cfg(target_os = "windows")]
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -62,6 +64,16 @@ const DESKTOP_FS_READ_MAX_BYTES: usize = 1024 * 1024;
 const DESKTOP_TOOL_NAME: &str = "echo";
 #[cfg(target_os = "windows")]
 const MAX_TURN_TOOL_CALLS: usize = 64;
+#[cfg(target_os = "windows")]
+const READINESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "windows")]
+const READINESS_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "windows")]
+const READINESS_BODY_LIMIT: usize = 4 * 1024;
+#[cfg(target_os = "windows")]
+const CANCEL_GRACEFUL_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "windows")]
+const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize)]
@@ -104,6 +116,111 @@ enum ConnectionState {
 enum ChatState {
     Idle,
     Running,
+    CancelRequested,
+}
+
+/// The one-shot, generation-scoped authority for a desktop turn's terminal result.
+/// Keeping this separate from the runtime means late adapter events cannot win twice.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalOwnership {
+    generation: u64,
+    claimed: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl TerminalOwnership {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            claimed: false,
+        }
+    }
+
+    fn claim(&mut self, generation: u64) -> bool {
+        if self.generation != generation || self.claimed {
+            return false;
+        }
+        self.claimed = true;
+        true
+    }
+
+    fn is_unclaimed(&self, generation: u64) -> bool {
+        self.generation == generation && !self.claimed
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GracefulCancelOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HardShutdownOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelRecoveryOutcome {
+    Graceful(GracefulCancelOutcome),
+    Hard(HardShutdownOutcome),
+    Stale,
+}
+
+#[cfg(target_os = "windows")]
+async fn await_graceful_cancel<F, E>(future: F, timeout: Duration) -> GracefulCancelOutcome
+where
+    F: Future<Output = Result<(), E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(())) => GracefulCancelOutcome::Completed,
+        Ok(Err(_)) => GracefulCancelOutcome::Failed,
+        Err(_) => GracefulCancelOutcome::TimedOut,
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn await_hard_shutdown<F, E>(future: F, timeout: Duration) -> HardShutdownOutcome
+where
+    F: Future<Output = Result<(), E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(())) => HardShutdownOutcome::Completed,
+        Ok(Err(_)) => HardShutdownOutcome::Failed,
+        Err(_) => HardShutdownOutcome::TimedOut,
+    }
+}
+
+/// Calls `shutdown` only after graceful cancellation requires hard recovery.
+#[cfg(target_os = "windows")]
+async fn await_cancel_recovery<F, E, P, S, H, HE>(
+    graceful: F,
+    graceful_timeout: Duration,
+    begin_hard_recovery: P,
+    shutdown: S,
+    hard_shutdown_timeout: Duration,
+) -> CancelRecoveryOutcome
+where
+    F: Future<Output = Result<(), E>>,
+    P: FnOnce(GracefulCancelOutcome) -> bool,
+    S: FnOnce() -> H,
+    H: Future<Output = Result<(), HE>>,
+{
+    let graceful = await_graceful_cancel(graceful, graceful_timeout).await;
+    if graceful == GracefulCancelOutcome::Completed {
+        CancelRecoveryOutcome::Graceful(graceful)
+    } else if !begin_hard_recovery(graceful) {
+        CancelRecoveryOutcome::Stale
+    } else {
+        CancelRecoveryOutcome::Hard(await_hard_shutdown(shutdown(), hard_shutdown_timeout).await)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -130,6 +247,8 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 struct DesktopAppState {
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
+    active_chat: Mutex<Option<ActiveChat>>,
+    next_chat_generation: Mutex<u64>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     model: Mutex<DesktopModelState>,
@@ -165,6 +284,8 @@ impl DesktopAppState {
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
             chat: Mutex::new(ChatState::Idle),
+            active_chat: Mutex::new(None),
+            next_chat_generation: Mutex::new(0),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             model: Mutex::new(DesktopModelState::default()),
@@ -325,12 +446,206 @@ impl DesktopConversationState {
 
 #[cfg(target_os = "windows")]
 impl DesktopAppState {
-    fn finish_chat(&self) {
+    fn start_chat(&self) -> Result<u64, FrontendError> {
+        {
+            let mut chat = self
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            begin_chat(&mut chat)?;
+        }
+        let mut next_generation = self
+            .next_chat_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *next_generation = next_generation.wrapping_add(1);
+        let generation = *next_generation;
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = Some(ActiveChat {
+            generation,
+            runtime: None,
+            session_id: None,
+            terminal: TerminalOwnership::new(generation),
+        });
+        Ok(generation)
+    }
+
+    fn register_chat_session(
+        &self,
+        generation: u64,
+        runtime: Arc<CodexRuntime>,
+        session_id: SessionId,
+    ) -> bool {
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(chat) = active.as_mut() else {
+            return false;
+        };
+        if !chat.terminal.is_unclaimed(generation)
+            || chat.runtime.is_some()
+            || chat.session_id.is_some()
+        {
+            return false;
+        }
+        chat.runtime = Some(runtime);
+        chat.session_id = Some(session_id);
+        true
+    }
+
+    fn active_chat(&self) -> Result<(u64, Arc<CodexRuntime>, SessionId), FrontendError> {
+        let active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match active.as_ref() {
+            Some(
+                chat @ ActiveChat {
+                    runtime: Some(runtime),
+                    session_id: Some(session_id),
+                    ..
+                },
+            ) if chat.terminal.is_unclaimed(chat.generation) => {
+                Ok((chat.generation, Arc::clone(runtime), session_id.clone()))
+            }
+            _ => Err(FrontendError::ChatNotRunning),
+        }
+    }
+
+    fn request_cancel(
+        &self,
+        generation: u64,
+        runtime: &Arc<CodexRuntime>,
+        session_id: &SessionId,
+    ) -> bool {
+        let active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let matches = active.as_ref().is_some_and(|chat| {
+            chat.terminal.is_unclaimed(generation)
+                && chat.session_id.as_ref() == Some(session_id)
+                && chat
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|current| same_arc(current, runtime))
+        });
+        drop(active);
+        if matches {
+            *self
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::CancelRequested;
+        }
+        matches
+    }
+
+    fn claim_terminal(
+        &self,
+        generation: u64,
+        runtime: &Arc<CodexRuntime>,
+        session_id: &SessionId,
+    ) -> bool {
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(chat) = active.as_mut() else {
+            return false;
+        };
+        if !chat.terminal.is_unclaimed(generation)
+            || chat.session_id.as_ref() != Some(session_id)
+            || !chat
+                .runtime
+                .as_ref()
+                .is_some_and(|current| same_arc(current, runtime))
+        {
+            return false;
+        }
+        let claimed = chat.terminal.claim(generation);
+        drop(active);
+        *self
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
+        claimed
+    }
+
+    fn is_current_chat(
+        &self,
+        generation: u64,
+        runtime: &Arc<CodexRuntime>,
+        session_id: &SessionId,
+    ) -> bool {
+        self.active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|chat| {
+                chat.terminal.is_unclaimed(generation)
+                    && chat.session_id.as_ref() == Some(session_id)
+                    && chat
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|current| same_arc(current, runtime))
+            })
+    }
+
+    fn claim_start_failure(&self, generation: u64) -> bool {
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !active
+            .as_ref()
+            .is_some_and(|chat| chat.terminal.is_unclaimed(generation) && chat.runtime.is_none())
+        {
+            return false;
+        }
+        *active = None;
+        drop(active);
+        *self
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
+        true
+    }
+
+    fn finish_chat(&self, generation: u64) {
+        {
+            let mut active = self
+                .active_chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !active
+                .as_mut()
+                .is_some_and(|chat| chat.terminal.claim(generation))
+            {
+                return;
+            }
+        }
         *self
             .chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
     }
+}
+
+#[cfg(target_os = "windows")]
+struct ActiveChat {
+    generation: u64,
+    runtime: Option<Arc<CodexRuntime>>,
+    session_id: Option<SessionId>,
+    terminal: TerminalOwnership,
+}
+
+#[cfg(target_os = "windows")]
+fn same_arc<T>(left: &Arc<T>, right: &Arc<T>) -> bool {
+    Arc::ptr_eq(left, right)
 }
 
 #[cfg(target_os = "windows")]
@@ -388,6 +703,32 @@ impl DesktopAppState {
             tracing::warn!(error = %error, "failed to shut down Codex during desktop exit");
         }
     }
+
+    fn begin_hard_recovery(&self, runtime: &Arc<CodexRuntime>) -> bool {
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let matches = matches!(&*connection, ConnectionState::Connected { runtime: current, .. } if same_arc(current, runtime));
+        if matches {
+            *connection = ConnectionState::Disconnecting;
+        }
+        matches
+    }
+
+    fn finish_hard_recovery(&self, success: bool) {
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*connection, ConnectionState::Disconnecting) {
+            *connection = if success {
+                ConnectionState::NotConnected
+            } else {
+                ConnectionState::Error(FrontendError::CodexConnectionFailed)
+            };
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -435,6 +776,7 @@ enum FrontendError {
     ChatEmptyPrompt,
     ChatPromptTooLarge,
     CodexNotConnected,
+    ChatNotRunning,
     ChatAlreadyRunning,
     ChatStartFailed,
     ChatRuntimeFailed,
@@ -490,11 +832,114 @@ enum DesktopModelProvider {
     LlamaCpp,
 }
 
+/// Closed, Desktop-private scheme selection for an already-running llama.cpp server.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProviderScheme {
+    Http,
+    Https,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProviderHost {
+    Ip(IpAddr),
+    Dns(String),
+}
+
+/// A normalized initial endpoint selected only by the Desktop host.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProviderEndpoint {
+    scheme: ProviderScheme,
+    host: ProviderHost,
+    port: u16,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderEndpointInput {
+    scheme: ProviderScheme,
+    host: String,
+    port: u16,
+}
+
+#[cfg(target_os = "windows")]
+impl ProviderEndpoint {
+    fn parse(input: ProviderEndpointInput) -> Result<Self, FrontendError> {
+        if input.port == 0 || input.host.is_empty() || input.host.trim() != input.host {
+            return Err(FrontendError::ModelConfigurationInvalid);
+        }
+        let host = match input.host.parse::<IpAddr>() {
+            Ok(ip) => ProviderHost::Ip(ip),
+            Err(_) if is_ipv4_shaped(&input.host) => {
+                return Err(FrontendError::ModelConfigurationInvalid);
+            }
+            Err(_) => ProviderHost::Dns(normalize_dns_hostname(&input.host)?),
+        };
+        Ok(Self {
+            scheme: input.scheme,
+            host,
+            port: input.port,
+        })
+    }
+
+    fn base_url(&self) -> String {
+        let scheme = match self.scheme {
+            ProviderScheme::Http => "http",
+            ProviderScheme::Https => "https",
+        };
+        let host = match &self.host {
+            ProviderHost::Ip(IpAddr::V4(ip)) => ip.to_string(),
+            ProviderHost::Ip(IpAddr::V6(ip)) => format!("[{ip}]"),
+            ProviderHost::Dns(host) => host.clone(),
+        };
+        format!("{scheme}://{host}:{}/v1", self.port)
+    }
+
+    fn insecure_transport(&self) -> bool {
+        self.scheme == ProviderScheme::Http
+            && !matches!(&self.host, ProviderHost::Ip(ip) if ip.is_loopback())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_ipv4_shaped(host: &str) -> bool {
+    host.contains('.')
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_dns_hostname(host: &str) -> Result<String, FrontendError> {
+    let hostname = host.strip_suffix('.').unwrap_or(host);
+    if hostname.is_empty() || hostname.len() > 253 || !hostname.is_ascii() {
+        return Err(FrontendError::ModelConfigurationInvalid);
+    }
+    for label in hostname.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(FrontendError::ModelConfigurationInvalid);
+        }
+    }
+    Ok(hostname.to_ascii_lowercase())
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DesktopModelSelection {
     provider: DesktopModelProvider,
     model: Option<String>,
+    llama_cpp_endpoint: Option<ProviderEndpoint>,
 }
 
 #[cfg(target_os = "windows")]
@@ -503,6 +948,7 @@ impl Default for DesktopModelSelection {
         Self {
             provider: DesktopModelProvider::Inherit,
             model: None,
+            llama_cpp_endpoint: None,
         }
     }
 }
@@ -512,18 +958,32 @@ impl DesktopModelSelection {
     fn codex_model_config(&self) -> Result<CodexModelConfig, FrontendError> {
         let provider = match self.provider {
             DesktopModelProvider::Inherit => {
-                return if self.model.is_none() {
+                return if self.model.is_none() && self.llama_cpp_endpoint.is_none() {
                     Ok(CodexModelConfig::Inherit)
                 } else {
                     Err(FrontendError::ModelConfigurationInvalid)
                 };
             }
-            DesktopModelProvider::OpenAi => CodexModelProvider::OpenAi,
-            DesktopModelProvider::Ollama => CodexModelProvider::Ollama,
-            DesktopModelProvider::LmStudio => CodexModelProvider::LmStudio,
-            DesktopModelProvider::LlamaCpp => {
-                CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local())
+            DesktopModelProvider::OpenAi if self.llama_cpp_endpoint.is_none() => {
+                CodexModelProvider::OpenAi
             }
+            DesktopModelProvider::Ollama if self.llama_cpp_endpoint.is_none() => {
+                CodexModelProvider::Ollama
+            }
+            DesktopModelProvider::LmStudio if self.llama_cpp_endpoint.is_none() => {
+                CodexModelProvider::LmStudio
+            }
+            DesktopModelProvider::LlamaCpp => {
+                let endpoint = self
+                    .llama_cpp_endpoint
+                    .as_ref()
+                    .ok_or(FrontendError::ModelConfigurationInvalid)?;
+                CodexModelProvider::LlamaCpp(
+                    CodexLlamaCppProvider::new(endpoint.base_url(), None)
+                        .map_err(|_| FrontendError::ModelConfigurationInvalid)?,
+                )
+            }
+            _ => return Err(FrontendError::ModelConfigurationInvalid),
         };
         let model = self
             .model
@@ -540,6 +1000,23 @@ impl DesktopModelSelection {
 struct DesktopModelState {
     selection: DesktopModelSelection,
     generation: u64,
+    readiness: ReadinessState,
+}
+
+/// Diagnostic state for the sole explicit Desktop llama.cpp readiness action.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // reqwest 0.13 has no stable TLS-only classifier in this closed client.
+enum ReadinessState {
+    #[default]
+    NotTested,
+    Checking,
+    Ready,
+    Loading,
+    Unreachable,
+    TlsFailure,
+    CheckFailed,
 }
 
 #[cfg(target_os = "windows")]
@@ -548,7 +1025,37 @@ struct DesktopModelState {
 struct ModelConfigurationPresentation {
     provider: DesktopModelProvider,
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<ProviderEndpointPresentation>,
+    insecure_transport: bool,
+    readiness: ReadinessState,
     status: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ProviderEndpointPresentation {
+    scheme: ProviderScheme,
+    host: String,
+    port: u16,
+    normalized: String,
+}
+
+#[cfg(target_os = "windows")]
+impl From<&ProviderEndpoint> for ProviderEndpointPresentation {
+    fn from(endpoint: &ProviderEndpoint) -> Self {
+        let host = match &endpoint.host {
+            ProviderHost::Ip(ip) => ip.to_string(),
+            ProviderHost::Dns(host) => host.clone(),
+        };
+        Self {
+            scheme: endpoint.scheme,
+            host,
+            port: endpoint.port,
+            normalized: endpoint.base_url(),
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -709,12 +1216,12 @@ fn app_status(state: State<'_, DesktopAppState>) -> AppStatus {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationPresentation {
-    let (selection, generation) = {
+    let (selection, generation, readiness) = {
         let model = state
             .model
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (model.selection.clone(), model.generation)
+        (model.selection.clone(), model.generation, model.readiness)
     };
     let connection = state
         .connection
@@ -723,6 +1230,15 @@ fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationP
     ModelConfigurationPresentation {
         provider: selection.provider,
         model: selection.model,
+        endpoint: selection
+            .llama_cpp_endpoint
+            .as_ref()
+            .map(ProviderEndpointPresentation::from),
+        insecure_transport: selection
+            .llama_cpp_endpoint
+            .as_ref()
+            .is_some_and(ProviderEndpoint::insecure_transport),
+        readiness,
         status: model_configuration_status(
             match &*connection {
                 ConnectionState::Connected {
@@ -741,12 +1257,20 @@ fn set_model_configuration(
     state: State<'_, DesktopAppState>,
     provider: DesktopModelProvider,
     model: Option<String>,
+    llama_cpp_endpoint: Option<ProviderEndpointInput>,
 ) -> Result<(), FrontendError> {
     let chat = *state
         .chat
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let selection = DesktopModelSelection { provider, model };
+    let llama_cpp_endpoint = llama_cpp_endpoint
+        .map(ProviderEndpoint::parse)
+        .transpose()?;
+    let selection = DesktopModelSelection {
+        provider,
+        model,
+        llama_cpp_endpoint,
+    };
     let mut current = state
         .model
         .lock()
@@ -760,15 +1284,141 @@ fn apply_model_selection(
     chat: ChatState,
     selection: DesktopModelSelection,
 ) -> Result<(), FrontendError> {
-    if chat == ChatState::Running {
+    if chat != ChatState::Idle {
         return Err(FrontendError::ModelConfigurationBusy);
     }
     selection.codex_model_config()?;
     if current.selection != selection {
         current.selection = selection;
         current.generation += 1;
+        current.readiness = ReadinessState::NotTested;
     }
     Ok(())
+}
+
+/// Desktop-private, explicit GET-only check of a currently selected llama.cpp endpoint.
+#[cfg(target_os = "windows")]
+struct LlamaCppReadinessProbe;
+
+#[cfg(target_os = "windows")]
+impl LlamaCppReadinessProbe {
+    async fn check(endpoint: &ProviderEndpoint) -> ReadinessState {
+        let client = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .connect_timeout(READINESS_CONNECT_TIMEOUT)
+            .timeout(READINESS_TOTAL_TIMEOUT)
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to construct readiness client");
+                return ReadinessState::CheckFailed;
+            }
+        };
+        let response = match client
+            .get(format!("{}/health", endpoint.base_url()))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return readiness_transport_error(&error),
+        };
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > READINESS_BODY_LIMIT as u64)
+        {
+            return ReadinessState::CheckFailed;
+        }
+        let mut bytes = 0usize;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    bytes = match bytes.checked_add(chunk.len()) {
+                        Some(bytes) if bytes <= READINESS_BODY_LIMIT => bytes,
+                        _ => return ReadinessState::CheckFailed,
+                    };
+                }
+                Err(error) => return readiness_transport_error(&error),
+            }
+        }
+        match status.as_u16() {
+            200 => ReadinessState::Ready,
+            503 => ReadinessState::Loading,
+            _ => ReadinessState::CheckFailed,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn readiness_transport_error(error: &reqwest::Error) -> ReadinessState {
+    // reqwest exposes connection and timeout facts without relying on unstable error text.
+    if error.is_timeout() || error.is_connect() {
+        ReadinessState::Unreachable
+    } else {
+        // The selected client does not expose a stable TLS-only classifier here.
+        ReadinessState::CheckFailed
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn test_llama_cpp_endpoint(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    let (endpoint, generation) = {
+        let mut model = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if model.selection.provider != DesktopModelProvider::LlamaCpp {
+            return Err(FrontendError::ModelConfigurationInvalid);
+        }
+        let endpoint = model
+            .selection
+            .llama_cpp_endpoint
+            .clone()
+            .ok_or(FrontendError::ModelConfigurationInvalid)?;
+        if model.readiness == ReadinessState::Checking {
+            return Ok(());
+        }
+        model.readiness = ReadinessState::Checking;
+        (endpoint, model.generation)
+    };
+    tauri::async_runtime::spawn(async move {
+        let result = LlamaCppReadinessProbe::check(&endpoint).await;
+        publish_readiness_result(
+            app.state::<DesktopAppState>().inner(),
+            generation,
+            &endpoint,
+            result,
+        );
+    });
+    Ok(())
+}
+
+/// Publishes only the result belonging to the exact selected endpoint generation.
+#[cfg(target_os = "windows")]
+fn publish_readiness_result(
+    state: &DesktopAppState,
+    generation: u64,
+    endpoint: &ProviderEndpoint,
+    result: ReadinessState,
+) {
+    let mut model = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if model.generation == generation
+        && model.selection.provider == DesktopModelProvider::LlamaCpp
+        && model.selection.llama_cpp_endpoint.as_ref() == Some(endpoint)
+    {
+        model.readiness = result;
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1263,7 +1913,7 @@ async fn disconnect_codex(
         .chat
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        == ChatState::Running
+        != ChatState::Idle
     {
         return Err(FrontendError::ChatAlreadyRunning);
     }
@@ -1317,7 +1967,7 @@ fn validate_prompt(prompt: &str) -> Result<(), FrontendError> {
 
 #[cfg(target_os = "windows")]
 fn begin_chat(chat: &mut ChatState) -> Result<(), FrontendError> {
-    if *chat == ChatState::Running {
+    if *chat != ChatState::Idle {
         return Err(FrontendError::ChatAlreadyRunning);
     }
     *chat = ChatState::Running;
@@ -1326,7 +1976,7 @@ fn begin_chat(chat: &mut ChatState) -> Result<(), FrontendError> {
 
 #[cfg(target_os = "windows")]
 fn repository_selection_allowed(chat: ChatState) -> Result<(), FrontendError> {
-    if chat == ChatState::Running {
+    if chat != ChatState::Idle {
         Err(FrontendError::RepositoryBusy)
     } else {
         Ok(())
@@ -1404,22 +2054,37 @@ async fn run_chat(
     request: AgentRequest,
     prompt: String,
     conversation_epoch: u64,
+    chat_generation: u64,
 ) {
     let handle = match runtime.start(request).await {
         Ok(handle) => handle,
         Err(error) => {
             tracing::warn!(error = %error, "desktop chat turn failed to start");
-            emit_chat_event(
-                &app,
-                ChatEvent::Failed {
-                    code: FrontendError::ChatStartFailed,
-                },
-            );
-            app.state::<DesktopAppState>().finish_chat();
+            if app
+                .state::<DesktopAppState>()
+                .claim_start_failure(chat_generation)
+            {
+                emit_chat_event(
+                    &app,
+                    ChatEvent::Failed {
+                        code: FrontendError::ChatStartFailed,
+                    },
+                );
+            }
             return;
         }
     };
 
+    if !app.state::<DesktopAppState>().register_chat_session(
+        chat_generation,
+        Arc::clone(&runtime),
+        handle.session_id().clone(),
+    ) {
+        tracing::warn!("desktop chat session was no longer current before streaming began");
+        return;
+    }
+
+    let session_id = handle.session_id().clone();
     emit_chat_event(&app, ChatEvent::Started);
     let mut terminal = false;
     let mut tool_calls = HashMap::new();
@@ -1433,9 +2098,22 @@ async fn run_chat(
         }
         match event {
             AgentEvent::ModelDelta { delta, .. } => {
-                emit_chat_event(&app, ChatEvent::Delta { text: delta })
+                if app.state::<DesktopAppState>().is_current_chat(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                ) {
+                    emit_chat_event(&app, ChatEvent::Delta { text: delta });
+                }
             }
             AgentEvent::Completed { output, .. } => {
+                if !app.state::<DesktopAppState>().claim_terminal(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                ) {
+                    return;
+                }
                 let assistant_text = output.message.content.clone();
                 let committed = app
                     .state::<DesktopAppState>()
@@ -1464,6 +2142,13 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Failed { .. } => {
+                if !app.state::<DesktopAppState>().claim_terminal(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                ) {
+                    return;
+                }
                 emit_chat_event(
                     &app,
                     ChatEvent::Failed {
@@ -1474,6 +2159,13 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Cancelled { .. } => {
+                if !app.state::<DesktopAppState>().claim_terminal(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                ) {
+                    return;
+                }
                 emit_chat_event(
                     &app,
                     ChatEvent::Cancelled {
@@ -1491,7 +2183,11 @@ async fn run_chat(
             | AgentEvent::ApprovalRequired { .. } => {}
         }
     }
-    if !terminal {
+    if !terminal
+        && app
+            .state::<DesktopAppState>()
+            .claim_terminal(chat_generation, &runtime, &session_id)
+    {
         emit_chat_event(
             &app,
             ChatEvent::Failed {
@@ -1499,7 +2195,6 @@ async fn run_chat(
             },
         );
     }
-    app.state::<DesktopAppState>().finish_chat();
 }
 
 #[cfg(target_os = "windows")]
@@ -1510,13 +2205,7 @@ async fn send_chat(
     state: State<'_, DesktopAppState>,
 ) -> Result<SendChatResult, FrontendError> {
     validate_prompt(&prompt)?;
-    {
-        let mut chat = state
-            .chat
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        begin_chat(&mut chat)?;
-    }
+    let chat_generation = state.start_chat()?;
     let (runtime, identity) = {
         let connection = state
             .connection
@@ -1536,7 +2225,7 @@ async fn send_chat(
                 },
             ),
             _ => {
-                state.finish_chat();
+                state.finish_chat(chat_generation);
                 return Err(FrontendError::CodexNotConnected);
             }
         }
@@ -1550,7 +2239,7 @@ async fn send_chat(
         let messages = match conversation.request_messages(&prompt) {
             Ok(messages) => messages,
             Err(error) => {
-                state.finish_chat();
+                state.finish_chat(chat_generation);
                 return Err(error);
             }
         };
@@ -1578,8 +2267,72 @@ async fn send_chat(
             emit_persistence_warning(&app, warning);
         }
     }
-    tauri::async_runtime::spawn(run_chat(app, runtime, request, prompt, conversation_epoch));
+    tauri::async_runtime::spawn(run_chat(
+        app,
+        runtime,
+        request,
+        prompt,
+        conversation_epoch,
+        chat_generation,
+    ));
     Ok(SendChatResult { context_change })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn cancel_chat(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    let (generation, runtime, session_id) = state.active_chat()?;
+    if !state.request_cancel(generation, &runtime, &session_id) {
+        return Err(FrontendError::ChatNotRunning);
+    }
+    let outcome = await_cancel_recovery(
+        runtime.cancel(session_id.clone()),
+        CANCEL_GRACEFUL_TIMEOUT,
+        |_| {
+            state.claim_terminal(generation, &runtime, &session_id)
+                && state.begin_hard_recovery(&runtime)
+        },
+        || runtime.shutdown(),
+        CANCEL_HARD_SHUTDOWN_TIMEOUT,
+    )
+    .await;
+    match outcome {
+        CancelRecoveryOutcome::Graceful(GracefulCancelOutcome::Completed) => {
+            // Either the adapter terminal event won first, or successful cancellation does.
+            // In both orders there is exactly one terminal owner and no completed persistence
+            // after cancellation owns the generation.
+            if state.claim_terminal(generation, &runtime, &session_id) {
+                emit_chat_event(
+                    &app,
+                    ChatEvent::Cancelled {
+                        code: FrontendError::ChatCancelled,
+                    },
+                );
+            }
+        }
+        CancelRecoveryOutcome::Hard(hard) => {
+            if hard != HardShutdownOutcome::Completed {
+                tracing::warn!("bounded hard Codex shutdown did not complete successfully");
+            }
+            state.finish_hard_recovery(hard == HardShutdownOutcome::Completed);
+            // This is a Desktop recovery outcome, not a claim that a remote provider request
+            // rolled back.
+            emit_chat_event(
+                &app,
+                ChatEvent::Failed {
+                    code: FrontendError::ChatRuntimeFailed,
+                },
+            );
+        }
+        CancelRecoveryOutcome::Stale
+        | CancelRecoveryOutcome::Graceful(
+            GracefulCancelOutcome::Failed | GracefulCancelOutcome::TimedOut,
+        ) => {}
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1592,7 +2345,7 @@ fn new_conversation(
         .chat
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        == ChatState::Running
+        != ChatState::Idle
     {
         return Err(FrontendError::ChatAlreadyRunning);
     }
@@ -1632,7 +2385,7 @@ fn clear_conversation_history(state: State<'_, DesktopAppState>) -> Result<(), F
 
 #[cfg(target_os = "windows")]
 fn clear_conversation_allowed(chat: ChatState) -> Result<(), FrontendError> {
-    if chat == ChatState::Running {
+    if chat != ChatState::Idle {
         Err(FrontendError::ConversationHistoryBusy)
     } else {
         Ok(())
@@ -1750,11 +2503,13 @@ fn main() -> ExitCode {
             app_status,
             model_configuration,
             set_model_configuration,
+            test_llama_cpp_endpoint,
             choose_repository,
             connect_codex,
             disconnect_codex,
             repository_snapshot,
             send_chat,
+            cancel_chat,
             new_conversation,
             clear_conversation_history,
             resume_previous_conversation,
@@ -1794,16 +2549,21 @@ fn main() {
 mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
     use super::{
-        ActivityEvent, ActivityResult, ChatEvent, ChatState, CodexExecutableSourcePresentation,
-        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        DESKTOP_TOOL_NAME, DesktopConversationState, DesktopModelProvider, DesktopModelSelection,
-        DesktopModelState, DesktopRepository, FrontendError, MAX_CONVERSATION_REPLAY_BYTES,
-        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        ResumePair, SendChatResult, activity_event, apply_model_selection, begin_chat,
-        clear_conversation_allowed, connect_prepared_codex, current_app_status,
-        desktop_tool_registry, frontend_error, model_configuration_status,
-        prepare_codex_connection, repository_selection_allowed, repository_tool_authority,
-        request_connect, resolve_prepare_and_connect_codex, validate_prompt,
+        ActivityEvent, ActivityResult, CancelRecoveryOutcome, ChatEvent, ChatState,
+        CodexExecutableSourcePresentation, ConnectRequest, ConnectionState,
+        ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME, DesktopAppState,
+        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
+        DesktopRepository, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
+        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
+        MAX_PROMPT_BYTES, ModelConfigurationPresentation, ProviderEndpoint, ProviderEndpointInput,
+        ProviderEndpointPresentation, ProviderScheme, READINESS_BODY_LIMIT,
+        READINESS_TOTAL_TIMEOUT, ReadinessState, ResumePair, SendChatResult, TerminalOwnership,
+        activity_event, apply_model_selection, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, clear_conversation_allowed, connect_prepared_codex,
+        current_app_status, desktop_tool_registry, frontend_error, model_configuration_status,
+        prepare_codex_connection, publish_readiness_result, repository_selection_allowed,
+        repository_tool_authority, request_connect, resolve_prepare_and_connect_codex, same_arc,
+        validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
@@ -1817,13 +2577,97 @@ mod tests {
         collections::HashMap,
         ffi::OsString,
         fs,
+        io::{Read, Write},
+        net::{Ipv4Addr, SocketAddrV4, TcpListener},
         path::PathBuf,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
-        time::{SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    #[derive(Debug)]
+    struct RuntimeMarker;
+
+    fn default_test_endpoint() -> ProviderEndpoint {
+        ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "127.0.0.1".to_owned(),
+            port: 8080,
+        })
+        .expect("default endpoint is valid")
+    }
+
+    struct ReadinessTestServer {
+        endpoint: ProviderEndpoint,
+        requests: std::sync::mpsc::Receiver<String>,
+        join: thread::JoinHandle<()>,
+    }
+
+    impl ReadinessTestServer {
+        fn start(response: String, requests_to_serve: usize) -> Self {
+            let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+                .expect("readiness test listener binds loopback");
+            listener
+                .set_nonblocking(false)
+                .expect("readiness listener is blocking");
+            let port = listener
+                .local_addr()
+                .expect("readiness listener has address")
+                .port();
+            let endpoint = ProviderEndpoint::parse(ProviderEndpointInput {
+                scheme: ProviderScheme::Http,
+                host: "127.0.0.1".to_owned(),
+                port,
+            })
+            .expect("loopback endpoint is valid");
+            let (sender, requests) = std::sync::mpsc::channel();
+            let join = thread::spawn(move || {
+                for _ in 0..requests_to_serve {
+                    let (mut stream, _) = listener.accept().expect("readiness request arrives");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .expect("request read timeout configures");
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 512];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let read = stream.read(&mut buffer).expect("request reads");
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    sender
+                        .send(String::from_utf8(request).expect("request is HTTP text"))
+                        .expect("request observation is received");
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("readiness response writes");
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                join,
+            }
+        }
+
+        fn request(&self) -> String {
+            self.requests
+                .recv_timeout(Duration::from_secs(2))
+                .expect("exactly one readiness request")
+        }
+
+        fn finish(self) {
+            self.join.join().expect("readiness server exits");
+        }
+    }
+
+    fn readiness_check(endpoint: &ProviderEndpoint) -> ReadinessState {
+        tauri::async_runtime::block_on(LlamaCppReadinessProbe::check(endpoint))
+    }
 
     fn message(role: MessageRole, content: &str) -> Message {
         Message {
@@ -1964,6 +2808,211 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn terminal_failure_and_cancellation_restore_desktop_chat_controls() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+
+        let failed_turn = state.start_chat().expect("failed turn reserves chat state");
+        assert_eq!(
+            *state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ChatState::Running
+        );
+        state.finish_chat(failed_turn);
+        assert_eq!(
+            *state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ChatState::Idle
+        );
+
+        let cancelled_turn = state
+            .start_chat()
+            .expect("cancelled turn reserves chat state");
+        state.finish_chat(cancelled_turn);
+        assert_eq!(
+            *state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ChatState::Idle
+        );
+        assert!(matches!(
+            state.active_chat(),
+            Err(FrontendError::ChatNotRunning)
+        ));
+    }
+
+    #[test]
+    fn stale_terminal_cannot_clear_a_later_desktop_turn() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let first = state.start_chat().expect("first turn");
+        state.finish_chat(first);
+        let second = state.start_chat().expect("second turn");
+
+        state.finish_chat(first);
+        assert_eq!(
+            *state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ChatState::Running
+        );
+        state.finish_chat(second);
+    }
+
+    #[test]
+    fn terminal_ownership_allows_exactly_one_winner_per_generation() {
+        let mut completed = TerminalOwnership::new(7);
+        assert!(completed.claim(7), "completed wins its generation");
+        assert!(!completed.claim(7), "cancel cannot claim after completed");
+
+        let mut cancelled = TerminalOwnership::new(8);
+        assert!(cancelled.claim(8), "cancel wins its generation");
+        assert!(!cancelled.claim(8), "late completed is rejected");
+
+        let mut duplicate = TerminalOwnership::new(9);
+        assert!(duplicate.claim(9), "first failed terminal wins");
+        assert!(!duplicate.claim(9), "duplicate failed is rejected");
+        assert!(!duplicate.claim(9), "duplicate cancelled is rejected");
+        assert!(!duplicate.claim(9), "duplicate completed is rejected");
+    }
+
+    #[test]
+    fn old_terminal_ownership_cannot_affect_a_new_generation() {
+        let mut current = TerminalOwnership::new(11);
+        assert!(!current.claim(10));
+        assert!(current.is_unclaimed(11));
+        assert!(current.claim(11));
+        assert!(!current.claim(10));
+    }
+
+    #[test]
+    fn completed_ownership_is_the_only_path_that_commits_a_pair() {
+        let identity = ConversationContextIdentity {
+            repository_generation: 1,
+            model_generation: 1,
+        };
+        let mut completed = DesktopConversationState::default();
+        completed.reconcile(identity);
+        let mut owner = TerminalOwnership::new(1);
+        assert!(owner.claim(1));
+        completed
+            .commit(0, "user".into(), message(MessageRole::Assistant, "answer"))
+            .expect("completed winner commits once");
+        assert_eq!(completed.history.len(), 2);
+
+        for generation in [2, 3, 4] {
+            let mut conversation = DesktopConversationState::default();
+            conversation.reconcile(identity);
+            let mut owner = TerminalOwnership::new(generation);
+            assert!(owner.claim(generation));
+            // Cancelled, failed, and hard-recovery winners deliberately have no commit path;
+            // model deltas are presentation-only and cannot become a completed response.
+            assert!(conversation.history.is_empty());
+            assert!(!owner.claim(generation), "late completion is rejected");
+        }
+    }
+
+    #[test]
+    fn runtime_identity_uses_arc_pointer_identity_without_a_codex_runtime() {
+        let first = Arc::new(RuntimeMarker);
+        let same = Arc::clone(&first);
+        let replacement = Arc::new(RuntimeMarker);
+        assert!(same_arc(&first, &same));
+        assert!(!same_arc(&first, &replacement));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_cancel_outcomes_are_bounded_without_starting_shutdown() {
+        assert_eq!(
+            await_graceful_cancel(
+                futures::future::ready(Ok::<(), ()>(())),
+                Duration::from_secs(2)
+            )
+            .await,
+            GracefulCancelOutcome::Completed
+        );
+        assert_eq!(
+            await_graceful_cancel(
+                futures::future::ready(Err::<(), ()>(())),
+                Duration::from_secs(2)
+            )
+            .await,
+            GracefulCancelOutcome::Failed
+        );
+        assert_eq!(
+            await_graceful_cancel(
+                futures::future::pending::<Result<(), ()>>(),
+                Duration::from_secs(2)
+            )
+            .await,
+            GracefulCancelOutcome::TimedOut
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hard_recovery_is_lazy_and_has_complete_error_and_timeout_outcomes() {
+        let shutdown_calls = Arc::new(AtomicU64::new(0));
+        let completed = await_cancel_recovery(
+            futures::future::ready(Ok::<(), ()>(())),
+            Duration::from_secs(2),
+            |_| true,
+            {
+                let shutdown_calls = Arc::clone(&shutdown_calls);
+                move || {
+                    shutdown_calls.fetch_add(1, Ordering::SeqCst);
+                    futures::future::ready(Ok::<(), ()>(()))
+                }
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(
+            completed,
+            CancelRecoveryOutcome::Graceful(GracefulCancelOutcome::Completed)
+        );
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 0);
+
+        let succeeded = await_cancel_recovery(
+            futures::future::pending::<Result<(), ()>>(),
+            Duration::from_secs(2),
+            |_| true,
+            {
+                let shutdown_calls = Arc::clone(&shutdown_calls);
+                move || {
+                    shutdown_calls.fetch_add(1, Ordering::SeqCst);
+                    futures::future::ready(Ok::<(), ()>(()))
+                }
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(
+            succeeded,
+            CancelRecoveryOutcome::Hard(HardShutdownOutcome::Completed)
+        );
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+
+        let failed = await_hard_shutdown(
+            futures::future::ready(Err::<(), ()>(())),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(failed, HardShutdownOutcome::Failed);
+        let timed_out = await_hard_shutdown(
+            futures::future::pending::<Result<(), ()>>(),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(timed_out, HardShutdownOutcome::TimedOut);
     }
 
     #[test]
@@ -2360,6 +3409,406 @@ mod tests {
     }
 
     #[test]
+    fn provider_endpoint_accepts_normalizes_and_serializes_only_the_closed_authority() {
+        let dns = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Https,
+            host: "EXAMPLE.COM.".to_owned(),
+            port: 443,
+        })
+        .expect("normalized DNS endpoint");
+        assert_eq!(dns.base_url(), "https://example.com:443/v1");
+        assert!(!dns.insecure_transport());
+        let ipv6 = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "::1".to_owned(),
+            port: 65535,
+        })
+        .expect("IPv6 endpoint");
+        assert_eq!(ipv6.base_url(), "http://[::1]:65535/v1");
+        assert!(!ipv6.insecure_transport());
+        let lan_http = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "198.51.100.20".to_owned(),
+            port: 1,
+        })
+        .expect("non-loopback endpoint");
+        assert!(lan_http.insecure_transport());
+    }
+
+    #[test]
+    fn llama_adapter_handoff_uses_the_synthesized_endpoint_without_credentials() {
+        let selection = DesktopModelSelection {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("model".to_owned()),
+            llama_cpp_endpoint: Some(
+                ProviderEndpoint::parse(ProviderEndpointInput {
+                    scheme: ProviderScheme::Https,
+                    host: "2001:db8::1".to_owned(),
+                    port: 443,
+                })
+                .expect("endpoint"),
+            ),
+        };
+        let CodexModelConfig::Explicit(config) = selection.codex_model_config().expect("config")
+        else {
+            panic!("llama selection must be explicit");
+        };
+        let CodexModelProvider::LlamaCpp(provider) = config.provider() else {
+            panic!("llama selection must use llama provider");
+        };
+        assert_eq!(provider.base_url(), "https://[2001:db8::1]:443/v1");
+        assert_eq!(provider.credential_environment_variable(), None);
+    }
+
+    #[test]
+    fn provider_endpoint_rejects_non_authority_syntax_and_malformed_hosts() {
+        for (host, port) in [
+            ("", 8080),
+            (" 127.0.0.1", 8080),
+            ("127.0.0.1 ", 8080),
+            ("http://example.com", 8080),
+            ("user@example.com", 8080),
+            ("example.com/path", 8080),
+            ("example.com?x", 8080),
+            ("example.com#x", 8080),
+            ("[::1]", 8080),
+            ("example.com:8080", 8080),
+            ("-example.com", 8080),
+            ("example-.com", 8080),
+            ("example..com", 8080),
+            ("例子.com", 8080),
+            ("999.999.999.999", 8080),
+            ("127.0.0.1", 0),
+        ] {
+            assert_eq!(
+                ProviderEndpoint::parse(ProviderEndpointInput {
+                    scheme: ProviderScheme::Http,
+                    host: host.to_owned(),
+                    port
+                }),
+                Err(FrontendError::ModelConfigurationInvalid),
+                "{host}:{port}",
+            );
+        }
+        let long_label = format!("{}.example", "a".repeat(64));
+        assert!(
+            ProviderEndpoint::parse(ProviderEndpointInput {
+                scheme: ProviderScheme::Https,
+                host: long_label,
+                port: 443
+            })
+            .is_err()
+        );
+        assert!(
+            ProviderEndpoint::parse(ProviderEndpointInput {
+                scheme: ProviderScheme::Https,
+                host: "a".repeat(254),
+                port: 443
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_normalization_controls_generation_and_llama_only_closure() {
+        let mut state = DesktopModelState::default();
+        let selection = |host: &str, scheme, port| DesktopModelSelection {
+            provider: DesktopModelProvider::LlamaCpp,
+            model: Some("model".to_owned()),
+            llama_cpp_endpoint: Some(
+                ProviderEndpoint::parse(ProviderEndpointInput {
+                    scheme,
+                    host: host.to_owned(),
+                    port,
+                })
+                .expect("endpoint"),
+            ),
+        };
+        apply_model_selection(
+            &mut state,
+            ChatState::Idle,
+            selection("EXAMPLE.COM.", ProviderScheme::Http, 8080),
+        )
+        .expect("apply");
+        assert_eq!(state.generation, 1);
+        apply_model_selection(
+            &mut state,
+            ChatState::Idle,
+            selection("example.com", ProviderScheme::Http, 8080),
+        )
+        .expect("equivalent apply");
+        assert_eq!(state.generation, 1);
+        apply_model_selection(
+            &mut state,
+            ChatState::Idle,
+            selection("example.com", ProviderScheme::Https, 8080),
+        )
+        .expect("scheme apply");
+        assert_eq!(state.generation, 2);
+        for provider in [
+            DesktopModelProvider::Inherit,
+            DesktopModelProvider::OpenAi,
+            DesktopModelProvider::Ollama,
+            DesktopModelProvider::LmStudio,
+        ] {
+            let selection = DesktopModelSelection {
+                provider,
+                model: if provider == DesktopModelProvider::Inherit {
+                    None
+                } else {
+                    Some("model".to_owned())
+                },
+                llama_cpp_endpoint: Some(default_test_endpoint()),
+            };
+            assert_eq!(
+                selection.codex_model_config(),
+                Err(FrontendError::ModelConfigurationInvalid)
+            );
+        }
+        assert_eq!(
+            DesktopModelSelection {
+                provider: DesktopModelProvider::LlamaCpp,
+                model: Some("model".to_owned()),
+                llama_cpp_endpoint: None
+            }
+            .codex_model_config(),
+            Err(FrontendError::ModelConfigurationInvalid)
+        );
+    }
+
+    #[test]
+    fn readiness_probe_uses_one_exact_get_request_and_maps_ready_and_loading() {
+        for (status, expected) in [(200, ReadinessState::Ready), (503, ReadinessState::Loading)] {
+            let server = ReadinessTestServer::start(
+                format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                1,
+            );
+            assert_eq!(readiness_check(&server.endpoint), expected);
+            let request = server.request();
+            assert!(request.starts_with("GET /v1/health HTTP/1.1\r\n"));
+            assert!(!request.contains("Authorization:"));
+            assert!(!request.contains("Cookie:"));
+            assert!(!request.contains("Referer:"));
+            assert!(!request.contains('?'));
+            server.finish();
+        }
+    }
+
+    #[test]
+    fn readiness_probe_does_not_follow_redirects() {
+        let redirect_target = ReadinessTestServer::start(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+            1,
+        );
+        let source = ReadinessTestServer::start(
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {}/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                redirect_target.endpoint.base_url()
+            ),
+            1,
+        );
+        assert_eq!(
+            readiness_check(&source.endpoint),
+            ReadinessState::CheckFailed
+        );
+        assert!(source.request().starts_with("GET /v1/health HTTP/1.1\r\n"));
+        assert!(
+            redirect_target
+                .requests
+                .recv_timeout(Duration::from_millis(250))
+                .is_err()
+        );
+        source.finish();
+        drop(redirect_target.requests);
+        drop(redirect_target.join);
+    }
+
+    #[test]
+    fn readiness_probe_rejects_declared_and_streamed_oversize_bodies() {
+        let declared = ReadinessTestServer::start(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                READINESS_BODY_LIMIT + 1
+            ),
+            1,
+        );
+        assert_eq!(
+            readiness_check(&declared.endpoint),
+            ReadinessState::CheckFailed
+        );
+        assert!(
+            declared
+                .request()
+                .starts_with("GET /v1/health HTTP/1.1\r\n")
+        );
+        declared.finish();
+
+        let body = "x".repeat(READINESS_BODY_LIMIT + 1);
+        let streamed = ReadinessTestServer::start(
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+                body.len(),
+                body
+            ),
+            1,
+        );
+        assert_eq!(
+            readiness_check(&streamed.endpoint),
+            ReadinessState::CheckFailed
+        );
+        assert!(
+            streamed
+                .request()
+                .starts_with("GET /v1/health HTTP/1.1\r\n")
+        );
+        streamed.finish();
+    }
+
+    #[test]
+    fn readiness_probe_maps_other_status_and_refused_connection() {
+        for status in [404, 500] {
+            let server = ReadinessTestServer::start(
+                format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                1,
+            );
+            assert_eq!(
+                readiness_check(&server.endpoint),
+                ReadinessState::CheckFailed
+            );
+            server.request();
+            server.finish();
+        }
+        let unused = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("temporary loopback port reserves");
+        let port = unused.local_addr().expect("reserved port address").port();
+        drop(unused);
+        let refused = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "127.0.0.1".to_owned(),
+            port,
+        })
+        .expect("refused endpoint is structurally valid");
+        assert_eq!(readiness_check(&refused), ReadinessState::Unreachable);
+    }
+
+    #[test]
+    fn readiness_probe_does_not_retry_a_transient_connection_failure() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("loopback listener binds");
+        let port = listener.local_addr().expect("listener address").port();
+        let endpoint = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "127.0.0.1".to_owned(),
+            port,
+        })
+        .expect("loopback endpoint is valid");
+        let attempts = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&attempts);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("first request arrives");
+            observed.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+            listener
+                .set_nonblocking(true)
+                .expect("listener becomes nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                if let Ok((stream, _)) = listener.accept() {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    drop(stream);
+                }
+                thread::yield_now();
+            }
+        });
+        assert_eq!(readiness_check(&endpoint), ReadinessState::CheckFailed);
+        server.join().expect("transient server exits");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn readiness_probe_has_a_bounded_total_timeout() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("loopback listener binds");
+        let port = listener.local_addr().expect("listener address").port();
+        let endpoint = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "127.0.0.1".to_owned(),
+            port,
+        })
+        .expect("loopback endpoint is valid");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("readiness request arrives");
+            thread::sleep(READINESS_TOTAL_TIMEOUT + Duration::from_secs(1));
+            drop(stream);
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(readiness_check(&endpoint), ReadinessState::Unreachable);
+        assert!(started.elapsed() < READINESS_TOTAL_TIMEOUT + Duration::from_secs(1));
+        server.join().expect("timeout server exits");
+    }
+
+    #[test]
+    fn stale_readiness_result_cannot_overwrite_a_new_model_generation() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let old_endpoint = default_test_endpoint();
+        let new_endpoint = ProviderEndpoint::parse(ProviderEndpointInput {
+            scheme: ProviderScheme::Http,
+            host: "127.0.0.1".to_owned(),
+            port: 8081,
+        })
+        .expect("replacement endpoint is valid");
+        {
+            let mut model = state.model.lock().expect("model lock");
+            model.selection = DesktopModelSelection {
+                provider: DesktopModelProvider::LlamaCpp,
+                model: Some("old".to_owned()),
+                llama_cpp_endpoint: Some(old_endpoint.clone()),
+            };
+            model.generation = 7;
+            model.readiness = ReadinessState::Checking;
+            model.selection = DesktopModelSelection {
+                provider: DesktopModelProvider::LlamaCpp,
+                model: Some("new".to_owned()),
+                llama_cpp_endpoint: Some(new_endpoint.clone()),
+            };
+            model.generation = 8;
+            model.readiness = ReadinessState::NotTested;
+        }
+        publish_readiness_result(&state, 7, &old_endpoint, ReadinessState::Ready);
+        let model = state.model.lock().expect("model lock");
+        assert_eq!(model.generation, 8);
+        assert_eq!(
+            model.selection.llama_cpp_endpoint.as_ref(),
+            Some(&new_endpoint)
+        );
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+    }
+
+    #[test]
+    fn readiness_probe_has_no_configuration_or_runtime_effect() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let server = ReadinessTestServer::start(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+            1,
+        );
+        assert_eq!(readiness_check(&server.endpoint), ReadinessState::Ready);
+        server.request();
+        server.finish();
+        let model = state.model.lock().expect("model lock");
+        assert_eq!(model.generation, 0);
+        assert_eq!(model.selection, DesktopModelSelection::default());
+        assert_eq!(model.readiness, ReadinessState::NotTested);
+        drop(model);
+        assert!(matches!(
+            *state.connection.lock().expect("connection lock"),
+            ConnectionState::NotConnected
+        ));
+        assert!(state.repository.lock().expect("repository lock").is_none());
+    }
+
+    #[test]
     fn desktop_model_selection_maps_only_closed_provider_choices() {
         let inherit = DesktopModelSelection::default().codex_model_config();
         assert_eq!(inherit, Ok(CodexModelConfig::Inherit));
@@ -2369,12 +3818,17 @@ mod tests {
             (DesktopModelProvider::LmStudio, CodexModelProvider::LmStudio),
             (
                 DesktopModelProvider::LlamaCpp,
-                CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default_local()),
+                CodexModelProvider::LlamaCpp(
+                    CodexLlamaCppProvider::new("http://127.0.0.1:8080/v1", None)
+                        .expect("test provider"),
+                ),
             ),
         ] {
             let selection = DesktopModelSelection {
                 provider,
                 model: Some("exact-model".to_owned()),
+                llama_cpp_endpoint: (provider == DesktopModelProvider::LlamaCpp)
+                    .then(default_test_endpoint),
             };
             assert_eq!(
                 selection.codex_model_config(),
@@ -2392,14 +3846,17 @@ mod tests {
             DesktopModelSelection {
                 provider: DesktopModelProvider::OpenAi,
                 model: None,
+                llama_cpp_endpoint: None,
             },
             DesktopModelSelection {
                 provider: DesktopModelProvider::Ollama,
                 model: Some("   ".to_owned()),
+                llama_cpp_endpoint: None,
             },
             DesktopModelSelection {
                 provider: DesktopModelProvider::Inherit,
                 model: Some("not-allowed".to_owned()),
+                llama_cpp_endpoint: None,
             },
         ] {
             assert_eq!(
@@ -2414,12 +3871,15 @@ mod tests {
         let presentation = ModelConfigurationPresentation {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("rah-local-model".to_owned()),
+            endpoint: Some(ProviderEndpointPresentation::from(&default_test_endpoint())),
+            insecure_transport: false,
+            readiness: ReadinessState::NotTested,
             status: "active",
         };
         let serialized = serde_json::to_string(&presentation).expect("presentation serializes");
         assert_eq!(
             serialized,
-            r#"{"provider":"llama_cpp","model":"rah-local-model","status":"active"}"#
+            r#"{"provider":"llama_cpp","model":"rah-local-model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080,"normalized":"http://127.0.0.1:8080/v1"},"insecureTransport":false,"readiness":"not_tested","status":"active"}"#
         );
         for forbidden in [
             "base_url",
@@ -2440,6 +3900,7 @@ mod tests {
         let selection = DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("rah-local-model".to_owned()),
+            llama_cpp_endpoint: Some(default_test_endpoint()),
         };
         assert_eq!(
             apply_model_selection(&mut state, ChatState::Idle, selection.clone()),
@@ -2463,6 +3924,7 @@ mod tests {
                 DesktopModelSelection {
                     provider: DesktopModelProvider::OpenAi,
                     model: Some("test-model".to_owned()),
+                    llama_cpp_endpoint: None,
                 },
             ),
             Err(FrontendError::ModelConfigurationBusy)

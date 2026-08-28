@@ -38,6 +38,23 @@
           </select>
           <label for="model-identifier">Model</label>
           <input id="model-identifier" type="text" maxlength="256" />
+          <div id="llama-cpp-endpoint" hidden>
+            <label for="llama-cpp-scheme">Scheme</label>
+            <select id="llama-cpp-scheme">
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
+            <label for="llama-cpp-host">Host</label>
+            <input id="llama-cpp-host" type="text" value="127.0.0.1" maxlength="253" />
+            <label for="llama-cpp-port">Port</label>
+            <input id="llama-cpp-port" type="number" min="1" max="65535" value="8080" />
+            <p id="llama-cpp-normalized-endpoint" class="model-hint" hidden></p>
+            <p id="llama-cpp-insecure-warning" class="connection-error" hidden>
+              Non-loopback HTTP sends model-provider traffic without transport encryption or authenticated server identity.
+            </p>
+            <p id="llama-cpp-readiness" class="model-hint">Not tested</p>
+            <button id="test-llama-cpp-endpoint" type="button">Test Endpoint</button>
+          </div>
           <p id="model-hint" class="model-hint"></p>
           <button id="apply-model-configuration" type="button">Apply Model Configuration</button>
         </section>

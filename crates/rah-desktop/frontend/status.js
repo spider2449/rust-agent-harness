@@ -19,6 +19,7 @@ let chatRunning = false;
 let activeAssistant = null;
 let resumeAvailable = false;
 let resumeUsed = false;
+let renderedModelConfiguration = null;
 const maxActivityEntries = 100;
 
 const tauriApiRetryDelayMs = 100;
@@ -61,6 +62,7 @@ function errorMessage(error) {
     chat_empty_prompt: "Enter a message before sending",
     chat_prompt_too_large: "Message is too large",
     codex_not_connected: "Connect Codex to chat",
+    chat_not_running: "No chat turn is running",
     chat_already_running: "A chat turn is already running",
     chat_start_failed: "Chat could not start",
     chat_runtime_failed: "Chat failed",
@@ -92,18 +94,38 @@ function modelHint(provider) {
     openai: "Codex built-in OpenAI provider",
     ollama: "Codex built-in Ollama provider",
     lm_studio: "Codex built-in LM Studio provider",
-    llama_cpp: "Local endpoint: http://127.0.0.1:8080/v1",
+    llama_cpp: "",
   };
   return hints[provider] ?? "Invalid model configuration";
 }
 
 function renderModelConfiguration(configuration) {
+  renderedModelConfiguration = configuration;
   const provider = document.querySelector("#model-provider");
   const model = document.querySelector("#model-identifier");
   provider.value = configuration.provider;
   model.value = configuration.model ?? "";
   model.disabled = configuration.provider === "inherit" || chatRunning;
   provider.disabled = chatRunning;
+  const llama = configuration.provider === "llama_cpp";
+  const endpointControls = document.querySelector("#llama-cpp-endpoint");
+  endpointControls.hidden = !llama;
+  for (const element of endpointControls.querySelectorAll("select, input")) element.disabled = chatRunning;
+  if (configuration.endpoint) {
+    document.querySelector("#llama-cpp-scheme").value = configuration.endpoint.scheme;
+    document.querySelector("#llama-cpp-host").value = configuration.endpoint.host;
+    document.querySelector("#llama-cpp-port").value = configuration.endpoint.port;
+  }
+  const normalized = document.querySelector("#llama-cpp-normalized-endpoint");
+  normalized.textContent = configuration.endpoint?.normalized ?? "";
+  normalized.hidden = !configuration.endpoint;
+  document.querySelector("#llama-cpp-insecure-warning").hidden = !llama || !configuration.insecureTransport;
+  const readiness = {
+    not_tested: "Not tested", checking: "Checking…", ready: "Ready", loading: "Model loading",
+    unreachable: "Unreachable", tls_failure: "TLS failure", check_failed: "Health check failed",
+  };
+  document.querySelector("#llama-cpp-readiness").textContent = readiness[configuration.readiness] ?? "Not tested";
+  document.querySelector("#test-llama-cpp-endpoint").disabled = !llama || chatRunning || configuration.readiness === "checking";
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
   document.querySelector("#model-hint").textContent = modelHint(configuration.provider);
 }
@@ -215,7 +237,8 @@ async function loadStatus(invoke) {
   const send = document.querySelector("#chat-send");
   document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
   prompt.disabled = !connected || chatRunning;
-  send.disabled = !connected || chatRunning;
+  send.disabled = !connected;
+  send.textContent = chatRunning ? "Cancel Turn" : "Send";
   document.querySelector("#new-conversation").disabled = chatRunning;
   document.querySelector("#resume-previous-conversation").disabled = !resumeAvailable
     || !connected
@@ -226,9 +249,13 @@ async function loadStatus(invoke) {
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
+  const endpointControls = document.querySelector("#llama-cpp-endpoint");
   document.querySelector("#apply-model-configuration").disabled = chatRunning;
   provider.disabled = chatRunning;
   model.disabled = chatRunning || provider.value === "inherit";
+  for (const element of endpointControls.querySelectorAll("select, input")) {
+    element.disabled = chatRunning;
+  }
   if (status.codexError) {
     connectionError.textContent = errorMessage(status.codexError);
     connectionError.hidden = false;
@@ -417,6 +444,7 @@ async function initializeDesktop() {
     const provider = document.querySelector("#model-provider");
     const model = document.querySelector("#model-identifier");
     model.disabled = chatRunning || provider.value === "inherit";
+    document.querySelector("#llama-cpp-endpoint").hidden = provider.value !== "llama_cpp";
     document.querySelector("#model-hint").textContent = modelHint(provider.value);
   });
   document.querySelector("#apply-model-configuration").addEventListener("click", async () => {
@@ -424,10 +452,16 @@ async function initializeDesktop() {
     error.hidden = true;
     const provider = document.querySelector("#model-provider").value;
     const model = document.querySelector("#model-identifier").value;
+    const llamaCppEndpoint = provider === "llama_cpp" ? {
+      scheme: document.querySelector("#llama-cpp-scheme").value,
+      host: document.querySelector("#llama-cpp-host").value,
+      port: Number(document.querySelector("#llama-cpp-port").value),
+    } : null;
     try {
       await invoke("set_model_configuration", {
         provider,
         model: provider === "inherit" ? null : model,
+        llamaCppEndpoint,
       });
       await refreshModelConfiguration(invoke);
       await loadStatus(invoke);
@@ -440,9 +474,41 @@ async function initializeDesktop() {
       error.hidden = false;
     }
   });
+  document.querySelector("#test-llama-cpp-endpoint").addEventListener("click", async () => {
+    const error = document.querySelector("#model-error");
+    error.hidden = true;
+    try {
+      const readinessRequest = invoke("test_llama_cpp_endpoint");
+      if (renderedModelConfiguration) {
+        renderModelConfiguration({ ...renderedModelConfiguration, readiness: "checking" });
+      }
+      await readinessRequest;
+      const refreshReadiness = async () => {
+        const configuration = await invoke("model_configuration");
+        renderModelConfiguration(configuration);
+        if (configuration.readiness === "checking") {
+          window.setTimeout(() => { void refreshReadiness(); }, 100);
+        }
+      };
+      void refreshReadiness();
+    } catch (readinessError) {
+      if (renderedModelConfiguration) {
+        renderModelConfiguration({ ...renderedModelConfiguration, readiness: "check_failed" });
+      }
+      error.textContent = "Health check failed";
+      error.hidden = false;
+    }
+  });
   document.querySelector("#chat-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (chatRunning) return;
+    if (chatRunning) {
+      try {
+        await invoke("cancel_chat");
+      } catch (error) {
+        showChatError(error);
+      }
+      return;
+    }
     const prompt = document.querySelector("#chat-prompt");
     const chatError = document.querySelector("#chat-error");
     chatError.hidden = true;

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-test-llama-cpp-endpoint"
+description = "Enables the test_llama_cpp_endpoint command without any pre-configured scope."
+commands.allow = ["test_llama_cpp_endpoint"]
+
+[[permission]]
+identifier = "deny-test-llama-cpp-endpoint"
+description = "Denies the test_llama_cpp_endpoint command without any pre-configured scope."
+commands.deny = ["test_llama_cpp_endpoint"]
