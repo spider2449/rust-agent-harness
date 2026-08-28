@@ -1627,6 +1627,20 @@ fn selected_git_executable() -> Result<std::path::PathBuf, FrontendError> {
     Ok(path)
 }
 
+/// Private diagnostic classification for the fixed repository-observer bundle.
+///
+/// These values deliberately never cross the Desktop IPC boundary: they identify
+/// an observer layer without disclosing paths, executable details, stderr, or
+/// repository configuration.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryObservationStage {
+    StatusExecutionOrRevalidation,
+    WorktreeDiffExecution,
+    StagedDiffExecution,
+    NormalizedOutput,
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1785,6 +1799,47 @@ fn desktop_snapshot(
 }
 
 #[cfg(target_os = "windows")]
+async fn desktop_repository_snapshot(
+    repository: &DesktopRepository,
+) -> Result<RepositorySnapshot, RepositoryObservationStage> {
+    let input = ToolInput(serde_json::json!({}));
+    let status = repository
+        .status
+        .execute(input.clone(), ToolContext::default())
+        .await
+        .map_err(|_| RepositoryObservationStage::StatusExecutionOrRevalidation)?;
+    let worktree_diff = repository
+        .worktree_diff
+        .execute(input.clone(), ToolContext::default())
+        .await
+        .map_err(|_| RepositoryObservationStage::WorktreeDiffExecution)?;
+    let staged_diff = repository
+        .staged_diff
+        .execute(input, ToolContext::default())
+        .await
+        .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?;
+    desktop_snapshot(
+        repository.display_path.clone(),
+        status,
+        worktree_diff,
+        staged_diff,
+    )
+    .map_err(|_| RepositoryObservationStage::NormalizedOutput)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepository) {
+    *state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(repository));
+    *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn choose_repository(
     app: AppHandle,
@@ -1814,14 +1869,7 @@ fn choose_repository(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
-    *state
-        .repository
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(repository));
-    *state
-        .repository_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    replace_selected_repository(state.inner(), repository);
     Ok(())
 }
 
@@ -1838,29 +1886,9 @@ async fn repository_snapshot(
     let Some(repository) = repository else {
         return Err(FrontendError::RepositoryNotSelected);
     };
-    let input = ToolInput(serde_json::json!({}));
-    let status = repository
-        .status
-        .execute(input.clone(), ToolContext::default())
-        .await;
-    let worktree_diff = repository
-        .worktree_diff
-        .execute(input.clone(), ToolContext::default())
-        .await;
-    let staged_diff = repository
-        .staged_diff
-        .execute(input, ToolContext::default())
-        .await;
-    let (status, worktree_diff, staged_diff) = match (status, worktree_diff, staged_diff) {
-        (Ok(status), Ok(worktree_diff), Ok(staged_diff)) => (status, worktree_diff, staged_diff),
-        _ => return Err(FrontendError::RepositoryObservationFailed),
-    };
-    desktop_snapshot(
-        repository.display_path.clone(),
-        status,
-        worktree_diff,
-        staged_diff,
-    )
+    desktop_repository_snapshot(&repository)
+        .await
+        .map_err(|_| FrontendError::RepositoryObservationFailed)
 }
 
 #[cfg(target_os = "windows")]
@@ -2774,13 +2802,14 @@ mod tests {
         LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
         MAX_PROMPT_BYTES, ModelConfigurationPresentation, Preferences, PreferencesWarning,
         ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState, ResumePair, SendChatResult,
-        TerminalOwnership, activity_event, apply_model_selection, await_cancel_recovery,
-        await_graceful_cancel, await_hard_shutdown, begin_chat, clear_conversation_allowed,
-        connect_prepared_codex, current_app_status, desktop_tool_registry, frontend_error,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState, RepositoryObservationStage,
+        ResumePair, SendChatResult, TerminalOwnership, activity_event, apply_model_selection,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        clear_conversation_allowed, connect_prepared_codex, current_app_status,
+        desktop_repository_snapshot, desktop_tool_registry, frontend_error,
         model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        repository_selection_allowed, repository_tool_authority, request_connect,
-        resolve_prepare_and_connect_codex, same_arc, validate_prompt,
+        replace_selected_repository, repository_selection_allowed, repository_tool_authority,
+        request_connect, resolve_prepare_and_connect_codex, same_arc, validate_prompt,
     };
     use rah_protocol::{
         AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
@@ -2797,6 +2826,7 @@ mod tests {
         io::{Read, Write},
         net::{Ipv4Addr, SocketAddrV4, TcpListener},
         path::PathBuf,
+        process::Command,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -3019,12 +3049,288 @@ mod tests {
                 std::env::current_exe().expect("current test executable should be available");
             DesktopRepository::new(&executable, &self.0).expect("test repository should construct")
         }
+
+        fn native_git() -> PathBuf {
+            let output = Command::new("where.exe")
+                .arg("git.exe")
+                .output()
+                .expect("where.exe should locate native Git");
+            assert!(
+                output.status.success(),
+                "native Git must be installed for this test"
+            );
+            let path = String::from_utf8(output.stdout).expect("Git path is UTF-8");
+            fs::canonicalize(
+                path.lines()
+                    .next()
+                    .expect("where.exe should return one Git path"),
+            )
+            .expect("Git path should canonicalize")
+        }
+
+        fn git_repository(state: GitRepositoryState) -> Self {
+            let repository = Self::new();
+            let git = Self::native_git();
+            fs::remove_dir_all(repository.0.join(".git"))
+                .expect("placeholder metadata should be removed before git init");
+            fs::remove_file(repository.0.join("inside.txt"))
+                .expect("placeholder file should be removed before git init");
+            let run = |arguments: &[&str]| {
+                let output = Command::new(&git)
+                    .args(arguments)
+                    .current_dir(&repository.0)
+                    .output()
+                    .expect("native Git command should start");
+                assert!(
+                    output.status.success(),
+                    "native Git fixture command should succeed"
+                );
+            };
+            run(&["init", "--quiet"]);
+            run(&["config", "user.email", "rah-desktop-test@example.invalid"]);
+            run(&["config", "user.name", "RAH Desktop Test"]);
+            fs::create_dir_all(repository.0.join("nested"))
+                .expect("nested fixture directory should be created");
+            fs::write(repository.0.join("tracked.txt"), "base\n")
+                .expect("tracked fixture should be written");
+            fs::write(
+                repository.0.join("nested").join("ordinary.txt"),
+                "ordinary\n",
+            )
+            .expect("nested tracked fixture should be written");
+            run(&["add", "tracked.txt", "nested/ordinary.txt"]);
+            run(&["commit", "--quiet", "-m", "fixture"]);
+            match state {
+                GitRepositoryState::Clean => {}
+                GitRepositoryState::Untracked => {
+                    fs::write(repository.0.join("untracked.txt"), "untracked\n")
+                        .expect("untracked fixture should be written");
+                }
+                GitRepositoryState::Modified => {
+                    fs::write(
+                        repository.0.join("nested").join("ordinary.txt"),
+                        "modified\n",
+                    )
+                    .expect("modified fixture should be written");
+                }
+                GitRepositoryState::Staged => {
+                    fs::write(repository.0.join("tracked.txt"), "staged\n")
+                        .expect("staged fixture should be written");
+                    run(&["add", "tracked.txt"]);
+                }
+            }
+            repository
+        }
     }
 
     impl Drop for TestRepository {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum GitRepositoryState {
+        Clean,
+        Untracked,
+        Modified,
+        Staged,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_snapshot_matrix_isolated_repositories_and_replacements() {
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Untracked);
+        let repository_c = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_d = TestRepository::git_repository(GitRepositoryState::Modified);
+        let git = TestRepository::native_git();
+
+        let a = DesktopRepository::new(&git, &repository_a.0).expect("A constructs");
+        let b = DesktopRepository::new(&git, &repository_b.0).expect("B constructs");
+        let c = DesktopRepository::new(&git, &repository_c.0).expect("C constructs");
+        let snapshot_a = desktop_repository_snapshot(&a)
+            .await
+            .expect("A snapshot succeeds");
+        assert_eq!(snapshot_a.status_entries.len(), 0, "{snapshot_a:#?}");
+        assert!(snapshot_a.worktree_diff.is_empty());
+        assert!(snapshot_a.staged_diff.is_empty());
+        let snapshot_b = desktop_repository_snapshot(&b)
+            .await
+            .expect("B snapshot succeeds");
+        assert_eq!(snapshot_b.status_entries.len(), 1);
+        assert!(snapshot_b.worktree_diff.is_empty());
+        assert!(snapshot_b.staged_diff.is_empty());
+        let snapshot_c = desktop_repository_snapshot(&c)
+            .await
+            .expect("C snapshot succeeds");
+        assert_eq!(snapshot_c.status_entries.len(), 1);
+        assert!(snapshot_c.worktree_diff.is_empty());
+        assert_eq!(snapshot_c.staged_diff.len(), 1);
+        let d = DesktopRepository::new(&git, &repository_d.0).expect("D constructs");
+        let snapshot_d = desktop_repository_snapshot(&d)
+            .await
+            .expect("D snapshot succeeds");
+        assert_eq!(snapshot_d.status_entries.len(), 1);
+        assert_eq!(snapshot_d.worktree_diff.len(), 1);
+        assert!(snapshot_d.staged_diff.is_empty());
+
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        replace_selected_repository(&state, a);
+        let first_a = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("A is selected");
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+        assert!(desktop_repository_snapshot(&first_a).await.is_ok());
+
+        replace_selected_repository(&state, b);
+        let selected_b = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("B is selected");
+        assert!(!Arc::ptr_eq(&first_a, &selected_b));
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
+        assert_eq!(
+            desktop_repository_snapshot(&selected_b)
+                .await
+                .unwrap()
+                .status_entries
+                .len(),
+            1
+        );
+
+        let replacement_a =
+            DesktopRepository::new(&git, &repository_a.0).expect("replacement A constructs");
+        replace_selected_repository(&state, replacement_a);
+        let second_a = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("replacement A is selected");
+        assert!(!Arc::ptr_eq(&first_a, &second_a));
+        assert_eq!(*state.repository_generation.lock().unwrap(), 3);
+        assert!(desktop_repository_snapshot(&second_a).await.is_ok());
+
+        replace_selected_repository(&state, c);
+        let selected_c = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("C is selected");
+        assert_eq!(*state.repository_generation.lock().unwrap(), 4);
+        assert_eq!(
+            desktop_repository_snapshot(&selected_c)
+                .await
+                .unwrap()
+                .staged_diff
+                .len(),
+            1
+        );
+
+        let fresh_state = DesktopAppState::new(storage.0.clone());
+        let fresh_b = DesktopRepository::new(&git, &repository_b.0).expect("fresh B constructs");
+        replace_selected_repository(&fresh_state, fresh_b);
+        let fresh_b = fresh_state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fresh B selected");
+        assert_eq!(*fresh_state.repository_generation.lock().unwrap(), 1);
+        assert_eq!(
+            desktop_repository_snapshot(&fresh_b)
+                .await
+                .unwrap()
+                .status_entries
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_snapshot_classifies_first_observer_execution_failure() {
+        let fixture = TestRepository::new();
+        let repository = fixture.desktop_repository();
+        assert_eq!(
+            desktop_repository_snapshot(&repository).await,
+            Err(RepositoryObservationStage::StatusExecutionOrRevalidation)
+        );
+    }
+
+    #[test]
+    fn hardened_git_environment_requires_host_pinned_safe_directory_for_foreign_owner_diagnostic() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let status = || {
+            Command::new(&git)
+                .args([
+                    "--no-pager",
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--untracked-files=normal",
+                    "--ignored=no",
+                    "--no-renames",
+                    "--ignore-submodules=all",
+                ])
+                .current_dir(&repository.0)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "NUL")
+                .env("GIT_CONFIG_COUNT", "2")
+                .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+                .env("GIT_CONFIG_VALUE_0", "false")
+                .env("GIT_CONFIG_KEY_1", "core.untrackedCache")
+                .env("GIT_CONFIG_VALUE_1", "false")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+                .output()
+                .expect("hardened native Git status should start")
+        };
+        assert!(
+            !status().status.success(),
+            "the diagnostic must reproduce Git's protected ownership refusal"
+        );
+
+        let output = Command::new(&git)
+            .args([
+                "--no-pager",
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=normal",
+                "--ignored=no",
+                "--no-renames",
+                "--ignore-submodules=all",
+            ])
+            .current_dir(&repository.0)
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "NUL")
+            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+            .env("GIT_CONFIG_VALUE_0", "false")
+            .env("GIT_CONFIG_KEY_1", "core.untrackedCache")
+            .env("GIT_CONFIG_VALUE_1", "false")
+            .env("GIT_CONFIG_KEY_2", "safe.directory")
+            .env("GIT_CONFIG_VALUE_2", &repository.0)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .output()
+            .expect("host-pinned safe-directory diagnostic should start");
+        assert!(
+            output.status.success(),
+            "only the exact host-selected root should restore this observation"
+        );
     }
 
     #[test]

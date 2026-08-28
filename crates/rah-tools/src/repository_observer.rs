@@ -19,7 +19,7 @@ use serde_json::json;
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, ToolError,
-    git_support::{git_environment, git_error},
+    git_support::{git_error, repository_observer_environment},
     host_execute::paths_equivalent,
     repository_diff::DiffBaseline,
 };
@@ -65,6 +65,7 @@ pub(crate) struct RepositoryObserver {
 impl RepositoryObserver {
     pub(crate) fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
         let repository = RepositoryIdentity::capture(root)?;
+        let environment = repository_observer_environment(&repository.root)?;
         let exact = |arguments: Vec<String>| {
             HostExecutionPolicy::new(
                 git,
@@ -72,7 +73,7 @@ impl RepositoryObserver {
                 &repository.root,
                 ".",
             )?
-            .with_environment(git_environment())?
+            .with_environment(environment.clone())?
             .with_timeout(FILE_INFO_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
@@ -90,7 +91,7 @@ impl RepositoryObserver {
                 &repository.root,
                 ".",
             )?
-            .with_environment(git_environment())?
+            .with_environment(environment.clone())?
             .with_timeout(FILE_INFO_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
