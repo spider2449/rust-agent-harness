@@ -1,60 +1,45 @@
+//! Host-owned, private SQLite transcript storage. SQL is never exposed outside this module.
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
 };
-
-pub(crate) const SNAPSHOT_FILE: &str = "conversation-transcript-v1.json";
-const V2_FILE: &str = "conversation-transcript.json";
 const V3_FILE: &str = "conversation-transcript-v3.json";
+const DB: &str = "conversation-transcript.sqlite3";
+const STAGING: &str = "conversation-transcript.sqlite3.importing";
 const MAX_NAMESPACES: usize = 64;
+// Bounds one legacy V3 JSON migration input, never the SQLite database.
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_RECORDS: usize = 79;
 const MAX_PAIRS: usize = 64;
 const MAX_EPOCHS: usize = 16;
-
+const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_SQL: &str = "CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=1),migration_complete INTEGER NOT NULL CHECK(migration_complete IN(0,1)),source_format TEXT NOT NULL CHECK(source_format IN('empty','v3')),imported_namespace_count INTEGER NOT NULL CHECK(imported_namespace_count>=0),imported_epoch_count INTEGER NOT NULL CHECK(imported_epoch_count>=0),imported_pair_count INTEGER NOT NULL CHECK(imported_pair_count>=0));CREATE TABLE namespaces(namespace_key TEXT PRIMARY KEY NOT NULL CHECK(namespace_key='neutral-v1' OR(length(namespace_key)=76 AND substr(namespace_key,1,12)='repo-sha256:' AND substr(namespace_key,13) NOT GLOB '*[^0-9a-f]*')));CREATE TABLE epochs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL CHECK(epoch_id>0),parent_epoch_id INTEGER,boundary TEXT,history_trimmed_before INTEGER NOT NULL CHECK(history_trimmed_before IN(0,1)),PRIMARY KEY(namespace_key,epoch_id),FOREIGN KEY(namespace_key) REFERENCES namespaces(namespace_key) ON DELETE CASCADE,FOREIGN KEY(namespace_key,parent_epoch_id) REFERENCES epochs(namespace_key,epoch_id),CHECK(parent_epoch_id IS NULL OR parent_epoch_id<epoch_id),CHECK(boundary IS NULL OR boundary IN('new_conversation','repository_changed','model_configuration_changed','repository_and_model_changed','application_restarted','history_trimmed')));CREATE TABLE pairs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL,pair_index INTEGER NOT NULL CHECK(pair_index>=0),user_text TEXT NOT NULL CHECK(length(CAST(user_text AS BLOB))<=16384),assistant_text TEXT NOT NULL CHECK(length(CAST(assistant_text AS BLOB))<=16384),PRIMARY KEY(namespace_key,epoch_id,pair_index),FOREIGN KEY(namespace_key,epoch_id) REFERENCES epochs(namespace_key,epoch_id) ON DELETE CASCADE);";
+const FAULT_CREATE: u8 = 1;
+const FAULT_MIGRATION_BEFORE_COMMIT: u8 = 2;
+const FAULT_MIGRATION_COMMIT: u8 = 3;
+const FAULT_ARCHIVE: u8 = 4;
+const FAULT_MUTATION: u8 = 5;
 #[cfg(test)]
-static TEST_FAULT: OnceLock<Mutex<Option<(PathBuf, u8)>>> = OnceLock::new();
-#[cfg(test)]
-const FAIL_CREATE: u8 = 1;
-#[cfg(test)]
-const FAIL_REPLACE: u8 = 2;
-#[cfg(test)]
-const FAIL_REMOVE_V1: u8 = 3;
-#[cfg(test)]
-const FAIL_REMOVE_V2: u8 = 4;
-
-#[cfg(test)]
-fn set_test_fault(path: PathBuf, fault: u8) {
-    *TEST_FAULT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path, fault));
+thread_local! {
+    static TEST_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
-
 #[cfg(test)]
-fn clear_test_fault() {
-    *TEST_FAULT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+fn fault(point: u8) -> Result<(), ()> {
+    if TEST_FAULT.with(|fault| fault.get()) == point {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
-
-#[cfg(test)]
-fn test_fault(path: &Path) -> Option<u8> {
-    TEST_FAULT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .and_then(|(target, fault)| (target == path).then_some(*fault))
+#[cfg(not(test))]
+fn fault(_: u8) -> Result<(), ()> {
+    Ok(())
 }
-
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Warning {
@@ -107,27 +92,12 @@ pub(crate) enum SeparatorReason {
     ApplicationRestarted,
     HistoryTrimmed,
 }
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct V1 {
-    version: u8,
-    records: Vec<Record>,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Record {
-    CompletedPair { user: String, assistant: String },
-    ContextSeparator { reason: SeparatorReason },
-}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct V2 {
     version: u8,
     epochs: Vec<Epoch>,
 }
-/// Version 3 deliberately partitions every durable lineage by a host-owned
-/// opaque namespace. V1/V2 have no ownership metadata and remain legacy.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct V3 {
@@ -149,442 +119,570 @@ struct Pair {
     user: String,
     assistant: String,
 }
-enum Backing {
-    V1(Vec<Record>),
-    V2(V2),
-    V3(V3),
-}
 pub(crate) struct Persistence {
-    directory: PathBuf,
-    backing: Backing,
-    warning: Option<Warning>,
-    sequence: u64,
+    connection: Option<Connection>,
     selected_namespace: Option<String>,
-    /// Each namespace with history receives its own restart boundary the first
-    /// time it is selected after this process starts. A neutral selection must
-    /// not consume a repository's restart/resume boundary.
-    restart_pending_namespaces: BTreeSet<String>,
+    restart_pending: BTreeSet<String>,
+    warning: Option<Warning>,
 }
-
 impl Persistence {
     pub(crate) fn start(directory: PathBuf) -> Self {
         let _ = fs::create_dir_all(&directory);
-        cleanup_temps(&directory);
-        let v3 = directory.join(V3_FILE);
-        let v2 = directory.join(V2_FILE);
-        let v1 = directory.join(SNAPSHOT_FILE);
-        let mut this = if v3.exists() {
-            match load_v3(&v3) {
-                Ok(v) => Self::v3(directory, v),
-                Err(()) => {
-                    quarantine(&v3);
-                    Self::failed(directory)
+        match open_or_migrate(&directory) {
+            Ok(c) => {
+                let pending = names_with_pairs(&c).unwrap_or_default();
+                Self {
+                    connection: Some(c),
+                    selected_namespace: None,
+                    restart_pending: pending,
+                    warning: None,
                 }
             }
-        } else if v2.exists() {
-            match load_v2(&v2) {
-                Ok(v) => Self::v2(directory, v),
-                Err(()) => {
-                    quarantine(&v2);
-                    Self::failed(directory)
-                }
-            }
-        } else {
-            match load_v1(&v1) {
-                Ok(Some(v)) => Self::v1(directory, v),
-                Ok(None) => Self::v1(directory, vec![]),
-                Err(()) => {
-                    quarantine(&v1);
-                    Self::failed(directory)
-                }
-            }
-        };
-        if !matches!(this.backing, Backing::V3(_)) && !this.empty() {
-            this.restart();
-        }
-        this
-    }
-    fn v1(directory: PathBuf, records: Vec<Record>) -> Self {
-        Self {
-            directory,
-            backing: Backing::V1(records),
-            warning: None,
-            sequence: 0,
-            selected_namespace: None,
-            restart_pending_namespaces: BTreeSet::new(),
+            Err(()) => Self {
+                connection: None,
+                selected_namespace: None,
+                restart_pending: BTreeSet::new(),
+                warning: Some(Warning::RestoreFailed),
+            },
         }
     }
-    fn v2(directory: PathBuf, v2: V2) -> Self {
-        Self {
-            directory,
-            backing: Backing::V2(v2),
-            warning: None,
-            sequence: 0,
-            selected_namespace: None,
-            restart_pending_namespaces: BTreeSet::new(),
+    pub(crate) fn select_namespace(&mut self, n: String) {
+        if !valid_namespace(&n) {
+            self.warning = Some(Warning::RestoreFailed);
+            return;
         }
-    }
-    fn v3(directory: PathBuf, v3: V3) -> Self {
-        let restart_pending_namespaces = v3
-            .namespaces
-            .iter()
-            .filter(|(_, namespace)| !namespace.epochs.iter().all(|epoch| epoch.pairs.is_empty()))
-            .map(|(namespace, _)| namespace.clone())
-            .collect();
-        Self {
-            directory,
-            backing: Backing::V3(v3),
-            warning: None,
-            sequence: 0,
-            selected_namespace: None,
-            restart_pending_namespaces,
-        }
-    }
-    fn failed(directory: PathBuf) -> Self {
-        Self {
-            directory,
-            backing: Backing::V2(V2 {
-                version: 2,
-                epochs: vec![],
-            }),
-            warning: Some(Warning::RestoreFailed),
-            sequence: 0,
-            selected_namespace: None,
-            restart_pending_namespaces: BTreeSet::new(),
-        }
-    }
-    /// Selects an opaque host-derived persistence namespace. Selecting a
-    /// namespace is the only way V3 records become visible or writable.
-    pub(crate) fn select_namespace(&mut self, namespace: String) {
-        // V1/V2 records have no repository owner. Preserve their files for
-        // compatibility, but never expose them through a selected namespace.
-        if !matches!(self.backing, Backing::V3(_)) {
-            self.backing = Backing::V3(V3 {
-                version: 3,
-                namespaces: BTreeMap::new(),
-            });
-        }
-        let startup_restart = self.restart_pending_namespaces.remove(&namespace);
-        let mut save = false;
-        self.selected_namespace = Some(namespace.clone());
-        match &mut self.backing {
-            Backing::V3(v3) => {
-                if startup_restart
-                    && v3
-                        .namespaces
-                        .get(&namespace)
-                        .is_some_and(|v| !v.epochs.iter().all(|e| e.pairs.is_empty()))
-                {
-                    let v = v3
-                        .namespaces
-                        .get_mut(&namespace)
-                        .expect("checked namespace");
-                    v.epochs.push(Epoch {
-                        id: next_id(&v.epochs).unwrap_or(0),
-                        parent_epoch_id: None,
-                        boundary: Some(SeparatorReason::ApplicationRestarted),
-                        history_trimmed_before: false,
-                        pairs: vec![],
-                    });
-                    save = true;
-                }
-            }
-            Backing::V1(_) | Backing::V2(_) => unreachable!(),
-        }
-        if save && self.save().is_err() {
-            self.warning = Some(Warning::SaveFailed);
-        }
-    }
-    fn selected_v3(&self) -> Option<&V2> {
-        let Backing::V3(v3) = &self.backing else {
-            return None;
-        };
-        v3.namespaces.get(self.selected_namespace.as_ref()?)
-    }
-    fn empty(&self) -> bool {
-        match &self.backing {
-            Backing::V1(r) => r.is_empty(),
-            Backing::V2(v) => v.epochs.iter().all(|e| e.pairs.is_empty()),
-            Backing::V3(v) => v
-                .namespaces
-                .values()
-                .all(|v| v.epochs.iter().all(|e| e.pairs.is_empty())),
-        }
-    }
-    fn restart(&mut self) {
-        match &mut self.backing {
-            Backing::V1(r) => r.push(Record::ContextSeparator {
-                reason: SeparatorReason::ApplicationRestarted,
-            }),
-            Backing::V2(v) => v.epochs.push(Epoch {
-                id: next_id(&v.epochs).unwrap_or(0),
-                parent_epoch_id: None,
-                boundary: Some(SeparatorReason::ApplicationRestarted),
-                history_trimmed_before: false,
-                pairs: vec![],
-            }),
-            Backing::V3(_) => return,
-        };
-        if self.save().is_err() {
-            self.warning = Some(Warning::SaveFailed);
+        self.selected_namespace = Some(n.clone());
+        if self.restart_pending.remove(&n)
+            && self
+                .separator(&n, SeparatorReason::ApplicationRestarted)
+                .is_err()
+        {
+            self.warning = Some(Warning::SaveFailed)
         }
     }
     pub(crate) fn presentation(&self) -> Presentation {
-        let mut records = vec![];
-        match &self.backing {
-            Backing::V1(v) => presentation_v1(v, &mut records),
-            Backing::V2(v) => {
-                for e in &v.epochs {
-                    if e.history_trimmed_before {
-                        records.push(PresentationRecord::ContextSeparator {
-                            reason: SeparatorReason::HistoryTrimmed,
-                        });
-                    }
-                    if let Some(reason) = e.boundary {
-                        records.push(PresentationRecord::ContextSeparator { reason });
-                    }
-                    for p in &e.pairs {
-                        records.push(PresentationRecord::CompletedMessage {
-                            role: PresentationRole::User,
-                            text: p.user.clone(),
-                        });
-                        records.push(PresentationRecord::CompletedMessage {
-                            role: PresentationRole::Assistant,
-                            text: p.assistant.clone(),
-                        });
-                    }
-                }
-            }
-            Backing::V3(_) => {
-                if let Some(v) = self.selected_v3() {
-                    for e in &v.epochs {
-                        if e.history_trimmed_before {
-                            records.push(PresentationRecord::ContextSeparator {
-                                reason: SeparatorReason::HistoryTrimmed,
-                            });
-                        }
-                        if let Some(reason) = e.boundary {
-                            records.push(PresentationRecord::ContextSeparator { reason });
-                        }
-                        for p in &e.pairs {
-                            records.push(PresentationRecord::CompletedMessage {
-                                role: PresentationRole::User,
-                                text: p.user.clone(),
-                            });
-                            records.push(PresentationRecord::CompletedMessage {
-                                role: PresentationRole::Assistant,
-                                text: p.assistant.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-        };
+        let v = self
+            .selected_namespace
+            .as_deref()
+            .and_then(|n| self.load(n).ok());
+        let records = v.as_ref().map(present).unwrap_or_default();
+        let resume_available = v.as_ref().is_some_and(|v| resume_source(v).is_ok());
         Presentation {
             records,
-            resume_available: self.resume_available(),
+            resume_available,
             warning: self.warning,
         }
     }
-    pub(crate) fn resume_available(&self) -> bool {
-        if self.selected_namespace.is_none() {
-            return matches!(&self.backing, Backing::V2(v) if resume_source(v).is_ok());
-        }
-        self.selected_v3().is_some_and(|v| resume_source(v).is_ok())
-    }
-
-    /// Returns only complete user/assistant pairs from the durable restart lineage.
-    /// Epoch IDs and storage details deliberately remain private to this module.
     pub(crate) fn resume_messages(&self) -> Result<Vec<ResumePair>, ResumeError> {
-        if self.selected_namespace.is_none() {
-            let Backing::V2(v) = &self.backing else {
-                return Err(ResumeError::Unavailable);
-            };
-            return reconstruct_resume(v, resume_source(v)?);
-        }
-        let Some(v) = self.selected_v3() else {
-            return Err(ResumeError::Unavailable);
-        };
-        let source = resume_source(v)?;
-        reconstruct_resume(v, source)
+        let v = self
+            .load(
+                self.selected_namespace
+                    .as_deref()
+                    .ok_or(ResumeError::Unavailable)?,
+            )
+            .map_err(|_| ResumeError::Incompatible)?;
+        reconstruct(&v, resume_source(&v)?)
     }
-
-    /// Durably links the current recovered restart epoch to its selected source.
-    /// The in-memory graph changes only after the atomic replacement succeeds.
     pub(crate) fn commit_resume_lineage(&mut self) -> Result<(), ResumeError> {
-        if self.selected_namespace.is_none() {
-            let Backing::V2(v) = &self.backing else {
-                return Err(ResumeError::Unavailable);
-            };
-            let source = resume_source(v)?;
-            let mut candidate = v.clone();
-            candidate
-                .epochs
+        let n = self
+            .selected_namespace
+            .clone()
+            .ok_or(ResumeError::Unavailable)?;
+        self.mutate(&n, |v| {
+            let s = resume_source(v)?;
+            v.epochs
                 .last_mut()
                 .ok_or(ResumeError::Incompatible)?
-                .parent_epoch_id = Some(source);
-            validate_v2(&candidate).map_err(|_| ResumeError::Incompatible)?;
-            let sequence = self.next();
-            write_v2(&self.directory, &candidate, sequence).map_err(|_| ResumeError::SaveFailed)?;
-            self.backing = Backing::V2(candidate);
-            return Ok(());
-        }
-        let Some(v) = self.selected_v3() else {
-            return Err(ResumeError::Unavailable);
-        };
-        let source = resume_source(v)?;
-        let mut candidate = v.clone();
-        let current = candidate
-            .epochs
-            .last_mut()
-            .ok_or(ResumeError::Incompatible)?;
-        current.parent_epoch_id = Some(source);
-        validate_v2(&candidate).map_err(|_| ResumeError::Incompatible)?;
-        let namespace = self.selected_namespace.clone().expect("selected namespace");
-        let mut durable = match &self.backing {
-            Backing::V3(v3) => v3.clone(),
-            _ => return Err(ResumeError::Unavailable),
-        };
-        durable.namespaces.insert(namespace, candidate);
-        let sequence = self.next();
-        write_v3(&self.directory, &durable, sequence).map_err(|_| ResumeError::SaveFailed)?;
-        let Backing::V3(v3) = &mut self.backing else {
-            return Err(ResumeError::Unavailable);
-        };
-        *v3 = durable;
-        Ok(())
+                .parent_epoch_id = Some(s);
+            Ok(())
+        })
     }
     pub(crate) fn append_pair(&mut self, user: String, assistant: String) -> Result<(), Warning> {
-        self.mutate(Some(Pair { user, assistant }), None)
+        let n = self.selected_namespace.clone().ok_or(Warning::SaveFailed)?;
+        self.mutate(&n, |v| {
+            apply(v, Some(Pair { user, assistant }), None).map_err(|_| ResumeError::SaveFailed)
+        })
+        .map_err(|_| Warning::SaveFailed)
     }
-    pub(crate) fn append_separator(&mut self, reason: SeparatorReason) -> Result<(), Warning> {
-        self.mutate(None, Some(reason))
+    pub(crate) fn append_separator(&mut self, r: SeparatorReason) -> Result<(), Warning> {
+        let n = self.selected_namespace.clone().ok_or(Warning::SaveFailed)?;
+        self.separator(&n, r).map_err(|_| Warning::SaveFailed)
     }
-    fn mutate(
-        &mut self,
-        pair: Option<Pair>,
-        separator: Option<SeparatorReason>,
-    ) -> Result<(), Warning> {
-        if self.selected_namespace.is_none() {
-            if let Backing::V1(records) = &mut self.backing {
-                apply_v1(records, pair.as_ref(), separator);
-                if !trim_v1(records) {
-                    return Err(Warning::SaveFailed);
-                }
-                let mut candidate = normalize_v1(records);
-                let sequence = self.next();
-                if !trim_v2(&mut candidate)
-                    || write_v2(&self.directory, &candidate, sequence).is_err()
-                {
-                    return Err(Warning::SaveFailed);
-                }
-                self.backing = Backing::V2(candidate);
-                return Ok(());
-            }
-            let Backing::V2(v) = &mut self.backing else {
-                unreachable!()
-            };
-            apply_v2(v, pair, separator)?;
-            if !trim_v2(v) {
-                return Err(Warning::SaveFailed);
-            }
-            return self.save().map_err(|_| Warning::SaveFailed);
-        }
-        if !matches!(self.backing, Backing::V3(_)) {
-            self.backing = Backing::V3(V3 {
-                version: 3,
-                namespaces: BTreeMap::new(),
-            });
-        }
-        let namespace = self
+    fn separator(&mut self, n: &str, r: SeparatorReason) -> Result<(), ResumeError> {
+        self.mutate(n, |v| {
+            apply(v, None, Some(r)).map_err(|_| ResumeError::SaveFailed)
+        })
+    }
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        let n = self
             .selected_namespace
             .clone()
             .unwrap_or_else(|| "neutral-v1".into());
-        let Backing::V3(v3) = &mut self.backing else {
-            unreachable!()
-        };
-        let v = v3.namespaces.entry(namespace).or_insert_with(|| V2 {
-            version: 2,
-            epochs: vec![],
-        });
-        apply_v2(v, pair, separator)?;
-        if !trim_v2(v) {
-            return Err(Warning::SaveFailed);
-        }
-        if self.save().is_err() {
-            Err(Warning::SaveFailed)
-        } else {
-            Ok(())
-        }
-    }
-    pub(crate) fn clear(&mut self) -> io::Result<()> {
-        if matches!(self.backing, Backing::V3(_)) {
-            let namespace = self
-                .selected_namespace
-                .clone()
-                .unwrap_or_else(|| "neutral-v1".into());
-            if let Backing::V3(v3) = &mut self.backing {
-                v3.namespaces.remove(&namespace);
-            }
-            self.save()?;
-            self.warning = None;
-            return Ok(());
-        }
-        let v1 = self.directory.join(SNAPSHOT_FILE);
-        let v2 = self.directory.join(V2_FILE);
-        if v2.exists() {
-            remove(&v1)?;
-            remove(&v2)?;
-        } else {
-            remove(&v1)?;
-        }
-        clean_private(&self.directory);
-        self.backing = Backing::V1(vec![]);
+        let c = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| io::Error::other("unavailable"))?;
+        let t = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        t.execute("DELETE FROM namespaces WHERE namespace_key=?1", params![n])
+            .map_err(io::Error::other)?;
+        t.commit().map_err(io::Error::other)?;
         self.warning = None;
         Ok(())
     }
-    fn next(&mut self) -> u64 {
-        self.sequence = self.sequence.wrapping_add(1);
-        self.sequence
+    fn load(&self, n: &str) -> Result<V2, ()> {
+        load(self.connection.as_ref().ok_or(())?, n)
     }
-    fn save(&mut self) -> io::Result<()> {
-        let n = self.next();
-        match &self.backing {
-            Backing::V1(v) => write_v1(&self.directory, v, n),
-            Backing::V2(v) => write_v2(&self.directory, v, n),
-            Backing::V3(v) => write_v3(&self.directory, v, n),
+    fn mutate<F>(&mut self, n: &str, f: F) -> Result<(), ResumeError>
+    where
+        F: FnOnce(&mut V2) -> Result<(), ResumeError>,
+    {
+        let c = self.connection.as_mut().ok_or(ResumeError::SaveFailed)?;
+        let t = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ResumeError::SaveFailed)?;
+        let mut v = load(&t, n).map_err(|_| ResumeError::SaveFailed)?;
+        f(&mut v)?;
+        if !trim(&mut v) || validate(&v).is_err() {
+            return Err(ResumeError::SaveFailed);
+        }
+        replace(&t, n, &v).map_err(|_| ResumeError::SaveFailed)?;
+        fault(FAULT_MUTATION).map_err(|_| ResumeError::SaveFailed)?;
+        t.commit().map_err(|_| ResumeError::SaveFailed)
+    }
+}
+fn open_or_migrate(d: &Path) -> Result<Connection, ()> {
+    let final_path = d.join(DB);
+    if final_path.exists() {
+        return open(&final_path).map_err(|()| {
+            // A final filename is authoritative even when it cannot be opened.
+            // Never resurrect stale V3 data after this point.
+            quarantine(&final_path);
+        });
+    }
+    // A prior final database was corrupt. Its V3 predecessor must remain
+    // inert: allowing an import here would resurrect stale history.
+    if quarantine_path(&final_path).exists() {
+        return Err(());
+    }
+    let staging = d.join(STAGING);
+    if staging.exists() {
+        if open(&staging).is_ok() {
+            fs::rename(&staging, &final_path).map_err(|_| ())?;
+            return open(&final_path);
+        }
+        let _ = fs::rename(&staging, staging.with_extension("importing.corrupt"));
+    }
+    let legacy = d.join(V3_FILE);
+    let v3 = if legacy.exists() {
+        Some(read_v3(&legacy)?)
+    } else {
+        None
+    };
+    create(&staging, v3.as_ref())?;
+    open(&staging)?;
+    fs::rename(&staging, &final_path).map_err(|_| ())?;
+    if v3.is_some() && fault(FAULT_ARCHIVE).is_ok() {
+        let _ = fs::rename(
+            legacy,
+            d.join("conversation-transcript-v3.json.migrated-v3"),
+        );
+    }
+    open(&final_path)
+}
+fn open(p: &Path) -> Result<Connection, ()> {
+    let c = Connection::open_with_flags(
+        p,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| ())?;
+    pragmas(&c)?;
+    validate_db(&c)?;
+    Ok(c)
+}
+fn pragmas(c: &Connection) -> Result<(), ()> {
+    c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=250;").map_err(|_|())?;
+    let (a, b, c1, d): (i64, String, i64, i64) = (
+        c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .map_err(|_| ())?,
+        c.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .map_err(|_| ())?,
+        c.query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .map_err(|_| ())?,
+        c.query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .map_err(|_| ())?,
+    );
+    if a == 1 && b.eq_ignore_ascii_case("delete") && c1 == 2 && d == 250 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+fn create(p: &Path, input: Option<&V3>) -> Result<(), ()> {
+    let _ = fs::remove_file(p);
+    fault(FAULT_CREATE)?;
+    let mut c = Connection::open(p).map_err(|_| ())?;
+    pragmas(&c)?;
+    c.execute_batch(SCHEMA_SQL).map_err(|_| ())?;
+    let t = c
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ())?;
+    let (mut ns, mut es, mut ps) = (0i64, 0i64, 0i64);
+    if let Some(v) = input {
+        for (n, x) in &v.namespaces {
+            replace(&t, n, x).map_err(|_| ())?;
+            ns += 1;
+            es += x.epochs.len() as i64;
+            ps += x.epochs.iter().map(|e| e.pairs.len() as i64).sum::<i64>();
+        }
+    }
+    t.execute(
+        "INSERT INTO schema_metadata VALUES(1,?1,1,?2,?3,?4,?5)",
+        params![
+            SCHEMA_VERSION,
+            if input.is_some() { "v3" } else { "empty" },
+            ns,
+            es,
+            ps
+        ],
+    )
+    .map_err(|_| ())?;
+    t.execute_batch("PRAGMA user_version=1").map_err(|_| ())?;
+    fault(FAULT_MIGRATION_BEFORE_COMMIT)?;
+    fault(FAULT_MIGRATION_COMMIT)?;
+    t.commit().map_err(|_| ())?;
+    Ok(())
+}
+fn validate_db(c: &Connection) -> Result<(), ()> {
+    let v: i64 = c
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|_| ())?;
+    let (m, done): (i64, i64) = c
+        .query_row(
+            "SELECT schema_version,migration_complete FROM schema_metadata WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| ())?;
+    let ok: String = c
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|_| ())?;
+    if v != SCHEMA_VERSION || m != SCHEMA_VERSION || done != 1 || ok != "ok" || !schema_matches(c) {
+        return Err(());
+    }
+    let mut s = c
+        .prepare("SELECT namespace_key FROM namespaces")
+        .map_err(|_| ())?;
+    let names = s
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|_| ())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    if names.len() > MAX_NAMESPACES {
+        return Err(());
+    }
+    for n in names {
+        if !valid_namespace(&n) || validate(&load(c, &n)?).is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+fn schema_matches(c: &Connection) -> bool {
+    let expected = ["schema_metadata", "namespaces", "epochs", "pairs"];
+    let actual = c.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>());
+    let Ok(actual) = actual else { return false };
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .any(|(name, _)| !expected.contains(&name.as_str()))
+    {
+        return false;
+    }
+    let schema = SCHEMA_SQL
+        .split(";")
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    schema
+        .iter()
+        .all(|ddl| actual.iter().any(|(_, sql)| sql.eq_ignore_ascii_case(ddl)))
+}
+fn quarantine(path: &Path) {
+    let corrupt = quarantine_path(path);
+    let journal = journal_path(path);
+    let corrupt_journal = journal_path(&corrupt);
+    // Keep one bounded generation. If rotating it fails, preserve the
+    // authoritative files in place and let startup fail closed.
+    if corrupt.exists() && fs::remove_file(&corrupt).is_err() {
+        return;
+    }
+    if corrupt_journal.exists() && fs::remove_file(&corrupt_journal).is_err() {
+        return;
+    }
+    if journal.exists() && fs::rename(&journal, &corrupt_journal).is_err() {
+        return;
+    }
+    if fs::rename(path, &corrupt).is_err() {
+        // Best effort rollback keeps the main database and its journal paired.
+        if corrupt_journal.exists() {
+            let _ = fs::rename(&corrupt_journal, &journal);
         }
     }
 }
-fn apply_v1(records: &mut Vec<Record>, pair: Option<&Pair>, separator: Option<SeparatorReason>) {
-    if let Some(p) = pair {
-        records.push(Record::CompletedPair {
-            user: p.user.clone(),
-            assistant: p.assistant.clone(),
+fn quarantine_path(path: &Path) -> PathBuf {
+    path.with_extension("sqlite3.corrupt")
+}
+fn journal_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}-journal", path.display()))
+}
+fn names_with_pairs(c: &Connection) -> Result<BTreeSet<String>, ()> {
+    let mut s=c.prepare("SELECT DISTINCT e.namespace_key FROM epochs e JOIN pairs p ON p.namespace_key=e.namespace_key AND p.epoch_id=e.epoch_id").map_err(|_|())?;
+    s.query_map([], |r| r.get(0))
+        .map_err(|_| ())?
+        .collect::<Result<_, _>>()
+        .map_err(|_| ())
+}
+fn load(c: &Connection, n: &str) -> Result<V2, ()> {
+    if !valid_namespace(n) {
+        return Err(());
+    }
+    let mut s=c.prepare("SELECT epoch_id,parent_epoch_id,boundary,history_trimmed_before FROM epochs WHERE namespace_key=?1 ORDER BY epoch_id").map_err(|_|())?;
+    let rows = s
+        .query_map(params![n], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|_| ())?;
+    let mut epochs = vec![];
+    for row in rows {
+        let (id, parent, boundary, trim) = row.map_err(|_| ())?;
+        let mut p=c.prepare("SELECT user_text,assistant_text FROM pairs WHERE namespace_key=?1 AND epoch_id=?2 ORDER BY pair_index").map_err(|_|())?;
+        let pairs = p
+            .query_map(params![n, id], |r| {
+                Ok(Pair {
+                    user: r.get(0)?,
+                    assistant: r.get(1)?,
+                })
+            })
+            .map_err(|_| ())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        epochs.push(Epoch {
+            id: id as u64,
+            parent_epoch_id: parent.map(|x| x as u64),
+            boundary: boundary.as_deref().map(reason).transpose()?,
+            history_trimmed_before: trim == 1,
+            pairs,
         });
     }
-    if let Some(reason) = separator {
-        records.push(Record::ContextSeparator { reason });
+    let v = V2 { version: 2, epochs };
+    if !v.epochs.is_empty() {
+        validate(&v)?
+    }
+    Ok(v)
+}
+fn replace(c: &Connection, n: &str, v: &V2) -> rusqlite::Result<()> {
+    c.execute("INSERT OR IGNORE INTO namespaces VALUES(?1)", params![n])?;
+    c.execute("DELETE FROM epochs WHERE namespace_key=?1", params![n])?;
+    for e in &v.epochs {
+        c.execute(
+            "INSERT INTO epochs VALUES(?1,?2,?3,?4,?5)",
+            params![
+                n,
+                e.id as i64,
+                e.parent_epoch_id.map(|x| x as i64),
+                e.boundary.map(name),
+                i64::from(e.history_trimmed_before)
+            ],
+        )?;
+        for (i, p) in e.pairs.iter().enumerate() {
+            c.execute(
+                "INSERT INTO pairs VALUES(?1,?2,?3,?4,?5)",
+                params![n, e.id as i64, i as i64, p.user, p.assistant],
+            )?;
+        }
+    }
+    Ok(())
+}
+fn name(r: SeparatorReason) -> &'static str {
+    match r {
+        SeparatorReason::NewConversation => "new_conversation",
+        SeparatorReason::RepositoryChanged => "repository_changed",
+        SeparatorReason::ModelConfigurationChanged => "model_configuration_changed",
+        SeparatorReason::RepositoryAndModelChanged => "repository_and_model_changed",
+        SeparatorReason::ApplicationRestarted => "application_restarted",
+        SeparatorReason::HistoryTrimmed => "history_trimmed",
     }
 }
-
+fn reason(s: &str) -> Result<SeparatorReason, ()> {
+    match s {
+        "new_conversation" => Ok(SeparatorReason::NewConversation),
+        "repository_changed" => Ok(SeparatorReason::RepositoryChanged),
+        "model_configuration_changed" => Ok(SeparatorReason::ModelConfigurationChanged),
+        "repository_and_model_changed" => Ok(SeparatorReason::RepositoryAndModelChanged),
+        "application_restarted" => Ok(SeparatorReason::ApplicationRestarted),
+        "history_trimmed" => Ok(SeparatorReason::HistoryTrimmed),
+        _ => Err(()),
+    }
+}
+fn present(v: &V2) -> Vec<PresentationRecord> {
+    let mut r = vec![];
+    for e in &v.epochs {
+        if e.history_trimmed_before {
+            r.push(PresentationRecord::ContextSeparator {
+                reason: SeparatorReason::HistoryTrimmed,
+            })
+        }
+        if let Some(x) = e.boundary {
+            r.push(PresentationRecord::ContextSeparator { reason: x })
+        }
+        for p in &e.pairs {
+            r.push(PresentationRecord::CompletedMessage {
+                role: PresentationRole::User,
+                text: p.user.clone(),
+            });
+            r.push(PresentationRecord::CompletedMessage {
+                role: PresentationRole::Assistant,
+                text: p.assistant.clone(),
+            });
+        }
+    }
+    r
+}
+fn apply(v: &mut V2, p: Option<Pair>, r: Option<SeparatorReason>) -> Result<(), ()> {
+    if let Some(r) = r {
+        v.epochs.push(Epoch {
+            id: v
+                .epochs
+                .last()
+                .map(|e| e.id.checked_add(1).ok_or(()))
+                .unwrap_or(Ok(1))?,
+            parent_epoch_id: None,
+            boundary: Some(r),
+            history_trimmed_before: false,
+            pairs: vec![],
+        })
+    }
+    if let Some(p) = p {
+        if v.epochs.is_empty() {
+            v.epochs.push(Epoch {
+                id: 1,
+                parent_epoch_id: None,
+                boundary: None,
+                history_trimmed_before: false,
+                pairs: vec![],
+            })
+        }
+        v.epochs.last_mut().ok_or(())?.pairs.push(p)
+    }
+    Ok(())
+}
+fn trim(v: &mut V2) -> bool {
+    while validate(v).is_err() {
+        if v.epochs.len() < 2 {
+            return false;
+        }
+        v.epochs.remove(0);
+        v.epochs[0].parent_epoch_id = None;
+        v.epochs[0].history_trimmed_before = true
+    }
+    true
+}
+fn validate(v: &V2) -> Result<(), ()> {
+    if v.version != 2 || v.epochs.len() > MAX_EPOCHS {
+        return Err(());
+    }
+    let (mut count, mut prior) = (0, 0);
+    for (i, e) in v.epochs.iter().enumerate() {
+        if e.id == 0
+            || e.id <= prior
+            || (i == 0 && !e.history_trimmed_before && e.boundary.is_some())
+            || (i == 0 && e.history_trimmed_before && e.boundary.is_none())
+            || (i > 0 && (e.boundary.is_none() || e.history_trimmed_before))
+        {
+            return Err(());
+        }
+        prior = e.id;
+        if let Some(x) = e.parent_epoch_id
+            && (e.boundary != Some(SeparatorReason::ApplicationRestarted)
+                || x >= e.id
+                || !v.epochs[..i]
+                    .iter()
+                    .any(|x| x.id == e.parent_epoch_id.unwrap()))
+        {
+            return Err(());
+        }
+        for p in &e.pairs {
+            count += 1;
+            if p.user.len() > MAX_MESSAGE_BYTES || p.assistant.len() > MAX_MESSAGE_BYTES {
+                return Err(());
+            }
+        }
+    }
+    if count > MAX_PAIRS
+        || count
+            + v.epochs.len().saturating_sub(1)
+            + usize::from(v.epochs.iter().any(|e| e.history_trimmed_before))
+            > MAX_RECORDS
+    {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+fn valid_namespace(s: &str) -> bool {
+    s == "neutral-v1"
+        || (s.len() == 76
+            && s.starts_with("repo-sha256:")
+            && s[12..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+}
+fn read_v3(p: &Path) -> Result<V3, ()> {
+    let mut b = vec![];
+    if fs::metadata(p).map_err(|_| ())?.len() as usize > MAX_BYTES {
+        return Err(());
+    }
+    fs::File::open(p)
+        .map_err(|_| ())?
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut b)
+        .map_err(|_| ())?;
+    let v: V3 = serde_json::from_slice(&b).map_err(|_| ())?;
+    if v.version == 3
+        && v.namespaces.len() <= MAX_NAMESPACES
+        && v.namespaces
+            .iter()
+            .all(|(n, v)| valid_namespace(n) && validate(v).is_ok())
+    {
+        Ok(v)
+    } else {
+        Err(())
+    }
+}
 fn resume_source(v: &V2) -> Result<u64, ResumeError> {
-    let current = v.epochs.last().ok_or(ResumeError::Unavailable)?;
-    if current.boundary != Some(SeparatorReason::ApplicationRestarted)
-        || current.parent_epoch_id.is_some()
-        || current.history_trimmed_before
+    let c = v.epochs.last().ok_or(ResumeError::Unavailable)?;
+    if c.boundary != Some(SeparatorReason::ApplicationRestarted)
+        || c.parent_epoch_id.is_some()
+        || c.history_trimmed_before
     {
         return Err(ResumeError::Unavailable);
     }
-    for epoch in v.epochs[..v.epochs.len() - 1].iter().rev() {
-        if epoch.history_trimmed_before {
+    for e in v.epochs[..v.epochs.len() - 1].iter().rev() {
+        if e.history_trimmed_before {
             return Err(ResumeError::Incompatible);
         }
-        if epoch.pairs.is_empty() && epoch.boundary == Some(SeparatorReason::ApplicationRestarted) {
+        if e.pairs.is_empty() && e.boundary == Some(SeparatorReason::ApplicationRestarted) {
             continue;
         }
         if matches!(
-            epoch.boundary,
+            e.boundary,
             Some(
                 SeparatorReason::NewConversation
                     | SeparatorReason::RepositoryChanged
@@ -595,495 +693,37 @@ fn resume_source(v: &V2) -> Result<u64, ResumeError> {
         ) {
             return Err(ResumeError::Unavailable);
         }
-        return if epoch.pairs.is_empty() {
+        return if e.pairs.is_empty() {
             Err(ResumeError::Unavailable)
         } else {
-            Ok(epoch.id)
+            Ok(e.id)
         };
     }
     Err(ResumeError::Unavailable)
 }
-
-fn reconstruct_resume(v: &V2, source: u64) -> Result<Vec<ResumePair>, ResumeError> {
-    let mut chain = vec![];
-    let mut next = Some(source);
-    while let Some(id) = next {
-        let epoch = v
+fn reconstruct(v: &V2, id: u64) -> Result<Vec<ResumePair>, ResumeError> {
+    let (mut out, mut id) = (vec![], Some(id));
+    while let Some(x) = id {
+        let e = v
             .epochs
             .iter()
-            .find(|epoch| epoch.id == id)
+            .find(|e| e.id == x)
             .ok_or(ResumeError::Incompatible)?;
-        if epoch.history_trimmed_before
-            || matches!(
-                epoch.boundary,
-                Some(
-                    SeparatorReason::NewConversation
-                        | SeparatorReason::RepositoryChanged
-                        | SeparatorReason::ModelConfigurationChanged
-                        | SeparatorReason::RepositoryAndModelChanged
-                        | SeparatorReason::HistoryTrimmed
-                )
-            )
-        {
+        if e.history_trimmed_before {
             return Err(ResumeError::Incompatible);
         }
-        chain.push(epoch);
-        next = epoch.parent_epoch_id;
+        out.push(e);
+        id = e.parent_epoch_id
     }
-    chain.reverse();
-    Ok(chain
+    out.reverse();
+    Ok(out
         .into_iter()
-        .flat_map(|epoch| epoch.pairs.iter())
-        .map(|pair| ResumePair {
-            user: pair.user.clone(),
-            assistant: pair.assistant.clone(),
+        .flat_map(|e| &e.pairs)
+        .map(|p| ResumePair {
+            user: p.user.clone(),
+            assistant: p.assistant.clone(),
         })
         .collect())
-}
-
-fn apply_v2(
-    v: &mut V2,
-    pair: Option<Pair>,
-    separator: Option<SeparatorReason>,
-) -> Result<(), Warning> {
-    if let Some(reason) = separator {
-        v.epochs.push(Epoch {
-            id: next_id(&v.epochs).map_err(|_| Warning::SaveFailed)?,
-            parent_epoch_id: None,
-            boundary: Some(reason),
-            history_trimmed_before: false,
-            pairs: vec![],
-        });
-    }
-    if let Some(pair) = pair {
-        if v.epochs.is_empty() {
-            v.epochs.push(Epoch {
-                id: 1,
-                parent_epoch_id: None,
-                boundary: None,
-                history_trimmed_before: false,
-                pairs: vec![],
-            });
-        }
-        v.epochs.last_mut().unwrap().pairs.push(pair);
-    }
-    Ok(())
-}
-fn normalize_v1(records: &[Record]) -> V2 {
-    let mut epochs = vec![Epoch {
-        id: 1,
-        parent_epoch_id: None,
-        boundary: None,
-        history_trimmed_before: false,
-        pairs: vec![],
-    }];
-    for record in records {
-        match record {
-            Record::CompletedPair { user, assistant } => {
-                epochs.last_mut().unwrap().pairs.push(Pair {
-                    user: user.clone(),
-                    assistant: assistant.clone(),
-                })
-            }
-            Record::ContextSeparator { reason } => {
-                let id = epochs.last().unwrap().id + 1;
-                epochs.push(Epoch {
-                    id,
-                    parent_epoch_id: None,
-                    boundary: Some(*reason),
-                    history_trimmed_before: false,
-                    pairs: vec![],
-                });
-            }
-        }
-    }
-    V2 { version: 2, epochs }
-}
-fn presentation_v1(input: &[Record], out: &mut Vec<PresentationRecord>) {
-    for r in input {
-        match r {
-            Record::CompletedPair { user, assistant } => {
-                out.push(PresentationRecord::CompletedMessage {
-                    role: PresentationRole::User,
-                    text: user.clone(),
-                });
-                out.push(PresentationRecord::CompletedMessage {
-                    role: PresentationRole::Assistant,
-                    text: assistant.clone(),
-                });
-            }
-            Record::ContextSeparator { reason } => {
-                out.push(PresentationRecord::ContextSeparator { reason: *reason })
-            }
-        }
-    }
-}
-fn next_id(epochs: &[Epoch]) -> Result<u64, ()> {
-    epochs
-        .last()
-        .map(|e| e.id.checked_add(1).ok_or(()))
-        .unwrap_or(Ok(1))
-}
-fn valid_message(s: &str) -> Result<(), ()> {
-    if s.len() > MAX_MESSAGE_BYTES {
-        Err(())
-    } else {
-        Ok(())
-    }
-}
-fn validate_v1(records: &[Record]) -> Result<(), ()> {
-    if records.len() > MAX_RECORDS {
-        return Err(());
-    }
-    let mut pairs = 0;
-    let mut epochs = 1;
-    for r in records {
-        match r {
-            Record::CompletedPair { user, assistant } => {
-                pairs += 1;
-                valid_message(user)?;
-                valid_message(assistant)?;
-            }
-            Record::ContextSeparator { .. } => epochs += 1,
-        }
-    }
-    if pairs > MAX_PAIRS || epochs > MAX_EPOCHS {
-        Err(())
-    } else {
-        Ok(())
-    }
-}
-fn validate_v2(v: &V2) -> Result<(), ()> {
-    if v.version != 2 || v.epochs.is_empty() || v.epochs.len() > MAX_EPOCHS {
-        return Err(());
-    }
-    let mut pairs = 0;
-    let mut previous = 0;
-    for (i, e) in v.epochs.iter().enumerate() {
-        if e.id == 0
-            || e.id <= previous
-            || (i == 0 && !e.history_trimmed_before && e.boundary.is_some())
-            || (i == 0 && e.history_trimmed_before && e.boundary.is_none())
-            || (i > 0 && e.boundary.is_none())
-            || (i > 0 && e.history_trimmed_before)
-        {
-            return Err(());
-        }
-        previous = e.id;
-        if let Some(parent) = e.parent_epoch_id
-            && (e.boundary != Some(SeparatorReason::ApplicationRestarted)
-                || parent >= e.id
-                || !v.epochs[..i].iter().any(|x| x.id == parent))
-        {
-            return Err(());
-        }
-        for p in &e.pairs {
-            pairs += 1;
-            valid_message(&p.user)?;
-            valid_message(&p.assistant)?;
-        }
-    }
-    if pairs > MAX_PAIRS
-        || pairs
-            + v.epochs.len().saturating_sub(1)
-            + usize::from(v.epochs.iter().any(|epoch| epoch.history_trimmed_before))
-            > MAX_RECORDS
-    {
-        Err(())
-    } else {
-        Ok(())
-    }
-}
-fn validate_v3(v: &V3) -> Result<(), ()> {
-    if v.version != 3
-        || v.namespaces.len() > MAX_NAMESPACES
-        || v.namespaces.keys().any(|key| !valid_namespace(key))
-    {
-        return Err(());
-    }
-    v.namespaces.values().try_for_each(validate_v2)
-}
-fn valid_namespace(key: &str) -> bool {
-    key == "neutral-v1"
-        || (key.len() == "repo-sha256:".len() + 64
-            && key.starts_with("repo-sha256:")
-            && key["repo-sha256:".len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
-}
-fn read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    if fs::metadata(path).map_err(|_| ())?.len() as usize > MAX_BYTES {
-        return Err(());
-    }
-    let mut f = fs::File::open(path).map_err(|_| ())?;
-    let mut b = vec![];
-    Read::by_ref(&mut f)
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut b)
-        .map_err(|_| ())?;
-    if b.is_empty() || b.len() > MAX_BYTES {
-        Err(())
-    } else {
-        Ok(Some(b))
-    }
-}
-fn load_v1(path: &Path) -> Result<Option<Vec<Record>>, ()> {
-    let Some(b) = read(path)? else {
-        return Ok(None);
-    };
-    let v: V1 = serde_json::from_slice(&b).map_err(|_| ())?;
-    if v.version != 1 {
-        return Err(());
-    }
-    validate_v1(&v.records)?;
-    Ok(Some(v.records))
-}
-fn load_v2(path: &Path) -> Result<V2, ()> {
-    let Some(b) = read(path)? else {
-        return Err(());
-    };
-    let v: V2 = serde_json::from_slice(&b).map_err(|_| ())?;
-    validate_v2(&v)?;
-    Ok(v)
-}
-fn load_v3(path: &Path) -> Result<V3, ()> {
-    let Some(b) = read(path)? else {
-        return Err(());
-    };
-    let v: V3 = serde_json::from_slice(&b).map_err(|_| ())?;
-    validate_v3(&v)?;
-    Ok(v)
-}
-fn trim_v1(r: &mut Vec<Record>) -> bool {
-    while validate_v1(r).is_err() || bytes_v1(r) > MAX_BYTES {
-        let Some(i) = r
-            .iter()
-            .position(|x| matches!(x, Record::ContextSeparator { .. }))
-        else {
-            return false;
-        };
-        r.drain(..=i);
-        if !matches!(
-            r.first(),
-            Some(Record::ContextSeparator {
-                reason: SeparatorReason::HistoryTrimmed
-            })
-        ) {
-            r.insert(
-                0,
-                Record::ContextSeparator {
-                    reason: SeparatorReason::HistoryTrimmed,
-                },
-            );
-        }
-    }
-    true
-}
-fn trim_v2(v: &mut V2) -> bool {
-    while validate_v2(v).is_err() || bytes_v2(v) > MAX_BYTES {
-        if v.epochs.len() < 2 {
-            return false;
-        }
-        v.epochs.remove(0);
-        v.epochs[0].parent_epoch_id = None;
-        v.epochs[0].history_trimmed_before = true;
-    }
-    true
-}
-fn bytes_v1(r: &[Record]) -> usize {
-    serde_json::to_vec(&V1 {
-        version: 1,
-        records: r.to_vec(),
-    })
-    .map_or(usize::MAX, |x| x.len())
-}
-fn bytes_v2(v: &V2) -> usize {
-    serde_json::to_vec(v).map_or(usize::MAX, |x| x.len())
-}
-fn write_v1(d: &Path, r: &[Record], n: u64) -> io::Result<()> {
-    validate_v1(r).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid transcript"))?;
-    atomic(
-        d,
-        SNAPSHOT_FILE,
-        &serde_json::to_vec(&V1 {
-            version: 1,
-            records: r.to_vec(),
-        })
-        .map_err(io::Error::other)?,
-        n,
-    )
-}
-fn write_v2(d: &Path, v: &V2, n: u64) -> io::Result<()> {
-    validate_v2(v).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid transcript"))?;
-    atomic(
-        d,
-        V2_FILE,
-        &serde_json::to_vec(v).map_err(io::Error::other)?,
-        n,
-    )
-}
-fn write_v3(d: &Path, v: &V3, n: u64) -> io::Result<()> {
-    validate_v3(v).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid repository-scoped transcript",
-        )
-    })?;
-    atomic(
-        d,
-        V3_FILE,
-        &serde_json::to_vec(v).map_err(io::Error::other)?,
-        n,
-    )
-}
-fn temp(file: &str, n: u64) -> String {
-    format!("{file}.tmp-{}-{n}", std::process::id())
-}
-fn is_temp(name: &str, file: &str) -> bool {
-    let Some(s) = name.strip_prefix(&format!("{file}.tmp-")) else {
-        return false;
-    };
-    let mut p = s.split('-');
-    matches!((p.next(),p.next(),p.next()),(Some(a),Some(b),None) if a.parse::<u32>().is_ok() && b.parse::<u64>().is_ok())
-}
-fn cleanup_temps(d: &Path) {
-    if let Ok(entries) = fs::read_dir(d) {
-        for e in entries.flatten() {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            if is_temp(&n, SNAPSHOT_FILE) || is_temp(&n, V2_FILE) || is_temp(&n, V3_FILE) {
-                let _ = fs::remove_file(e.path());
-            }
-        }
-    }
-}
-fn remove(path: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    if (path.file_name().and_then(|name| name.to_str()) == Some(SNAPSHOT_FILE)
-        && test_fault(path) == Some(FAIL_REMOVE_V1))
-        || (path.file_name().and_then(|name| name.to_str()) == Some(V2_FILE)
-            && test_fault(path) == Some(FAIL_REMOVE_V2))
-    {
-        return Err(io::Error::other("injected removal failure"));
-    }
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-fn clean_private(d: &Path) {
-    for f in [SNAPSHOT_FILE, V2_FILE, V3_FILE] {
-        let _ = fs::remove_file(d.join(format!("{f}.corrupt")));
-    }
-    cleanup_temps(d);
-}
-fn quarantine(path: &Path) {
-    let _ = fs::rename(
-        path,
-        path.with_file_name(format!(
-            "{}.corrupt",
-            path.file_name().unwrap().to_string_lossy()
-        )),
-    );
-}
-fn atomic(d: &Path, name: &str, bytes: &[u8], n: u64) -> io::Result<()> {
-    if bytes.len() > MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "snapshot too large",
-        ));
-    }
-    let dst = d.join(name);
-    let tmp = d.join(temp(name, n));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    drop(f);
-    #[cfg(test)]
-    if (!dst.exists() && test_fault(&dst) == Some(FAIL_CREATE))
-        || (dst.exists() && test_fault(&dst) == Some(FAIL_REPLACE))
-    {
-        let _ = fs::remove_file(&tmp);
-        return Err(io::Error::other("injected atomic replacement failure"));
-    }
-    let result = if dst.exists() {
-        replace(&dst, &tmp)
-    } else {
-        move_file(&tmp, &dst)
-    };
-    if result.is_err() {
-        let _ = fs::remove_file(tmp);
-    }
-    result
-}
-#[cfg(target_os = "windows")]
-fn wide(p: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    p.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-#[cfg(target_os = "windows")]
-fn replace(d: &Path, t: &Path) -> io::Result<()> {
-    let d = wide(d);
-    let t = wide(t);
-    if unsafe {
-        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
-            d.as_ptr(),
-            t.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    } != 0
-    {
-        Ok(())
-    } else {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
-        {
-            return Err(error);
-        }
-        // Some Windows configurations reject ReplaceFileW for a destination
-        // created by the initial MoveFileExW. This remains one native,
-        // replace-existing operation; it never deletes the destination first.
-        if unsafe {
-            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-                t.as_ptr(),
-                d.as_ptr(),
-                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-            )
-        } != 0
-        {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-}
-#[cfg(target_os = "windows")]
-fn move_file(t: &Path, d: &Path) -> io::Result<()> {
-    let t = wide(t);
-    let d = wide(d);
-    if unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-            t.as_ptr(),
-            d.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
 }
 
 #[cfg(test)]
@@ -1091,902 +731,259 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
-    fn fault_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
-    fn directory(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "rah-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn directory(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("rah-task127-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
     }
-    fn pair(text: &str) -> Pair {
-        Pair {
-            user: text.into(),
-            assistant: text.into(),
-        }
-    }
-    fn e(id: u64, b: Option<SeparatorReason>, p: Option<u64>) -> Epoch {
-        Epoch {
-            id,
-            parent_epoch_id: p,
-            boundary: b,
-            history_trimmed_before: false,
-            pairs: vec![],
-        }
-    }
-    #[test]
-    fn v2_is_strict_and_validates_lineage() {
-        let v = V2 {
-            version: 2,
-            epochs: vec![
-                e(1, None, None),
-                e(2, Some(SeparatorReason::ApplicationRestarted), Some(1)),
-                e(3, Some(SeparatorReason::ApplicationRestarted), Some(2)),
-            ],
-        };
-        assert!(validate_v2(&v).is_ok());
-        for v in [
-            V2 {
-                version: 2,
-                epochs: vec![e(0, None, None)],
-            },
-            V2 {
-                version: 2,
-                epochs: vec![
-                    e(1, None, None),
-                    e(1, Some(SeparatorReason::NewConversation), None),
-                ],
-            },
-            V2 {
-                version: 2,
-                epochs: vec![
-                    e(1, None, None),
-                    e(2, Some(SeparatorReason::NewConversation), Some(1)),
-                ],
-            },
-            V2 {
-                version: 2,
-                epochs: vec![
-                    e(1, None, None),
-                    e(2, Some(SeparatorReason::ApplicationRestarted), Some(3)),
-                ],
-            },
-        ] {
-            assert!(validate_v2(&v).is_err());
-        }
-        assert!(serde_json::from_slice::<V2>(br#"{"version":2,"epochs":[],"x":1}"#).is_err());
-    }
-    #[test]
-    fn normalization_preserves_presentation() {
-        let r = vec![
-            Record::CompletedPair {
-                user: "u".into(),
-                assistant: "a".into(),
-            },
-            Record::ContextSeparator {
-                reason: SeparatorReason::RepositoryChanged,
-            },
-            Record::CompletedPair {
-                user: "v".into(),
-                assistant: "b".into(),
-            },
-        ];
-        let v = normalize_v1(&r);
-        assert_eq!(v.epochs.len(), 2);
-        assert!(v.epochs.iter().all(|x| x.parent_epoch_id.is_none()));
-        let mut one = vec![];
-        presentation_v1(&r, &mut one);
-        let two = Persistence::v2(PathBuf::new(), v).presentation().records;
-        assert_eq!(
-            serde_json::to_string(&one).unwrap(),
-            serde_json::to_string(&two).unwrap()
-        );
-    }
-    #[test]
-    fn v2_precedence_and_v1_migration() {
-        let d = std::env::temp_dir().join(format!("rah-v2-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        write_v1(
-            &d,
-            &[Record::CompletedPair {
-                user: "old".into(),
-                assistant: "a".into(),
-            }],
-            1,
-        )
-        .unwrap();
-        let mut p = Persistence::start(d.clone());
-        assert!(!d.join(V2_FILE).exists());
-        p.append_pair("new".into(), "a".into()).unwrap();
-        assert!(d.join(V2_FILE).exists() && d.join(SNAPSHOT_FILE).exists());
-        assert!(matches!(
-            Persistence::start(d.clone()).backing,
-            Backing::V2(_)
-        ));
-        let _ = fs::remove_dir_all(d);
-    }
-    #[test]
-    fn invalid_v2_never_falls_back() {
-        let d = std::env::temp_dir().join(format!("rah-v2-bad-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        write_v1(
-            &d,
-            &[Record::CompletedPair {
-                user: "old".into(),
-                assistant: "a".into(),
-            }],
-            1,
-        )
-        .unwrap();
-        fs::write(d.join(V2_FILE), b"bad").unwrap();
-        let p = Persistence::start(d.clone());
-        assert!(p.presentation().records.is_empty());
-        assert_eq!(p.warning, Some(Warning::RestoreFailed));
-        assert!(d.join(SNAPSHOT_FILE).exists());
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn repository_namespaces_never_replay_or_present_another_repository() {
-        let d = directory("repository-namespaces");
-        let mut p = Persistence::start(d.clone());
-        let a = format!("repo-sha256:{:064x}", 10);
-        let b = format!("repo-sha256:{:064x}", 11);
-        p.select_namespace(a.clone());
-        p.append_pair("same message".into(), "A reply".into())
-            .unwrap();
-        p.select_namespace(b);
-        assert!(p.presentation().records.is_empty());
-        assert_eq!(p.resume_messages(), Err(ResumeError::Unavailable));
-        p.append_pair("same message".into(), "B reply".into())
-            .unwrap();
-        p.select_namespace(a);
-        let a = p.presentation();
-        assert!(serde_json::to_string(&a).unwrap().contains("A reply"));
-        assert!(!serde_json::to_string(&a).unwrap().contains("B reply"));
-        p.select_namespace("neutral-v1".into());
-        assert!(p.presentation().records.is_empty());
-        assert_eq!(p.resume_messages(), Err(ResumeError::Unavailable));
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn restart_resumes_only_the_selected_repository_namespace() {
-        let d = directory("repository-restart");
-        let mut p = Persistence::start(d.clone());
-        let a = format!("repo-sha256:{:064x}", 10);
-        let b = format!("repo-sha256:{:064x}", 11);
-        p.select_namespace(a.clone());
-        p.append_pair("A user".into(), "A assistant".into())
-            .unwrap();
-        p.select_namespace(b.clone());
-        p.append_pair("B user".into(), "B assistant".into())
-            .unwrap();
-        drop(p);
-
-        let mut after_a = Persistence::start(d.clone());
-        after_a.select_namespace(a);
-        assert_eq!(
-            after_a.resume_messages().unwrap(),
-            vec![ResumePair {
-                user: "A user".into(),
-                assistant: "A assistant".into()
-            }]
-        );
-        drop(after_a);
-        let mut after_b = Persistence::start(d.clone());
-        after_b.select_namespace(b);
-        assert_eq!(
-            after_b.resume_messages().unwrap(),
-            vec![ResumePair {
-                user: "B user".into(),
-                assistant: "B assistant".into()
-            }]
-        );
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn legacy_and_corrupt_records_are_never_assigned_to_a_repository_namespace() {
-        let d = directory("repository-legacy");
-        write_v2(
-            &d,
-            &normalize_v1(&[Record::CompletedPair {
-                user: "legacy".into(),
-                assistant: "legacy".into(),
-            }]),
-            1,
-        )
-        .unwrap();
-        let mut legacy = Persistence::start(d.clone());
-        legacy.select_namespace(format!("repo-sha256:{:064x}", 10));
-        assert!(legacy.presentation().records.is_empty());
-        assert_eq!(legacy.resume_messages(), Err(ResumeError::Unavailable));
-        fs::write(
-            d.join(V3_FILE),
-            br#"{"version":3,"namespaces":{"unknown":{"version":2,"epochs":[]}}}"#,
-        )
-        .unwrap();
-        let mut corrupt = Persistence::start(d.clone());
-        corrupt.select_namespace(format!("repo-sha256:{:064x}", 10));
-        assert!(corrupt.presentation().records.is_empty());
-        assert_eq!(corrupt.resume_messages(), Err(ResumeError::Unavailable));
-        assert_eq!(corrupt.warning, Some(Warning::RestoreFailed));
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn v2_schema_rejects_every_closed_invalid_form() {
-        for raw in [
-            br#"not json"# as &[u8],
-            br#"{"version":2,"epochs":[]}"#,
-            br#"{"version":2,"epochs":[{"id":1,"parent_epoch_id":null,"boundary":null,"history_trimmed_before":false,"pairs":[],"extra":true}]}"#,
-            br#"{"version":2,"epochs":[{"id":1,"parent_epoch_id":null,"boundary":null,"history_trimmed_before":false,"pairs":[{"user":"u","assistant":"a","extra":true}]}]}"#,
-            br#"{"version":2,"epochs":[{"id":1,"parent_epoch_id":null,"boundary":"unknown","history_trimmed_before":false,"pairs":[]}]}"#,
-            br#"{"version":2,"epochs":[{"id":1,"parent_epoch_id":null,"boundary":null,"pairs":[]}]}"#,
-        ] { assert!(load_v2_from(raw).is_err()); }
-        let mut huge = e(1, None, None);
-        huge.pairs.push(Pair {
-            user: "x".repeat(MAX_MESSAGE_BYTES + 1),
-            assistant: "a".into(),
-        });
-        assert!(
-            validate_v2(&V2 {
-                version: 2,
-                epochs: vec![huge]
-            })
-            .is_err()
-        );
-        let mut pairs = e(1, None, None);
-        pairs.pairs = (0..MAX_PAIRS + 1)
-            .map(|_| Pair {
-                user: "u".into(),
-                assistant: "a".into(),
-            })
-            .collect();
-        assert!(
-            validate_v2(&V2 {
-                version: 2,
-                epochs: vec![pairs]
-            })
-            .is_err()
-        );
-        let epochs = (1..=MAX_EPOCHS as u64 + 1)
-            .map(|id| {
-                e(
-                    id,
-                    if id == 1 {
-                        None
-                    } else {
-                        Some(SeparatorReason::NewConversation)
-                    },
-                    None,
-                )
-            })
-            .collect();
-        assert!(validate_v2(&V2 { version: 2, epochs }).is_err());
-    }
-
-    #[test]
-    fn normalization_maps_every_separator_and_keeps_v1_strict() {
-        let reasons = [
-            SeparatorReason::NewConversation,
-            SeparatorReason::RepositoryChanged,
-            SeparatorReason::ModelConfigurationChanged,
-            SeparatorReason::RepositoryAndModelChanged,
-            SeparatorReason::ApplicationRestarted,
-            SeparatorReason::HistoryTrimmed,
-        ];
-        let mut records = vec![Record::CompletedPair {
-            user: "first".into(),
-            assistant: "a".into(),
-        }];
-        for reason in reasons {
-            records.push(Record::ContextSeparator { reason });
-            records.push(Record::CompletedPair {
-                user: format!("{reason:?}"),
-                assistant: "a".into(),
-            });
-        }
-        let normalized = normalize_v1(&records);
-        assert_eq!(normalized.epochs.len(), 7);
-        for (epoch, reason) in normalized.epochs.iter().skip(1).zip(reasons) {
-            assert_eq!(epoch.boundary, Some(reason));
-            assert!(!epoch.history_trimmed_before);
-        }
-        assert!(load_v1_from(br#"{"version":1,"records":[],"extra":true}"#).is_err());
-    }
-
-    #[test]
-    fn trimming_preserves_boundary_and_severs_lineage() {
-        let mut a = e(1, None, None);
-        a.pairs.push(Pair {
-            user: "A".into(),
-            assistant: "a".into(),
-        });
-        let mut b = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
-        b.pairs = (0..MAX_PAIRS)
-            .map(|_| Pair {
-                user: "B".into(),
-                assistant: "a".into(),
-            })
-            .collect();
-        let c = e(3, Some(SeparatorReason::ApplicationRestarted), Some(2));
-        let mut v = V2 {
-            version: 2,
-            epochs: vec![a, b, c],
-        };
-        assert!(trim_v2(&mut v));
-        assert_eq!(v.epochs[0].id, 2);
-        assert!(v.epochs[0].history_trimmed_before);
-        assert_eq!(
-            v.epochs[0].boundary,
-            Some(SeparatorReason::ApplicationRestarted)
-        );
-        assert_eq!(v.epochs[0].parent_epoch_id, None);
-        assert_eq!(v.epochs[1].parent_epoch_id, Some(2));
-        assert!(validate_v2(&v).is_ok());
-        let p = Persistence::v2(PathBuf::new(), v).presentation();
-        assert!(matches!(
-            p.records[0],
-            PresentationRecord::ContextSeparator {
-                reason: SeparatorReason::HistoryTrimmed
-            }
-        ));
-        assert!(matches!(
-            p.records[1],
-            PresentationRecord::ContextSeparator {
-                reason: SeparatorReason::ApplicationRestarted
-            }
-        ));
-    }
-
-    #[test]
-    fn clear_covers_both_exact_private_families() {
-        let d = std::env::temp_dir().join(format!("rah-clear-v2-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        write_v1(
-            &d,
-            &[Record::CompletedPair {
-                user: "u".into(),
-                assistant: "a".into(),
-            }],
-            1,
-        )
-        .unwrap();
-        write_v2(
-            &d,
-            &normalize_v1(&[Record::CompletedPair {
-                user: "v".into(),
-                assistant: "a".into(),
-            }]),
-            2,
-        )
-        .unwrap();
-        for file in [
-            format!("{SNAPSHOT_FILE}.corrupt"),
-            format!("{V2_FILE}.corrupt"),
-            temp(SNAPSHOT_FILE, 3),
-            temp(V2_FILE, 4),
-            "conversation-transcript.json.tmp-1-2-extra".into(),
-            "unrelated.json".into(),
-        ] {
-            fs::write(d.join(file), b"x").unwrap();
-        }
-        let mut p = Persistence::start(d.clone());
-        p.clear().unwrap();
-        assert!(!d.join(SNAPSHOT_FILE).exists() && !d.join(V2_FILE).exists());
-        assert!(
-            d.join("conversation-transcript.json.tmp-1-2-extra")
-                .exists()
-                && d.join("unrelated.json").exists()
-        );
-        assert!(p.presentation().records.is_empty());
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn startup_precedence_matrix_is_fail_closed() {
-        let d = directory("startup");
-        let fresh = Persistence::start(d.clone());
-        assert!(fresh.presentation().records.is_empty() && fresh.warning.is_none());
-        write_v1(
-            &d,
-            &[Record::CompletedPair {
-                user: "v1".into(),
-                assistant: "a".into(),
-            }],
-            1,
-        )
-        .unwrap();
-        let v1 = Persistence::start(d.clone());
-        assert!(matches!(v1.backing, Backing::V1(_)) && !d.join(V2_FILE).exists());
-        write_v2(
-            &d,
-            &V2 {
-                version: 2,
-                epochs: vec![e(1, None, None)],
-            },
-            2,
-        )
-        .unwrap();
-        assert!(matches!(
-            Persistence::start(d.clone()).backing,
-            Backing::V2(_)
-        ));
-        fs::remove_file(d.join(V2_FILE)).unwrap();
-        fs::write(d.join(SNAPSHOT_FILE), b"bad").unwrap();
-        let invalid_v1 = Persistence::start(d.clone());
-        assert_eq!(invalid_v1.warning, Some(Warning::RestoreFailed));
-        write_v2(
-            &d,
-            &V2 {
-                version: 2,
-                epochs: vec![e(1, None, None)],
-            },
-            3,
-        )
-        .unwrap();
-        assert!(matches!(
-            Persistence::start(d.clone()).backing,
-            Backing::V2(_)
-        ));
-        fs::write(d.join(V2_FILE), b"bad").unwrap();
-        let invalid_v2 = Persistence::start(d.clone());
-        assert_eq!(invalid_v2.warning, Some(Warning::RestoreFailed));
-        assert!(d.join(format!("{V2_FILE}.corrupt")).exists());
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn migration_failure_is_non_rollback_and_retries() {
-        let _lock = fault_lock();
-        let d = directory("migration-failure");
-        write_v1(
-            &d,
-            &[Record::CompletedPair {
-                user: "old".into(),
-                assistant: "a".into(),
-            }],
-            1,
-        )
-        .unwrap();
-        let mut p = Persistence::start(d.clone());
-        set_test_fault(d.join(V2_FILE), FAIL_CREATE);
-        assert_eq!(
-            p.append_pair("current".into(), "a".into()),
-            Err(Warning::SaveFailed)
-        );
-        assert!(load_v1(&d.join(SNAPSHOT_FILE)).unwrap().is_some());
-        assert!(!d.join(V2_FILE).exists());
-        assert!(matches!(p.backing, Backing::V1(_)));
-        clear_test_fault();
-        p.append_pair("retry".into(), "a".into()).unwrap();
-        assert!(matches!(p.backing, Backing::V2(_)));
-        let recovered = load_v2(&d.join(V2_FILE)).unwrap();
-        assert_eq!(recovered.epochs[1].pairs.len(), 2);
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn v2_replace_failure_keeps_disk_snapshot_and_later_catches_up() {
-        let _lock = fault_lock();
-        let d = directory("replace-failure");
-        let mut p = Persistence::v2(
-            d.clone(),
-            V2 {
-                version: 2,
-                epochs: vec![e(1, None, None)],
-            },
-        );
-        p.append_pair("one".into(), "a".into()).unwrap();
-        set_test_fault(d.join(V2_FILE), FAIL_REPLACE);
-        assert_eq!(
-            p.append_pair("two".into(), "a".into()),
-            Err(Warning::SaveFailed)
-        );
-        assert_eq!(load_v2(&d.join(V2_FILE)).unwrap().epochs[0].pairs.len(), 1);
-        clear_test_fault();
-        p.append_pair("three".into(), "a".into()).unwrap();
-        assert_eq!(load_v2(&d.join(V2_FILE)).unwrap().epochs[0].pairs.len(), 3);
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn every_genuine_v1_boundary_mutation_migrates_but_startup_does_not() {
-        for reason in [
-            SeparatorReason::NewConversation,
-            SeparatorReason::RepositoryChanged,
-            SeparatorReason::ModelConfigurationChanged,
-            SeparatorReason::RepositoryAndModelChanged,
-        ] {
-            let d = directory("boundary-migration");
-            write_v1(
-                &d,
-                &[Record::CompletedPair {
-                    user: "u".into(),
-                    assistant: "a".into(),
-                }],
-                1,
-            )
-            .unwrap();
-            let mut p = Persistence::start(d.clone());
-            assert!(!d.join(V2_FILE).exists());
-            p.append_separator(reason).unwrap();
-            assert!(d.join(V2_FILE).exists());
-            let _ = fs::remove_dir_all(d);
-        }
-    }
-
-    #[test]
-    fn deep_and_repeated_lineage_trimming_preserves_graphs() {
-        let mut v = V2 {
-            version: 2,
-            epochs: vec![
-                e(1, None, None),
-                e(2, Some(SeparatorReason::ApplicationRestarted), Some(1)),
-                e(3, Some(SeparatorReason::ApplicationRestarted), Some(2)),
-                e(4, Some(SeparatorReason::ApplicationRestarted), Some(3)),
-            ],
-        };
-        v.epochs[0].pairs.push(pair("a"));
-        v.epochs[1].pairs = (0..MAX_PAIRS).map(|_| pair("b")).collect();
-        assert!(trim_v2(&mut v));
-        assert_eq!(
-            (
-                v.epochs[0].id,
-                v.epochs[0].parent_epoch_id,
-                v.epochs[1].parent_epoch_id,
-                v.epochs[2].parent_epoch_id
-            ),
-            (2, None, Some(2), Some(3))
-        );
-        assert!(v.epochs[0].history_trimmed_before && validate_v2(&v).is_ok());
-        let before = serde_json::to_vec(&v).unwrap();
-        assert!(trim_v2(&mut v));
-        assert_eq!(serde_json::to_vec(&v).unwrap(), before);
-        let _ = v.epochs.remove(0);
-        v.epochs[0].parent_epoch_id = None;
-        v.epochs[0].history_trimmed_before = true;
-        assert_eq!(v.epochs[0].id, 3);
-        assert_eq!(v.epochs[1].parent_epoch_id, Some(3));
-        assert!(validate_v2(&v).is_ok());
-    }
-
-    #[test]
-    fn byte_and_display_limit_trimming_removes_whole_epochs_only() {
-        let mut old = e(1, None, None);
-        old.pairs.push(pair(&"o".repeat(8_200)));
-        let mut retained = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
-        retained.pairs = (0..15).map(|_| pair(&"x".repeat(8_200))).collect();
-        let mut v = V2 {
-            version: 2,
-            epochs: vec![old, retained],
-        };
-        assert!(bytes_v2(&v) > MAX_BYTES && trim_v2(&mut v));
-        assert_eq!(v.epochs.len(), 1);
-        assert!(v.epochs[0].history_trimmed_before && v.epochs[0].parent_epoch_id.is_none());
-        assert!(bytes_v2(&v) <= MAX_BYTES && validate_v2(&v).is_ok());
-        let before = serde_json::to_vec(&v).unwrap();
-        v.epochs[0].pairs.push(pair(&"z".repeat(8_200)));
-        assert!(!trim_v2(&mut v));
-        assert_ne!(serde_json::to_vec(&v).unwrap(), before);
-
-        let mut epochs = (1..=17)
-            .map(|id| {
-                e(
-                    id,
-                    if id == 1 {
-                        None
-                    } else {
-                        Some(SeparatorReason::NewConversation)
-                    },
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
-        for epoch in epochs.iter_mut().skip(1) {
-            epoch.pairs.push(pair("x"));
-        }
-        epochs[1].pairs.extend((0..49).map(|_| pair("x")));
-        let mut display = V2 { version: 2, epochs };
-        assert!(trim_v2(&mut display));
-        assert!(validate_v2(&display).is_ok());
-        assert!(display.epochs.len() <= 15);
-        assert_eq!(
-            display
-                .epochs
+    fn v3(names: &[(&str, &str)]) -> V3 {
+        V3 {
+            version: 3,
+            namespaces: names
                 .iter()
-                .filter(|e| e.history_trimmed_before)
-                .count(),
+                .map(|(n, text)| {
+                    (
+                        (*n).into(),
+                        V2 {
+                            version: 2,
+                            epochs: vec![Epoch {
+                                id: 1,
+                                parent_epoch_id: None,
+                                boundary: None,
+                                history_trimmed_before: false,
+                                pairs: vec![Pair {
+                                    user: (*text).into(),
+                                    assistant: "assistant".into(),
+                                }],
+                            }],
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+    fn write_v3(d: &Path, value: &V3) {
+        fs::write(d.join(V3_FILE), serde_json::to_vec(value).unwrap()).unwrap();
+    }
+    fn select(p: &mut Persistence, n: &str) {
+        p.select_namespace(n.into());
+    }
+    fn texts(p: &Persistence) -> Vec<String> {
+        p.presentation()
+            .records
+            .into_iter()
+            .filter_map(|r| match r {
+                PresentationRecord::CompletedMessage { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+    fn row_counts(d: &Path) -> (i64, i64, i64) {
+        let c = Connection::open(d.join(DB)).unwrap();
+        (
+            c.query_row("SELECT count(*) FROM namespaces", [], |r| r.get(0))
+                .unwrap(),
+            c.query_row("SELECT count(*) FROM epochs", [], |r| r.get(0))
+                .unwrap(),
+            c.query_row("SELECT count(*) FROM pairs", [], |r| r.get(0))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn empty_database_has_exact_schema_and_pragmas() {
+        let _guard = lock();
+        let d = directory("empty");
+        let p = Persistence::start(d.clone());
+        let c = p.connection.as_ref().unwrap();
+        assert!(schema_matches(c));
+        assert_eq!(
+            c.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
             1
         );
+        assert_eq!(
+            c.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                .unwrap()
+                .to_ascii_lowercase(),
+            "delete"
+        );
+        assert_eq!(
+            c.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            c.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            250
+        );
+        drop(p);
+        assert!(d.join(DB).exists());
+        let _ = fs::remove_dir_all(d);
     }
 
     #[test]
-    fn clear_failure_matrix_preserves_memory_and_orders_primary_deletes() {
-        let _lock = fault_lock();
-        for fault in [FAIL_REMOVE_V1, FAIL_REMOVE_V2] {
-            let d = directory("clear-failure");
-            write_v1(
-                &d,
-                &[Record::CompletedPair {
-                    user: "v1".into(),
-                    assistant: "a".into(),
+    fn migration_archive_failure_is_authoritative_once_after_restart() {
+        let _guard = lock();
+        let d = directory("migration");
+        let key = "repo-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_v3(&d, &v3(&[("neutral-v1", "neutral"), (key, "repo")]));
+        TEST_FAULT.with(|fault| fault.set(FAULT_ARCHIVE));
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, key);
+        assert_eq!(texts(&p), ["repo", "assistant"]);
+        assert!(d.join(DB).exists() && d.join(V3_FILE).exists());
+        assert_eq!(row_counts(&d), (2, 3, 2));
+        drop(p);
+        TEST_FAULT.with(|fault| fault.set(0));
+        let mut restart = Persistence::start(d.clone());
+        select(&mut restart, key);
+        assert_eq!(texts(&restart), ["repo", "assistant",]);
+        assert!(d.join(V3_FILE).exists());
+        // V3 was never read again: no duplicate namespace, epoch, or pair.
+        assert_eq!(row_counts(&d), (2, 4, 2));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn valid_authoritative_sqlite_wins_over_stale_v3() {
+        let _guard = lock();
+        let d = directory("sqlite-wins");
+        write_v3(&d, &v3(&[("neutral-v1", "first")]));
+        let mut imported = Persistence::start(d.clone());
+        select(&mut imported, "neutral-v1");
+        assert_eq!(texts(&imported), ["first", "assistant"]);
+        drop(imported);
+        write_v3(&d, &v3(&[("neutral-v1", "stale")]));
+        let mut reopened = Persistence::start(d.clone());
+        select(&mut reopened, "neutral-v1");
+        assert_eq!(texts(&reopened), ["first", "assistant"]);
+        assert_eq!(row_counts(&d), (1, 3, 1));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn incomplete_migration_is_not_authoritative_and_retries_from_v3() {
+        let _guard = lock();
+        let d = directory("retry");
+        write_v3(&d, &v3(&[("neutral-v1", "v3")]));
+        TEST_FAULT.with(|fault| fault.set(FAULT_MIGRATION_BEFORE_COMMIT));
+        assert_eq!(
+            Persistence::start(d.clone()).warning,
+            Some(Warning::RestoreFailed)
+        );
+        assert!(d.join(V3_FILE).exists() && !d.join(DB).exists());
+        TEST_FAULT.with(|fault| fault.set(0));
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, "neutral-v1");
+        assert_eq!(texts(&p), ["v3", "assistant"]);
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn corrupt_or_incomplete_authoritative_sqlite_fails_closed_without_v3_fallback() {
+        let _guard = lock();
+        let d = directory("corrupt");
+        write_v3(&d, &v3(&[("neutral-v1", "old")]));
+        fs::write(d.join(DB), b"not sqlite").unwrap();
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, "neutral-v1");
+        assert_eq!(p.warning, Some(Warning::RestoreFailed));
+        assert!(texts(&p).is_empty());
+        assert!(d.join("conversation-transcript.sqlite3.corrupt").exists());
+        drop(p);
+        let mut reopened = Persistence::start(d.clone());
+        select(&mut reopened, "neutral-v1");
+        assert_eq!(reopened.warning, Some(Warning::RestoreFailed));
+        assert!(texts(&reopened).is_empty());
+        assert!(d.join(V3_FILE).exists());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn quarantine_rotates_one_generation_and_moves_delete_journal() {
+        let _guard = lock();
+        let d = directory("quarantine");
+        let db = d.join(DB);
+        fs::write(&db, b"corrupt").unwrap();
+        fs::write(journal_path(&db), b"journal").unwrap();
+        fs::write(quarantine_path(&db), b"old").unwrap();
+        fs::write(journal_path(&quarantine_path(&db)), b"old-journal").unwrap();
+        quarantine(&db);
+        assert_eq!(fs::read(quarantine_path(&db)).unwrap(), b"corrupt");
+        assert_eq!(
+            fs::read(journal_path(&quarantine_path(&db))).unwrap(),
+            b"journal"
+        );
+        assert!(!db.exists());
+        assert!(!journal_path(&db).exists());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn supported_version_with_malformed_schema_fails_closed() {
+        let _guard = lock();
+        let d = directory("schema");
+        let c = Connection::open(d.join(DB)).unwrap();
+        c.execute_batch("CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY, schema_version INTEGER, migration_complete INTEGER); INSERT INTO schema_metadata VALUES(1,1,1); PRAGMA user_version=1;").unwrap();
+        drop(c);
+        let p = Persistence::start(d.clone());
+        assert_eq!(p.warning, Some(Warning::RestoreFailed));
+        assert!(d.join("conversation-transcript.sqlite3.corrupt").exists());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn namespace_mutations_are_isolated_and_failed_transaction_is_not_visible() {
+        let _guard = lock();
+        let d = directory("isolation");
+        let a = "repo-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "repo-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, a);
+        p.append_pair("a".into(), "aa".into()).unwrap();
+        select(&mut p, b);
+        assert!(texts(&p).is_empty());
+        TEST_FAULT.with(|fault| fault.set(FAULT_MUTATION));
+        assert_eq!(
+            p.append_pair("b".into(), "bb".into()),
+            Err(Warning::SaveFailed)
+        );
+        assert!(texts(&p).is_empty());
+        TEST_FAULT.with(|fault| fault.set(0));
+        p.append_pair("b".into(), "bb".into()).unwrap();
+        select(&mut p, a);
+        assert_eq!(texts(&p), ["a", "aa"]);
+        p.clear().unwrap();
+        assert!(texts(&p).is_empty());
+        select(&mut p, b);
+        assert_eq!(texts(&p), ["b", "bb"]);
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn message_limit_is_measured_in_utf8_bytes() {
+        let mut value = V2 {
+            version: 2,
+            epochs: vec![Epoch {
+                id: 1,
+                parent_epoch_id: None,
+                boundary: None,
+                history_trimmed_before: false,
+                pairs: vec![Pair {
+                    user: "\u{00e9}".repeat(MAX_MESSAGE_BYTES / 2 + 1),
+                    assistant: String::new(),
                 }],
-                1,
-            )
-            .unwrap();
-            write_v2(
-                &d,
-                &V2 {
-                    version: 2,
-                    epochs: vec![Epoch {
-                        pairs: vec![pair("v2")],
-                        ..e(1, None, None)
-                    }],
-                },
-                2,
-            )
-            .unwrap();
-            let mut p = Persistence::start(d.clone());
-            set_test_fault(
-                d.join(if fault == FAIL_REMOVE_V1 {
-                    SNAPSHOT_FILE
-                } else {
-                    V2_FILE
-                }),
-                fault,
-            );
-            assert!(p.clear().is_err());
-            assert!(!p.presentation().records.is_empty());
-            if fault == FAIL_REMOVE_V1 {
-                assert!(d.join(V2_FILE).exists());
-            }
-            if fault == FAIL_REMOVE_V2 {
-                assert!(!d.join(SNAPSHOT_FILE).exists() && d.join(V2_FILE).exists());
-            }
-            clear_test_fault();
-            let _ = fs::remove_dir_all(d);
-        }
-    }
-
-    #[test]
-    fn presentation_remains_closed_and_absent_clear_is_idempotent() {
-        let d = directory("closed-presentation");
-        let mut p = Persistence::v1(
-            d.clone(),
-            vec![Record::CompletedPair {
-                user: "u".into(),
-                assistant: "a".into(),
             }],
-        );
-        p.warning = Some(Warning::SaveFailed);
-        let json = serde_json::to_string(&p.presentation()).unwrap();
-        for forbidden in [
-            "path",
-            "generation",
-            "session",
-            "thread",
-            "request",
-            "endpoint",
-            "credential",
-            "token",
-            "executable",
-            "permission",
-            "registry",
-        ] {
-            assert!(!json.contains(forbidden));
-        }
-        let mut fresh = Persistence::start(d.clone());
-        fresh.clear().unwrap();
-        assert!(fresh.presentation().records.is_empty());
-        assert!(fresh.presentation().warning.is_none());
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn resume_selects_previous_restart_conversation_and_skips_empty_restarts() {
-        let mut a = e(1, None, None);
-        a.pairs.push(pair("a"));
-        let v = V2 {
-            version: 2,
-            epochs: vec![
-                a,
-                e(2, Some(SeparatorReason::ApplicationRestarted), None),
-                e(3, Some(SeparatorReason::ApplicationRestarted), None),
-            ],
         };
-        assert_eq!(resume_source(&v), Ok(1));
-        assert_eq!(
-            reconstruct_resume(&v, 1),
-            Ok(vec![ResumePair {
-                user: "a".into(),
-                assistant: "a".into()
-            }])
-        );
-    }
-
-    #[test]
-    fn resume_stops_at_fresh_boundaries_and_trim() {
-        for boundary in [
-            SeparatorReason::NewConversation,
-            SeparatorReason::RepositoryChanged,
-            SeparatorReason::ModelConfigurationChanged,
-            SeparatorReason::RepositoryAndModelChanged,
-        ] {
-            let mut a = e(1, None, None);
-            a.pairs.push(pair("a"));
-            let v = V2 {
-                version: 2,
-                epochs: vec![
-                    a,
-                    e(2, Some(boundary), None),
-                    e(3, Some(SeparatorReason::ApplicationRestarted), None),
-                ],
-            };
-            assert_eq!(resume_source(&v), Err(ResumeError::Unavailable));
-        }
-        let mut a = e(1, None, None);
-        a.pairs.push(pair("a"));
-        a.history_trimmed_before = true;
-        let v = V2 {
-            version: 2,
-            epochs: vec![a, e(2, Some(SeparatorReason::ApplicationRestarted), None)],
-        };
-        assert_eq!(resume_source(&v), Err(ResumeError::Incompatible));
-    }
-
-    #[test]
-    fn resume_reconstructs_transitive_lineage_and_commits_only_parent_link() {
-        let d = directory("resume-lineage");
-        let mut a = e(1, None, None);
-        a.pairs.push(pair("a"));
-        let mut b = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
-        b.pairs.push(pair("b"));
-        let v = V2 {
-            version: 2,
-            epochs: vec![
-                a,
-                b,
-                e(3, Some(SeparatorReason::ApplicationRestarted), None),
-            ],
-        };
-        let mut persistence = Persistence::v2(d.clone(), v);
-        assert_eq!(
-            persistence.resume_messages().unwrap(),
-            vec![
-                ResumePair {
-                    user: "a".into(),
-                    assistant: "a".into()
-                },
-                ResumePair {
-                    user: "b".into(),
-                    assistant: "b".into()
-                },
-            ]
-        );
-        persistence.commit_resume_lineage().unwrap();
-        let Backing::V2(graph) = persistence.backing else {
-            unreachable!()
-        };
-        assert_eq!(graph.epochs[2].parent_epoch_id, Some(2));
-        assert!(graph.epochs[2].pairs.is_empty());
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn resume_lineage_is_not_committed_when_its_atomic_write_fails() {
-        let _lock = fault_lock();
-        let d = directory("resume-lineage-failure");
-        let mut source = e(1, None, None);
-        source.pairs.push(pair("source"));
-        let mut persistence = Persistence::v2(
-            d.clone(),
-            V2 {
-                version: 2,
-                epochs: vec![
-                    source,
-                    e(2, Some(SeparatorReason::ApplicationRestarted), None),
-                ],
-            },
-        );
-        persistence.save().unwrap();
-        assert_eq!(persistence.resume_messages().unwrap().len(), 1);
-        set_test_fault(d.join(V2_FILE), FAIL_REPLACE);
-        assert_eq!(
-            persistence.commit_resume_lineage(),
-            Err(ResumeError::SaveFailed)
-        );
-        let Backing::V2(current) = &persistence.backing else {
-            unreachable!()
-        };
-        assert_eq!(current.epochs[1].parent_epoch_id, None);
-        assert_eq!(
-            load_v2(&d.join(V2_FILE)).unwrap().epochs[1].parent_epoch_id,
-            None
-        );
-        clear_test_fault();
-        persistence.commit_resume_lineage().unwrap();
-        let Backing::V2(current) = &persistence.backing else {
-            unreachable!()
-        };
-        assert_eq!(current.epochs[1].parent_epoch_id, Some(1));
-        assert_eq!(
-            load_v2(&d.join(V2_FILE)).unwrap().epochs[1].parent_epoch_id,
-            Some(1)
-        );
-        let _ = fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn post_resume_pair_stays_in_the_linked_epoch_for_the_next_restart() {
-        let d = directory("resume-follow-up");
-        let mut first = e(1, None, None);
-        first.pairs.push(pair("first"));
-        let mut second = e(2, Some(SeparatorReason::ApplicationRestarted), Some(1));
-        second.pairs.push(pair("second"));
-        let mut persistence = Persistence::v2(
-            d.clone(),
-            V2 {
-                version: 2,
-                epochs: vec![
-                    first,
-                    second,
-                    e(3, Some(SeparatorReason::ApplicationRestarted), None),
-                ],
-            },
-        );
-        persistence.commit_resume_lineage().unwrap();
-        persistence
-            .append_pair("third".into(), "third".into())
-            .unwrap();
-        persistence
-            .append_separator(SeparatorReason::ApplicationRestarted)
-            .unwrap();
-        assert_eq!(
-            persistence.resume_messages().unwrap(),
-            vec![
-                ResumePair {
-                    user: "first".into(),
-                    assistant: "first".into(),
-                },
-                ResumePair {
-                    user: "second".into(),
-                    assistant: "second".into(),
-                },
-                ResumePair {
-                    user: "third".into(),
-                    assistant: "third".into(),
-                },
-            ]
-        );
-        let _ = fs::remove_dir_all(d);
-    }
-
-    fn load_v1_from(bytes: &[u8]) -> Result<(), ()> {
-        let v: V1 = serde_json::from_slice(bytes).map_err(|_| ())?;
-        if v.version != 1 {
-            return Err(());
-        }
-        validate_v1(&v.records)
-    }
-
-    fn load_v2_from(bytes: &[u8]) -> Result<(), ()> {
-        let v: V2 = serde_json::from_slice(bytes).map_err(|_| ())?;
-        validate_v2(&v)
+        assert!(validate(&value).is_err());
+        value.epochs[0].pairs[0].user = "\u{00e9}".repeat(MAX_MESSAGE_BYTES / 2);
+        assert!(validate(&value).is_ok());
     }
 }

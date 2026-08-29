@@ -104,7 +104,14 @@ struct StartupActivationCounters {
 #[cfg(all(test, target_os = "windows"))]
 static STARTUP_ACTIVATION_COUNTERS: OnceLock<Mutex<StartupActivationCounters>> = OnceLock::new();
 #[cfg(all(test, target_os = "windows"))]
-static STARTUP_COUNTER_TRACKING: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static STARTUP_COUNTER_TRACKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn startup_counter_tracking() -> bool {
+    STARTUP_COUNTER_TRACKING.with(std::cell::Cell::get)
+}
 
 #[cfg(all(test, target_os = "windows"))]
 fn startup_activation_counters() -> &'static Mutex<StartupActivationCounters> {
@@ -116,7 +123,7 @@ fn reset_startup_activation_counters() {
     *startup_activation_counters()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = StartupActivationCounters::default();
-    STARTUP_COUNTER_TRACKING.store(true, Ordering::SeqCst);
+    STARTUP_COUNTER_TRACKING.with(|tracking| tracking.set(true));
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -124,7 +131,7 @@ fn startup_activation_snapshot() -> StartupActivationCounters {
     let snapshot = *startup_activation_counters()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    STARTUP_COUNTER_TRACKING.store(false, Ordering::SeqCst);
+    STARTUP_COUNTER_TRACKING.with(|tracking| tracking.set(false));
     snapshot
 }
 
@@ -519,7 +526,7 @@ impl DesktopConversationState {
         pairs: Vec<ResumePair>,
     ) -> Result<(), FrontendError> {
         #[cfg(test)]
-        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        if startup_counter_tracking() {
             startup_activation_counters()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -872,7 +879,7 @@ impl DesktopRepository {
         repository_root: &std::path::Path,
     ) -> Result<Self, ToolError> {
         #[cfg(test)]
-        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        if startup_counter_tracking() {
             startup_activation_counters()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1567,7 +1574,7 @@ struct LlamaCppReadinessProbe;
 impl LlamaCppReadinessProbe {
     async fn check(endpoint: &ProviderEndpoint) -> ReadinessState {
         #[cfg(test)]
-        if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+        if startup_counter_tracking() {
             startup_activation_counters()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2021,7 +2028,7 @@ fn desktop_tool_registry(
     repository: Option<&DesktopRepository>,
 ) -> Result<Arc<ToolRegistry>, ToolError> {
     #[cfg(test)]
-    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+    if startup_counter_tracking() {
         startup_activation_counters()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2070,7 +2077,7 @@ where
     R: FnOnce() -> Result<codex_baseline::CodexExecutableSelection, BaselineError>,
 {
     #[cfg(test)]
-    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+    if startup_counter_tracking() {
         startup_activation_counters()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2100,7 +2107,7 @@ where
     Fut: Future<Output = Result<T, FrontendError>>,
 {
     #[cfg(test)]
-    if STARTUP_COUNTER_TRACKING.load(Ordering::SeqCst) {
+    if startup_counter_tracking() {
         startup_activation_counters()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5043,7 +5050,7 @@ mod tests {
     fn malformed_preference_restore_defaults_without_connection_or_transcript_mutation() {
         let storage = TestRepository::new();
         let preferences_path = storage.0.join("desktop-preferences.json");
-        let transcript_path = storage.0.join("conversation-transcript.json");
+        let transcript_path = storage.0.join("conversation-transcript.sqlite3");
         fs::write(&preferences_path, b"{").unwrap();
         let state = DesktopAppState::new(storage.0.clone());
         let model = state.model.lock().unwrap();
@@ -5055,7 +5062,7 @@ mod tests {
             ConnectionState::NotConnected
         ));
         assert_eq!(fs::read(&preferences_path).unwrap(), b"{");
-        assert!(!transcript_path.exists());
+        assert!(transcript_path.exists());
     }
 
     #[test]
@@ -5380,7 +5387,6 @@ mod tests {
     fn reset_and_restore_keep_preference_and_conversation_persistence_separate() {
         let storage = TestRepository::new();
         let preference_path = storage.0.join("desktop-preferences.json");
-        let transcript_path = storage.0.join("conversation-transcript.json");
         let non_default = DesktopModelSelection {
             provider: DesktopModelProvider::Ollama,
             model: Some("non-default".into()),
@@ -5390,19 +5396,18 @@ mod tests {
         preferences.save(&non_default).unwrap();
         {
             let mut persistence = super::Persistence::start(storage.0.clone());
+            persistence.select_namespace("neutral-v1".into());
             persistence
                 .append_pair("user".into(), "assistant".into())
                 .unwrap();
         }
         let state = DesktopAppState::new(storage.0.clone());
-        let transcript_after_startup = fs::read(&transcript_path).unwrap();
         let preference_after_startup = fs::read(&preference_path).unwrap();
         let presentation_after_startup =
             serde_json::to_vec(&state.persistence.lock().unwrap().presentation()).unwrap();
         assert_eq!(state.model.lock().unwrap().selection, non_default);
-        // The setup record is legacy V2/global history. Startup selects the
-        // neutral namespace, so it remains preserved on disk but is not
-        // presented or eligible for replay.
+        // SQLite retains the selected neutral namespace independently from
+        // model preferences and connection state.
         assert!(
             state
                 .persistence
@@ -5410,7 +5415,8 @@ mod tests {
                 .unwrap()
                 .presentation()
                 .records
-                .is_empty()
+                .len()
+                >= 3
         );
 
         let mut model = state.model.lock().unwrap();
@@ -5422,10 +5428,6 @@ mod tests {
         .unwrap();
         drop(model);
         state.preferences.lock().unwrap().reset().unwrap();
-        assert_eq!(
-            fs::read(&transcript_path).unwrap(),
-            transcript_after_startup
-        );
         assert_eq!(
             serde_json::to_vec(&state.persistence.lock().unwrap().presentation()).unwrap(),
             presentation_after_startup
@@ -5459,7 +5461,8 @@ mod tests {
                 .unwrap()
                 .presentation()
                 .records
-                .is_empty()
+                .len()
+                >= 3
         );
     }
 

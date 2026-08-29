@@ -48,7 +48,7 @@ enum RegistryLookup {
 /// Resolves only while choosing a repository; startup never calls this.
 pub(super) fn resolve() -> Result<GitExecutableSelection, GitDiscoveryError> {
     #[cfg(test)]
-    if crate::STARTUP_COUNTER_TRACKING.load(std::sync::atomic::Ordering::SeqCst) {
+    if crate::startup_counter_tracking() {
         crate::startup_activation_counters()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
