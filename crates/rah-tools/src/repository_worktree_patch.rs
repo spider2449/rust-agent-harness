@@ -1840,6 +1840,7 @@ mod tests {
             git(&root, &["config", "user.name", "RAH Test"]);
             git(&root, &["config", "user.email", "rah@example.invalid"]);
             git(&root, &["config", "core.autocrlf", "false"]);
+            git(&root, &["config", "core.filemode", "true"]);
             fs::write(root.join("target.txt"), b"alpha\nold\nomega\n")
                 .expect("target should be written");
             fs::write(root.join("other.txt"), b"other\n").expect("other should be written");
@@ -2595,24 +2596,138 @@ mod tests {
         for mode in [0o755, 0o644] {
             let base = TestDirectory::new("unix-mode");
             let root = base.repository();
-            fs::set_permissions(root.join("target.txt"), fs::Permissions::from_mode(mode)).unwrap();
-            if mode & 0o111 != 0 {
-                git(&root, &["add", "--chmod=+x", "--", "target.txt"]);
-                git(&root, &["commit", "--quiet", "-m", "executable target"]);
-            }
+            let target = root.join("target.txt");
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
+            let chmod = if mode & 0o111 != 0 { "+x" } else { "-x" };
+            git(
+                &root,
+                &["add", &format!("--chmod={chmod}"), "--", "target.txt"],
+            );
+            git(&root, &["commit", "--quiet", "-m", "normalize target mode"]);
+            assert_unix_mode_baseline(&root, mode);
+
             let bytes = fs::read(root.join("target.txt")).unwrap();
+            let head_before = git_output(&root, &["ls-tree", "-z", "HEAD", "--", "target.txt"]);
+            let index_before =
+                git_output(&root, &["ls-files", "--stage", "-z", "--", "target.txt"]);
             let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
             let output = run(&tool, request("target.txt", &bytes, "old", "new")).await;
-            assert_eq!(content(&output)["status"], "ok");
             assert_eq!(
-                fs::metadata(root.join("target.txt"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o111,
+                content(&output)["status"],
+                "ok",
+                "{}",
+                unix_mode_diagnostics(&root, mode, Some(&output))
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"alpha\nnew\nomega\n");
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o111,
                 mode & 0o111
             );
+            assert_eq!(
+                git_output(&root, &["ls-tree", "-z", "HEAD", "--", "target.txt"]),
+                head_before
+            );
+            assert_eq!(
+                git_output(&root, &["ls-files", "--stage", "-z", "--", "target.txt"]),
+                index_before
+            );
+            assert_no_patch_temporary(&root);
         }
+    }
+
+    #[cfg(unix)]
+    fn assert_unix_mode_baseline(root: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let expected_git_mode = if mode & 0o111 != 0 {
+            b"100755"
+        } else {
+            b"100644"
+        };
+        let target = root.join("target.txt");
+        let diagnostics = unix_mode_diagnostics(root, mode, None);
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o111,
+            mode & 0o111,
+            "{diagnostics}"
+        );
+        assert!(
+            git_output(root, &["ls-tree", "HEAD", "--", "target.txt"])
+                .starts_with(expected_git_mode),
+            "{diagnostics}"
+        );
+        assert!(
+            git_output(root, &["ls-files", "--stage", "--", "target.txt"])
+                .starts_with(expected_git_mode),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            git_exit_code(
+                root,
+                &[
+                    "--literal-pathspecs",
+                    "diff-files",
+                    "--quiet",
+                    "--",
+                    "target.txt"
+                ]
+            ),
+            Some(0),
+            "{diagnostics}"
+        );
+        assert!(
+            git_output(
+                root,
+                &["status", "--porcelain=v1", "--untracked-files=all", "-z"]
+            )
+            .is_empty(),
+            "{diagnostics}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn unix_mode_diagnostics(
+        root: &Path,
+        requested_mode: u32,
+        output: Option<&crate::ToolOutput>,
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let filesystem_executable = fs::metadata(root.join("target.txt"))
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        let (returned_status, returned_reason) = output
+            .map(|output| {
+                (
+                    content(output)["status"].to_string(),
+                    content(output)["reason"].to_string(),
+                )
+            })
+            .unwrap_or_else(|| ("setup".to_owned(), "not_run".to_owned()));
+        format!(
+            "requested_mode={requested_mode:o}; filesystem_executable={filesystem_executable}; head={:?}; index={:?}; diff_files_exit={:?}; status={:?}; returned_status={}; returned_reason={}",
+            String::from_utf8_lossy(&git_output(root, &["ls-tree", "HEAD", "--", "target.txt"])),
+            String::from_utf8_lossy(&git_output(
+                root,
+                &["ls-files", "--stage", "--", "target.txt"]
+            )),
+            git_exit_code(
+                root,
+                &[
+                    "--literal-pathspecs",
+                    "diff-files",
+                    "--quiet",
+                    "--",
+                    "target.txt"
+                ]
+            ),
+            String::from_utf8_lossy(&git_output(
+                root,
+                &["status", "--porcelain=v1", "--untracked-files=all", "-z"]
+            )),
+            returned_status,
+            returned_reason,
+        )
     }
 
     fn request(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {
@@ -2704,6 +2819,16 @@ mod tests {
             .expect("Git command should start");
         assert!(output.status.success());
         output.stdout
+    }
+
+    #[cfg(unix)]
+    fn git_exit_code(root: &Path, arguments: &[&str]) -> Option<i32> {
+        Command::new(git_executable())
+            .args(arguments)
+            .current_dir(root)
+            .status()
+            .expect("Git command should start")
+            .code()
     }
 
     fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) {
