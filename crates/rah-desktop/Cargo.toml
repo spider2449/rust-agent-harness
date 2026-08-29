@@ -16,6 +16,7 @@ rah-tools = { path = "../rah-tools" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "2" }
 tauri-plugin-dialog = "2"
 tokio = { workspace = true, features = ["macros", "sync", "test-util", "time"] }

@@ -40,6 +40,8 @@ use rah_tools::{
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use sha2::{Digest, Sha256};
 #[cfg(all(test, target_os = "windows"))]
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
@@ -47,7 +49,7 @@ use std::{
     collections::HashMap,
     future::Future,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::{
         Arc, Mutex,
@@ -82,6 +84,9 @@ const READINESS_BODY_LIMIT: usize = 4 * 1024;
 const CANCEL_GRACEFUL_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "windows")]
 const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Empty, Desktop-owned child directory used when no project is selected.
+#[cfg(target_os = "windows")]
+const NEUTRAL_WORKSPACE_DIRECTORY: &str = "codex-neutral-workspace";
 
 /// Test-only evidence that constructing Desktop state does not activate optional authorities.
 #[cfg(all(test, target_os = "windows"))]
@@ -299,6 +304,8 @@ struct DesktopAppState {
     next_chat_generation: Mutex<u64>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
+    /// An app-owned non-project directory used only when no repository is selected.
+    neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
     preferences: Mutex<Preferences>,
     model_apply_persistence: Mutex<()>,
@@ -309,10 +316,29 @@ struct DesktopAppState {
 
 #[cfg(target_os = "windows")]
 impl DesktopAppState {
+    fn persistence_namespace(&self) -> String {
+        let repository = self
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        repository.as_ref().map_or_else(
+            || "neutral-v1".to_owned(),
+            |repository| repository_persistence_key(&repository.root),
+        )
+    }
+
+    fn select_persistence_namespace(&self) {
+        self.persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .select_namespace(self.persistence_namespace());
+    }
+
     fn persist_separator(
         &self,
         reason: SeparatorReason,
     ) -> Result<(), ConversationPersistenceWarning> {
+        self.select_persistence_namespace();
         self.persistence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -324,6 +350,7 @@ impl DesktopAppState {
         prompt: String,
         assistant: String,
     ) -> Result<(), ConversationPersistenceWarning> {
+        self.select_persistence_namespace();
         self.persistence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -331,7 +358,13 @@ impl DesktopAppState {
     }
 
     fn new(storage_directory: PathBuf) -> Self {
+        let neutral_workspace = neutral_workspace(&storage_directory);
         let (preferences, selection) = Preferences::start(storage_directory.clone());
+        let mut persistence = Persistence::start(storage_directory);
+        // Startup has no selected repository. Bind presentation and any future
+        // writes to the neutral namespace immediately; legacy global records
+        // remain preserved but never become visible in this namespace.
+        persistence.select_namespace("neutral-v1".to_owned());
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
             chat: Mutex::new(ChatState::Idle),
@@ -339,6 +372,7 @@ impl DesktopAppState {
             next_chat_generation: Mutex::new(0),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
+            neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
                 generation: 0,
@@ -347,10 +381,23 @@ impl DesktopAppState {
             preferences: Mutex::new(preferences),
             model_apply_persistence: Mutex::new(()),
             conversation: Mutex::new(DesktopConversationState::default()),
-            persistence: Mutex::new(Persistence::start(storage_directory)),
+            persistence: Mutex::new(persistence),
             close_started: AtomicBool::new(false),
         }
     }
+}
+
+/// Durable repository identity is derived only from the canonical root selected
+/// by the host. It is intentionally opaque in persistence metadata.
+#[cfg(target_os = "windows")]
+fn repository_persistence_key(root: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+    let mut digest = Sha256::new();
+    digest.update(b"rah-desktop-repository-v1\0");
+    for unit in root.as_os_str().encode_wide() {
+        digest.update(unit.to_le_bytes());
+    }
+    format!("repo-sha256:{:x}", digest.finalize())
 }
 
 #[cfg(target_os = "windows")]
@@ -831,13 +878,19 @@ impl DesktopRepository {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .repository_composition += 1;
         }
-        let status = RepositoryStatusTool::new(git_executable, repository_root)?;
-        let worktree_diff = RepositoryDiffTool::new(git_executable, repository_root)?;
-        let staged_diff = RepositoryDiffStagedTool::new(git_executable, repository_root)?;
+        let repository_root =
+            repository_root
+                .canonicalize()
+                .map_err(|error| ToolError::Execution {
+                    message: error.to_string(),
+                })?;
+        let status = RepositoryStatusTool::new(git_executable, &repository_root)?;
+        let worktree_diff = RepositoryDiffTool::new(git_executable, &repository_root)?;
+        let staged_diff = RepositoryDiffStagedTool::new(git_executable, &repository_root)?;
         Ok(Self {
             display_path: repository_root.display().to_string(),
             git_executable: git_executable.to_path_buf(),
-            root: repository_root.to_path_buf(),
+            root: repository_root,
             status: Arc::new(status),
             worktree_diff: Arc::new(worktree_diff),
             staged_diff: Arc::new(staged_diff),
@@ -860,6 +913,7 @@ pub(crate) enum FrontendError {
     ChatEmptyPrompt,
     ChatPromptTooLarge,
     CodexNotConnected,
+    CodexReconnectRequired,
     ChatNotRunning,
     ChatAlreadyRunning,
     ChatStartFailed,
@@ -1231,7 +1285,8 @@ enum ActivityResult {
 #[cfg(target_os = "windows")]
 fn frontend_error(error: &CodexAdapterError) -> FrontendError {
     match error {
-        CodexAdapterError::InvalidModelProviderConfig { .. } => {
+        CodexAdapterError::WorkspaceContext { .. }
+        | CodexAdapterError::InvalidModelProviderConfig { .. } => {
             FrontendError::CodexConnectionFailed
         }
         CodexAdapterError::ExecutableDiscovery { .. } => FrontendError::CodexNotFound,
@@ -1246,6 +1301,13 @@ fn frontend_error(error: &CodexAdapterError) -> FrontendError {
         | CodexAdapterError::ProtocolViolation { .. }
         | CodexAdapterError::Transport { .. } => FrontendError::CodexConnectionFailed,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn neutral_workspace(storage_directory: &Path) -> Option<PathBuf> {
+    let workspace = storage_directory.join(NEUTRAL_WORKSPACE_DIRECTORY);
+    std::fs::create_dir_all(&workspace).ok()?;
+    workspace.canonicalize().ok()
 }
 
 #[cfg(target_os = "windows")]
@@ -1333,6 +1395,17 @@ fn repository_tool_authority(
         (true, Some(_)) => "reconnect required",
         _ => "inactive",
     }
+}
+
+#[cfg(target_os = "windows")]
+fn connection_context_is_current(
+    connection_repository_generation: u64,
+    connection_model_generation: u64,
+    current_repository_generation: u64,
+    current_model_generation: u64,
+) -> bool {
+    connection_repository_generation == current_repository_generation
+        && connection_model_generation == current_model_generation
 }
 
 #[cfg(target_os = "windows")]
@@ -1835,6 +1908,15 @@ fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepos
         .repository_generation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    state.select_persistence_namespace();
+    // Persisted presentation is repository-owned, while replay remains an
+    // explicit Resume action. Never carry the previous repository's model
+    // context across this boundary.
+    state
+        .conversation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .start_new();
 }
 
 #[cfg(target_os = "windows")]
@@ -2061,7 +2143,7 @@ async fn connect_codex(
         }
     }
 
-    let (repository, repository_generation) = {
+    let (repository, repository_generation, neutral_workspace) = {
         let repository = state
             .repository
             .lock()
@@ -2071,7 +2153,7 @@ async fn connect_codex(
             .repository_generation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (repository, generation)
+        (repository, generation, state.neutral_workspace.clone())
     };
     let (model_config, model_generation) = {
         let model = state
@@ -2098,7 +2180,7 @@ async fn connect_codex(
                 tracing::error!(error = %error, "failed to construct desktop tool registry");
                 FrontendError::ToolRegistryFailed
             })?;
-            CodexRuntime::connect_tool_bridge_with_model_config(
+            CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
                 prepared.executable,
                 registry,
                 if repository.is_some() {
@@ -2111,6 +2193,13 @@ async fn connect_codex(
                     vec![PermissionLevel::None]
                 },
                 prepared.model_config,
+                if let Some(repository) = repository.as_deref() {
+                    repository.root.as_path()
+                } else {
+                    neutral_workspace
+                        .as_deref()
+                        .ok_or(FrontendError::CodexConnectionFailed)?
+                },
             )
             .await
             .map_err(|error| {
@@ -2382,7 +2471,10 @@ async fn run_chat(
                 terminal = true;
                 break;
             }
-            AgentEvent::Failed { .. } => {
+            AgentEvent::Failed { message, .. } => {
+                // The frontend receives only a closed error code. Retain the
+                // adapter-provided stage privately for live diagnosis.
+                tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -2471,6 +2563,24 @@ async fn send_chat(
             }
         }
     };
+    let current_repository_generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_model_generation = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generation;
+    if !connection_context_is_current(
+        identity.repository_generation,
+        identity.model_generation,
+        current_repository_generation,
+        current_model_generation,
+    ) {
+        state.finish_chat(chat_generation);
+        return Err(FrontendError::CodexReconnectRequired);
+    }
     let (request, conversation_epoch, context_change) = {
         let mut conversation = state
             .conversation
@@ -2610,6 +2720,7 @@ fn clear_conversation_history(state: State<'_, DesktopAppState>) -> Result<(), F
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
+    state.select_persistence_namespace();
     state
         .persistence
         .lock()
@@ -2686,6 +2797,7 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
             _ => return Err(FrontendError::ConversationResumeUnavailable),
         }
     };
+    state.select_persistence_namespace();
     let mut conversation = state
         .conversation
         .lock()
@@ -2724,6 +2836,7 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
 fn conversation_transcript(
     state: State<'_, DesktopAppState>,
 ) -> ConversationTranscriptPresentation {
+    state.select_persistence_namespace();
     state
         .persistence
         .lock()
@@ -2798,23 +2911,28 @@ mod tests {
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
         LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
-        MAX_PROMPT_BYTES, ModelConfigurationPresentation, Preferences, PreferencesWarning,
-        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState, RepositoryObservationStage,
-        ResumePair, SendChatResult, TerminalOwnership, activity_event, apply_model_selection,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        clear_conversation_allowed, connect_prepared_codex, current_app_status,
-        desktop_repository_snapshot, desktop_tool_registry, frontend_error,
-        model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        replace_selected_repository, repository_selection_allowed, repository_tool_authority,
-        request_connect, resolve_prepare_and_connect_codex, same_arc, validate_prompt,
+        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
+        PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
+        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState,
+        RepositoryObservationStage, ResumePair, SendChatResult, TerminalOwnership, activity_event,
+        apply_model_selection, await_cancel_recovery, await_graceful_cancel, await_hard_shutdown,
+        begin_chat, clear_conversation_allowed, connect_prepared_codex,
+        connection_context_is_current, current_app_status, desktop_repository_snapshot,
+        desktop_tool_registry, frontend_error, model_configuration_status,
+        prepare_codex_connection, publish_readiness_result, replace_selected_repository,
+        repository_selection_allowed, repository_tool_authority, request_connect,
+        resolve_codex_executable, resolve_prepare_and_connect_codex, same_arc,
+        selected_git_executable, validate_prompt,
     };
+    use futures::StreamExt;
     use rah_protocol::{
-        AgentEvent, Message, MessageRole, PermissionLevel, SessionId, ToolCall, ToolCallId,
-        ToolInput, ToolName, ToolOutput,
+        AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
+        RequestId, SessionId, ToolCall, ToolCallId, ToolInput, ToolName, ToolOutput,
     };
+    use rah_runtime::AgentRuntime;
     use rah_runtime_codex::{
         CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
+        CodexRuntime,
     };
     use rah_tools::ToolContext;
     use std::{
@@ -3595,6 +3713,52 @@ mod tests {
         assert!(!serialized.contains("codex.exe"));
     }
 
+    #[tokio::test]
+    #[ignore = "host-only Task 126 live runtime.start probe; requires the pinned Codex 0.149.0 executable and inherited Codex configuration"]
+    async fn task_126_host_probe_uses_desktop_repository_runtime_construction() {
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical selected repository root");
+        let git = selected_git_executable().expect("host Git discovery");
+        let repository = DesktopRepository::new(&git, &root)
+            .expect("current directory is a selected repository");
+        let prepared =
+            prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
+                .expect("pinned Codex executable resolves");
+        let registry =
+            desktop_tool_registry(Some(&repository)).expect("desktop repository registry");
+        let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
+            prepared.executable,
+            registry,
+            vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            prepared.model_config,
+            &root,
+        )
+        .await
+        .expect("Desktop runtime connects");
+        let handle = runtime
+            .start(AgentRequest {
+                request_id: RequestId::new(),
+                input: AgentInput {
+                    messages: vec![Message {
+                        role: MessageRole::User,
+                        content: "Task 126 runtime.start probe".to_owned(),
+                    }],
+                },
+                options: AgentOptions::default(),
+            })
+            .await
+            .expect("thread/start and turn/start create an AgentHandle");
+        let first = handle.into_events().next().await;
+        assert!(matches!(first, Some(AgentEvent::Started { .. })));
+        runtime.shutdown().await.expect("host probe shutdown");
+    }
+
     #[test]
     fn unsupported_codex_version_frontend_error_has_one_adapter_origin() {
         let mismatch = CodexAdapterError::VersionMismatch {
@@ -3716,9 +3880,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_repository_uses_an_app_owned_neutral_workspace_not_its_storage_root() {
+        let storage = TestRepository::new();
+        fs::write(storage.0.join("AGENTS.md"), "SENTINEL_STORAGE_ROOT")
+            .expect("storage sentinel should be written");
+        let state = DesktopAppState::new(storage.0.clone());
+        let neutral = state
+            .neutral_workspace
+            .as_ref()
+            .expect("neutral workspace should be available");
+        let canonical_storage =
+            fs::canonicalize(&storage.0).expect("storage root should canonicalize");
+        assert_eq!(neutral.parent(), Some(canonical_storage.as_path()));
+        assert_eq!(
+            neutral.file_name().and_then(|name| name.to_str()),
+            Some(NEUTRAL_WORKSPACE_DIRECTORY)
+        );
+        assert!(!neutral.join("AGENTS.md").exists());
+        assert_ne!(neutral, &storage.0);
+    }
+
+    #[test]
+    fn stale_repository_or_model_connection_cannot_start_a_chat_turn() {
+        assert!(connection_context_is_current(4, 8, 4, 8));
+        assert!(!connection_context_is_current(4, 8, 5, 8));
+        assert!(!connection_context_is_current(4, 8, 4, 9));
+        assert!(!connection_context_is_current(4, 8, 5, 9));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
         let fixture = TestRepository::new();
+        fs::write(
+            fixture.0.join("AGENTS.md"),
+            "SENTINEL_REPOSITORY_INSTRUCTIONS_CANNOT_GRANT_AUTHORITY",
+        )
+        .expect("repository instruction sentinel should be written");
         let repository = fixture.desktop_repository();
         let registry = desktop_tool_registry(Some(&repository)).expect("registry should build");
         let definitions = registry.definitions();
@@ -5202,8 +5400,11 @@ mod tests {
         let presentation_after_startup =
             serde_json::to_vec(&state.persistence.lock().unwrap().presentation()).unwrap();
         assert_eq!(state.model.lock().unwrap().selection, non_default);
+        // The setup record is legacy V2/global history. Startup selects the
+        // neutral namespace, so it remains preserved on disk but is not
+        // presented or eligible for replay.
         assert!(
-            !state
+            state
                 .persistence
                 .lock()
                 .unwrap()
@@ -5252,7 +5453,7 @@ mod tests {
             fs::read(&preference_path).unwrap()
         );
         assert!(
-            !restored
+            restored
                 .persistence
                 .lock()
                 .unwrap()

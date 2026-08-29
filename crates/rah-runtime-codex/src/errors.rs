@@ -5,6 +5,13 @@ use thiserror::Error;
 /// Typed failures produced by the private Codex app-server adapter.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// The host-selected workspace context could not be canonicalized.
+    #[error("invalid host-selected Codex workspace context: {source}")]
+    WorkspaceContext {
+        /// Operating-system failure while canonicalizing the host-owned path.
+        #[source]
+        source: io::Error,
+    },
     /// Host-owned model/provider selection failed validation.
     #[error("invalid Codex model/provider configuration: {message}")]
     InvalidModelProviderConfig {

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::{
@@ -9,6 +10,8 @@ use std::{
 
 pub(crate) const SNAPSHOT_FILE: &str = "conversation-transcript-v1.json";
 const V2_FILE: &str = "conversation-transcript.json";
+const V3_FILE: &str = "conversation-transcript-v3.json";
+const MAX_NAMESPACES: usize = 64;
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_RECORDS: usize = 79;
@@ -123,6 +126,14 @@ struct V2 {
     version: u8,
     epochs: Vec<Epoch>,
 }
+/// Version 3 deliberately partitions every durable lineage by a host-owned
+/// opaque namespace. V1/V2 have no ownership metadata and remain legacy.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct V3 {
+    version: u8,
+    namespaces: BTreeMap<String, V2>,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Epoch {
@@ -141,21 +152,36 @@ struct Pair {
 enum Backing {
     V1(Vec<Record>),
     V2(V2),
+    V3(V3),
 }
 pub(crate) struct Persistence {
     directory: PathBuf,
     backing: Backing,
     warning: Option<Warning>,
     sequence: u64,
+    selected_namespace: Option<String>,
+    /// Each namespace with history receives its own restart boundary the first
+    /// time it is selected after this process starts. A neutral selection must
+    /// not consume a repository's restart/resume boundary.
+    restart_pending_namespaces: BTreeSet<String>,
 }
 
 impl Persistence {
     pub(crate) fn start(directory: PathBuf) -> Self {
         let _ = fs::create_dir_all(&directory);
         cleanup_temps(&directory);
+        let v3 = directory.join(V3_FILE);
         let v2 = directory.join(V2_FILE);
         let v1 = directory.join(SNAPSHOT_FILE);
-        let mut this = if v2.exists() {
+        let mut this = if v3.exists() {
+            match load_v3(&v3) {
+                Ok(v) => Self::v3(directory, v),
+                Err(()) => {
+                    quarantine(&v3);
+                    Self::failed(directory)
+                }
+            }
+        } else if v2.exists() {
             match load_v2(&v2) {
                 Ok(v) => Self::v2(directory, v),
                 Err(()) => {
@@ -173,7 +199,7 @@ impl Persistence {
                 }
             }
         };
-        if !this.empty() {
+        if !matches!(this.backing, Backing::V3(_)) && !this.empty() {
             this.restart();
         }
         this
@@ -184,6 +210,8 @@ impl Persistence {
             backing: Backing::V1(records),
             warning: None,
             sequence: 0,
+            selected_namespace: None,
+            restart_pending_namespaces: BTreeSet::new(),
         }
     }
     fn v2(directory: PathBuf, v2: V2) -> Self {
@@ -192,6 +220,24 @@ impl Persistence {
             backing: Backing::V2(v2),
             warning: None,
             sequence: 0,
+            selected_namespace: None,
+            restart_pending_namespaces: BTreeSet::new(),
+        }
+    }
+    fn v3(directory: PathBuf, v3: V3) -> Self {
+        let restart_pending_namespaces = v3
+            .namespaces
+            .iter()
+            .filter(|(_, namespace)| !namespace.epochs.iter().all(|epoch| epoch.pairs.is_empty()))
+            .map(|(namespace, _)| namespace.clone())
+            .collect();
+        Self {
+            directory,
+            backing: Backing::V3(v3),
+            warning: None,
+            sequence: 0,
+            selected_namespace: None,
+            restart_pending_namespaces,
         }
     }
     fn failed(directory: PathBuf) -> Self {
@@ -203,12 +249,66 @@ impl Persistence {
             }),
             warning: Some(Warning::RestoreFailed),
             sequence: 0,
+            selected_namespace: None,
+            restart_pending_namespaces: BTreeSet::new(),
         }
+    }
+    /// Selects an opaque host-derived persistence namespace. Selecting a
+    /// namespace is the only way V3 records become visible or writable.
+    pub(crate) fn select_namespace(&mut self, namespace: String) {
+        // V1/V2 records have no repository owner. Preserve their files for
+        // compatibility, but never expose them through a selected namespace.
+        if !matches!(self.backing, Backing::V3(_)) {
+            self.backing = Backing::V3(V3 {
+                version: 3,
+                namespaces: BTreeMap::new(),
+            });
+        }
+        let startup_restart = self.restart_pending_namespaces.remove(&namespace);
+        let mut save = false;
+        self.selected_namespace = Some(namespace.clone());
+        match &mut self.backing {
+            Backing::V3(v3) => {
+                if startup_restart
+                    && v3
+                        .namespaces
+                        .get(&namespace)
+                        .is_some_and(|v| !v.epochs.iter().all(|e| e.pairs.is_empty()))
+                {
+                    let v = v3
+                        .namespaces
+                        .get_mut(&namespace)
+                        .expect("checked namespace");
+                    v.epochs.push(Epoch {
+                        id: next_id(&v.epochs).unwrap_or(0),
+                        parent_epoch_id: None,
+                        boundary: Some(SeparatorReason::ApplicationRestarted),
+                        history_trimmed_before: false,
+                        pairs: vec![],
+                    });
+                    save = true;
+                }
+            }
+            Backing::V1(_) | Backing::V2(_) => unreachable!(),
+        }
+        if save && self.save().is_err() {
+            self.warning = Some(Warning::SaveFailed);
+        }
+    }
+    fn selected_v3(&self) -> Option<&V2> {
+        let Backing::V3(v3) = &self.backing else {
+            return None;
+        };
+        v3.namespaces.get(self.selected_namespace.as_ref()?)
     }
     fn empty(&self) -> bool {
         match &self.backing {
             Backing::V1(r) => r.is_empty(),
             Backing::V2(v) => v.epochs.iter().all(|e| e.pairs.is_empty()),
+            Backing::V3(v) => v
+                .namespaces
+                .values()
+                .all(|v| v.epochs.iter().all(|e| e.pairs.is_empty())),
         }
     }
     fn restart(&mut self) {
@@ -223,6 +323,7 @@ impl Persistence {
                 history_trimmed_before: false,
                 pairs: vec![],
             }),
+            Backing::V3(_) => return,
         };
         if self.save().is_err() {
             self.warning = Some(Warning::SaveFailed);
@@ -254,6 +355,30 @@ impl Persistence {
                     }
                 }
             }
+            Backing::V3(_) => {
+                if let Some(v) = self.selected_v3() {
+                    for e in &v.epochs {
+                        if e.history_trimmed_before {
+                            records.push(PresentationRecord::ContextSeparator {
+                                reason: SeparatorReason::HistoryTrimmed,
+                            });
+                        }
+                        if let Some(reason) = e.boundary {
+                            records.push(PresentationRecord::ContextSeparator { reason });
+                        }
+                        for p in &e.pairs {
+                            records.push(PresentationRecord::CompletedMessage {
+                                role: PresentationRole::User,
+                                text: p.user.clone(),
+                            });
+                            records.push(PresentationRecord::CompletedMessage {
+                                role: PresentationRole::Assistant,
+                                text: p.assistant.clone(),
+                            });
+                        }
+                    }
+                }
+            }
         };
         Presentation {
             records,
@@ -262,13 +387,22 @@ impl Persistence {
         }
     }
     pub(crate) fn resume_available(&self) -> bool {
-        matches!(&self.backing, Backing::V2(v) if resume_source(v).is_ok())
+        if self.selected_namespace.is_none() {
+            return matches!(&self.backing, Backing::V2(v) if resume_source(v).is_ok());
+        }
+        self.selected_v3().is_some_and(|v| resume_source(v).is_ok())
     }
 
     /// Returns only complete user/assistant pairs from the durable restart lineage.
     /// Epoch IDs and storage details deliberately remain private to this module.
     pub(crate) fn resume_messages(&self) -> Result<Vec<ResumePair>, ResumeError> {
-        let Backing::V2(v) = &self.backing else {
+        if self.selected_namespace.is_none() {
+            let Backing::V2(v) = &self.backing else {
+                return Err(ResumeError::Unavailable);
+            };
+            return reconstruct_resume(v, resume_source(v)?);
+        }
+        let Some(v) = self.selected_v3() else {
             return Err(ResumeError::Unavailable);
         };
         let source = resume_source(v)?;
@@ -278,7 +412,24 @@ impl Persistence {
     /// Durably links the current recovered restart epoch to its selected source.
     /// The in-memory graph changes only after the atomic replacement succeeds.
     pub(crate) fn commit_resume_lineage(&mut self) -> Result<(), ResumeError> {
-        let Backing::V2(v) = &self.backing else {
+        if self.selected_namespace.is_none() {
+            let Backing::V2(v) = &self.backing else {
+                return Err(ResumeError::Unavailable);
+            };
+            let source = resume_source(v)?;
+            let mut candidate = v.clone();
+            candidate
+                .epochs
+                .last_mut()
+                .ok_or(ResumeError::Incompatible)?
+                .parent_epoch_id = Some(source);
+            validate_v2(&candidate).map_err(|_| ResumeError::Incompatible)?;
+            let sequence = self.next();
+            write_v2(&self.directory, &candidate, sequence).map_err(|_| ResumeError::SaveFailed)?;
+            self.backing = Backing::V2(candidate);
+            return Ok(());
+        }
+        let Some(v) = self.selected_v3() else {
             return Err(ResumeError::Unavailable);
         };
         let source = resume_source(v)?;
@@ -289,9 +440,18 @@ impl Persistence {
             .ok_or(ResumeError::Incompatible)?;
         current.parent_epoch_id = Some(source);
         validate_v2(&candidate).map_err(|_| ResumeError::Incompatible)?;
+        let namespace = self.selected_namespace.clone().expect("selected namespace");
+        let mut durable = match &self.backing {
+            Backing::V3(v3) => v3.clone(),
+            _ => return Err(ResumeError::Unavailable),
+        };
+        durable.namespaces.insert(namespace, candidate);
         let sequence = self.next();
-        write_v2(&self.directory, &candidate, sequence).map_err(|_| ResumeError::SaveFailed)?;
-        self.backing = Backing::V2(candidate);
+        write_v3(&self.directory, &durable, sequence).map_err(|_| ResumeError::SaveFailed)?;
+        let Backing::V3(v3) = &mut self.backing else {
+            return Err(ResumeError::Unavailable);
+        };
+        *v3 = durable;
         Ok(())
     }
     pub(crate) fn append_pair(&mut self, user: String, assistant: String) -> Result<(), Warning> {
@@ -305,23 +465,48 @@ impl Persistence {
         pair: Option<Pair>,
         separator: Option<SeparatorReason>,
     ) -> Result<(), Warning> {
-        if let Backing::V1(records) = &mut self.backing {
-            apply_v1(records, pair.as_ref(), separator);
-            if !trim_v1(records) {
+        if self.selected_namespace.is_none() {
+            if let Backing::V1(records) = &mut self.backing {
+                apply_v1(records, pair.as_ref(), separator);
+                if !trim_v1(records) {
+                    return Err(Warning::SaveFailed);
+                }
+                let mut candidate = normalize_v1(records);
+                let sequence = self.next();
+                if !trim_v2(&mut candidate)
+                    || write_v2(&self.directory, &candidate, sequence).is_err()
+                {
+                    return Err(Warning::SaveFailed);
+                }
+                self.backing = Backing::V2(candidate);
+                return Ok(());
+            }
+            let Backing::V2(v) = &mut self.backing else {
+                unreachable!()
+            };
+            apply_v2(v, pair, separator)?;
+            if !trim_v2(v) {
                 return Err(Warning::SaveFailed);
             }
-            let mut candidate = normalize_v1(records);
-            let sequence = self.next();
-            if !trim_v2(&mut candidate) || write_v2(&self.directory, &candidate, sequence).is_err()
-            {
-                return Err(Warning::SaveFailed);
-            }
-            self.backing = Backing::V2(candidate);
-            return Ok(());
+            return self.save().map_err(|_| Warning::SaveFailed);
         }
-        let Backing::V2(v) = &mut self.backing else {
+        if !matches!(self.backing, Backing::V3(_)) {
+            self.backing = Backing::V3(V3 {
+                version: 3,
+                namespaces: BTreeMap::new(),
+            });
+        }
+        let namespace = self
+            .selected_namespace
+            .clone()
+            .unwrap_or_else(|| "neutral-v1".into());
+        let Backing::V3(v3) = &mut self.backing else {
             unreachable!()
         };
+        let v = v3.namespaces.entry(namespace).or_insert_with(|| V2 {
+            version: 2,
+            epochs: vec![],
+        });
         apply_v2(v, pair, separator)?;
         if !trim_v2(v) {
             return Err(Warning::SaveFailed);
@@ -333,6 +518,18 @@ impl Persistence {
         }
     }
     pub(crate) fn clear(&mut self) -> io::Result<()> {
+        if matches!(self.backing, Backing::V3(_)) {
+            let namespace = self
+                .selected_namespace
+                .clone()
+                .unwrap_or_else(|| "neutral-v1".into());
+            if let Backing::V3(v3) = &mut self.backing {
+                v3.namespaces.remove(&namespace);
+            }
+            self.save()?;
+            self.warning = None;
+            return Ok(());
+        }
         let v1 = self.directory.join(SNAPSHOT_FILE);
         let v2 = self.directory.join(V2_FILE);
         if v2.exists() {
@@ -355,6 +552,7 @@ impl Persistence {
         match &self.backing {
             Backing::V1(v) => write_v1(&self.directory, v, n),
             Backing::V2(v) => write_v2(&self.directory, v, n),
+            Backing::V3(v) => write_v3(&self.directory, v, n),
         }
     }
 }
@@ -596,6 +794,23 @@ fn validate_v2(v: &V2) -> Result<(), ()> {
         Ok(())
     }
 }
+fn validate_v3(v: &V3) -> Result<(), ()> {
+    if v.version != 3
+        || v.namespaces.len() > MAX_NAMESPACES
+        || v.namespaces.keys().any(|key| !valid_namespace(key))
+    {
+        return Err(());
+    }
+    v.namespaces.values().try_for_each(validate_v2)
+}
+fn valid_namespace(key: &str) -> bool {
+    key == "neutral-v1"
+        || (key.len() == "repo-sha256:".len() + 64
+            && key.starts_with("repo-sha256:")
+            && key["repo-sha256:".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+}
 fn read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
     if !path.exists() {
         return Ok(None);
@@ -632,6 +847,14 @@ fn load_v2(path: &Path) -> Result<V2, ()> {
     };
     let v: V2 = serde_json::from_slice(&b).map_err(|_| ())?;
     validate_v2(&v)?;
+    Ok(v)
+}
+fn load_v3(path: &Path) -> Result<V3, ()> {
+    let Some(b) = read(path)? else {
+        return Err(());
+    };
+    let v: V3 = serde_json::from_slice(&b).map_err(|_| ())?;
+    validate_v3(&v)?;
     Ok(v)
 }
 fn trim_v1(r: &mut Vec<Record>) -> bool {
@@ -702,6 +925,20 @@ fn write_v2(d: &Path, v: &V2, n: u64) -> io::Result<()> {
         n,
     )
 }
+fn write_v3(d: &Path, v: &V3, n: u64) -> io::Result<()> {
+    validate_v3(v).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid repository-scoped transcript",
+        )
+    })?;
+    atomic(
+        d,
+        V3_FILE,
+        &serde_json::to_vec(v).map_err(io::Error::other)?,
+        n,
+    )
+}
 fn temp(file: &str, n: u64) -> String {
     format!("{file}.tmp-{}-{n}", std::process::id())
 }
@@ -717,7 +954,7 @@ fn cleanup_temps(d: &Path) {
         for e in entries.flatten() {
             let n = e.file_name();
             let n = n.to_string_lossy();
-            if is_temp(&n, SNAPSHOT_FILE) || is_temp(&n, V2_FILE) {
+            if is_temp(&n, SNAPSHOT_FILE) || is_temp(&n, V2_FILE) || is_temp(&n, V3_FILE) {
                 let _ = fs::remove_file(e.path());
             }
         }
@@ -739,7 +976,7 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 fn clean_private(d: &Path) {
-    for f in [SNAPSHOT_FILE, V2_FILE] {
+    for f in [SNAPSHOT_FILE, V2_FILE, V3_FILE] {
         let _ = fs::remove_file(d.join(format!("{f}.corrupt")));
     }
     cleanup_temps(d);
@@ -998,6 +1235,95 @@ mod tests {
         assert!(p.presentation().records.is_empty());
         assert_eq!(p.warning, Some(Warning::RestoreFailed));
         assert!(d.join(SNAPSHOT_FILE).exists());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn repository_namespaces_never_replay_or_present_another_repository() {
+        let d = directory("repository-namespaces");
+        let mut p = Persistence::start(d.clone());
+        let a = format!("repo-sha256:{:064x}", 10);
+        let b = format!("repo-sha256:{:064x}", 11);
+        p.select_namespace(a.clone());
+        p.append_pair("same message".into(), "A reply".into())
+            .unwrap();
+        p.select_namespace(b);
+        assert!(p.presentation().records.is_empty());
+        assert_eq!(p.resume_messages(), Err(ResumeError::Unavailable));
+        p.append_pair("same message".into(), "B reply".into())
+            .unwrap();
+        p.select_namespace(a);
+        let a = p.presentation();
+        assert!(serde_json::to_string(&a).unwrap().contains("A reply"));
+        assert!(!serde_json::to_string(&a).unwrap().contains("B reply"));
+        p.select_namespace("neutral-v1".into());
+        assert!(p.presentation().records.is_empty());
+        assert_eq!(p.resume_messages(), Err(ResumeError::Unavailable));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn restart_resumes_only_the_selected_repository_namespace() {
+        let d = directory("repository-restart");
+        let mut p = Persistence::start(d.clone());
+        let a = format!("repo-sha256:{:064x}", 10);
+        let b = format!("repo-sha256:{:064x}", 11);
+        p.select_namespace(a.clone());
+        p.append_pair("A user".into(), "A assistant".into())
+            .unwrap();
+        p.select_namespace(b.clone());
+        p.append_pair("B user".into(), "B assistant".into())
+            .unwrap();
+        drop(p);
+
+        let mut after_a = Persistence::start(d.clone());
+        after_a.select_namespace(a);
+        assert_eq!(
+            after_a.resume_messages().unwrap(),
+            vec![ResumePair {
+                user: "A user".into(),
+                assistant: "A assistant".into()
+            }]
+        );
+        drop(after_a);
+        let mut after_b = Persistence::start(d.clone());
+        after_b.select_namespace(b);
+        assert_eq!(
+            after_b.resume_messages().unwrap(),
+            vec![ResumePair {
+                user: "B user".into(),
+                assistant: "B assistant".into()
+            }]
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn legacy_and_corrupt_records_are_never_assigned_to_a_repository_namespace() {
+        let d = directory("repository-legacy");
+        write_v2(
+            &d,
+            &normalize_v1(&[Record::CompletedPair {
+                user: "legacy".into(),
+                assistant: "legacy".into(),
+            }]),
+            1,
+        )
+        .unwrap();
+        let mut legacy = Persistence::start(d.clone());
+        legacy.select_namespace(format!("repo-sha256:{:064x}", 10));
+        assert!(legacy.presentation().records.is_empty());
+        assert_eq!(legacy.resume_messages(), Err(ResumeError::Unavailable));
+        fs::write(
+            d.join(V3_FILE),
+            br#"{"version":3,"namespaces":{"unknown":{"version":2,"epochs":[]}}}"#,
+        )
+        .unwrap();
+        let mut corrupt = Persistence::start(d.clone());
+        corrupt.select_namespace(format!("repo-sha256:{:064x}", 10));
+        assert!(corrupt.presentation().records.is_empty());
+        assert_eq!(corrupt.resume_messages(), Err(ResumeError::Unavailable));
+        assert_eq!(corrupt.warning, Some(Warning::RestoreFailed));
         let _ = fs::remove_dir_all(d);
     }
 

@@ -324,6 +324,16 @@ function renderTranscript(transcript) {
   if (transcript.warning) showPersistenceWarning(transcript.warning);
 }
 
+async function replaceTranscript(invoke) {
+  // A repository namespace is a presentation boundary, not a separator in a
+  // shared transcript. Remove every rendered record before displaying only the
+  // newly selected namespace.
+  document.querySelector("#chat-messages").replaceChildren();
+  activeAssistant = null;
+  resumeUsed = false;
+  renderTranscript(await invoke("conversation_transcript"));
+}
+
 function showChatError(code) {
   const error = document.querySelector("#chat-error");
   error.textContent = errorMessage(code);
@@ -394,6 +404,7 @@ async function initializeDesktop() {
     error.hidden = true;
     try {
       await invoke("choose_repository");
+      await replaceTranscript(invoke);
       await loadStatus(invoke);
       await refreshRepository(invoke);
     } catch (repositoryError) {
@@ -544,7 +555,7 @@ async function initializeDesktop() {
     }
   });
   await loadStatus(invoke);
-  renderTranscript(await invoke("conversation_transcript"));
+  await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);
   const preferencesWarning = await invoke("desktop_preferences_warning");
   if (preferencesWarning) {

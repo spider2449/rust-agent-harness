@@ -3,8 +3,8 @@
   "generated_by": "codex app-server generate-json-schema",
   "required_files": [
     { "path": "v1/InitializeParams.json", "required": ["clientInfo"] },
-    { "path": "v2/ThreadStartResponse.json", "required": ["thread"] },
-    { "path": "v2/ThreadStartParams.json", "required": [], "properties": ["dynamicTools"], "experimental": true },
+    { "path": "v2/ThreadStartResponse.json", "required": ["thread", "cwd"], "properties": ["instructionSources"] },
+    { "path": "v2/ThreadStartParams.json", "required": [], "properties": ["cwd", "dynamicTools"], "experimental": true },
     { "path": "v2/TurnStartParams.json", "required": ["threadId", "input"] },
     { "path": "v2/TurnStartResponse.json", "required": ["turn"] },
     { "path": "v2/ThreadResumeParams.json", "required": ["threadId"] },

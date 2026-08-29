@@ -71,6 +71,8 @@ pub struct CodexRuntime {
     sessions: Arc<Mutex<HashMap<SessionId, SessionRecord>>>,
     bridge: Option<BridgeMode>,
     model_config: CodexModelConfig,
+    /// Host-owned absolute workspace context for every thread this runtime starts.
+    workspace_context: Option<std::path::PathBuf>,
 }
 
 impl CodexRuntime {
@@ -116,6 +118,34 @@ impl CodexRuntime {
         .await
     }
 
+    /// Starts Codex with a host-owned, canonical workspace context for `thread/start`.
+    ///
+    /// This value is never derived from model input. Callers that expose repository
+    /// selection must pass the same canonical root used to build their tool registry.
+    pub async fn connect_tool_bridge_with_model_config_and_workspace(
+        executable: impl AsRef<Path>,
+        registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
+        model_config: CodexModelConfig,
+        workspace_context: impl AsRef<Path>,
+    ) -> Result<Self, CodexAdapterError> {
+        let workspace_context = workspace_context
+            .as_ref()
+            .canonicalize()
+            .map_err(|error| CodexAdapterError::WorkspaceContext { source: error })?;
+        let transport = ProcessTransport::start(executable.as_ref(), true).await?;
+        Self::from_transport_mode(
+            transport,
+            Some(BridgeConfig {
+                registry,
+                allowed_permissions: Arc::new(allowed_permissions),
+            }),
+            model_config,
+            Some(workspace_context),
+        )
+        .await
+    }
+
     pub(crate) async fn from_transport(
         transport: impl AppServerTransport,
     ) -> Result<Self, CodexAdapterError> {
@@ -126,7 +156,7 @@ impl CodexRuntime {
         transport: impl AppServerTransport,
         model_config: CodexModelConfig,
     ) -> Result<Self, CodexAdapterError> {
-        Self::from_transport_mode(transport, None, model_config).await
+        Self::from_transport_mode(transport, None, model_config, None).await
     }
 
     pub(crate) async fn from_transport_bridge(
@@ -156,6 +186,27 @@ impl CodexRuntime {
                 allowed_permissions: Arc::new(allowed_permissions),
             }),
             model_config,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn from_transport_bridge_with_model_config_and_workspace(
+        transport: impl AppServerTransport,
+        registry: Arc<ToolRegistry>,
+        allowed_permissions: Vec<PermissionLevel>,
+        model_config: CodexModelConfig,
+        workspace_context: std::path::PathBuf,
+    ) -> Result<Self, CodexAdapterError> {
+        Self::from_transport_mode(
+            transport,
+            Some(BridgeConfig {
+                registry,
+                allowed_permissions: Arc::new(allowed_permissions),
+            }),
+            model_config,
+            Some(workspace_context),
         )
         .await
     }
@@ -164,6 +215,7 @@ impl CodexRuntime {
         transport: impl AppServerTransport,
         bridge_config: Option<BridgeConfig>,
         model_config: CodexModelConfig,
+        workspace_context: Option<std::path::PathBuf>,
     ) -> Result<Self, CodexAdapterError> {
         let bridge_enabled = bridge_config.is_some();
         let connection =
@@ -196,6 +248,7 @@ impl CodexRuntime {
             sessions,
             bridge,
             model_config,
+            workspace_context,
         })
     }
 
@@ -236,11 +289,19 @@ impl AgentRuntime for CodexRuntime {
         let receiver = self.connection.subscribe();
         let (thread_params, bridge_tools, bridge_aliases) = if let Some(bridge) = &self.bridge {
             let snapshot = snapshot_tools(&bridge.config.registry);
-            let params = restricted_thread_params(Some(snapshot.dynamic_tools), &self.model_config);
+            let params = restricted_thread_params(
+                Some(snapshot.dynamic_tools),
+                &self.model_config,
+                self.workspace_context.as_deref(),
+            );
             (params, snapshot.by_alias, snapshot.by_name)
         } else {
             (
-                restricted_thread_params(None, &self.model_config),
+                restricted_thread_params(
+                    None,
+                    &self.model_config,
+                    self.workspace_context.as_deref(),
+                ),
                 HashMap::new(),
                 HashMap::new(),
             )
@@ -249,9 +310,13 @@ impl AgentRuntime for CodexRuntime {
             .connection
             .request("thread/start", thread_params)
             .await
-            .map_err(agent_error)?;
-        let thread_id = required_string(&thread, &["thread", "id"]).map_err(agent_error)?;
-        verify_effective_model_config(&thread, &self.model_config).map_err(agent_error)?;
+            .map_err(|error| agent_start_error("thread/start request", error))?;
+        let thread_id = required_string(&thread, &["thread", "id"])
+            .map_err(|error| agent_start_error("thread/start response thread.id", error))?;
+        verify_effective_model_config(&thread, &self.model_config)
+            .map_err(|error| agent_start_error("thread/start effective model/provider", error))?;
+        verify_effective_workspace_context(&thread, self.workspace_context.as_deref())
+            .map_err(|error| agent_start_error("thread/start effective cwd", error))?;
         let turn = self
             .connection
             .request(
@@ -264,8 +329,9 @@ impl AgentRuntime for CodexRuntime {
                 }),
             )
             .await
-            .map_err(agent_error)?;
-        let turn_id = required_string(&turn, &["turn", "id"]).map_err(agent_error)?;
+            .map_err(|error| agent_start_error("turn/start request", error))?;
+        let turn_id = required_string(&turn, &["turn", "id"])
+            .map_err(|error| agent_start_error("turn/start response turn.id", error))?;
         let session_id = SessionId::new();
         self.sessions().insert(
             session_id.clone(),
@@ -359,13 +425,14 @@ impl AgentRuntime for CodexRuntime {
 fn restricted_thread_params(
     dynamic_tools: Option<Vec<Value>>,
     model_config: &CodexModelConfig,
+    workspace_context: Option<&Path>,
 ) -> Value {
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "read-only",
         "serviceName": "rah-runtime-codex",
         "config": {
-            "features": { "shell_tool": false, "unified_exec": false },
+            "features": { "shell_tool": false, "unified_exec": false, "memories": false },
             "tools": { "web_search": false, "view_image": false },
             "apps": { "_default": { "enabled": false } },
             "mcp_servers": {}
@@ -373,6 +440,9 @@ fn restricted_thread_params(
     });
     if let Some(dynamic_tools) = dynamic_tools {
         params["dynamicTools"] = Value::Array(dynamic_tools);
+    }
+    if let Some(workspace_context) = workspace_context {
+        params["cwd"] = Value::String(workspace_context.display().to_string());
     }
     if let CodexModelConfig::Explicit(selection) = model_config {
         params["model"] = Value::String(selection.model().to_owned());
@@ -415,6 +485,29 @@ fn restricted_thread_params(
         }
     }
     params
+}
+
+fn verify_effective_workspace_context(
+    response: &Value,
+    workspace_context: Option<&Path>,
+) -> Result<(), CodexAdapterError> {
+    let Some(workspace_context) = workspace_context else {
+        return Ok(());
+    };
+    let effective = required_string(response, &["cwd"])?;
+    let effective = Path::new(&effective).canonicalize().map_err(|source| {
+        CodexAdapterError::ProtocolViolation {
+            message: format!(
+                "Codex returned an effective thread workspace that could not be canonicalized: {source}"
+            ),
+        }
+    })?;
+    if effective != workspace_context {
+        return Err(CodexAdapterError::ProtocolViolation {
+            message: "Codex thread workspace did not match the host-selected workspace".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn verify_effective_model_config(
@@ -500,6 +593,7 @@ fn event_stream(
                         && belongs_to(&params, &thread_id, &turn_id) =>
                 {
                     let Some(delta) = params.get("delta").and_then(Value::as_str) else {
+                        tracing::warn!(stage = "post-start runtime/event failure", "Codex agent-message delta was malformed");
                         yield failed(&session_id, "agent-message delta is missing `delta`");
                         break;
                     };
@@ -538,17 +632,22 @@ fn event_stream(
                             let message = params.pointer("/turn/error/message")
                                 .and_then(Value::as_str)
                                 .unwrap_or("Codex turn failed");
+                            tracing::warn!(stage = "post-start runtime/event failure", "Codex turn completed as failed");
                             yield failed(&session_id, message);
                         }
-                        status => yield failed(
-                            &session_id,
-                            &format!("unknown terminal Codex turn status: {status:?}"),
-                        ),
+                        status => {
+                            tracing::warn!(stage = "post-start runtime/event failure", "Codex turn completed with an unknown status");
+                            yield failed(
+                                &session_id,
+                                &format!("unknown terminal Codex turn status: {status:?}"),
+                            );
+                        }
                     }
                     break;
                 }
                 Ok(ConnectionEvent::Notification { method, params }) => {
                     if unsupported_tool_item(&method, &params, bridge_enabled) {
+                        tracing::warn!(stage = "dynamic tool bridge failure", "restricted Codex-owned tool activity was denied");
                         yield failed(
                             &session_id,
                             "Codex-owned tool activity is unsupported by the restricted runtime",
@@ -568,6 +667,7 @@ fn event_stream(
                 }
                 Ok(ConnectionEvent::RahEvent { .. }) => {}
                 Ok(ConnectionEvent::UnsupportedRequest { method }) => {
+                    tracing::warn!(stage = "dynamic tool bridge failure", codex_method = %method, "unsupported Codex server request was denied");
                     yield AgentEvent::Failed {
                         session_id: session_id.clone(),
                         code: AgentErrorCode::PermissionDenied,
@@ -576,10 +676,12 @@ fn event_stream(
                     break;
                 }
                 Ok(ConnectionEvent::Fault { message }) => {
+                    tracing::warn!(stage = "post-start runtime/event failure", "Codex connection fault after turn start");
                     yield failed(&session_id, &message);
                     break;
                 }
                 Err(error) => {
+                    tracing::warn!(stage = "post-start runtime/event failure", "Codex event receiver failed");
                     yield failed(&session_id, &format!("Codex event stream failed: {error}"));
                     break;
                 }
@@ -742,6 +844,15 @@ fn agent_error(error: CodexAdapterError) -> AgentError {
     }
 }
 
+/// Adds a private, stable diagnostic stage to an otherwise RAH-owned runtime error.
+/// Desktop logs this error but deliberately maps it to a sanitized frontend code.
+fn agent_start_error(stage: &'static str, error: CodexAdapterError) -> AgentError {
+    tracing::warn!(stage, category = ?std::mem::discriminant(&error), error = %error, "Codex runtime start failed");
+    AgentError::Runtime {
+        message: format!("Codex runtime start failed at {stage}: {error}"),
+    }
+}
+
 fn broadcast_error(error: broadcast::error::RecvError) -> AgentError {
     AgentError::Runtime {
         message: format!("Codex event stream failed: {error}"),
@@ -764,7 +875,10 @@ mod tests {
         CodexModelSelection, test_support::fake_transport,
     };
 
-    use super::{CodexRuntime, restricted_thread_params, verify_effective_model_config};
+    use super::{
+        CodexRuntime, restricted_thread_params, verify_effective_model_config,
+        verify_effective_workspace_context,
+    };
 
     fn explicit(model: &str, provider: CodexModelProvider) -> CodexModelConfig {
         CodexModelConfig::Explicit(CodexModelSelection::new(model, provider).expect("selection"))
@@ -786,18 +900,36 @@ mod tests {
     #[test]
     fn inherited_model_config_preserves_the_task_106_thread_shape() {
         assert_eq!(
-            restricted_thread_params(None, &CodexModelConfig::Inherit),
+            restricted_thread_params(None, &CodexModelConfig::Inherit, None),
             json!({
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "serviceName": "rah-runtime-codex",
                 "config": {
-                    "features": { "shell_tool": false, "unified_exec": false },
+                    "features": { "shell_tool": false, "unified_exec": false, "memories": false },
                     "tools": { "web_search": false, "view_image": false },
                     "apps": { "_default": { "enabled": false } },
                     "mcp_servers": {}
                 }
             })
+        );
+    }
+
+    #[test]
+    fn host_workspace_context_is_sent_and_must_match_the_effective_thread_cwd() {
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let params = restricted_thread_params(None, &CodexModelConfig::Inherit, Some(&root));
+        assert_eq!(params["cwd"], root.display().to_string());
+        assert!(
+            verify_effective_workspace_context(
+                &json!({ "cwd": root.display().to_string() }),
+                Some(&root)
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_effective_workspace_context(&json!({ "cwd": r"C:\launch-root" }), Some(&root))
+                .is_err()
         );
     }
 
@@ -808,7 +940,7 @@ mod tests {
             (CodexModelProvider::Ollama, "ollama"),
             (CodexModelProvider::LmStudio, "lmstudio"),
         ] {
-            let params = restricted_thread_params(None, &explicit("host-model", provider));
+            let params = restricted_thread_params(None, &explicit("host-model", provider), None);
             assert_eq!(params["model"], "host-model");
             assert_eq!(params["modelProvider"], provider_id);
             assert!(params["config"].get("model_providers").is_none());
@@ -823,6 +955,7 @@ mod tests {
                 "rah-local-model",
                 CodexModelProvider::LlamaCpp(CodexLlamaCppProvider::default()),
             ),
+            None,
         );
         assert_eq!(llama["modelProvider"], "rah-llamacpp");
         assert_eq!(
@@ -846,6 +979,7 @@ mod tests {
                     .expect("provider"),
                 ),
             ),
+            None,
         );
         assert_eq!(custom["modelProvider"], "rah-custom");
         assert_eq!(

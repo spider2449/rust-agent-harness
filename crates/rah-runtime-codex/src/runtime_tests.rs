@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use futures::StreamExt;
 use rah_protocol::{
@@ -82,6 +82,107 @@ async fn connected_runtime() -> (Arc<CodexRuntime>, FakePeer) {
         .expect("connection task")
         .expect("runtime should initialize");
     (Arc::new(runtime), peer)
+}
+
+#[tokio::test]
+async fn host_workspace_binds_the_thread_start_request_and_rejects_a_mismatch() {
+    let root = PathBuf::from(r"C:\selected-repo");
+    let (transport, mut peer) = fake_transport();
+    let connecting = tokio::spawn(
+        CodexRuntime::from_transport_bridge_with_model_config_and_workspace(
+            transport,
+            Arc::new(rah_tools::ToolRegistry::new()),
+            Vec::new(),
+            crate::CodexModelConfig::Inherit,
+            root.clone(),
+        ),
+    );
+    peer.respond("initialize", json!({})).await;
+    peer.expect_notification("initialized").await;
+    let runtime = Arc::new(connecting.await.unwrap().unwrap());
+    let starting = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.start(sample_request()).await })
+    };
+    let request = peer
+        .respond(
+            "thread/start",
+            json!({ "thread": { "id": "private-thread" }, "cwd": r"C:\launch-root" }),
+        )
+        .await;
+    assert_eq!(request["params"]["cwd"], root.display().to_string());
+    assert!(
+        starting.await.unwrap().is_err(),
+        "mismatched effective cwd fails closed"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pinned_0_149_thread_start_fixture_reaches_turn_start_and_first_event() {
+    let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let (transport, mut peer) = fake_transport();
+    let connecting = tokio::spawn(
+        CodexRuntime::from_transport_bridge_with_model_config_and_workspace(
+            transport,
+            Arc::new(rah_tools::ToolRegistry::new()),
+            Vec::new(),
+            crate::CodexModelConfig::Inherit,
+            root.clone(),
+        ),
+    );
+    peer.respond("initialize", json!({})).await;
+    peer.expect_notification("initialized").await;
+    let runtime = Arc::new(connecting.await.unwrap().unwrap());
+    let starting = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.start(sample_request()).await })
+    };
+    let thread = peer
+        .respond(
+            "thread/start",
+            json!({
+                "thread": { "id": "private-thread" },
+                "cwd": root.display().to_string(),
+                "instructionSources": []
+            }),
+        )
+        .await;
+    assert_eq!(thread["params"]["cwd"], root.display().to_string());
+    let turn = peer
+        .respond("turn/start", json!({ "turn": { "id": "private-turn" } }))
+        .await;
+    assert!(turn["params"].get("cwd").is_none());
+    let handle = starting.await.unwrap().unwrap();
+    let events = handle.into_events().take(1).collect::<Vec<_>>().await;
+    assert!(matches!(events.as_slice(), [AgentEvent::Started { .. }]));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "host-only Task 126 direct 0.149.0 runtime.start probe"]
+async fn task_126_direct_pinned_runtime_start_probe() {
+    let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let executable = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .expect("LOCALAPPDATA")
+        .join("codex-baselines\\0.149.0\\codex.exe");
+    let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
+        executable,
+        Arc::new(rah_tools::ToolRegistry::new()),
+        Vec::new(),
+        crate::CodexModelConfig::Inherit,
+        &root,
+    )
+    .await
+    .expect("pinned app-server connects");
+    let handle = runtime
+        .start(sample_request())
+        .await
+        .expect("thread/start and turn/start create an AgentHandle");
+    let events = handle.into_events().take(1).collect::<Vec<_>>().await;
+    assert!(matches!(events.as_slice(), [AgentEvent::Started { .. }]));
+    runtime.shutdown().await.unwrap();
 }
 
 async fn start_turn(runtime: &Arc<CodexRuntime>, peer: &mut FakePeer) -> AgentHandle {

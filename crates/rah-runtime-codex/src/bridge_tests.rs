@@ -3122,6 +3122,7 @@ fn assert_restrictions(params: &Value) {
     assert_eq!(params["sandbox"], "read-only");
     assert_eq!(params["config"]["features"]["shell_tool"], false);
     assert_eq!(params["config"]["features"]["unified_exec"], false);
+    assert_eq!(params["config"]["features"]["memories"], false);
     assert_eq!(params["config"]["tools"]["web_search"], false);
     assert_eq!(params["config"]["tools"]["view_image"], false);
     assert_eq!(params["config"]["apps"]["_default"]["enabled"], false);
