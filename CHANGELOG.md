@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.10.0 — release candidate (not yet released)
+
+### Added
+
+- Desktop certified Codex baseline discovery and selection for exactly
+  `codex-cli 0.149.0`, plus closed native Git executable discovery.
+- One bounded host-selected llama.cpp provider endpoint under ADR 0015, inactive
+  Desktop model-preference persistence, exact selected-repository observation,
+  verified repository runtime-CWD binding, and launch-CWD/`AGENTS.md` isolation.
+- Repository-scoped conversation persistence, explicit bounded Resume/replay,
+  SQLite transcript storage, transactional V3-to-SQLite migration, A/B
+  transcript isolation, and fail-closed SQLite corruption handling.
+
+### Limitations
+
+- Task 120 remote llama.cpp generation proof is **DEFERRED / NOT VALIDATED**.
+  Transport confinement is **NOT CLAIMED**; ADR 0015 does not promise redirect,
+  proxy, DNS, peer-identity, or effective-destination confinement.
+- No llama.cpp process management or provider/model installation; no generic
+  network Tool, network MCP/Streamable HTTP, generic shell/process authority,
+  model-selected executable/cwd/endpoint, automatic authority restoration, Git
+  commit/ref/history authority, or generic repository delete/rename authority.
+- Repository move/rename intentionally changes the conversation-persistence
+  namespace. SQLite is private Desktop storage, not generic SQL authority, and
+  uncertain external effects have no rollback guarantee.
+
 ## v0.9.0 — 2026-08-25
 
 Released as `RAH v0.9.0` on 2026-08-25. The immutable annotated tag `v0.9.0`

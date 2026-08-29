@@ -5,7 +5,27 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.9 release candidate: bounded repository mutation and workflow inspection
+## v0.10 release candidate: Desktop host configuration and private conversation storage
+
+RAH v0.10.0 prepares the existing bounded Desktop host configuration for
+release. Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
+human-selected bounded `llama_cpp` endpoint under ADR 0015, and retains saved
+model preferences as inactive desired state until an explicit Connect or
+reconnect. It neither manages a llama.cpp process nor installs a provider or
+model.
+
+The selected repository is canonical host-owned context: native Git discovery
+and observation are fixed to that repository, Codex starts with its verified
+repository CWD (or an app-owned neutral workspace), and launch-CWD/`AGENTS.md`
+context cannot substitute it. Conversations are stored privately in
+repository-scoped SQLite namespaces; Resume is explicit bounded display/context
+replay and never restores repository, model, tool, or other authority.
+
+Remote llama.cpp generation proof remains **DEFERRED / NOT VALIDATED**. A
+bounded initial endpoint is not transport confinement: redirect, proxy, DNS,
+peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
+
+## Preserved bounded repository mutation and workflow inspection
 
 RAH retains the v0.4 trusted-host static capability profile and the v0.5
 separate, accepted worktree-content authority: `repo.patch`. It can
@@ -392,7 +412,7 @@ and lists candidate run IDs without deleting them. Scheduled runs delete eligibl
 old records. The workflow uses only the repository `GITHUB_TOKEN` with
 `actions: write` and `contents: read` permissions.
 
-## v0.8 milestone limitations and explicit deferrals
+## v0.10 limitations and explicit deferrals
 
 - The CLI exposes deterministic demos and explicit host-selected profile
   validation, not provider/profile auto-discovery or model-facing profile APIs.
@@ -428,8 +448,17 @@ old records. The workflow uses only the repository `GITHUB_TOKEN` with
   rollback guarantee. Timeout/cancellation may leave uncertain effects, which
   are never automatically replayed.
 - OS sandboxing, network isolation, and rollback guarantees are not provided.
-- Interactive approvals, SQLite persistence, TUI/web UI, multi-agent
-  orchestration, RAG, and long-term memory remain out of scope.
+- Desktop has no llama.cpp process management, provider/model installation,
+  generic network Tool, network MCP/Streamable HTTP, generic shell/process
+  authority, model-selected executable/cwd/endpoint, or automatic authority
+  restoration. It grants no Git commit/ref/history authority or generic
+  repository delete/rename authority. Moving or renaming a repository
+  intentionally changes its conversation-persistence namespace.
+- SQLite is private Desktop storage, not a model/tool SQL capability. Resume
+  replays only bounded completed text after a fresh connection; it has no
+  rollback guarantee for uncertain external effects.
+- Interactive approvals, TUI/web UI, multi-agent orchestration, RAG, and
+  long-term memory remain out of scope.
 
 See [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), and the
 accepted [ADRs](docs/adr/).

@@ -1,4 +1,4 @@
-# RAH v0.9 Milestone Security Model
+# RAH v0.10 Milestone Security Model
 
 ## v0.9 boundary and preserved capabilities
 
@@ -343,20 +343,24 @@ registry, tool, or sandbox contracts.
 
 ## Known limitations
 
-RAH Desktop stores one bounded archive of completed conversation text in the
-current user's application-local data directory. Legacy v1 snapshots may be
-migrated after a genuine post-start durable mutation to a private v2 snapshot.
-V2 adds only bounded conversation epoch structure and optional lineage fields;
-it does not persist repository, model, provider, tool, or authority metadata.
-This snapshot has no
-application-level at-rest encryption; normal Windows user-account filesystem
-protections are the first-version boundary. The Desktop-private schema does not
-intentionally persist credentials, provider-native IDs, ToolRegistry authority,
-repository paths, or tool output. Recovered transcript text is display-only and
-does not restore model, repository, tool, or replay authority. Users can
-explicitly clear this locally persisted Desktop conversation transcript; the
-action removes both supported v1 and v2 private persistence families and does
-not delete repository or project files.
+RAH Desktop stores bounded completed conversation text in the current user's
+application-local `conversation-transcript.sqlite3` database. Schema version
+`1` contains `schema_metadata`, `namespaces`, `epochs`, and `pairs`, with
+private opaque repository SHA-256 namespaces (or `neutral-v1`); it intentionally
+does not expose raw repository paths, credentials, provider-native IDs,
+ToolRegistry authority, tool output, or a generic SQL surface. Normal Windows
+user-account filesystem protections remain the first-version at-rest boundary.
+
+An absent database and valid V3 JSON migrates transactionally. Once that commit
+succeeds, SQLite is authoritative even if archival of V3 fails; stale V3 never
+wins. Corrupt authoritative SQLite is quarantined and fails closed, never
+falling back to V3. V1/V2 data is never guessed into a repository or neutral
+owner, and there is no dual write or active JSON backend after SQLite authority.
+
+Recovered transcript text is display-only. Explicit Resume imports bounded
+completed text only after a fresh current connection verifies; it restores no
+model, repository, tool, replay, or other authority. Users can clear this local
+Desktop transcript state without deleting repository/project files.
 
 - Interactive Codex approvals are unsupported.
 
@@ -364,8 +368,8 @@ Desktop Resume Previous Conversation is an explicit model-context import, never
 an automatic restart action. It uses only completed persisted text and lineage
 after a fresh current connection is verified; the current host repository,
 model, and tool state remain authoritative. Resume restores neither authority
-nor a native Codex thread, and persistence stores no repository or model
-identity for this feature.
+nor a native Codex thread. Repository identity is only an opaque private
+namespace, not a grant of repository authority.
 
 - The Codex adapter and external protocols are exactly pinned compatibility
   boundaries.
@@ -375,3 +379,6 @@ identity for this feature.
 - Deterministic tests validate translation, policy, and lifecycle behavior; they
   do not claim live model, credential, third-party server, or platform-sandbox
   validation.
+- The host-selected ADR 0015 endpoint is bounded initial provider configuration,
+  not transport confinement. Redirect/proxy/DNS/peer identity/effective
+  destination guarantees and Task 120 remote generation proof are not claimed.

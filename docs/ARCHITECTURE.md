@@ -1,4 +1,4 @@
-# RAH v0.8 Milestone Architecture
+# RAH v0.10 Milestone Architecture
 
 ## Ownership boundaries
 
@@ -42,6 +42,20 @@ static validation records only symbolic bindings without
 constructing it; effective composition constructs and publishes it through a
 fresh registry on complete success. Generic Tool Bridge dispatch remains
 capability-agnostic. Codex live certification remains deferred.
+
+ADR 0015 adds one Desktop-private, human/host-selected initial `llama_cpp`
+endpoint. Rust validates the closed endpoint structure and synthesizes the
+fixed `/v1` base URL; it is not a Tool, generic network surface, credential
+store, provider lifecycle manager, or public RAH abstraction. Saved Desktop
+model preferences are inactive desired state only. They do not auto-connect,
+recreate a runtime or `ToolRegistry`, or restore authority.
+
+Desktop repository context is host-owned. The selected canonical repository
+supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
+`thread/start`; no-repository mode uses a neutral app-owned workspace.
+Repository-scoped transcript storage uses an opaque SHA-256 namespace rather
+than a raw path. Its private SQLite backend is storage only: it is not exposed
+as SQL to models or tools and does not grant repository mutation authority.
 
 The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
 executable and repository root. Its closed request schema permits only a
