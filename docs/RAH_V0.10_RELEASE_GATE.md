@@ -1,17 +1,21 @@
 # RAH v0.10 Release Gate
 
-Release status: **RELEASE PREPARATION — NOT YET RELEASED**
+**HISTORICAL RELEASE RECORD — RELEASED**
 
-## Candidate identity
+## Release identity
 
-- Candidate version: `0.10.0`.
+- Release: `RAH v0.10.0`.
+- Release commit / peeled tag target:
+  `9f4947ce4e37e9ce5b1e49330ab5327c1bd61ffa`.
+- Annotated tag: `v0.10.0`.
+- Tag object: `d340120e5b316265d6a4cd83bdf08eb73d712d1a`.
 - Audited starting checkpoint: `e57187afa831545888aff2418cb9e5d3668bab72`.
-- Release-preparation commit: Task 129 candidate commit pending; exact SHA is
-  recorded in the Task 129 completion report.
+- Task 129 branch CI: `33247143075` — PASS.
+- Task 130 tag CI: `33248727210` — PASS.
 - Certified Codex baseline: exactly `codex-cli 0.149.0`.
 - Verified live platform: Windows.
-- Tag: **not yet created**.
-- GitHub Release: **not yet published**.
+- GitHub Release: published (`RAH v0.10.0`, `v0.10.0`, draft=false,
+  prerelease=false).
 
 ## Deterministic release checklist
 
@@ -25,7 +29,12 @@ Release status: **RELEASE PREPARATION — NOT YET RELEASED**
 - [x] `node --check crates/rah-desktop/frontend/status.js`
 - [x] Desktop release build: `target\\release\\rah-desktop.exe`, 16,711,168
   bytes, `2026-08-29 18:02:47 +08:00`, no adjacent `sqlite3.dll`.
-- [ ] Exact-head deterministic-validation CI after push.
+- [x] Task 129 exact-head deterministic-validation CI after push:
+  `33247143075` — PASS.
+- [x] Task 130 annotated tag `v0.10.0` created at the release commit.
+- [x] Task 130 exact-head tag CI: `33248727210` — PASS.
+- [x] GitHub Release `RAH v0.10.0` published (draft=false,
+  prerelease=false).
 
 ## Windows live evidence inventory
 
@@ -81,7 +90,7 @@ backend after SQLite authority.
 
 ## Authority and security invariants
 
-The candidate adds no authority beyond ADRs `0001`–`0015`. Model requests remain
+The release adds no authority beyond ADRs `0001`–`0015`. Model requests remain
 non-authoritative; endpoint, executable, CWD, repository, and desired settings
 remain host-owned. SQLite is storage, not authority; Desktop UI is
 presentation/control, not authority.
@@ -114,7 +123,9 @@ Recovery explicitly establishes Git/filesystem mode semantics for both `100755`
 and `100644`; production `repo.patch` behavior did not change. This is a test
 recovery, not an authority or product-feature change.
 
-## Immutable release procedure
+## Historical completion
 
-Task 130 alone may create the annotated `v0.10.0` tag and publish the GitHub
-Release after this candidate's exact-head deterministic-validation CI is green.
+Task 130 created the annotated `v0.10.0` tag at the immutable release commit,
+confirmed tag CI, and published the GitHub Release. This document is a
+historical release record; later `master` documentation cleanup is not part of
+the immutable `v0.10.0` release tree.
