@@ -344,14 +344,14 @@ impl RepositoryObserver {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RepositoryIdentity {
+pub(crate) struct RepositoryIdentity {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
 }
 
 impl RepositoryIdentity {
-    fn capture(root: &Path) -> Result<Self, ToolError> {
+    pub(crate) fn capture(root: &Path) -> Result<Self, ToolError> {
         if !root.is_absolute() {
             return Err(git_error("repository root must be an absolute path"));
         }
@@ -370,7 +370,7 @@ impl RepositoryIdentity {
         })
     }
 
-    fn revalidate(&self) -> Result<(), ToolError> {
+    pub(crate) fn revalidate(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
         let root = canonical_directory(&self.root, "repository root")?;
         let dot_git = root.join(".git");
@@ -382,6 +382,10 @@ impl RepositoryIdentity {
             return Err(git_error("repository identity changed"));
         }
         Ok(())
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 }
 

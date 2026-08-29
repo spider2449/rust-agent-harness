@@ -16,6 +16,7 @@ mod git_support;
 mod git_unstage;
 mod host_execute;
 mod native_repository_create;
+mod repository_commit;
 mod repository_create_file;
 mod repository_diff;
 mod repository_diff_staged;
