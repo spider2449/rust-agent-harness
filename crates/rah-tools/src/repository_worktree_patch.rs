@@ -1840,7 +1840,7 @@ mod tests {
             git(&root, &["config", "user.name", "RAH Test"]);
             git(&root, &["config", "user.email", "rah@example.invalid"]);
             git(&root, &["config", "core.autocrlf", "false"]);
-            git(&root, &["config", "core.filemode", "true"]);
+            git(&root, &["config", "core.fileMode", "true"]);
             fs::write(root.join("target.txt"), b"alpha\nold\nomega\n")
                 .expect("target should be written");
             fs::write(root.join("other.txt"), b"other\n").expect("other should be written");
@@ -2603,7 +2603,19 @@ mod tests {
                 &root,
                 &["add", &format!("--chmod={chmod}"), "--", "target.txt"],
             );
-            git(&root, &["commit", "--quiet", "-m", "normalize target mode"]);
+            let normalization = Command::new(git_executable())
+                .args(["diff", "--cached", "--quiet", "--", "target.txt"])
+                .current_dir(&root)
+                .output()
+                .expect("Git cached-diff command should start");
+            match normalization.status.code() {
+                Some(0) => {}
+                Some(1) => git(&root, &["commit", "--quiet", "-m", "normalize target mode"]),
+                status => panic!(
+                    "Git cached-diff command failed with status {status:?}: {}",
+                    String::from_utf8_lossy(&normalization.stderr)
+                ),
+            }
             assert_unix_mode_baseline(&root, mode);
 
             let bytes = fs::read(root.join("target.txt")).unwrap();
@@ -2672,6 +2684,11 @@ mod tests {
                     "target.txt"
                 ]
             ),
+            Some(0),
+            "{diagnostics}"
+        );
+        assert_eq!(
+            git_exit_code(root, &["diff", "--cached", "--quiet", "--", "target.txt"]),
             Some(0),
             "{diagnostics}"
         );
