@@ -6,6 +6,8 @@ mod codex_baseline;
 mod conversation_persistence;
 #[cfg(target_os = "windows")]
 mod desktop_preferences;
+#[cfg(target_os = "windows")]
+mod git_discovery;
 
 #[cfg(target_os = "windows")]
 use codex_baseline::{BaselineError, CodexExecutableSource, resolve as resolve_codex_executable};
@@ -86,6 +88,7 @@ const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct StartupActivationCounters {
     codex_resolver: u64,
+    git_resolver: u64,
     codex_runtime_construction: u64,
     readiness_probe: u64,
     tool_registry: u64,
@@ -1617,14 +1620,9 @@ fn publish_readiness_result(
 
 #[cfg(target_os = "windows")]
 fn selected_git_executable() -> Result<std::path::PathBuf, FrontendError> {
-    let Some(path) = std::env::var_os("RAH_GIT_EXECUTABLE") else {
-        return Err(FrontendError::GitUnavailable);
-    };
-    let path = std::path::PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err(FrontendError::GitUnavailable);
-    }
-    Ok(path)
+    git_discovery::resolve()
+        .map(|selection| selection.into_candidate())
+        .map_err(|_| FrontendError::GitUnavailable)
 }
 
 /// Private diagnostic classification for the fixed repository-observer bundle.
