@@ -82,6 +82,8 @@ function errorMessage(error) {
     repository_observation_failed: "Repository observation failed",
     repository_dialog_failed: "Repository picker failed",
     repository_busy: "Repository selection is unavailable while chat is running",
+    repository_action_invalid: "That repository action is no longer available. Refresh and choose it again.",
+    repository_action_stale: "Repository changed after it was displayed. Refresh and choose a new action.",
     model_configuration_invalid: "Invalid model configuration",
     model_configuration_busy: "Model configuration is unavailable while chat is running",
     preferences_save_failed: "Model preferences could not be saved.",
@@ -147,16 +149,42 @@ function renderRepositorySnapshot(snapshot) {
       title.textContent = `${file.changeKind} ${file.newPath ?? file.oldPath ?? "[unknown path]"} +${file.addedLines ?? 0} -${file.deletedLines ?? 0}`;
       patch.textContent = file.patch ?? (file.binary ? "Binary file changed" : "No patch");
       article.append(title, patch);
+      if (file.unstageActionId) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.repositoryAction = "unstage";
+        button.dataset.actionId = file.unstageActionId;
+        button.textContent = "Unstage";
+        article.append(button);
+      }
       return article;
     }) : [emptyEntry("No changes")]));
   };
   status.replaceChildren(...(snapshot.statusEntries.length ? snapshot.statusEntries.map((entry) => {
     const item = document.createElement("article");
     item.textContent = `${entry.indexState}/${entry.worktreeState} ${entry.path}`;
+    if (entry.stageActionId) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.repositoryAction = "stage";
+      button.dataset.actionId = entry.stageActionId;
+      button.textContent = "Stage";
+      item.append(" ", button);
+    } else if (entry.stagingNote) {
+      const note = document.createElement("span");
+      note.textContent = ` — ${entry.stagingNote}`;
+      item.append(note);
+    }
     return item;
   }) : [emptyEntry("Working tree clean")]));
   renderDiff(document.querySelector("#worktree-diff-entries"), snapshot.worktreeDiff);
   renderDiff(document.querySelector("#staged-diff-entries"), snapshot.stagedDiff);
+  document.querySelector("#staged-review-state").textContent = ({
+    no_staged_changes: "No staged changes",
+    review_available: "Review available — complete within bounded observation",
+    review_binary_unsupported: "Binary staged content — review is not authorizable in v0.12",
+    review_unavailable: "Review unavailable",
+  }[snapshot.review.state] ?? "Review unavailable");
 }
 
 function emptyEntry(text) {
@@ -443,6 +471,21 @@ async function initializeDesktop() {
       await loadStatus(invoke);
     } catch (error) {
       showChatError(error);
+    }
+  });
+  document.querySelector(".repository").addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-repository-action]");
+    if (!button) return;
+    const error = document.querySelector("#repository-error");
+    error.hidden = true;
+    button.disabled = true;
+    try {
+      await invoke(button.dataset.repositoryAction === "stage" ? "repository_stage_action" : "repository_unstage_action", { actionId: button.dataset.actionId });
+      await refreshRepository(invoke);
+    } catch (repositoryError) {
+      error.textContent = errorMessage(repositoryError);
+      error.hidden = false;
+      await refreshRepository(invoke);
     }
   });
   document.querySelector("#resume-previous-conversation").addEventListener("click", async () => {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repository-stage-action"
+description = "Enables the repository_stage_action command without any pre-configured scope."
+commands.allow = ["repository_stage_action"]
+
+[[permission]]
+identifier = "deny-repository-stage-action"
+description = "Denies the repository_stage_action command without any pre-configured scope."
+commands.deny = ["repository_stage_action"]

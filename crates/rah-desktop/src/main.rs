@@ -34,9 +34,10 @@ use rah_runtime_codex::{
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
-    EchoTool, FsReadTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
-    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryDiffStagedTool,
+    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool,
+    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
+    ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -55,7 +56,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 #[cfg(target_os = "windows")]
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -311,6 +312,7 @@ struct DesktopAppState {
     next_chat_generation: Mutex<u64>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
+    repository_workflow: Mutex<RepositoryWorkflowState>,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -379,6 +381,7 @@ impl DesktopAppState {
             next_chat_generation: Mutex::new(0),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
+            repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
@@ -905,6 +908,52 @@ impl DesktopRepository {
     }
 }
 
+/// Ephemeral, Rust-owned selectors for one observed index mutation. They are
+/// regenerated on every repository observation and are never persisted.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct RepositoryWorkflowState {
+    observation_generation: u64,
+    next_action: u64,
+    actions: HashMap<String, RepositoryIndexAction>,
+    review: Option<StagedReviewDescriptor>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RepositoryIndexActionKind {
+    Stage,
+    Unstage,
+}
+
+#[cfg(target_os = "windows")]
+struct RepositoryIndexAction {
+    kind: RepositoryIndexActionKind,
+    repository_generation: u64,
+    observation_generation: u64,
+    target: PathBuf,
+    target_observation: TargetObservation,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, PartialEq, Eq)]
+struct TargetObservation {
+    canonical_path: PathBuf,
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Task 148 consumes this Rust-only review binding.
+#[derive(Clone)]
+struct StagedReviewDescriptor {
+    repository_generation: u64,
+    observation_generation: u64,
+    digest: String,
+    complete: bool,
+    binary_supported: bool,
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -941,6 +990,8 @@ pub(crate) enum FrontendError {
     RepositoryObservationFailed,
     RepositoryDialogFailed,
     RepositoryBusy,
+    RepositoryActionInvalid,
+    RepositoryActionStale,
     ModelConfigurationInvalid,
     ModelConfigurationBusy,
 }
@@ -1727,6 +1778,7 @@ struct RepositorySnapshot {
     status_entries: Vec<RepositoryStatusEntry>,
     worktree_diff: Vec<RepositoryDiffFile>,
     staged_diff: Vec<RepositoryDiffFile>,
+    review: StagedReviewPresentation,
 }
 
 #[cfg(target_os = "windows")]
@@ -1739,6 +1791,10 @@ struct RepositoryStatusEntry {
     index_state: String,
     worktree_state: String,
     conflict_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage_action_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staging_note: Option<&'static str>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1752,6 +1808,18 @@ struct RepositoryDiffFile {
     added_lines: Option<u64>,
     deleted_lines: Option<u64>,
     patch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unstage_action_id: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum StagedReviewPresentation {
+    NoStagedChanges,
+    ReviewAvailable,
+    ReviewBinaryUnsupported,
+    ReviewUnavailable { reason: &'static str },
 }
 
 #[cfg(target_os = "windows")]
@@ -1818,6 +1886,8 @@ fn desktop_snapshot(
                     .and_then(serde_json::Value::as_str)
                     .ok_or(FrontendError::RepositoryObservationFailed)?
                     .to_owned(),
+                stage_action_id: None,
+                staging_note: None,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1864,15 +1934,25 @@ fn desktop_snapshot(
                                 desktop_tagged_text(value)
                             }
                         }),
+                        unstage_action_id: None,
                     })
                 })
                 .collect()
         };
+    let staged_diff = convert_diff(staged_diff)?;
+    let review = if staged_diff.is_empty() {
+        StagedReviewPresentation::NoStagedChanges
+    } else if staged_diff.iter().any(|file| file.binary) {
+        StagedReviewPresentation::ReviewBinaryUnsupported
+    } else {
+        StagedReviewPresentation::ReviewAvailable
+    };
     Ok(RepositorySnapshot {
         path,
         status_entries,
         worktree_diff: convert_diff(worktree_diff)?,
-        staged_diff: convert_diff(staged_diff)?,
+        staged_diff,
+        review,
     })
 }
 
@@ -1906,6 +1986,210 @@ async fn desktop_repository_snapshot(
 }
 
 #[cfg(target_os = "windows")]
+fn observe_regular_target(root: &Path, relative: &str) -> Option<TargetObservation> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let candidate = root.join(relative);
+    let link = std::fs::symlink_metadata(&candidate).ok()?;
+    if link.file_type().is_symlink() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if link.file_attributes() & 0x400 != 0 {
+            return None;
+        }
+    }
+    let canonical_path = candidate.canonicalize().ok()?;
+    if !canonical_path.starts_with(root) {
+        return None;
+    }
+    let metadata = std::fs::metadata(&canonical_path).ok()?;
+    metadata.is_file().then(|| TargetObservation {
+        canonical_path,
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn target_is_current(expected: &TargetObservation) -> bool {
+    let Ok(link) = std::fs::symlink_metadata(&expected.canonical_path) else {
+        return false;
+    };
+    if link.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if link.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    let Ok(canonical_path) = expected.canonical_path.canonicalize() else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(&canonical_path) else {
+        return false;
+    };
+    metadata.is_file()
+        && canonical_path == expected.canonical_path
+        && metadata.len() == expected.length
+        && metadata.modified().ok() == expected.modified
+}
+
+#[cfg(target_os = "windows")]
+fn install_repository_workflow(
+    state: &DesktopAppState,
+    repository: &DesktopRepository,
+    repository_generation: u64,
+    mut snapshot: RepositorySnapshot,
+) -> RepositorySnapshot {
+    let mut workflow = state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    workflow.observation_generation += 1;
+    workflow.actions.clear();
+    workflow.review = None;
+    let observation_generation = workflow.observation_generation;
+    for entry in &mut snapshot.status_entries {
+        let Some(target) = observe_regular_target(&repository.root, &entry.path) else {
+            if !entry.tracked && entry.worktree_state == "untracked" {
+                entry.staging_note =
+                    Some("Untracked — staging not supported by current bounded Desktop authority");
+            }
+            continue;
+        };
+        let stage = entry.tracked
+            && entry.worktree_state != "unmodified"
+            && entry.conflict_state == "none"
+            && GitStageTool::new(
+                &repository.git_executable,
+                &repository.root,
+                &entry.path,
+                &target.canonical_path,
+            )
+            .is_ok();
+        if stage {
+            workflow.next_action += 1;
+            let action_id = format!("index-{}", workflow.next_action);
+            workflow.actions.insert(
+                action_id.clone(),
+                RepositoryIndexAction {
+                    kind: RepositoryIndexActionKind::Stage,
+                    repository_generation,
+                    observation_generation,
+                    target: target.canonical_path.clone(),
+                    target_observation: target.clone(),
+                },
+            );
+            entry.stage_action_id = Some(action_id);
+        }
+        let unstage = entry.tracked
+            && entry.index_state == "modified"
+            && entry.conflict_state == "none"
+            && GitUnstageTool::new(
+                &repository.git_executable,
+                &repository.root,
+                &entry.path,
+                &target.canonical_path,
+            )
+            .is_ok();
+        if unstage {
+            workflow.next_action += 1;
+            let action_id = format!("index-{}", workflow.next_action);
+            workflow.actions.insert(
+                action_id.clone(),
+                RepositoryIndexAction {
+                    kind: RepositoryIndexActionKind::Unstage,
+                    repository_generation,
+                    observation_generation,
+                    target: target.canonical_path.clone(),
+                    target_observation: target,
+                },
+            );
+            for file in &mut snapshot.staged_diff {
+                if file.new_path.as_deref() == Some(entry.path.as_str()) {
+                    file.unstage_action_id = Some(action_id.clone());
+                }
+            }
+        }
+    }
+    if matches!(snapshot.review, StagedReviewPresentation::ReviewAvailable) {
+        let bytes = serde_json::to_vec(&snapshot.staged_diff).unwrap_or_default();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        workflow.review = Some(StagedReviewDescriptor {
+            repository_generation,
+            observation_generation,
+            digest,
+            complete: true,
+            binary_supported: true,
+        });
+    }
+    snapshot
+}
+
+#[cfg(target_os = "windows")]
+async fn refresh_repository_workflow(
+    state: &DesktopAppState,
+) -> Result<RepositorySnapshot, FrontendError> {
+    let (repository, generation) = (
+        state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+        *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    let Some(repository) = repository else {
+        return Err(FrontendError::RepositoryNotSelected);
+    };
+    let snapshot = match desktop_repository_snapshot(&repository).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => RepositorySnapshot {
+            path: repository.display_path.clone(),
+            status_entries: Vec::new(),
+            worktree_diff: Vec::new(),
+            staged_diff: Vec::new(),
+            review: StagedReviewPresentation::ReviewUnavailable {
+                reason: "bounded staged observation failed",
+            },
+        },
+    };
+    if *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        != generation
+    {
+        return Err(FrontendError::RepositoryObservationFailed);
+    }
+    Ok(install_repository_workflow(
+        state,
+        &repository,
+        generation,
+        snapshot,
+    ))
+}
+
+#[cfg(target_os = "windows")]
 fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepository) {
     *state
         .repository
@@ -1915,6 +2199,10 @@ fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepos
         .repository_generation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
     state.select_persistence_namespace();
     // Persisted presentation is repository-owned, while replay remains an
     // explicit Resume action. Never carry the previous repository's model
@@ -1965,17 +2253,141 @@ fn choose_repository(
 async fn repository_snapshot(
     state: State<'_, DesktopAppState>,
 ) -> Result<RepositorySnapshot, FrontendError> {
+    refresh_repository_workflow(state.inner()).await
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryIndexActionResult {
+    status: &'static str,
+    changed: bool,
+    staged: bool,
+    unstaged: bool,
+    no_op: bool,
+    partial: bool,
+}
+
+#[cfg(target_os = "windows")]
+async fn repository_index_action(
+    state: &DesktopAppState,
+    action_id: String,
+    kind: RepositoryIndexActionKind,
+) -> Result<RepositoryIndexActionResult, FrontendError> {
+    let generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let action = {
+        let mut workflow = state
+            .repository_workflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let action = workflow
+            .actions
+            .remove(&action_id)
+            .ok_or(FrontendError::RepositoryActionInvalid)?;
+        // Every attempt consumes the complete observed catalog: no action can
+        // survive a possible index effect, including known failure/uncertainty.
+        workflow.actions.clear();
+        workflow.review = None;
+        if action.kind != kind
+            || action.repository_generation != generation
+            || action.observation_generation != workflow.observation_generation
+        {
+            return Err(FrontendError::RepositoryActionStale);
+        }
+        action
+    };
     let repository = state
         .repository
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let Some(repository) = repository else {
-        return Err(FrontendError::RepositoryNotSelected);
+        .clone()
+        .ok_or(FrontendError::RepositoryNotSelected)?;
+    if !target_is_current(&action.target_observation) {
+        let _ = refresh_repository_workflow(state).await;
+        return Err(FrontendError::RepositoryActionStale);
+    }
+    let result = match kind {
+        RepositoryIndexActionKind::Stage => match GitStageTool::new(
+            &repository.git_executable,
+            &repository.root,
+            action.target.to_string_lossy(),
+            &action.target,
+        ) {
+            Ok(tool) => {
+                tool.execute(ToolInput(serde_json::json!({})), ToolContext::default())
+                    .await
+            }
+            Err(error) => Err(error),
+        },
+        RepositoryIndexActionKind::Unstage => match GitUnstageTool::new(
+            &repository.git_executable,
+            &repository.root,
+            action.target.to_string_lossy(),
+            &action.target,
+        ) {
+            Ok(tool) => {
+                tool.execute(ToolInput(serde_json::json!({})), ToolContext::default())
+                    .await
+            }
+            Err(error) => Err(error),
+        },
     };
-    desktop_repository_snapshot(&repository)
-        .await
-        .map_err(|_| FrontendError::RepositoryObservationFailed)
+    let _ = refresh_repository_workflow(state).await;
+    let output = result.map_err(|_| FrontendError::RepositoryObservationFailed)?;
+    let value = observer_json(output)?;
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("failed_known");
+    Ok(RepositoryIndexActionResult {
+        status: match status {
+            "ok" => "ok",
+            "uncertain" => "uncertain",
+            "policy_violation" => "policy_violation",
+            _ => "failed_known",
+        },
+        changed: value
+            .get("changed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        staged: value
+            .get("staged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        unstaged: value
+            .get("unstaged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        no_op: value
+            .get("no_op")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        partial: value
+            .get("partial")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn repository_stage_action(
+    state: State<'_, DesktopAppState>,
+    action_id: String,
+) -> Result<RepositoryIndexActionResult, FrontendError> {
+    repository_index_action(state.inner(), action_id, RepositoryIndexActionKind::Stage).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn repository_unstage_action(
+    state: State<'_, DesktopAppState>,
+    action_id: String,
+) -> Result<RepositoryIndexActionResult, FrontendError> {
+    repository_index_action(state.inner(), action_id, RepositoryIndexActionKind::Unstage).await
 }
 
 #[cfg(target_os = "windows")]
@@ -2871,6 +3283,8 @@ fn main() -> ExitCode {
             connect_codex,
             disconnect_codex,
             repository_snapshot,
+            repository_stage_action,
+            repository_unstage_action,
             send_chat,
             cancel_chat,
             new_conversation,
@@ -2921,12 +3335,13 @@ mod tests {
         MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
         PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState,
-        RepositoryObservationStage, ResumePair, SendChatResult, TerminalOwnership, activity_event,
-        apply_model_selection, await_cancel_recovery, await_graceful_cancel, await_hard_shutdown,
-        begin_chat, clear_conversation_allowed, connect_prepared_codex,
-        connection_context_is_current, current_app_status, desktop_repository_snapshot,
-        desktop_tool_registry, frontend_error, model_configuration_status,
-        prepare_codex_connection, publish_readiness_result, replace_selected_repository,
+        RepositoryIndexActionKind, RepositoryObservationStage, ResumePair, SendChatResult,
+        TerminalOwnership, activity_event, apply_model_selection, await_cancel_recovery,
+        await_graceful_cancel, await_hard_shutdown, begin_chat, clear_conversation_allowed,
+        connect_prepared_codex, connection_context_is_current, current_app_status,
+        desktop_repository_snapshot, desktop_tool_registry, frontend_error,
+        model_configuration_status, prepare_codex_connection, publish_readiness_result,
+        refresh_repository_workflow, replace_selected_repository, repository_index_action,
         repository_selection_allowed, repository_tool_authority, request_connect,
         resolve_codex_executable, resolve_prepare_and_connect_codex, same_arc,
         selected_git_executable, validate_prompt,
@@ -3375,6 +3790,69 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observed_single_target_stage_and_unstage_refresh_and_consume_selectors() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Modified);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("native Git repository constructs"),
+        );
+        let snapshot = refresh_repository_workflow(&state)
+            .await
+            .expect("modified snapshot");
+        let stage = snapshot
+            .status_entries
+            .iter()
+            .find_map(|entry| entry.stage_action_id.clone())
+            .unwrap_or_else(|| panic!("tracked modification is stage eligible: {snapshot:#?}"));
+        let before = fs::read(repository.0.join("nested/ordinary.txt")).unwrap();
+        let staged =
+            repository_index_action(&state, stage.clone(), RepositoryIndexActionKind::Stage)
+                .await
+                .expect("one stage action");
+        assert_eq!(staged.status, "ok");
+        assert!(staged.staged);
+        assert_eq!(
+            fs::read(repository.0.join("nested/ordinary.txt")).unwrap(),
+            before
+        );
+        assert_eq!(
+            repository_index_action(&state, stage, RepositoryIndexActionKind::Stage).await,
+            Err(FrontendError::RepositoryActionInvalid)
+        );
+        let snapshot = refresh_repository_workflow(&state)
+            .await
+            .expect("staged snapshot");
+        assert!(matches!(
+            snapshot.review,
+            super::StagedReviewPresentation::ReviewAvailable
+        ));
+        let unstage = snapshot
+            .staged_diff
+            .iter()
+            .find_map(|file| file.unstage_action_id.clone())
+            .expect("staged tracked modification is unstage eligible");
+        let unstaged = repository_index_action(&state, unstage, RepositoryIndexActionKind::Unstage)
+            .await
+            .expect("one unstage action");
+        assert_eq!(unstaged.status, "ok");
+        assert!(unstaged.unstaged);
+        assert_eq!(
+            fs::read(repository.0.join("nested/ordinary.txt")).unwrap(),
+            before
+        );
+        let snapshot = refresh_repository_workflow(&state)
+            .await
+            .expect("unstaged snapshot");
+        assert!(matches!(
+            snapshot.review,
+            super::StagedReviewPresentation::NoStagedChanges
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

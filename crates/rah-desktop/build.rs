@@ -13,6 +13,8 @@ fn main() {
             "connect_codex",
             "disconnect_codex",
             "repository_snapshot",
+            "repository_stage_action",
+            "repository_unstage_action",
             "send_chat",
             "cancel_chat",
             "new_conversation",

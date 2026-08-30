@@ -16,6 +16,8 @@
     "allow-connect-codex",
     "allow-disconnect-codex",
     "allow-repository-snapshot",
+    "allow-repository-stage-action",
+    "allow-repository-unstage-action",
     "allow-send-chat",
     "allow-cancel-chat",
     "allow-new-conversation",
