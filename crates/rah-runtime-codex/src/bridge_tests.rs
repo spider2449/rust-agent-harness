@@ -148,6 +148,105 @@ struct RepositoryFixture {
     profile: PathBuf,
 }
 
+/// Disposable repository for Task 138.  Its profile is composed through the
+/// real CLI path; only the host-only control may arm the staged snapshot.
+struct RepositoryCommitFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    target: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryCommitFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).expect("repository directory should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "fixture@example.invalid"]);
+        git(&root, &["config", "user.name", "fixture"]);
+        let target = root.join("target.txt");
+        fs::write(&target, b"baseline\n").expect("target should be written");
+        git(&root, &["add", "--", "target.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        fs::write(&target, b"reviewed A\n").expect("staged target should be written");
+        git(&root, &["add", "--", "target.txt"]);
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task138-repository-commit-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "repo": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.commit", "enabled": true, "permission": "execute",
+                "executable": "git", "repository": "repo",
+                "identity_name": "RAH bridge host",
+                "identity_email": "bridge-host@example.invalid"
+            }]
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap()).unwrap();
+        Self {
+            _base: base,
+            root,
+            target,
+            profile,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        compose(TrustedStaticProfile::load(&self.profile).expect("profile should load"))
+            .await
+            .expect("effective profile should compose")
+    }
+
+    fn head(&self) -> String {
+        String::from_utf8(git_output(&self.root, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn stage(&self, contents: &[u8]) {
+        fs::write(&self.target, contents).unwrap();
+        git(&self.root, &["add", "--", "target.txt"]);
+    }
+
+    fn assert_commit(&self, old_head: &str, message: &str) {
+        let head = self.head();
+        assert_eq!(
+            String::from_utf8(git_output(&self.root, &["rev-parse", "HEAD^"]))
+                .unwrap()
+                .trim(),
+            old_head
+        );
+        assert_eq!(
+            String::from_utf8(git_output(
+                &self.root,
+                &["show", "-s", "--format=%B", "HEAD"]
+            ))
+            .unwrap()
+            .trim_end(),
+            message
+        );
+        assert_eq!(
+            String::from_utf8(git_output(
+                &self.root,
+                &["show", "-s", "--format=%an <%ae>", "HEAD"]
+            ))
+            .unwrap()
+            .trim(),
+            "RAH bridge host <bridge-host@example.invalid>"
+        );
+        assert!(
+            !String::from_utf8(git_output(&self.root, &["cat-file", "-p", &head]))
+                .unwrap()
+                .contains("gpgsig ")
+        );
+    }
+}
+
 impl RepositoryFixture {
     fn new(label: &str) -> Self {
         Self::new_with_target(label, b"alpha\nold\nomega\n")
@@ -2784,6 +2883,308 @@ async fn composed_diff_reports_binary_without_payload_or_path_leakage() {
     composition.shutdown().await;
 }
 
+#[tokio::test]
+async fn trusted_profile_composed_repo_commit_is_message_only_host_armed_and_never_replayed() {
+    let fixture = RepositoryCommitFixture::new("repo-commit-bridge");
+    let old_head = fixture.head();
+    let composition = fixture.compose().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(definition.name, ToolName::new("repo.commit"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema,
+        json!({"type":"object","properties":{"message":{"type":"string","maxLength":16384}},"required":["message"],"additionalProperties":false})
+    );
+    assert!(
+        definition
+            .description
+            .contains("host-reviewed staged repository snapshot once")
+    );
+    assert!(!definition.description.contains("Git argv"));
+    assert!(composition.repository_commit_control().is_some());
+    assert_eq!(composition.registry().definitions().len(), 1);
+
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let dynamic = &thread["params"]["dynamicTools"][0];
+    let alias = dynamic["name"].as_str().unwrap().to_owned();
+    assert!(alias.starts_with("rah_tool_"));
+    assert_ne!(alias, "repo.commit");
+    assert!(
+        alias
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    );
+    assert_eq!(dynamic["description"], definition.description);
+    assert_eq!(dynamic["inputSchema"], definition.input_schema);
+    let schema = dynamic["inputSchema"].to_string();
+    for forbidden in [
+        "authorization",
+        "token",
+        "reviewed_snapshot",
+        "expected_head",
+        "branch",
+        "index",
+        "tree",
+        "repository",
+        "path",
+        "argv",
+        "identity",
+        "signing",
+        "credential",
+    ] {
+        assert!(!schema.contains(forbidden), "schema leaked {forbidden}");
+    }
+    assert_restrictions(&thread["params"]);
+
+    // Composition and bridge advertisement do not arm.  Execute is necessary,
+    // but not sufficient, for this host-owned operation.
+    for (call, message) in [
+        ("unarmed", "bridge unarmed"),
+        ("unarmed-again", "still unarmed"),
+    ] {
+        peer.send(tool_request(
+            json!(call),
+            "private-thread",
+            "private-turn",
+            call,
+            &alias,
+            json!({"message": message}),
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(response_json(&response)["status"], "precondition_failed");
+        assert_eq!(fixture.head(), old_head);
+    }
+
+    // Invalid JSON-shaped input cannot consume the pending host review.
+    composition
+        .repository_commit_control()
+        .unwrap()
+        .authorize_current_reviewed_snapshot()
+        .await
+        .unwrap();
+    for (call, input) in [
+        (
+            "extra",
+            json!({"message":"valid", "branch":"refs/heads/other"}),
+        ),
+        ("missing", json!({})),
+        ("wrong-type", json!({"message":123})),
+        ("oversized", json!({"message":"x".repeat(16 * 1024 + 1)})),
+    ] {
+        peer.send(tool_request(
+            json!(call),
+            "private-thread",
+            "private-turn",
+            call,
+            &alias,
+            input,
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(response_json(&response)["status"], "invalid_input");
+        assert_eq!(fixture.head(), old_head);
+    }
+
+    peer.send(tool_request(
+        json!(901),
+        "private-thread",
+        "private-turn",
+        "commit-once",
+        &alias,
+        json!({"message":"bridge verified commit"}),
+    ));
+    let committed = peer.next_sent().await;
+    assert_eq!(committed["result"]["success"], true);
+    let committed_output = response_json(&committed);
+    assert_eq!(committed_output["status"], "committed_verified");
+    assert_eq!(committed_output["commit_oid"], fixture.head());
+    fixture.assert_commit(&old_head, "bridge verified commit");
+    assert!(
+        !committed
+            .to_string()
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+    assert!(
+        !committed
+            .to_string()
+            .contains(git_executable().to_string_lossy().as_ref())
+    );
+
+    // Completed exact replay is cached by the bridge, not sent through the
+    // registry. A fresh ID is dispatched but the consumed authorization fails closed.
+    peer.send(tool_request(
+        json!(902),
+        "private-thread",
+        "private-turn",
+        "commit-once",
+        &alias,
+        json!({"message":"bridge verified commit"}),
+    ));
+    let replay = peer.next_sent().await;
+    assert_eq!(replay["result"], committed["result"]);
+    assert_eq!(fixture.head(), committed_output["commit_oid"]);
+    peer.send(tool_request(
+        json!(903),
+        "private-thread",
+        "private-turn",
+        "commit-once",
+        &alias,
+        json!({"message":"different"}),
+    ));
+    assert_eq!(peer.next_sent().await["error"]["code"], -32602);
+    assert_eq!(fixture.head(), committed_output["commit_oid"]);
+    peer.send(tool_request(
+        json!(904),
+        "private-thread",
+        "private-turn",
+        "fresh-after-consumption",
+        &alias,
+        json!({"message":"fresh"}),
+    ));
+    assert_eq!(
+        response_json(&peer.next_sent().await)["status"],
+        "precondition_failed"
+    );
+    assert_eq!(fixture.head(), committed_output["commit_oid"]);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert!(events.windows(3).any(|events| matches!(events, [AgentEvent::ToolRequested { tool_call, .. }, AgentEvent::ToolStarted { .. }, AgentEvent::ToolFinished { .. }] if tool_call.name == ToolName::new("repo.commit"))));
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_commit_preserves_armed_authorization_across_bridge_denial_and_rejects_stale_snapshot()
+ {
+    let fixture = RepositoryCommitFixture::new("repo-commit-permission");
+    let old_head = fixture.head();
+    let composition = fixture.compose().await;
+    composition
+        .repository_commit_control()
+        .unwrap()
+        .authorize_current_reviewed_snapshot()
+        .await
+        .unwrap();
+    let (denied, mut peer, _) = connected_bridge(composition.registry_handle(), vec![]).await;
+    let (handle, thread) = start_bridge(&denied, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    peer.send(tool_request(
+        json!(910),
+        "private-thread",
+        "private-turn",
+        "denied",
+        &alias,
+        json!({"message":"denied"}),
+    ));
+    assert_eq!(peer.next_sent().await["result"]["success"], false);
+    let collecting = tokio::spawn(async move { handle.into_events().collect::<Vec<_>>().await });
+    peer.respond("turn/interrupt", json!({})).await;
+    let events = collecting.await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+    );
+    denied.shutdown().await.unwrap();
+
+    // Permission denial never entered the Tool, so the same host authorization
+    // remains usable once when a separately configured bridge permits Execute.
+    let (allowed, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&allowed, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    peer.send(tool_request(
+        json!(911),
+        "private-thread",
+        "private-turn",
+        "allowed",
+        &alias,
+        json!({"message":"after denial"}),
+    ));
+    assert_eq!(
+        response_json(&peer.next_sent().await)["status"],
+        "committed_verified"
+    );
+    fixture.assert_commit(&old_head, "after denial");
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
+    allowed.shutdown().await.unwrap();
+    composition.shutdown().await;
+
+    let fixture = RepositoryCommitFixture::new("repo-commit-stale");
+    let old_head = fixture.head();
+    let original = fs::read(&fixture.target).unwrap();
+    let composition = fixture.compose().await;
+    composition
+        .repository_commit_control()
+        .unwrap()
+        .authorize_current_reviewed_snapshot()
+        .await
+        .unwrap();
+    fixture.stage(b"reviewed B\n");
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    peer.send(tool_request(
+        json!(912),
+        "private-thread",
+        "private-turn",
+        "stale",
+        &alias,
+        json!({"message":"stale"}),
+    ));
+    assert_eq!(
+        response_json(&peer.next_sent().await)["status"],
+        "precondition_failed"
+    );
+    fixture.stage(&original);
+    peer.send(tool_request(
+        json!(913),
+        "private-thread",
+        "private-turn",
+        "stale-restored",
+        &alias,
+        json!({"message":"restored"}),
+    ));
+    assert_eq!(
+        response_json(&peer.next_sent().await)["status"],
+        "precondition_failed"
+    );
+    assert_eq!(fixture.head(), old_head);
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
 async fn connected_bridge(
     registry: Arc<ToolRegistry>,
     allowed: Vec<PermissionLevel>,
@@ -2977,6 +3378,15 @@ async fn bridge_call(
             .expect("observer response should be JSON text"),
     )
     .expect("observer response should retain JSON")
+}
+
+fn response_json(response: &Value) -> Value {
+    serde_json::from_str(
+        response["result"]["contentItems"][0]["text"]
+            .as_str()
+            .expect("bridge ToolOutput should be JSON text"),
+    )
+    .expect("bridge ToolOutput should preserve JSON")
 }
 
 async fn await_cancellation(peer: &mut FakePeer, call_id: Value) {
