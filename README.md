@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.11 release candidate: host-reviewed bounded repository commit
+## v0.11 release: host-reviewed bounded repository commit
 
 RAH v0.10.0 established the existing bounded Desktop host configuration.
 Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one

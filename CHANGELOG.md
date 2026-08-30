@@ -1,6 +1,11 @@
 # Changelog
 
-## v0.11.0 — release candidate (not yet released)
+## v0.11.0 — 2026-08-30
+
+Released as `RAH v0.11.0`. The immutable annotated tag `v0.11.0` has object
+ID `3fd37807f382c2c0c61328e72d7542984db05983` and peels to release commit
+`44a2ee3c6580b862fd0a71b9e773984de757dc15`. Tag CI run `33300410414`
+passed, and the GitHub Release was published.
 
 ### Added
 

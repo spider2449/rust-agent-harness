@@ -1,17 +1,19 @@
 # RAH v0.11 Release Gate
 
-Release status: **RELEASE PREPARATION — NOT YET RELEASED**
+**HISTORICAL RELEASE RECORD — RELEASED**
 
-## Candidate identity
+## Immutable release identity
 
-- Candidate version: `0.11.0`.
-- Audited starting checkpoint: `15420bcffa0a2bb2155f7f691a9af17f07ca0894`.
-- Task 140 exact-head CI: `33295380139` — PASS.
-- Release-preparation commit: pending until Task 141 commit is created.
+- Release: `RAH v0.11.0`.
+- Release commit / peeled tag target:
+  `44a2ee3c6580b862fd0a71b9e773984de757dc15`.
+- Annotated tag: `v0.11.0`.
+- Tag object: `3fd37807f382c2c0c61328e72d7542984db05983`.
+- Task 141 branch CI: `33296367918` — PASS.
+- Task 142 tag CI: `33300410414` — PASS.
 - Certified Codex baseline: exactly `codex-cli 0.149.0`.
 - Verified live platform: Windows.
-- Tag: **NOT YET CREATED**.
-- GitHub Release: **NOT YET PUBLISHED**.
+- GitHub Release: published (draft=false, prerelease=false).
 
 ## Authority summary
 
@@ -113,4 +115,8 @@ v0.11 introduced no new Cargo dependency. Task 141 verifies `Cargo.toml` and
 - [x] `node --check crates/rah-desktop/frontend/status.js`
 - [x] `cargo build -p rah-desktop --release`
 - [x] Desktop release executable inspected: `F:\coding\otherPrj\rust-agent-harness\target\release\rah-desktop.exe`; 16,707,584 bytes; `2026-08-30 14:05:56 +08:00`; adjacent `sqlite3.dll` absent.
-- [ ] Task 141 exact-head deterministic-validation CI after push
+- [x] Task 141 exact-head deterministic-validation CI: `33296367918` — PASS
+- [x] Annotated `v0.11.0` tag created
+- [x] Tag peels to release commit
+- [x] Task 142 tag CI: `33300410414` — PASS
+- [x] GitHub Release published
