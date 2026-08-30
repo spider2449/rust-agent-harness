@@ -909,7 +909,12 @@ mod tests {
         let (git, root) = fixture();
         let policy = policy(&git, &root);
         let command = policy.commit_config();
-        assert!(command.chunks_exact(2).all(|pair| pair[0] == "-c"));
+        let (pairs, remainder) = command.as_slice().as_chunks::<2>();
+        assert!(
+            remainder.is_empty(),
+            "commit configuration must contain complete -c/key-value pairs"
+        );
+        assert!(pairs.iter().all(|pair| pair[0] == "-c"));
         assert!(!command.iter().any(|arg| {
             [
                 "-a",
