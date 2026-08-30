@@ -1,4 +1,4 @@
-# RAH v0.10 Milestone Architecture
+# RAH v0.11 Milestone Architecture
 
 ## Ownership boundaries
 
@@ -49,6 +49,27 @@ fixed `/v1` base URL; it is not a Tool, generic network surface, credential
 store, provider lifecycle manager, or public RAH abstraction. Saved Desktop
 model preferences are inactive desired state only. They do not auto-connect,
 recreate a runtime or `ToolRegistry`, or restore authority.
+
+ADR 0016 adds `repo.commit` without redesigning those boundaries:
+
+```text
+Model / Runtime
+  -> AgentRuntime
+  -> ToolRegistry
+  -> repo.commit
+  -> host-owned repository commit policy / native Git
+```
+
+Trusted Profile composition selects the fixed host-owned repository, native Git
+resource, and identity, then publishes the ordinary `repo.commit` Tool through
+a fresh registry. It does not authorize a staged snapshot. The host-only
+`RepositoryCommitControl` separately arms one fresh reviewed snapshot; the
+model sees only the message schema and the Generic Tool Bridge sees only a
+private routing alias. `Execute` is an outer permission gate, not history
+authority. The private policy fixes the one normal commit invocation and
+revalidates repository, executable, hooks, attached HEAD, branch, compound
+index snapshot, and postconditions under the shared RAH repository mutation
+lease. This is neither generic Git nor branch/ref authority.
 
 Desktop repository context is host-owned. The selected canonical repository
 supplies fixed Git identity, `safe.directory`, and verified runtime CWD at

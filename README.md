@@ -25,6 +25,32 @@ Remote llama.cpp generation proof remains **DEFERRED / NOT VALIDATED**. A
 bounded initial endpoint is not transport confinement: redirect, proxy, DNS,
 peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
 
+## v0.11 milestone: host-reviewed bounded repository commit
+
+RAH v0.11 adds one deliberately narrow final step to the existing local
+repository workflow:
+
+```text
+inspect -> edit/create -> stage/review -> host-reviewed bounded commit
+```
+
+The only new model-visible Tool is `repo.commit`, with the closed input
+`{"message":"..."}`. It requires `PermissionLevel::Execute` as an outer gate,
+but Execute alone is not repository-history authority. A trusted profile must
+compose the exact host-selected repository, native Git executable, and identity,
+and the host must separately authorize one fresh reviewed staged snapshot for
+each call. The authorization is in-memory, one-shot, and never restored or
+replayed.
+
+`repo.commit` creates at most one ordinary commit from the already staged
+snapshot on the current attached branch. It never stages files, accepts no
+branch/ref/path/Git argv/identity input, and grants no amend, merge, rebase,
+cherry-pick, tag, remote, credential, network-Git, or generic Git authority.
+Uncertain external effects are not retried or rolled back. Windows local live
+validation is certified with the complete official Codex 0.149.0 runtime
+(including its same-version code-mode host); Ubuntu CI is deterministic
+evidence, not Linux live certification.
+
 ## Preserved bounded repository mutation and workflow inspection
 
 RAH retains the v0.4 trusted-host static capability profile and the v0.5

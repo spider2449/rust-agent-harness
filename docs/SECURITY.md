@@ -1,4 +1,49 @@
-# RAH v0.10 Milestone Security Model
+# RAH v0.11 Milestone Security Model
+
+## ADR 0016 bounded repository commit authority
+
+`repo.commit` is the v0.11 exception that completes the host-reviewed local
+workflow from an already staged index to one ordinary commit. ADR 0016 remains
+authoritative. The trusted host owns the authority: the public model input is
+only a bounded UTF-8 `message`; it cannot select repository, native Git,
+branch/ref, parent, index/tree/hash, identity, hooks, config/environment,
+argv, remote, or credential.
+
+Trusted Profile composition has a closed `repo.commit` schema with symbolic
+repository and executable resources, explicit host identity, and an `Execute`
+outer permission. It does not authorize a commit. A host-only
+`RepositoryCommitControl` must explicitly capture and arm one fresh reviewed
+snapshot. One pending authorization is retained in memory; malformed messages
+do not consume it, while stale/precondition, known-no-effect, uncertain, and
+successful attempts consume it. It is neither serialized to SQLite nor
+reconstructed after restart.
+
+The policy admits only an exact host-selected ordinary repository with attached,
+non-unborn HEAD and its existing current branch. The authorization binds the
+expected parent and compound reviewed index snapshot (raw index SHA-256,
+canonical staged-entry digest, and `git write-tree` OID). It rejects detached
+or unborn HEAD, special Git states, linked worktrees, and staged gitlinks. The
+fixed native-Git command performs one normal non-amend commit only; no automatic
+staging, signing, merge/rebase/cherry-pick, or retry/replay is available.
+
+Git executable and host-owned empty hooks-directory identities are revalidated.
+The child uses host-fixed minimized configuration/environment, explicit trusted
+author/committer identity, `--no-verify`, `core.hooksPath`, and
+`commit.gpgSign=false`. The policy proves either `committed_verified`, a
+post-observed `known_no_effect`, or conservatively `uncertain`; it never claims
+rollback. Model-visible output is bounded/redacted: a status and, only on
+verified success, the commit OID—not raw Git stderr, paths, index hashes,
+authorization data, configuration, or credentials.
+
+The shared per-repository mutation lease serializes RAH-owned stage, unstage,
+patch, create-file, edit-files, and commit operations. It does not exclude
+external Git or other process actors. This offline local authority grants no
+branch/ref history control, tags, remote Git, credentials, network operation,
+generic filesystem write/delete/rename, generic shell/process execution,
+linked-worktree/submodule support, OS sandbox, network isolation, or rollback.
+Windows is the certified live platform using the complete official Codex 0.149.0
+runtime including its same-version code-mode host. Ubuntu CI is deterministic
+evidence only; Linux and macOS live parity are not claimed.
 
 ## v0.9 boundary and preserved capabilities
 
