@@ -941,6 +941,7 @@ struct TargetObservation {
     canonical_path: PathBuf,
     length: u64,
     modified: Option<SystemTime>,
+    content_digest: [u8; 32],
 }
 
 #[cfg(target_os = "windows")]
@@ -1812,6 +1813,26 @@ struct RepositoryDiffFile {
     unstage_action_id: Option<String>,
 }
 
+/// Stable, host-only review content used to bind a staged-review observation.
+/// Presentation selectors deliberately cannot affect this representation.
+#[cfg(target_os = "windows")]
+#[derive(Serialize)]
+struct CanonicalStagedReview<'a> {
+    files: Vec<CanonicalStagedReviewFile<'a>>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Serialize)]
+struct CanonicalStagedReviewFile<'a> {
+    old_path: &'a Option<String>,
+    new_path: &'a Option<String>,
+    change_kind: &'a str,
+    binary: bool,
+    added_lines: Option<u64>,
+    deleted_lines: Option<u64>,
+    patch: &'a Option<String>,
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -2017,10 +2038,15 @@ fn observe_regular_target(root: &Path, relative: &str) -> Option<TargetObservati
         return None;
     }
     let metadata = std::fs::metadata(&canonical_path).ok()?;
-    metadata.is_file().then(|| TargetObservation {
+    if !metadata.is_file() {
+        return None;
+    }
+    let content_digest = Sha256::digest(std::fs::read(&canonical_path).ok()?).into();
+    Some(TargetObservation {
         canonical_path,
         length: metadata.len(),
         modified: metadata.modified().ok(),
+        content_digest,
     })
 }
 
@@ -2049,6 +2075,30 @@ fn target_is_current(expected: &TargetObservation) -> bool {
         && canonical_path == expected.canonical_path
         && metadata.len() == expected.length
         && metadata.modified().ok() == expected.modified
+        && std::fs::read(&canonical_path)
+            .ok()
+            .map(|bytes| Sha256::digest(bytes).into())
+            == Some(expected.content_digest)
+}
+
+#[cfg(target_os = "windows")]
+fn staged_review_digest(files: &[RepositoryDiffFile]) -> String {
+    let canonical = CanonicalStagedReview {
+        files: files
+            .iter()
+            .map(|file| CanonicalStagedReviewFile {
+                old_path: &file.old_path,
+                new_path: &file.new_path,
+                change_kind: &file.change_kind,
+                binary: file.binary,
+                added_lines: file.added_lines,
+                deleted_lines: file.deleted_lines,
+                patch: &file.patch,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(target_os = "windows")]
@@ -2066,6 +2116,8 @@ fn install_repository_workflow(
     workflow.actions.clear();
     workflow.review = None;
     let observation_generation = workflow.observation_generation;
+    let review_digest = matches!(snapshot.review, StagedReviewPresentation::ReviewAvailable)
+        .then(|| staged_review_digest(&snapshot.staged_diff));
     for entry in &mut snapshot.status_entries {
         let Some(target) = observe_regular_target(&repository.root, &entry.path) else {
             if !entry.tracked && entry.worktree_state == "untracked" {
@@ -2086,7 +2138,10 @@ fn install_repository_workflow(
             .is_ok();
         if stage {
             workflow.next_action += 1;
-            let action_id = format!("index-{}", workflow.next_action);
+            let action_id = format!(
+                "index-{repository_generation}-{observation_generation}-{}",
+                workflow.next_action
+            );
             workflow.actions.insert(
                 action_id.clone(),
                 RepositoryIndexAction {
@@ -2111,7 +2166,10 @@ fn install_repository_workflow(
             .is_ok();
         if unstage {
             workflow.next_action += 1;
-            let action_id = format!("index-{}", workflow.next_action);
+            let action_id = format!(
+                "index-{repository_generation}-{observation_generation}-{}",
+                workflow.next_action
+            );
             workflow.actions.insert(
                 action_id.clone(),
                 RepositoryIndexAction {
@@ -2129,9 +2187,7 @@ fn install_repository_workflow(
             }
         }
     }
-    if matches!(snapshot.review, StagedReviewPresentation::ReviewAvailable) {
-        let bytes = serde_json::to_vec(&snapshot.staged_diff).unwrap_or_default();
-        let digest = format!("{:x}", Sha256::digest(bytes));
+    if let Some(digest) = review_digest {
         workflow.review = Some(StagedReviewDescriptor {
             repository_generation,
             observation_generation,
@@ -3853,6 +3909,182 @@ mod tests {
             snapshot.review,
             super::StagedReviewPresentation::NoStagedChanges
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn old_repository_selector_cannot_resolve_to_new_repository_action() {
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Modified);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Modified);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let git = TestRepository::native_git();
+
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&git, &repository_a.0).expect("A constructs"),
+        );
+        let old_action_id = refresh_repository_workflow(&state)
+            .await
+            .expect("A observation succeeds")
+            .status_entries
+            .into_iter()
+            .find_map(|entry| entry.stage_action_id)
+            .expect("A exposes one stage action");
+
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&git, &repository_b.0).expect("B constructs"),
+        );
+        let new_action_id = refresh_repository_workflow(&state)
+            .await
+            .expect("B observation succeeds")
+            .status_entries
+            .into_iter()
+            .find_map(|entry| entry.stage_action_id)
+            .expect("B exposes one stage action");
+        assert_ne!(old_action_id, new_action_id);
+
+        let git_output = |arguments: &[&str]| {
+            Command::new(&git)
+                .args(arguments)
+                .current_dir(&repository_b.0)
+                .output()
+                .expect("Git state command should start")
+        };
+        let head_before = git_output(&["rev-parse", "HEAD"]);
+        let refs_before = git_output(&["show-ref", "--head"]);
+        let index_before = fs::read(repository_b.0.join(".git/index")).expect("B index reads");
+        let worktree_before =
+            fs::read(repository_b.0.join("nested/ordinary.txt")).expect("B worktree reads");
+
+        assert!(matches!(
+            repository_index_action(&state, old_action_id, RepositoryIndexActionKind::Stage).await,
+            Err(FrontendError::RepositoryActionInvalid | FrontendError::RepositoryActionStale)
+        ));
+        assert_eq!(
+            git_output(&["rev-parse", "HEAD"]).stdout,
+            head_before.stdout
+        );
+        assert_eq!(
+            git_output(&["show-ref", "--head"]).stdout,
+            refs_before.stdout
+        );
+        assert_eq!(
+            fs::read(repository_b.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(repository_b.0.join("nested/ordinary.txt")).unwrap(),
+            worktree_before
+        );
+
+        let result =
+            repository_index_action(&state, new_action_id, RepositoryIndexActionKind::Stage)
+                .await
+                .expect("B action works once");
+        assert!(result.staged);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn review_digest_is_stable_for_unchanged_index_and_ignores_action_selectors() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Staged);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("staged repository constructs"),
+        );
+        let first = refresh_repository_workflow(&state)
+            .await
+            .expect("first review");
+        let first_action = first.staged_diff[0].unstage_action_id.clone();
+        let digest_a = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .review
+            .as_ref()
+            .expect("first review descriptor")
+            .digest
+            .clone();
+
+        let second = refresh_repository_workflow(&state)
+            .await
+            .expect("second review");
+        let second_action = second.staged_diff[0].unstage_action_id.clone();
+        let digest_b = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .review
+            .as_ref()
+            .expect("second review descriptor")
+            .digest
+            .clone();
+        assert_ne!(first_action, second_action);
+        assert_eq!(digest_a, digest_b);
+
+        fs::write(
+            repository.0.join("tracked.txt"),
+            "different staged content\n",
+        )
+        .expect("staged target updates");
+        let output = Command::new(TestRepository::native_git())
+            .args(["add", "tracked.txt"])
+            .current_dir(&repository.0)
+            .output()
+            .expect("Git add starts");
+        assert!(output.status.success());
+        refresh_repository_workflow(&state)
+            .await
+            .expect("changed review");
+        let digest_c = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .review
+            .as_ref()
+            .expect("changed review descriptor")
+            .digest
+            .clone();
+        assert_ne!(digest_a, digest_c);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_size_target_change_rejects_displayed_stage_action() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Modified);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("modified repository constructs"),
+        );
+        let action_id = refresh_repository_workflow(&state)
+            .await
+            .expect("observation succeeds")
+            .status_entries
+            .into_iter()
+            .find_map(|entry| entry.stage_action_id)
+            .expect("stage action exists");
+        let target = repository.0.join("nested/ordinary.txt");
+        assert_eq!(fs::read(&target).unwrap().len(), b"changed!\n".len());
+        fs::write(&target, "changed!\n").expect("same-size target rewrite");
+
+        assert_eq!(
+            repository_index_action(&state, action_id, RepositoryIndexActionKind::Stage).await,
+            Err(FrontendError::RepositoryActionStale)
+        );
+        let output = Command::new(TestRepository::native_git())
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&repository.0)
+            .output()
+            .expect("Git index check starts");
+        assert!(
+            output.status.success(),
+            "stale action must not stage the target"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

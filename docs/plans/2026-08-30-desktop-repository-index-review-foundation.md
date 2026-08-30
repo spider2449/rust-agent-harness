@@ -58,3 +58,22 @@ worktree preservation, selector consumption, refreshed review states, and the
 unchanged model registry. Local validation includes Desktop, rah-tools,
 workspace, strict Clippy, metadata, frontend syntax, diff, and Windows manual
 smoke gates. No commit is authorized or attempted by this task.
+
+## Task 147A recovery hardening
+
+The original Task 147 implementation commit is
+`669a4b36751121e137a539398e21d603a4c7ca98`; its original exact-head CI run
+`33304029128` passed. Closure review found that resetting the workflow on
+repository replacement could reuse an `index-N` selector, and that the staged
+review digest was accidentally computed after ephemeral action IDs had been
+injected into presentation data.
+
+Task 147A binds every selector to Rust-owned repository and observation
+generations as well as a local counter, so a selector from an earlier repository
+or observation cannot name a current action. It computes the review descriptor
+from a private canonical staged-review representation that excludes all action
+and presentation fields. Regression coverage proves cross-repository stale
+selectors cannot mutate the replacement repository, unchanged staged review
+produces the same digest despite regenerated selectors, changed staged content
+changes the digest, and a same-size externally rewritten target is rejected
+before staging.
