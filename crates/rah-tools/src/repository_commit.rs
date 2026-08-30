@@ -4,22 +4,23 @@
 //! task may adapt its narrow internal authority; it must not turn this into a
 //! generic Git executor.
 
-#![allow(dead_code)] // Private foundation awaiting host-only composition in Task 137.
-
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
-use futures::lock::MutexGuard;
+use async_trait::async_trait;
+use futures::lock::{Mutex, MutexGuard};
+use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolName, ToolOutput};
 use rah_sandbox::{HostProcessOutput, OutputLimits};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    HostArgumentPolicy, HostExecutionPolicy, ToolError,
+    HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError, ToolInput,
     git_stage::repository_lease,
     git_support::git_error,
     repository_observer::{FileIdentity, RepositoryIdentity},
@@ -34,12 +35,12 @@ const OUTPUT_LIMITS: OutputLimits = OutputLimits {
 };
 
 /// The only private outcomes of one bounded commit attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum CommitDisposition {
     InvalidInput,
     PreconditionFailed,
     KnownNoEffect,
-    CommittedVerified,
+    CommittedVerified(String),
     Uncertain,
 }
 
@@ -52,7 +53,11 @@ struct HostIdentity {
 impl HostIdentity {
     fn new(name: String, email: String) -> Result<Self, ToolError> {
         for (label, value) in [("name", &name), ("email", &email)] {
-            if value.is_empty() || value.trim().is_empty() || value.contains('\0') {
+            if value.is_empty()
+                || value.trim().is_empty()
+                || value.contains('\0')
+                || value.len() > 1024
+            {
                 return Err(git_error(format!("host commit {label} is invalid")));
             }
         }
@@ -195,7 +200,10 @@ impl RepositoryCommitPolicy {
             return CommitDisposition::Uncertain;
         }
         match self.verify_committed(&authorization, &message).await {
-            Ok(true) => CommitDisposition::CommittedVerified,
+            Ok(true) => match self.current_head().await {
+                Ok(oid) => CommitDisposition::CommittedVerified(oid),
+                Err(_) => CommitDisposition::Uncertain,
+            },
             Ok(false) => match self.proves_no_effect(&authorization).await {
                 Ok(true) => CommitDisposition::KnownNoEffect,
                 _ => CommitDisposition::Uncertain,
@@ -203,6 +211,10 @@ impl RepositoryCommitPolicy {
             Err(_) if spawned.is_err() => CommitDisposition::Uncertain,
             Err(_) => CommitDisposition::Uncertain,
         }
+    }
+
+    async fn current_head(&self) -> Result<String, ToolError> {
+        output_text(self.run(&["rev-parse", "--verify", "HEAD"]).await?)
     }
 
     async fn matches_authorization(
@@ -484,6 +496,106 @@ impl RepositoryCommitPolicy {
     #[cfg(test)]
     fn attempts(&self) -> usize {
         self.attempts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Host-only control for explicitly reviewing and arming one staged snapshot.
+/// It is not a Tool, serializable value, or model-visible capability.
+pub struct RepositoryCommitControl {
+    policy: Arc<RepositoryCommitPolicy>,
+    pending: Arc<Mutex<Option<ReviewedCommitAuthorization>>>,
+}
+
+impl RepositoryCommitControl {
+    /// Captures the current reviewed staged snapshot. An explicit later call
+    /// replaces an unused authorization rather than queuing commit authority.
+    pub async fn authorize_current_reviewed_snapshot(&self) -> Result<(), ToolError> {
+        let authorization = self.policy.authorize().await?;
+        *self.pending.lock().await = Some(authorization);
+        Ok(())
+    }
+}
+
+/// The narrow message-only model-facing adapter for one host-composed policy.
+pub struct RepositoryCommitTool {
+    policy: Arc<RepositoryCommitPolicy>,
+    pending: Arc<Mutex<Option<ReviewedCommitAuthorization>>>,
+}
+
+impl RepositoryCommitTool {
+    /// Constructs a tool and its paired host-only control. No snapshot is armed.
+    pub fn compose(
+        git: &Path,
+        repository: &Path,
+        name: String,
+        email: String,
+    ) -> Result<(Self, RepositoryCommitControl), ToolError> {
+        let policy = Arc::new(RepositoryCommitPolicy::new(git, repository, name, email)?);
+        let pending = Arc::new(Mutex::new(None));
+        Ok((
+            Self {
+                policy: Arc::clone(&policy),
+                pending: Arc::clone(&pending),
+            },
+            RepositoryCommitControl { policy, pending },
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for RepositoryCommitTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("repo.commit"),
+            description: "Commit the currently host-reviewed staged repository snapshot once using the provided message.".into(),
+            input_schema: serde_json::json!({
+                "type": "object", "properties": {"message": {"type": "string", "maxLength": MESSAGE_LIMIT}},
+                "required": ["message"], "additionalProperties": false
+            }),
+            permission: PermissionLevel::Execute,
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let Some(message) = input
+            .0
+            .as_object()
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| input.0.as_object().is_some_and(|value| value.len() == 1))
+        else {
+            return Ok(commit_output("invalid_input", None));
+        };
+        if validate_message(message).is_err() {
+            return Ok(commit_output("invalid_input", None));
+        }
+        let authorization = self.pending.lock().await.take();
+        let Some(authorization) = authorization else {
+            return Ok(commit_output("precondition_failed", None));
+        };
+        let (status, oid) = match self.policy.commit(authorization, message.to_owned()).await {
+            CommitDisposition::InvalidInput => ("invalid_input", None),
+            CommitDisposition::PreconditionFailed => ("precondition_failed", None),
+            CommitDisposition::KnownNoEffect => ("known_no_effect", None),
+            CommitDisposition::CommittedVerified(oid) => ("committed_verified", Some(oid)),
+            CommitDisposition::Uncertain => ("uncertain", None),
+        };
+        Ok(commit_output(status, oid))
+    }
+}
+
+fn commit_output(status: &str, oid: Option<String>) -> ToolOutput {
+    let mut value = serde_json::json!({"status": status});
+    if let Some(oid) = oid {
+        value["commit_oid"] = serde_json::Value::String(oid);
+    }
+    ToolOutput {
+        content: vec![ToolContent::Text(value.to_string())],
+        is_error: status != "committed_verified",
     }
 }
 
@@ -783,12 +895,12 @@ mod tests {
         fs::write(root.join("untracked.txt"), b"u\n").unwrap();
         let policy = policy(&git, &root);
         let authorization = policy.authorize().await.unwrap();
-        assert_eq!(
+        assert!(matches!(
             policy
                 .commit(authorization, "reviewed message".into())
                 .await,
-            CommitDisposition::CommittedVerified
-        );
+            CommitDisposition::CommittedVerified(_)
+        ));
         assert_eq!(policy.attempts(), 1);
         assert_eq!(fs::read(root.join("tracked.txt")).unwrap(), b"unstaged\n");
         assert!(root.join("untracked.txt").exists());
@@ -890,10 +1002,10 @@ mod tests {
         }
         let policy = policy(&git, &root);
         let authorization = policy.authorize().await.unwrap();
-        assert_eq!(
+        assert!(matches!(
             policy.commit(authorization, "message".into()).await,
-            CommitDisposition::CommittedVerified
-        );
+            CommitDisposition::CommittedVerified(_)
+        ));
         assert!(!marker.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1066,10 +1178,10 @@ mod tests {
         }
         let policy = policy(&git, &root);
         let authorization = policy.authorize().await.unwrap();
-        assert_eq!(
+        assert!(matches!(
             policy.commit(authorization, "exact message".into()).await,
-            CommitDisposition::CommittedVerified
-        );
+            CommitDisposition::CommittedVerified(_)
+        ));
         assert!(!marker.exists());
         let raw = Command::new(&git)
             .args(["cat-file", "-p", "HEAD"])
@@ -1083,6 +1195,43 @@ mod tests {
                 .contains("author RAH Host <rah-host@example.invalid> ")
         );
         drop(policy);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_requires_explicit_host_review_and_consumes_authorization() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"reviewed\n");
+        let (tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let call = |message: &str| ToolInput(serde_json::json!({"message": message}));
+        let unarmed = tool
+            .execute(call("message"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&unarmed.content[0], ToolContent::Text(value) if value.contains("precondition_failed"))
+        );
+        control.authorize_current_reviewed_snapshot().await.unwrap();
+        let committed = tool
+            .execute(call("message"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&committed.content[0], ToolContent::Text(value) if value.contains("committed_verified"))
+        );
+        let replay = tool
+            .execute(call("message"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&replay.content[0], ToolContent::Text(value) if value.contains("precondition_failed"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

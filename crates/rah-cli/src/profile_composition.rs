@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use rah_tools::{
-    EffectiveCapability, EffectiveProfile, ProfileError, RepositoryDiffStagedTool,
-    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool,
-    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry,
-    TrustedStaticProfile,
+    EffectiveCapability, EffectiveProfile, ProfileError, RepositoryCommitControl,
+    RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
+    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -17,6 +17,7 @@ pub struct EffectiveProfileComposition {
     effective: EffectiveProfile,
     mcp_adapters: Vec<McpAdapter>,
     plugin_adapters: Vec<PluginAdapter>,
+    repository_commit_control: Option<RepositoryCommitControl>,
 }
 
 impl EffectiveProfileComposition {
@@ -36,6 +37,12 @@ impl EffectiveProfileComposition {
         &self.effective
     }
 
+    /// Returns the host-only control for the sole composed `repo.commit` capability.
+    #[must_use]
+    pub fn repository_commit_control(&self) -> Option<&RepositoryCommitControl> {
+        self.repository_commit_control.as_ref()
+    }
+
     /// Shuts down every owned provider after the registry is no longer used.
     pub async fn shutdown(self) {
         for adapter in self.plugin_adapters.into_iter().rev() {
@@ -52,6 +59,7 @@ pub async fn compose(
     profile: TrustedStaticProfile,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
     let mut registry = ToolRegistry::new();
+    let mut repository_commit_control = None;
     for definition in profile.registry().definitions() {
         let tool = profile
             .registry()
@@ -90,6 +98,29 @@ pub async fn compose(
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for commit in profile.repository_commits() {
+        if repository_commit_control.is_some() {
+            return Err(ProfileError::DuplicateRegistration);
+        }
+        let executable = profile
+            .executable_resource(commit.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(commit.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let (tool, control) = RepositoryCommitTool::compose(
+            executable,
+            repository,
+            commit.identity_name().to_owned(),
+            commit.identity_email().to_owned(),
+        )
+        .map_err(|_| ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(tool))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+        repository_commit_control = Some(control);
     }
 
     for edit in profile.repository_multi_file_edits() {
@@ -223,7 +254,7 @@ pub async fn compose(
         if capability.enabled
             && (matches!(
                 capability.capability_id.as_str(),
-                "repo.patch" | "repo.create-file" | "repo.edit-files"
+                "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
             ) || matches!(
                 capability.capability_id.as_str(),
                 "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
@@ -253,6 +284,7 @@ pub async fn compose(
         effective,
         mcp_adapters,
         plugin_adapters,
+        repository_commit_control,
     })
 }
 

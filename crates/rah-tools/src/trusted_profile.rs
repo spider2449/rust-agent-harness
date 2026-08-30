@@ -29,6 +29,7 @@ pub struct TrustedStaticProfile {
     repository_file_creations: Vec<RepositoryFileCreationProfile>,
     repository_multi_file_edits: Vec<RepositoryMultiFileEditProfile>,
     repository_observers: Vec<RepositoryObserverProfile>,
+    repository_commits: Vec<RepositoryCommitProfile>,
     mcp_providers: Vec<McpProviderProfile>,
     process_plugins: Vec<ProcessPluginProfile>,
     resources: Resources,
@@ -77,6 +78,7 @@ impl TrustedStaticProfile {
         let mut repository_file_creations = Vec::new();
         let mut repository_multi_file_edits = Vec::new();
         let mut repository_observers = Vec::new();
+        let mut repository_commits = Vec::new();
         for capability in &profile.capabilities {
             let (
                 inventory,
@@ -84,6 +86,7 @@ impl TrustedStaticProfile {
                 repository_file_creation,
                 repository_multi_file_edit,
                 repository_observer,
+                repository_commit,
             ) = build_capability(capability, &profile.resources, &mut registry)?;
             capabilities.push(inventory);
             if let Some(repository_worktree_patch) = repository_worktree_patch {
@@ -97,6 +100,9 @@ impl TrustedStaticProfile {
             }
             if let Some(repository_observer) = repository_observer {
                 repository_observers.push(repository_observer);
+            }
+            if let Some(repository_commit) = repository_commit {
+                repository_commits.push(repository_commit);
             }
         }
 
@@ -133,6 +139,7 @@ impl TrustedStaticProfile {
             repository_file_creations,
             repository_multi_file_edits,
             repository_observers,
+            repository_commits,
             mcp_providers: profile.mcp_providers,
             process_plugins: profile.process_plugins,
             resources: profile.resources,
@@ -195,6 +202,12 @@ impl TrustedStaticProfile {
     #[must_use]
     pub fn repository_observers(&self) -> &[RepositoryObserverProfile] {
         &self.repository_observers
+    }
+
+    /// Returns closed host-only `repo.commit` declarations for effective composition.
+    #[must_use]
+    pub fn repository_commits(&self) -> &[RepositoryCommitProfile] {
+        &self.repository_commits
     }
 
     /// Resolves a configured symbolic executable for an external provider.
@@ -443,6 +456,10 @@ struct Capability {
     cwd_resource: Option<String>,
     #[serde(default)]
     repository: Option<String>,
+    #[serde(default)]
+    identity_name: Option<String>,
+    #[serde(default)]
+    identity_email: Option<String>,
 }
 
 /// Closed host-only binding needed to construct the bounded `repo.patch` tool.
@@ -478,12 +495,40 @@ pub struct RepositoryMultiFileEditProfile {
     repository: String,
 }
 
+/// Closed host-only binding for the bounded `repo.commit` capability.
+#[derive(Clone, Debug)]
+pub struct RepositoryCommitProfile {
+    executable: String,
+    repository: String,
+    identity_name: String,
+    identity_email: String,
+}
+impl RepositoryCommitProfile {
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+    #[must_use]
+    pub fn identity_name(&self) -> &str {
+        &self.identity_name
+    }
+    #[must_use]
+    pub fn identity_email(&self) -> &str {
+        &self.identity_email
+    }
+}
+
 type CapabilityBuildResult = (
     EffectiveCapability,
     Option<RepositoryWorktreePatchProfile>,
     Option<RepositoryFileCreationProfile>,
     Option<RepositoryMultiFileEditProfile>,
     Option<RepositoryObserverProfile>,
+    Option<RepositoryCommitProfile>,
 );
 
 /// Closed host-only binding needed to construct one fixed repository observer.
@@ -570,6 +615,7 @@ fn build_capability(
             None,
             None,
             None,
+            None,
         ));
     }
 
@@ -589,6 +635,7 @@ fn build_capability(
                 validation: "configured",
             },
             Some(binding),
+            None,
             None,
             None,
             None,
@@ -614,6 +661,7 @@ fn build_capability(
             Some(binding),
             None,
             None,
+            None,
         ));
     }
 
@@ -636,6 +684,28 @@ fn build_capability(
             None,
             Some(binding),
             None,
+            None,
+        ));
+    }
+
+    if capability.name == "repo.commit" {
+        let binding = repository_commit_binding(capability)?;
+        executable(resources, Some(binding.executable()))?;
+        directory(resources, Some(binding.repository()))?;
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: true,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "configured",
+            },
+            None,
+            None,
+            None,
+            None,
+            Some(binding),
         ));
     }
 
@@ -658,6 +728,7 @@ fn build_capability(
             None,
             None,
             Some(binding),
+            None,
         ));
     }
 
@@ -709,6 +780,7 @@ fn build_capability(
             resources: symbolic_resources,
             validation: "validated",
         },
+        None,
         None,
         None,
         None,
@@ -842,8 +914,8 @@ fn capability_contract(
             .cloned()
             .collect(),
         ),
-        "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.file-info"
-        | "repo.status" | "repo.diff" | "repo.diff-staged" => (
+        "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
+        | "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -991,6 +1063,57 @@ fn repository_observer_binding(
         capability_id: capability.name.clone(),
         executable: executable.clone(),
         repository: repository.clone(),
+    })
+}
+
+fn repository_commit_binding(
+    capability: &Capability,
+) -> Result<RepositoryCommitProfile, ProfileError> {
+    if capability.workspace.is_some()
+        || capability.max_bytes.is_some()
+        || capability.cwd_resource.is_some()
+    {
+        return Err(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        });
+    }
+    let executable = capability
+        .executable
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let repository = capability
+        .repository
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let identity_name = capability
+        .identity_name
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "identity_name",
+        })?;
+    let identity_email =
+        capability
+            .identity_email
+            .as_ref()
+            .ok_or(ProfileError::InvalidProfile {
+                reason: "identity_email",
+            })?;
+    validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
+    validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
+    for value in [identity_name, identity_email] {
+        if value.trim().is_empty() || value.contains('\0') || value.len() > 1024 {
+            return Err(ProfileError::InvalidProfile { reason: "identity" });
+        }
+    }
+    Ok(RepositoryCommitProfile {
+        executable: executable.clone(),
+        repository: repository.clone(),
+        identity_name: identity_name.clone(),
+        identity_email: identity_email.clone(),
     })
 }
 
