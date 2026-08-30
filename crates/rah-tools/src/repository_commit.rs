@@ -19,8 +19,10 @@ use rah_sandbox::{HostProcessOutput, OutputLimits};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    HostArgumentPolicy, HostExecutionPolicy, ToolError, git_stage::repository_lease,
-    git_support::git_error, repository_observer::RepositoryIdentity,
+    HostArgumentPolicy, HostExecutionPolicy, ToolError,
+    git_stage::repository_lease,
+    git_support::git_error,
+    repository_observer::{FileIdentity, RepositoryIdentity},
 };
 
 const MESSAGE_LIMIT: usize = 16 * 1024;
@@ -62,6 +64,7 @@ impl HostIdentity {
 /// It is consumed by value, cannot be reconstructed from hashes, and remains
 /// private until a future host-only composition task needs it.
 struct ReviewedCommitAuthorization {
+    generation: uuid::Uuid,
     branch: String,
     old_head: String,
     raw_index_sha256: [u8; 32],
@@ -82,8 +85,11 @@ struct CommitSnapshot {
 struct RepositoryCommitPolicy {
     repository: RepositoryIdentity,
     git: PathBuf,
+    git_binding: HostExecutionPolicy,
     identity: HostIdentity,
     hooks: PathBuf,
+    hooks_identity: FileIdentity,
+    generation: uuid::Uuid,
     lease: std::sync::Arc<futures::lock::Mutex<()>>,
     #[cfg(test)]
     attempts: std::sync::atomic::AtomicUsize,
@@ -100,7 +106,7 @@ impl RepositoryCommitPolicy {
         }
         let hooks = unique_empty_hooks_directory()?;
         // HostExecutionPolicy captures and validates the exact native executable.
-        let _ = HostExecutionPolicy::new(
+        let git_binding = HostExecutionPolicy::new(
             git,
             HostArgumentPolicy::Exact(vec!["--version".into()]),
             repository.root(),
@@ -110,8 +116,11 @@ impl RepositoryCommitPolicy {
         Ok(Self {
             repository,
             git: fs::canonicalize(git).map_err(io_error)?,
+            git_binding,
             identity: HostIdentity::new(name, email)?,
+            hooks_identity: FileIdentity::capture(&hooks)?,
             hooks,
+            generation: uuid::Uuid::new_v4(),
             lease,
             #[cfg(test)]
             attempts: std::sync::atomic::AtomicUsize::new(0),
@@ -125,7 +134,10 @@ impl RepositoryCommitPolicy {
     async fn authorize(&self) -> Result<ReviewedCommitAuthorization, ToolError> {
         let _lease = self.acquire_lease().await;
         let snapshot = self.capture_snapshot().await?;
+        #[cfg(test)]
+        test_phase::hit(test_phase::Phase::AfterAuthorization, self)?;
         Ok(ReviewedCommitAuthorization {
+            generation: self.generation,
             branch: snapshot.branch,
             old_head: snapshot.old_head,
             raw_index_sha256: snapshot.raw_index_sha256,
@@ -145,13 +157,43 @@ impl RepositoryCommitPolicy {
             return CommitDisposition::InvalidInput;
         }
         let _lease = self.acquire_lease().await;
+        #[cfg(test)]
+        if test_phase::hit(test_phase::Phase::AfterLease, self).is_err() {
+            return CommitDisposition::Uncertain;
+        }
+        if authorization.generation != self.generation {
+            return CommitDisposition::PreconditionFailed;
+        }
+        #[cfg(test)]
+        if test_phase::hit(test_phase::Phase::BeforeFinalRevalidation, self).is_err() {
+            return CommitDisposition::Uncertain;
+        }
         if self.matches_authorization(&authorization).await.is_err() {
             return CommitDisposition::PreconditionFailed;
+        }
+        #[cfg(test)]
+        if test_phase::spawn_failure(self) {
+            return match self.proves_no_effect(&authorization).await {
+                Ok(true) => CommitDisposition::KnownNoEffect,
+                _ => CommitDisposition::Uncertain,
+            };
+        }
+        #[cfg(test)]
+        if test_phase::hit(test_phase::Phase::BeforeSpawn, self).is_err() {
+            return CommitDisposition::Uncertain;
         }
         #[cfg(test)]
         self.attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let spawned = self.run_commit(&message).await;
+        #[cfg(test)]
+        if test_phase::hit(test_phase::Phase::AfterSpawn, self).is_err() {
+            return CommitDisposition::Uncertain;
+        }
+        #[cfg(test)]
+        if test_phase::hit(test_phase::Phase::BeforePostObservation, self).is_err() {
+            return CommitDisposition::Uncertain;
+        }
         match self.verify_committed(&authorization, &message).await {
             Ok(true) => CommitDisposition::CommittedVerified,
             Ok(false) => match self.proves_no_effect(&authorization).await {
@@ -181,6 +223,7 @@ impl RepositoryCommitPolicy {
 
     async fn capture_snapshot(&self) -> Result<CommitSnapshot, ToolError> {
         self.repository.revalidate()?;
+        self.git_binding.revalidate()?;
         self.revalidate_hooks()?;
         self.require_ordinary_state()?;
         let branch = output_text(self.run(&["symbolic-ref", "-q", "HEAD"]).await?)?;
@@ -292,6 +335,7 @@ impl RepositoryCommitPolicy {
         arguments: Vec<String>,
         timeout: Duration,
     ) -> Result<HostExecutionPolicy, ToolError> {
+        self.git_binding.revalidate()?;
         HostExecutionPolicy::new(
             &self.git,
             HostArgumentPolicy::Exact(arguments),
@@ -343,6 +387,7 @@ impl RepositoryCommitPolicy {
         let canonical = fs::canonicalize(&self.hooks).map_err(io_error)?;
         if canonical != self.hooks
             || !canonical.is_dir()
+            || FileIdentity::capture(&canonical)? != self.hooks_identity
             || fs::read_dir(&canonical).map_err(io_error)?.next().is_some()
         {
             return Err(git_error(
@@ -356,6 +401,8 @@ impl RepositoryCommitPolicy {
         &self,
         authorization: &ReviewedCommitAuthorization,
     ) -> Result<bool, ToolError> {
+        #[cfg(test)]
+        test_phase::hit(test_phase::Phase::DuringNoEffectVerification, self)?;
         self.repository.revalidate()?;
         let branch = output_text(self.run(&["symbolic-ref", "-q", "HEAD"]).await?)?;
         let head = output_text(self.run(&["rev-parse", "--verify", "HEAD"]).await?)?;
@@ -373,6 +420,8 @@ impl RepositoryCommitPolicy {
         authorization: &ReviewedCommitAuthorization,
         message: &str,
     ) -> Result<bool, ToolError> {
+        #[cfg(test)]
+        test_phase::hit(test_phase::Phase::DuringCommittedVerification, self)?;
         self.repository.revalidate()?;
         let branch = output_text(self.run(&["symbolic-ref", "-q", "HEAD"]).await?)?;
         let new_head = output_text(self.run(&["rev-parse", "--verify", "HEAD"]).await?)?;
@@ -386,17 +435,27 @@ impl RepositoryCommitPolicy {
         {
             return Ok(false);
         }
+        if output_text(self.run(&["cat-file", "-t", &new_head]).await?)? != "commit" {
+            return Ok(false);
+        }
         let raw = successful(self.run(&["cat-file", "-p", &new_head]).await?)?.stdout;
         let (headers, body) = split_commit(&raw)?;
         let parents = headers
             .iter()
             .filter_map(|line| line.strip_prefix("parent "))
             .collect::<Vec<_>>();
-        let tree = headers.iter().find_map(|line| line.strip_prefix("tree "));
-        let author = headers.iter().find_map(|line| line.strip_prefix("author "));
-        let committer = headers
+        let trees = headers
             .iter()
-            .find_map(|line| line.strip_prefix("committer "));
+            .filter_map(|line| line.strip_prefix("tree "))
+            .collect::<Vec<_>>();
+        let authors = headers
+            .iter()
+            .filter_map(|line| line.strip_prefix("author "))
+            .collect::<Vec<_>>();
+        let committers = headers
+            .iter()
+            .filter_map(|line| line.strip_prefix("committer "))
+            .collect::<Vec<_>>();
         let signed = headers.iter().any(|line| line.starts_with("gpgsig "));
         let committed_message = if message.ends_with('\n') {
             message.as_bytes().to_vec()
@@ -404,15 +463,17 @@ impl RepositoryCommitPolicy {
             format!("{message}\n").into_bytes()
         };
         if parents != [authorization.old_head.as_str()]
-            || tree != Some(authorization.tree.as_str())
+            || trees != [authorization.tree.as_str()]
             || signed
             || body != committed_message
         {
             return Ok(false);
         }
         let expected = format!("{} <{}> ", self.identity.name, self.identity.email);
-        if !author.is_some_and(|value| value.starts_with(&expected))
-            || !committer.is_some_and(|value| value.starts_with(&expected))
+        if authors.len() != 1
+            || committers.len() != 1
+            || !authors[0].starts_with(&expected)
+            || !committers[0].starts_with(&expected)
         {
             return Ok(false);
         }
@@ -531,8 +592,96 @@ fn split_commit(raw: &[u8]) -> Result<(Vec<&str>, &[u8]), ToolError> {
     let headers = std::str::from_utf8(&raw[..split])
         .map_err(|_| git_error("commit headers were not UTF-8"))?
         .lines()
-        .collect();
+        .collect::<Vec<_>>();
+    if headers.iter().any(|line| line.is_empty()) {
+        return Err(git_error("malformed commit headers"));
+    }
     Ok((headers, &raw[split + 2..]))
+}
+
+// Deliberately finite, test-only fault points for the one-attempt state
+// machine. They are not compiled into a production artifact and cannot become
+// a runtime callback or plugin surface.
+#[cfg(test)]
+mod test_phase {
+    use std::sync::{Mutex, OnceLock};
+
+    use super::{RepositoryCommitPolicy, ToolError, git_error};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Phase {
+        AfterAuthorization,
+        AfterLease,
+        BeforeFinalRevalidation,
+        BeforeSpawn,
+        AfterSpawn,
+        BeforePostObservation,
+        DuringCommittedVerification,
+        DuringNoEffectVerification,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Fail,
+        SpawnFailure,
+        IndexLock,
+    }
+
+    static FAULT: OnceLock<Mutex<Option<(uuid::Uuid, Phase, Fault)>>> = OnceLock::new();
+
+    pub(super) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            *FAULT.get_or_init(|| Mutex::new(None)).lock().unwrap() = None;
+        }
+    }
+
+    pub(super) fn install(
+        policy: &RepositoryCommitPolicy,
+        phase: Phase,
+        fault: &'static str,
+    ) -> Guard {
+        let fault = match fault {
+            "fail" => Fault::Fail,
+            "spawn_failure" => Fault::SpawnFailure,
+            "index_lock" => Fault::IndexLock,
+            _ => panic!("unknown repository commit test fault"),
+        };
+        let mut slot = FAULT.get_or_init(|| Mutex::new(None)).lock().unwrap();
+        assert!(
+            slot.replace((policy.generation, phase, fault)).is_none(),
+            "test fault already installed"
+        );
+        Guard
+    }
+
+    pub(super) fn hit(phase: Phase, _policy: &RepositoryCommitPolicy) -> Result<(), ToolError> {
+        if matches!(
+            *FAULT.get_or_init(|| Mutex::new(None)).lock().unwrap(),
+            Some((generation, selected, Fault::Fail)) if generation == _policy.generation && selected == phase
+        ) {
+            return Err(git_error("test-only postcondition observer failure"));
+        }
+        if matches!(
+            *FAULT.get_or_init(|| Mutex::new(None)).lock().unwrap(),
+            Some((generation, selected, Fault::IndexLock)) if generation == _policy.generation && selected == phase
+        ) {
+            std::fs::write(
+                _policy.repository.root().join(".git/index.lock"),
+                b"test-owned lock",
+            )
+            .map_err(super::io_error)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn spawn_failure(policy: &RepositoryCommitPolicy) -> bool {
+        matches!(
+            *FAULT.get_or_init(|| Mutex::new(None)).lock().unwrap(),
+            Some((generation, Phase::BeforeSpawn, Fault::SpawnFailure)) if generation == policy.generation
+        )
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +757,18 @@ mod tests {
             "rah-host@example.invalid".into(),
         )
         .unwrap()
+    }
+
+    fn stage(git: &Path, root: &Path, bytes: &[u8]) {
+        fs::write(root.join("tracked.txt"), bytes).unwrap();
+        assert!(
+            Command::new(git)
+                .args(["add", "tracked.txt"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     #[tokio::test]
     async fn normal_dirty_and_same_file_snapshots_commit_exact_index() {
@@ -734,6 +895,189 @@ mod tests {
             CommitDisposition::CommittedVerified
         );
         assert!(!marker.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn message_and_fixed_command_boundaries_are_exact() {
+        assert!(validate_message("first\nbody").is_ok());
+        assert!(validate_message(&"x".repeat(MESSAGE_LIMIT)).is_ok());
+        assert!(validate_message(&"x".repeat(MESSAGE_LIMIT + 1)).is_err());
+        for invalid in ["", " \t\n", "\nbody", "a\0b"] {
+            assert!(validate_message(invalid).is_err());
+        }
+        let (git, root) = fixture();
+        let policy = policy(&git, &root);
+        let command = policy.commit_config();
+        assert!(command.chunks_exact(2).all(|pair| pair[0] == "-c"));
+        assert!(!command.iter().any(|arg| {
+            [
+                "-a",
+                "--amend",
+                "--allow-empty",
+                "--allow-empty-message",
+                "--author",
+                "--date",
+                "--gpg-sign",
+                "--signoff",
+                "-F",
+                "-t",
+                "-C",
+                "--reuse-message",
+                "--fixup",
+                "--squash",
+                "--trailer",
+            ]
+            .contains(&arg.as_str())
+        }));
+        drop(policy);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn policy_generation_head_and_index_races_refuse_before_spawn() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"staged\n");
+        let first = policy(&git, &root);
+        let second = policy(&git, &root);
+        let authorization = first.authorize().await.unwrap();
+        assert_eq!(
+            second.commit(authorization, "message".into()).await,
+            CommitDisposition::PreconditionFailed
+        );
+        assert_eq!(second.attempts(), 0);
+
+        let authorization = first.authorize().await.unwrap();
+        stage(&git, &root, b"different index\n");
+        assert_eq!(
+            first.commit(authorization, "message".into()).await,
+            CommitDisposition::PreconditionFailed
+        );
+        assert_eq!(first.attempts(), 0);
+        stage(&git, &root, b"staged again\n");
+        let authorization = first.authorize().await.unwrap();
+        let branch = String::from_utf8(
+            Command::new(&git)
+                .args(["symbolic-ref", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let branch = branch.trim();
+        assert!(
+            Command::new(&git)
+                .args(["symbolic-ref", "HEAD", "refs/heads/rah-other"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            first.commit(authorization, "message".into()).await,
+            CommitDisposition::PreconditionFailed
+        );
+        assert_eq!(first.attempts(), 0);
+        assert!(
+            Command::new(&git)
+                .args(["symbolic-ref", "HEAD", branch])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        drop(second);
+        drop(first);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_lock_refusal_and_post_spawn_observer_failure_are_classified_by_state() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"one\n");
+        let policy = policy(&git, &root);
+        let authorization = policy.authorize().await.unwrap();
+        let guard = test_phase::install(&policy, test_phase::Phase::BeforeSpawn, "spawn_failure");
+        assert_eq!(
+            policy.commit(authorization, "message".into()).await,
+            CommitDisposition::KnownNoEffect
+        );
+        assert_eq!(policy.attempts(), 0);
+        drop(guard);
+
+        let authorization = policy.authorize().await.unwrap();
+        let lock = root.join(".git/index.lock");
+        let guard = test_phase::install(&policy, test_phase::Phase::BeforeSpawn, "index_lock");
+        assert_eq!(
+            policy.commit(authorization, "message".into()).await,
+            CommitDisposition::KnownNoEffect
+        );
+        assert_eq!(policy.attempts(), 1);
+        drop(guard);
+        fs::remove_file(lock).unwrap();
+
+        let authorization = policy.authorize().await.unwrap();
+        let guard = test_phase::install(&policy, test_phase::Phase::BeforePostObservation, "fail");
+        assert_eq!(
+            policy.commit(authorization, "message".into()).await,
+            CommitDisposition::Uncertain
+        );
+        assert_eq!(policy.attempts(), 2);
+        drop(guard);
+        drop(policy);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hostile_local_hooks_identity_and_editor_configuration_do_not_gain_authority() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"staged\n");
+        let hostile = root.join("hostile-hooks");
+        fs::create_dir(&hostile).unwrap();
+        let marker = root.join("hostile-marker");
+        #[cfg(unix)]
+        {
+            let hook = hostile.join("prepare-commit-msg");
+            fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for (key, value) in [
+            ("core.hooksPath", hostile.to_string_lossy().as_ref()),
+            ("core.editor", "false"),
+            ("commit.template", "missing-template"),
+            ("user.name", "ambient attacker"),
+            ("user.email", "attacker@example.invalid"),
+        ] {
+            assert!(
+                Command::new(&git)
+                    .args(["config", key, value])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let policy = policy(&git, &root);
+        let authorization = policy.authorize().await.unwrap();
+        assert_eq!(
+            policy.commit(authorization, "exact message".into()).await,
+            CommitDisposition::CommittedVerified
+        );
+        assert!(!marker.exists());
+        let raw = Command::new(&git)
+            .args(["cat-file", "-p", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+            .stdout;
+        assert!(
+            String::from_utf8(raw)
+                .unwrap()
+                .contains("author RAH Host <rah-host@example.invalid> ")
+        );
+        drop(policy);
         fs::remove_dir_all(root).unwrap();
     }
 }

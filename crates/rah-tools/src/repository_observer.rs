@@ -390,7 +390,7 @@ impl RepositoryIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -404,7 +404,7 @@ struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn capture(path: &Path) -> Result<Self, ToolError> {
+    pub(crate) fn capture(path: &Path) -> Result<Self, ToolError> {
         #[cfg(not(windows))]
         let metadata = fs::metadata(path).map_err(fs_error)?;
         #[cfg(unix)]

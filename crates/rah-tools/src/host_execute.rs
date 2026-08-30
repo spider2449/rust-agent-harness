@@ -212,7 +212,9 @@ impl HostExecutionPolicy {
         })
     }
 
-    fn revalidate(&self) -> Result<(), ToolError> {
+    /// Rechecks the immutable executable and cwd bindings before a
+    /// capability-specific caller constructs a derived fixed command.
+    pub(crate) fn revalidate(&self) -> Result<(), ToolError> {
         let current = canonical_native_executable(&self.executable)?;
         if !paths_equivalent(&current, &self.executable) {
             return Err(policy_error("configured executable identity changed"));
