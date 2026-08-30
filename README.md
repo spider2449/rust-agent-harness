@@ -5,10 +5,10 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.10 release candidate: Desktop host configuration and private conversation storage
+## v0.11 release candidate: host-reviewed bounded repository commit
 
-RAH v0.10.0 prepares the existing bounded Desktop host configuration for
-release. Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
+RAH v0.10.0 established the existing bounded Desktop host configuration.
+Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
 human-selected bounded `llama_cpp` endpoint under ADR 0015, and retains saved
 model preferences as inactive desired state until an explicit Connect or
 reconnect. It neither manages a llama.cpp process nor installs a provider or
@@ -25,7 +25,7 @@ Remote llama.cpp generation proof remains **DEFERRED / NOT VALIDATED**. A
 bounded initial endpoint is not transport confinement: redirect, proxy, DNS,
 peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
 
-## v0.11 milestone: host-reviewed bounded repository commit
+### Bounded repository commit
 
 RAH v0.11 adds one deliberately narrow final step to the existing local
 repository workflow:

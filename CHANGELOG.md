@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.11.0 — release candidate (not yet released)
+
+### Added
+
+- `repo.commit`, a bounded host-reviewed repository commit capability that
+  creates one ordinary commit from one exact reviewed staged snapshot in the
+  exact trusted-profile-selected repository.
+- Trusted Profile composition for the exact repository, exact native Git
+  executable, explicit trusted host identity, Execute outer permission, and
+  separate host-only per-operation authorization.
+
+### Verified
+
+- Deterministic commit-policy hardening, Trusted Profile composition, and
+  Generic Tool Bridge verification.
+- Windows certified live Codex validation at exactly `codex-cli 0.149.0`; the
+  complete same-version official code-mode host was required for the certified
+  dynamic-tool path.
+- The disposable live fixture completed lifecycle `1 / 1 / 1` with
+  `committed_verified` at `13c200c5c772b3e4a0eceb0a2364981c849313e0`.
+  This is fixture evidence, not a RAH repository release commit. There was no
+  automatic staging, retry, replay, approval, or synthetic tool call.
+
+### Security and limitations
+
+- `repo.commit` is not generic Git authority. Execute alone is insufficient:
+  every commit requires fresh host-reviewed authorization; the model controls
+  only the message.
+- No automatic staging, branch creation/switching, arbitrary ref mutation,
+  detached/unborn commit, amend, merge, rebase, cherry-pick, reset, clean,
+  stash, tag, remote/network Git, credential Git, linked worktree, or
+  submodule/gitlink commit is supported.
+- Uncertain effects are never retried or replayed, and no rollback guarantee is
+  made. Windows is live-certified; Ubuntu is deterministic evidence only.
+- Task 120 remote llama generation remains **DEFERRED / NOT VALIDATED**.
+  Transport confinement remains **NOT CLAIMED**.
+
 ## v0.10.0 — 2026-08-29
 
 Released as `RAH v0.10.0`. The immutable annotated tag `v0.10.0` has object
