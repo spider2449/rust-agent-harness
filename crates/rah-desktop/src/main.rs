@@ -951,7 +951,7 @@ struct DesktopCommitCapability {
     repository_generation: u64,
     model_generation: u64,
     identity_generation: u64,
-    _tool: RepositoryCommitTool,
+    _tool: Arc<RepositoryCommitTool>,
     control: Arc<RepositoryCommitControl>,
 }
 
@@ -1402,7 +1402,31 @@ enum ActivityEvent {
     Finished {
         tool: String,
         result: ActivityResult,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<CommitActivityPresentation>,
     },
+}
+
+/// The only commit result details that Desktop may present. The underlying tool
+/// output remains bridge-private and can never expose authorization material.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CommitActivityPresentation {
+    status: CommitActivityStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_oid: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CommitActivityStatus {
+    InvalidInput,
+    PreconditionFailed,
+    KnownNoEffect,
+    CommittedVerified,
+    Uncertain,
 }
 
 #[cfg(target_os = "windows")]
@@ -2874,6 +2898,7 @@ impl ConnectionResult {
 #[cfg(target_os = "windows")]
 fn desktop_tool_registry(
     repository: Option<&DesktopRepository>,
+    commit_tool: Option<Arc<RepositoryCommitTool>>,
 ) -> Result<Arc<ToolRegistry>, ToolError> {
     #[cfg(test)]
     if startup_counter_tracking() {
@@ -2909,6 +2934,9 @@ fn desktop_tool_registry(
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(create_file))?;
         registry.register(Arc::new(edit_files))?;
+        if let Some(commit_tool) = commit_tool {
+            registry.register(commit_tool)?;
+        }
     }
     Ok(Arc::new(registry))
 }
@@ -3027,15 +3055,36 @@ async fn connect_codex(
             }
         }
     };
-    let capability_repository = repository.clone();
+    let identity = state
+        .commit_identity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let identity_generation = *state
+        .commit_identity_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let commit_capability = match (repository.as_deref(), identity) {
+        (Some(repository), Some(identity)) => RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            identity.name,
+            identity.email,
+        )
+        .ok()
+        .map(|(tool, control)| (Arc::new(tool), Arc::new(control))),
+        _ => None,
+    };
+    let commit_tool = commit_capability.as_ref().map(|(tool, _)| Arc::clone(tool));
     match resolve_prepare_and_connect_codex(
         resolve_codex_executable,
         model_config,
         |prepared| async move {
-            let registry = desktop_tool_registry(repository.as_deref()).map_err(|error| {
-                tracing::error!(error = %error, "failed to construct desktop tool registry");
-                FrontendError::ToolRegistryFailed
-            })?;
+            let registry =
+                desktop_tool_registry(repository.as_deref(), commit_tool).map_err(|error| {
+                    tracing::error!(error = %error, "failed to construct desktop tool registry");
+                    FrontendError::ToolRegistryFailed
+                })?;
             CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
                 prepared.executable,
                 registry,
@@ -3078,23 +3127,7 @@ async fn connect_codex(
                 model_generation,
             };
             drop(connection);
-            let identity = state
-                .commit_identity
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let identity_generation = *state
-                .commit_identity_generation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let (Some(repository), Some(identity)) = (capability_repository, identity)
-                && let Ok((tool, control)) = RepositoryCommitTool::compose(
-                    &repository.git_executable,
-                    &repository.root,
-                    identity.name,
-                    identity.email,
-                )
-            {
+            if let Some((tool, control)) = commit_capability {
                 *state
                     .commit_capability
                     .lock()
@@ -3104,7 +3137,7 @@ async fn connect_codex(
                         model_generation,
                         identity_generation,
                         _tool: tool,
-                        control: Arc::new(control),
+                        control,
                     });
             }
             Ok(ConnectionResult::connected())
@@ -3232,8 +3265,11 @@ fn activity_event(
         } => tool_calls.remove(tool_call_id).map(|tool| {
             let refresh = matches!(
                 tool.as_str(),
-                "repo.patch" | "repo.create-file" | "repo.edit-files"
+                "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
             );
+            let commit = (tool == "repo.commit")
+                .then(|| commit_activity_presentation(output))
+                .flatten();
             (
                 ActivityEvent::Finished {
                     tool,
@@ -3242,12 +3278,57 @@ fn activity_event(
                     } else {
                         ActivityResult::Success
                     },
+                    commit,
                 },
                 refresh,
             )
         }),
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn commit_activity_presentation(
+    output: &rah_protocol::ToolOutput,
+) -> Option<CommitActivityPresentation> {
+    let [ToolContent::Text(text)] = output.content.as_slice() else {
+        return None;
+    };
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if !value
+        .as_object()?
+        .keys()
+        .all(|key| key == "status" || key == "commit_oid")
+    {
+        return None;
+    }
+    let status = match value.get("status")?.as_str()? {
+        "invalid_input" => CommitActivityStatus::InvalidInput,
+        "precondition_failed" => CommitActivityStatus::PreconditionFailed,
+        "known_no_effect" => CommitActivityStatus::KnownNoEffect,
+        "committed_verified" => CommitActivityStatus::CommittedVerified,
+        "uncertain" => CommitActivityStatus::Uncertain,
+        _ => return None,
+    };
+    if output.is_error == matches!(status, CommitActivityStatus::CommittedVerified) {
+        return None;
+    }
+    let commit_oid = value.get("commit_oid").and_then(serde_json::Value::as_str);
+    let commit_oid = match status {
+        CommitActivityStatus::CommittedVerified => {
+            let oid = commit_oid?;
+            if (oid.len() == 40 || oid.len() == 64)
+                && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                Some(oid.to_owned())
+            } else {
+                return None;
+            }
+        }
+        _ if commit_oid.is_none() => None,
+        _ => return None,
+    };
+    Some(CommitActivityPresentation { status, commit_oid })
 }
 
 #[cfg(target_os = "windows")]
@@ -3810,19 +3891,20 @@ mod tests {
         RepositoryIndexActionKind, RepositoryObservationStage, ResumePair, SendChatResult,
         StagedReviewPresentation, TerminalOwnership, activity_event, apply_model_selection,
         authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, clear_conversation_allowed, connect_prepared_codex,
-        connection_context_is_current, current_app_status, desktop_repository_snapshot,
-        desktop_repository_snapshot_with_review, desktop_tool_registry, frontend_error,
-        install_repository_workflow, model_configuration_status, prepare_codex_connection,
-        publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
-        repository_index_action, repository_selection_allowed, repository_tool_authority,
-        request_connect, resolve_codex_executable, resolve_prepare_and_connect_codex,
+        await_hard_shutdown, begin_chat, clear_conversation_allowed, commit_activity_presentation,
+        connect_prepared_codex, connection_context_is_current, current_app_status,
+        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        desktop_tool_registry, frontend_error, install_repository_workflow,
+        model_configuration_status, prepare_codex_connection, publish_readiness_result,
+        refresh_repository_workflow, replace_selected_repository, repository_index_action,
+        repository_selection_allowed, repository_tool_authority, request_connect,
+        resolve_codex_executable, resolve_prepare_and_connect_codex,
         revoke_repository_commit_context, same_arc, selected_git_executable, validate_prompt,
     };
     use futures::StreamExt;
     use rah_protocol::{
         AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-        RequestId, SessionId, ToolCall, ToolCallId, ToolInput, ToolName, ToolOutput,
+        RequestId, SessionId, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName, ToolOutput,
     };
     use rah_runtime::AgentRuntime;
     use rah_runtime_codex::{
@@ -4315,7 +4397,7 @@ mod tests {
             repository_generation,
             model_generation,
             identity_generation,
-            _tool: tool,
+            _tool: Arc::new(tool),
             control: Arc::new(control),
         });
 
@@ -4409,7 +4491,7 @@ mod tests {
             repository_generation,
             model_generation,
             identity_generation,
-            _tool: tool,
+            _tool: Arc::new(tool),
             control: Arc::clone(&control),
         });
         let git_output = |arguments: &[&str]| {
@@ -4510,7 +4592,7 @@ mod tests {
             repository_generation,
             model_generation,
             identity_generation,
-            _tool: tool,
+            _tool: Arc::new(tool),
             control: Arc::clone(&control),
         });
         let (snapshot, review) =
@@ -4644,7 +4726,7 @@ mod tests {
             repository_generation,
             model_generation,
             identity_generation,
-            _tool: tool,
+            _tool: Arc::new(tool),
             control: Arc::clone(&control),
         });
         let (snapshot, review) =
@@ -4747,7 +4829,7 @@ mod tests {
             repository_generation,
             model_generation,
             identity_generation,
-            _tool: tool,
+            _tool: Arc::new(tool),
             control: Arc::clone(&fresh_control),
         });
         assert!(!fresh_control.has_pending_authorization().await);
@@ -5391,7 +5473,7 @@ mod tests {
             prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
                 .expect("pinned Codex executable resolves");
         let registry =
-            desktop_tool_registry(Some(&repository)).expect("desktop repository registry");
+            desktop_tool_registry(Some(&repository), None).expect("desktop repository registry");
         let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
             prepared.executable,
             registry,
@@ -5533,7 +5615,7 @@ mod tests {
 
     #[test]
     fn desktop_registry_contains_only_permission_free_echo() {
-        let registry = desktop_tool_registry(None).expect("desktop registry should build");
+        let registry = desktop_tool_registry(None, None).expect("desktop registry should build");
         let definitions = registry.definitions();
 
         assert_eq!(definitions.len(), 1);
@@ -5542,6 +5624,61 @@ mod tests {
             definitions[0].permission,
             rah_protocol::PermissionLevel::None
         );
+    }
+
+    #[test]
+    fn host_composed_commit_tool_is_registered_with_execute_permission() {
+        let fixture = TestRepository::new();
+        let repository = fixture.desktop_repository();
+        let (tool, _control) = RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .expect("host commit composition should succeed");
+        let registry = desktop_tool_registry(Some(&repository), Some(Arc::new(tool)))
+            .expect("registry should retain the host-composed commit tool");
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.commit")
+            .expect("commit tool is registered");
+        assert_eq!(definition.permission, PermissionLevel::Execute);
+        assert_eq!(
+            definition.input_schema,
+            serde_json::json!({
+                "type": "object", "properties": {"message": {"type": "string", "maxLength": 16 * 1024}},
+                "required": ["message"], "additionalProperties": false
+            })
+        );
+    }
+
+    #[test]
+    fn commit_activity_presentation_is_redacted_and_fail_closed() {
+        let verified = ToolOutput {
+            content: vec![ToolContent::Text(
+                r#"{"status":"committed_verified","commit_oid":"0123456789abcdef0123456789abcdef01234567"}"#.to_owned(),
+            )],
+            is_error: false,
+        };
+        let presentation =
+            commit_activity_presentation(&verified).expect("verified result is presentable");
+        assert_eq!(
+            presentation.status,
+            super::CommitActivityStatus::CommittedVerified
+        );
+        assert_eq!(
+            presentation.commit_oid.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        let malformed = ToolOutput {
+            content: vec![ToolContent::Text(
+                r#"{"status":"uncertain","detail":"private"}"#.to_owned(),
+            )],
+            is_error: true,
+        };
+        assert!(commit_activity_presentation(&malformed).is_none());
     }
 
     #[test]
@@ -5582,7 +5719,8 @@ mod tests {
         )
         .expect("repository instruction sentinel should be written");
         let repository = fixture.desktop_repository();
-        let registry = desktop_tool_registry(Some(&repository)).expect("registry should build");
+        let registry =
+            desktop_tool_registry(Some(&repository), None).expect("registry should build");
         let definitions = registry.definitions();
         let names = definitions
             .iter()
@@ -5673,7 +5811,7 @@ mod tests {
         let fixture = TestRepository::new();
         let mut repository = fixture.desktop_repository();
         repository.root = fixture.0.join("missing-root");
-        assert!(desktop_tool_registry(Some(&repository)).is_err());
+        assert!(desktop_tool_registry(Some(&repository), None).is_err());
     }
 
     #[test]
@@ -5690,6 +5828,7 @@ mod tests {
         let event = ActivityEvent::Finished {
             tool: DESKTOP_TOOL_NAME.to_owned(),
             result: ActivityResult::Success,
+            commit: None,
         };
         let serialized = serde_json::to_string(&event).expect("activity event serializes");
 
@@ -5759,6 +5898,7 @@ mod tests {
                 ActivityEvent::Finished {
                     tool: "repo.edit-files".to_owned(),
                     result: ActivityResult::Failed,
+                    commit: None,
                 },
                 true,
             ))
@@ -5767,6 +5907,38 @@ mod tests {
         assert_eq!(
             serialized,
             r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
+        );
+    }
+
+    #[test]
+    fn verified_commit_activity_is_redacted_and_refreshes_the_repository() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.commit"),
+                input: ToolInput(serde_json::json!({"message": "bounded commit"})),
+            },
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output: ToolOutput {
+                content: vec![ToolContent::Text(
+                    r#"{"status":"committed_verified","commit_oid":"0123456789abcdef0123456789abcdef01234567"}"#.to_owned(),
+                )],
+                is_error: false,
+            },
+        };
+        let mut calls = HashMap::new();
+        assert!(activity_event(&requested, &mut calls).is_some());
+        let (event, refresh) = activity_event(&finished, &mut calls).expect("commit finishes");
+        assert!(refresh);
+        let serialized = serde_json::to_string(&event).expect("commit activity serializes");
+        assert_eq!(
+            serialized,
+            r#"{"kind":"tool_finished","tool":"repo.commit","result":"success","commit":{"status":"committed_verified","commitOid":"0123456789abcdef0123456789abcdef01234567"}}"#
         );
     }
 

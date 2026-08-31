@@ -234,6 +234,23 @@ function appendActivity(payload) {
   tool.textContent = payload.tool;
   state.textContent = labels[payload.kind] ?? "Unknown";
   entry.append(tool, state);
+  if (payload.commit) {
+    const commit = document.createElement("span");
+    const commitLabels = {
+      invalid_input: "Commit input rejected",
+      precondition_failed: "Commit not performed — review again",
+      known_no_effect: "Commit had no effect — review again",
+      committed_verified: "Commit verified",
+      uncertain: "Commit outcome uncertain — inspect manually; do not retry",
+    };
+    commit.textContent = commitLabels[payload.commit.status] ?? "Commit result unavailable";
+    entry.append(commit);
+    if (payload.commit.commitOid) {
+      const oid = document.createElement("code");
+      oid.textContent = payload.commit.commitOid;
+      entry.append(oid);
+    }
+  }
   entries.append(entry);
   while (entries.children.length > maxActivityEntries) {
     entries.firstElementChild.remove();
