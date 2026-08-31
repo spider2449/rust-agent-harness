@@ -5654,6 +5654,132 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_registry_commit_requires_its_paired_control_and_is_one_shot() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository = DesktopRepository::new(&TestRepository::native_git(), &fixture.0)
+            .expect("selected Git repository constructs");
+        fs::write(fixture.0.join("tracked.txt"), b"reviewed index bytes\n").unwrap();
+        assert!(
+            Command::new(TestRepository::native_git())
+                .args(["add", "tracked.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(fixture.0.join("tracked.txt"), b"unstaged bytes remain\n").unwrap();
+        fs::write(fixture.0.join("untracked.txt"), b"untracked bytes remain\n").unwrap();
+        let (tool, control) = RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .expect("Desktop commit capability composes");
+        let registry = desktop_tool_registry(Some(&repository), Some(Arc::new(tool)))
+            .expect("Desktop registry retains the composed tool");
+        let git = TestRepository::native_git();
+        let observe = |arguments: &[&str]| {
+            Command::new(&git)
+                .args(arguments)
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap()
+        };
+        let old_head = String::from_utf8(observe(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let count_before = String::from_utf8(observe(&["rev-list", "--count", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u64>()
+            .unwrap();
+        let call = || ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("repo.commit"),
+            input: ToolInput(serde_json::json!({"message": "reviewed desktop commit"})),
+        };
+
+        let unarmed = registry
+            .execute(call(), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(unarmed.is_error);
+        assert!(
+            matches!(&unarmed.content[0], ToolContent::Text(text) if text.contains("precondition_failed"))
+        );
+        assert_eq!(
+            String::from_utf8(observe(&["rev-parse", "HEAD"]).stdout)
+                .unwrap()
+                .trim(),
+            old_head
+        );
+
+        let (_, review) = control.review_current_staged_snapshot().await.unwrap();
+        control
+            .authorize_reviewed_snapshot(&review.expect("text review"))
+            .await
+            .unwrap();
+        let committed = registry
+            .execute(call(), ToolContext::default())
+            .await
+            .unwrap();
+        let presentation =
+            commit_activity_presentation(&committed).expect("sanitized verified result");
+        let new_head = String::from_utf8(observe(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(presentation.commit_oid.as_deref(), Some(new_head.as_str()));
+        assert_ne!(new_head, old_head);
+        assert_eq!(
+            String::from_utf8(observe(&["rev-parse", "HEAD^"]).stdout)
+                .unwrap()
+                .trim(),
+            old_head
+        );
+        assert_eq!(
+            String::from_utf8(observe(&["rev-list", "--count", "HEAD"]).stdout)
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap(),
+            count_before + 1
+        );
+        assert_eq!(
+            observe(&["show", "HEAD:tracked.txt"]).stdout,
+            b"reviewed index bytes\n"
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("tracked.txt")).unwrap(),
+            b"unstaged bytes remain\n"
+        );
+        assert!(
+            String::from_utf8(observe(&["status", "--porcelain=v1"]).stdout)
+                .unwrap()
+                .contains("?? untracked.txt")
+        );
+
+        let replay = registry
+            .execute(call(), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(replay.is_error);
+        assert!(
+            matches!(&replay.content[0], ToolContent::Text(text) if text.contains("precondition_failed"))
+        );
+        assert_eq!(
+            String::from_utf8(observe(&["rev-list", "--count", "HEAD"]).stdout)
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap(),
+            count_before + 1
+        );
+    }
+
     #[test]
     fn commit_activity_presentation_is_redacted_and_fail_closed() {
         let verified = ToolOutput {
