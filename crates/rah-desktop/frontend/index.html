@@ -59,6 +59,16 @@
           <button id="apply-model-configuration" type="button">Apply Model Configuration</button>
           <button id="reset-model-preferences" type="button">Reset Model Preferences</button>
         </section>
+        <section class="commit-identity" aria-labelledby="commit-identity-title">
+          <h2 id="commit-identity-title">Commit identity</h2>
+          <p id="commit-identity-state">Not configured</p>
+          <p class="model-hint">This chooses author and committer identity. It does not authorize a commit.</p>
+          <label for="commit-identity-name">Name</label>
+          <input id="commit-identity-name" type="text" maxlength="1024" />
+          <label for="commit-identity-email">Email</label>
+          <input id="commit-identity-email" type="text" maxlength="1024" />
+          <button id="save-commit-identity" type="button">Save Identity</button>
+        </section>
         <section class="repository" aria-labelledby="repository-title">
           <h2 id="repository-title">Repository</h2>
           <p id="repository-error" class="connection-error" hidden></p>
@@ -75,6 +85,7 @@
           <div id="staged-diff-entries" class="repository-diff"></div>
           <h3>Staged Review</h3>
           <p id="staged-review-state">No staged changes</p>
+          <button id="authorize-commit" type="button" hidden>Authorize Commit</button>
         </section>
         <section class="chat" aria-labelledby="chat-title">
           <h2 id="chat-title">Chat</h2>

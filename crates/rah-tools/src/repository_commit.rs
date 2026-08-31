@@ -23,6 +23,8 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError, ToolInput,
     git_stage::repository_lease,
     git_support::git_error,
+    repository_diff::{DiffBaseline, contains_binary_content, execute_fixed_diff_while_leased},
+    repository_observer::RepositoryObserver,
     repository_observer::{FileIdentity, RepositoryIdentity},
 };
 
@@ -85,6 +87,19 @@ struct CommitSnapshot {
     tree: String,
 }
 
+/// Opaque host-only binding between one complete staged-review presentation and
+/// its semantic commit state. It deliberately has no public constructor and
+/// is neither serializable nor a Tool input.
+pub struct RepositoryCommitReview {
+    generation: uuid::Uuid,
+    branch: String,
+    old_head: String,
+    staged_entries_sha256: [u8; 32],
+    tree: String,
+    #[allow(dead_code)] // Retained only to bind this opaque review to its display.
+    presentation_sha256: [u8; 32],
+}
+
 /// One host-selected repository, executable, identity, and empty hook root.
 /// Construction is deliberately private: no model input can select any field.
 struct RepositoryCommitPolicy {
@@ -138,9 +153,76 @@ impl RepositoryCommitPolicy {
 
     async fn authorize(&self) -> Result<ReviewedCommitAuthorization, ToolError> {
         let _lease = self.acquire_lease().await;
+        self.ensure_staged_content_is_authorizable().await?;
         let snapshot = self.capture_snapshot().await?;
         #[cfg(test)]
         test_phase::hit(test_phase::Phase::AfterAuthorization, self)?;
+        Ok(ReviewedCommitAuthorization {
+            generation: self.generation,
+            branch: snapshot.branch,
+            old_head: snapshot.old_head,
+            raw_index_sha256: snapshot.raw_index_sha256,
+            staged_entries_sha256: snapshot.staged_entries_sha256,
+            tree: snapshot.tree,
+        })
+    }
+
+    async fn review(&self) -> Result<(ToolOutput, Option<RepositoryCommitReview>), ToolError> {
+        let _lease = self.acquire_lease().await;
+        let before = self.capture_snapshot().await?;
+        let observer = RepositoryObserver::new(&self.git, self.repository.root())?;
+        let presentation =
+            execute_fixed_diff_while_leased(&observer, DiffBaseline::IndexVsHead).await?;
+        let after = self.capture_snapshot().await?;
+        if !same_review_semantics(&before, &after) {
+            return Err(git_error("staged review changed during observation"));
+        }
+        if contains_binary_content(&presentation)? {
+            return Ok((presentation, None));
+        }
+        let bytes = serde_json::to_vec(&presentation)
+            .map_err(|_| git_error("staged review presentation was invalid"))?;
+        Ok((
+            presentation,
+            Some(RepositoryCommitReview {
+                generation: self.generation,
+                branch: after.branch,
+                old_head: after.old_head,
+                staged_entries_sha256: after.staged_entries_sha256,
+                tree: after.tree,
+                presentation_sha256: Sha256::digest(bytes).into(),
+            }),
+        ))
+    }
+
+    async fn ensure_staged_content_is_authorizable(&self) -> Result<(), ToolError> {
+        let observer = RepositoryObserver::new(&self.git, self.repository.root())?;
+        let presentation =
+            execute_fixed_diff_while_leased(&observer, DiffBaseline::IndexVsHead).await?;
+        if contains_binary_content(&presentation)? {
+            return Err(git_error(
+                "binary staged changes are not authorizable in this release",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn authorize_review(
+        &self,
+        review: &RepositoryCommitReview,
+    ) -> Result<ReviewedCommitAuthorization, ToolError> {
+        let _lease = self.acquire_lease().await;
+        if review.generation != self.generation {
+            return Err(git_error("review belongs to a different commit policy"));
+        }
+        let snapshot = self.capture_snapshot().await?;
+        if snapshot.branch != review.branch
+            || snapshot.old_head != review.old_head
+            || snapshot.staged_entries_sha256 != review.staged_entries_sha256
+            || snapshot.tree != review.tree
+        {
+            return Err(git_error("reviewed staged snapshot changed"));
+        }
         Ok(ReviewedCommitAuthorization {
             generation: self.generation,
             branch: snapshot.branch,
@@ -507,6 +589,40 @@ pub struct RepositoryCommitControl {
 }
 
 impl RepositoryCommitControl {
+    /// Observes the normalized staged presentation and, only when all staged
+    /// content is supported, an opaque semantic binding under one RAH
+    /// repository lease. The presentation hash is only a correspondence check;
+    /// it is not commit authority.
+    pub async fn review_current_staged_snapshot(
+        &self,
+    ) -> Result<(ToolOutput, Option<RepositoryCommitReview>), ToolError> {
+        self.policy.review().await
+    }
+
+    /// Revokes the in-memory one-shot authorization without exposing it.
+    pub async fn clear_authorization(&self) {
+        self.pending.lock().await.take();
+    }
+
+    /// Compares a host-created review with the current semantic state and arms
+    /// a fresh ADR 0016 snapshot while retaining one lease throughout.
+    pub async fn authorize_reviewed_snapshot(
+        &self,
+        review: &RepositoryCommitReview,
+    ) -> Result<(), ToolError> {
+        // A new explicit request never leaves an older approval active when it
+        // fails. The review is then compared and captured under one lease.
+        self.clear_authorization().await;
+        let authorization = self.policy.authorize_review(review).await?;
+        *self.pending.lock().await = Some(authorization);
+        Ok(())
+    }
+
+    /// Redacted status seam for host UI state; the authorization itself never
+    /// crosses this boundary.
+    pub async fn has_pending_authorization(&self) -> bool {
+        self.pending.lock().await.is_some()
+    }
     /// Captures the current reviewed staged snapshot. An explicit later call
     /// replaces an unused authorization rather than queuing commit authority.
     pub async fn authorize_current_reviewed_snapshot(&self) -> Result<(), ToolError> {
@@ -514,6 +630,13 @@ impl RepositoryCommitControl {
         *self.pending.lock().await = Some(authorization);
         Ok(())
     }
+}
+
+fn same_review_semantics(left: &CommitSnapshot, right: &CommitSnapshot) -> bool {
+    left.branch == right.branch
+        && left.old_head == right.old_head
+        && left.staged_entries_sha256 == right.staged_entries_sha256
+        && left.tree == right.tree
 }
 
 /// The narrow message-only model-facing adapter for one host-composed policy.
@@ -1231,6 +1354,198 @@ mod tests {
             .unwrap();
         assert!(
             matches!(&replay.content[0], ToolContent::Text(value) if value.contains("precondition_failed"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opaque_review_authorizes_only_unchanged_matching_policy_state() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"reviewed\n");
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let review = review.expect("text staged content has an opaque review");
+        control.authorize_reviewed_snapshot(&review).await.unwrap();
+        assert!(control.has_pending_authorization().await);
+
+        stage(&git, &root, b"changed after review\n");
+        assert!(control.authorize_reviewed_snapshot(&review).await.is_err());
+        assert!(!control.has_pending_authorization().await);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_staged_content_never_produces_or_arms_a_review() {
+        let (git, root) = fixture();
+        fs::write(root.join("binary.dat"), [0_u8, 159, 146, 150]).unwrap();
+        assert!(
+            Command::new(&git)
+                .args(["add", "binary.dat"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let head_before = Command::new(&git)
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let refs_before = Command::new(&git)
+            .args(["show-ref", "--head"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let worktree_before = fs::read(root.join("binary.dat")).unwrap();
+
+        let (presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        assert!(contains_binary_content(&presentation).unwrap());
+        assert!(review.is_none());
+        let index_before = fs::read(root.join(".git/index")).unwrap();
+        assert!(control.authorize_current_reviewed_snapshot().await.is_err());
+        assert!(!control.has_pending_authorization().await);
+        assert_eq!(
+            Command::new(&git)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+            head_before.stdout
+        );
+        assert_eq!(
+            Command::new(&git)
+                .args(["show-ref", "--head"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+            refs_before.stdout
+        );
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index_before);
+        assert_eq!(fs::read(root.join("binary.dat")).unwrap(), worktree_before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opaque_review_is_refused_by_another_policy() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"reviewed\n");
+        let (_first_tool, first) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_second_tool, second) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_presentation, review) = first.review_current_staged_snapshot().await.unwrap();
+        let review = review.expect("text staged content has an opaque review");
+        assert!(second.authorize_reviewed_snapshot(&review).await.is_err());
+        assert!(!second.has_pending_authorization().await);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opaque_review_refuses_external_head_change_without_commit_effect() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"reviewed\n");
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let review = review.expect("text staged content has an opaque review");
+        assert!(
+            Command::new(&git)
+                .args(["commit", "--quiet", "--allow-empty", "-m", "external"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(control.authorize_reviewed_snapshot(&review).await.is_err());
+        assert!(!control.has_pending_authorization().await);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorizing_an_opaque_review_never_invokes_commit() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"reviewed\n");
+        let before_head = Command::new(&git)
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let before_status = Command::new(&git)
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let before_count = Command::new(&git)
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let review = review.expect("text staged content has an opaque review");
+        control.authorize_reviewed_snapshot(&review).await.unwrap();
+        assert_eq!(
+            Command::new(&git)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+            before_head.stdout
+        );
+        assert_eq!(
+            Command::new(&git)
+                .args(["status", "--porcelain=v1"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+            before_status.stdout
+        );
+        assert_eq!(
+            Command::new(&git)
+                .args(["rev-list", "--count", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+            before_count.stdout
         );
         fs::remove_dir_all(root).unwrap();
     }

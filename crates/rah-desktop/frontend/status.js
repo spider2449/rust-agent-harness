@@ -20,6 +20,7 @@ let activeAssistant = null;
 let resumeAvailable = false;
 let resumeUsed = false;
 let renderedModelConfiguration = null;
+let renderedCommitReview = null;
 const maxActivityEntries = 100;
 
 const tauriApiRetryDelayMs = 100;
@@ -86,6 +87,11 @@ function errorMessage(error) {
     repository_action_stale: "Repository changed after it was displayed. Refresh and choose a new action.",
     model_configuration_invalid: "Invalid model configuration",
     model_configuration_busy: "Model configuration is unavailable while chat is running",
+    commit_identity_invalid: "Commit identity is invalid",
+    commit_identity_save_failed: "Commit identity could not be saved",
+    commit_authorization_unavailable: "Commit authorization is unavailable. Refresh and reconnect if needed.",
+    commit_authorization_stale: "The staged review is stale. Refresh and review again.",
+    commit_authorization_failed: "Commit authorization failed. Refresh and review again.",
     preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
@@ -179,12 +185,20 @@ function renderRepositorySnapshot(snapshot) {
   }) : [emptyEntry("Working tree clean")]));
   renderDiff(document.querySelector("#worktree-diff-entries"), snapshot.worktreeDiff);
   renderDiff(document.querySelector("#staged-diff-entries"), snapshot.stagedDiff);
-  document.querySelector("#staged-review-state").textContent = ({
+  renderedCommitReview = snapshot.review;
+  const reviewState = ({
     no_staged_changes: "No staged changes",
     review_available: "Review available — complete within bounded observation",
     review_binary_unsupported: "Binary staged content — review is not authorizable in v0.12",
     review_unavailable: "Review unavailable",
   }[snapshot.review.state] ?? "Review unavailable");
+  const authorization = snapshot.review.authorizationState;
+  document.querySelector("#staged-review-state").textContent = authorization === "authorized_pending"
+    ? "Authorized for one future commit request"
+    : reviewState;
+  const authorize = document.querySelector("#authorize-commit");
+  authorize.hidden = !snapshot.review.canAuthorize;
+  authorize.disabled = !snapshot.review.canAuthorize;
 }
 
 function emptyEntry(text) {
@@ -389,15 +403,18 @@ async function toggleCodexConnection(invoke) {
   const error = document.querySelector("#connection-error");
   button.disabled = true;
   error.hidden = true;
+  let disconnected = false;
   try {
     const status = await invoke("app_status");
-    await invoke(status.codexStatus === "connected" ? "disconnect_codex" : "connect_codex");
+    disconnected = status.codexStatus === "connected";
+    await invoke(disconnected ? "disconnect_codex" : "connect_codex");
   } catch (connectionError) {
     error.textContent = errorMessage(connectionError);
     error.hidden = false;
   } finally {
     try {
       await loadStatus(invoke);
+      if (disconnected) await refreshRepository(invoke);
     } catch (statusError) {
       console.error("failed to refresh desktop status", statusError);
       showBackendError();
@@ -471,6 +488,33 @@ async function initializeDesktop() {
       await loadStatus(invoke);
     } catch (error) {
       showChatError(error);
+    }
+  });
+  document.querySelector("#save-commit-identity").addEventListener("click", async () => {
+    try {
+      await invoke("set_commit_identity", {
+        name: document.querySelector("#commit-identity-name").value,
+        email: document.querySelector("#commit-identity-email").value,
+      });
+      const identity = await invoke("commit_identity");
+      document.querySelector("#commit-identity-state").textContent = identity.configured ? "Configured" : "Not configured";
+      await refreshRepository(invoke);
+      await loadStatus(invoke);
+    } catch (error) {
+      document.querySelector("#repository-error").textContent = errorMessage(error);
+      document.querySelector("#repository-error").hidden = false;
+    }
+  });
+  document.querySelector("#authorize-commit").addEventListener("click", async () => {
+    if (!renderedCommitReview?.reviewId) return;
+    try {
+      const result = await invoke("repository_authorize_commit_review", { reviewId: renderedCommitReview.reviewId });
+      document.querySelector("#staged-review-state").textContent = result.authorizationState === "authorized_pending"
+        ? "Authorized for one future commit request" : "Review authorization unavailable";
+      document.querySelector("#authorize-commit").hidden = true;
+    } catch (error) {
+      document.querySelector("#repository-error").textContent = errorMessage(error);
+      document.querySelector("#repository-error").hidden = false;
     }
   });
   document.querySelector(".repository").addEventListener("click", async (event) => {
@@ -600,6 +644,8 @@ async function initializeDesktop() {
   await loadStatus(invoke);
   await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);
+  const identity = await invoke("commit_identity");
+  document.querySelector("#commit-identity-state").textContent = identity.configured ? "Configured" : "Not configured";
   const preferencesWarning = await invoke("desktop_preferences_warning");
   if (preferencesWarning) {
     const error = document.querySelector("#model-error");

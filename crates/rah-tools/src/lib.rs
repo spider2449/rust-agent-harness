@@ -41,7 +41,9 @@ pub use git_stage::{GIT_STAGE_TOOL_NAME, GitStageTool};
 pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
 pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
-pub use repository_commit::{RepositoryCommitControl, RepositoryCommitTool};
+pub use repository_commit::{
+    RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
+};
 pub use repository_create_file::{REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryFileCreationTool};
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};

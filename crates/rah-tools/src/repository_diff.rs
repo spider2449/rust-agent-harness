@@ -88,6 +88,16 @@ pub(crate) async fn execute_fixed_diff(
 ) -> Result<ToolOutput, ToolError> {
     validate_empty_request(input)?;
     let _lease = observer.acquire_lease().await;
+    execute_fixed_diff_while_leased(observer, baseline).await
+}
+
+/// Runs the fixed observation while the caller owns this repository's RAH
+/// lease. This remains crate-private so host code cannot turn it into a
+/// generic Git observation API.
+pub(crate) async fn execute_fixed_diff_while_leased(
+    observer: &RepositoryObserver,
+    baseline: DiffBaseline,
+) -> Result<ToolOutput, ToolError> {
     observer.revalidate()?;
     let started = Instant::now();
     let before_head = match baseline {
@@ -122,6 +132,30 @@ pub(crate) async fn execute_fixed_diff(
         baseline,
         before_head.flatten(),
     )
+}
+
+/// Returns whether a successful normalized diff contains any binary entry.
+///
+/// This keeps consumers of the fixed diff on its structural binary
+/// classification rather than attempting to rediscover binary content from
+/// paths or patch presentation.
+pub(crate) fn contains_binary_content(output: &ToolOutput) -> Result<bool, ToolError> {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return Err(diff_error("normalized result had an unexpected shape"));
+    };
+    if output.is_error {
+        return Err(diff_error("normalized result was an error"));
+    }
+    let files = value
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| diff_error("normalized result had no files"))?;
+    files.iter().try_fold(false, |has_binary, file| {
+        file.get("binary")
+            .and_then(Value::as_bool)
+            .map(|binary| has_binary || binary)
+            .ok_or_else(|| diff_error("normalized file had no binary classification"))
+    })
 }
 
 fn ensure_same_head(before: &Option<String>, after: Option<String>) -> Result<(), ToolError> {

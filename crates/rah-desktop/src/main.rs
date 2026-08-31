@@ -34,10 +34,10 @@ use rah_runtime_codex::{
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
-    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryDiffStagedTool,
-    RepositoryDiffTool, RepositoryFileCreationTool, RepositoryFileInfoTool,
-    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry,
+    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryCommitControl,
+    RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryFileCreationTool, RepositoryFileInfoTool, RepositoryMultiFileEditTool,
+    RepositoryStatusTool, RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,8 @@ const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Empty, Desktop-owned child directory used when no project is selected.
 #[cfg(target_os = "windows")]
 const NEUTRAL_WORKSPACE_DIRECTORY: &str = "codex-neutral-workspace";
+#[cfg(target_os = "windows")]
+const COMMIT_IDENTITY_MAX_BYTES: usize = 1024;
 
 /// Test-only evidence that constructing Desktop state does not activate optional authorities.
 #[cfg(all(test, target_os = "windows"))]
@@ -313,6 +315,9 @@ struct DesktopAppState {
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     repository_workflow: Mutex<RepositoryWorkflowState>,
+    commit_identity: Mutex<Option<DesktopCommitIdentity>>,
+    commit_identity_generation: Mutex<u64>,
+    commit_capability: Mutex<Option<DesktopCommitCapability>>,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -369,6 +374,7 @@ impl DesktopAppState {
     fn new(storage_directory: PathBuf) -> Self {
         let neutral_workspace = neutral_workspace(&storage_directory);
         let (preferences, selection) = Preferences::start(storage_directory.clone());
+        let identity = preferences.identity();
         let mut persistence = Persistence::start(storage_directory);
         // Startup has no selected repository. Bind presentation and any future
         // writes to the neutral namespace immediately; legacy global records
@@ -382,6 +388,9 @@ impl DesktopAppState {
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
+            commit_identity: Mutex::new(identity),
+            commit_identity_generation: Mutex::new(0),
+            commit_capability: Mutex::new(None),
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
@@ -438,6 +447,7 @@ struct ConversationContextIdentity {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ConversationContextChange {
@@ -908,6 +918,43 @@ impl DesktopRepository {
     }
 }
 
+/// Explicit human author/committer preference. It is configuration only and
+/// never constitutes reviewed-snapshot authority.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCommitIdentity {
+    name: String,
+    email: String,
+}
+
+#[cfg(target_os = "windows")]
+impl DesktopCommitIdentity {
+    fn validate(&self) -> Result<(), ()> {
+        for value in [&self.name, &self.email] {
+            if value.is_empty()
+                || value.trim().is_empty()
+                || value.len() > COMMIT_IDENTITY_MAX_BYTES
+                || value
+                    .chars()
+                    .any(|character| character == '\0' || character.is_control())
+            {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct DesktopCommitCapability {
+    repository_generation: u64,
+    model_generation: u64,
+    identity_generation: u64,
+    _tool: RepositoryCommitTool,
+    control: Arc<RepositoryCommitControl>,
+}
+
 /// Ephemeral, Rust-owned selectors for one observed index mutation. They are
 /// regenerated on every repository observation and are never persisted.
 #[cfg(target_os = "windows")]
@@ -917,6 +964,9 @@ struct RepositoryWorkflowState {
     next_action: u64,
     actions: HashMap<String, RepositoryIndexAction>,
     review: Option<StagedReviewDescriptor>,
+    commit_review: Option<RepositoryCommitReview>,
+    review_selector: Option<String>,
+    authorization: CommitAuthorizationPresentation,
 }
 
 #[cfg(target_os = "windows")]
@@ -955,6 +1005,23 @@ struct StagedReviewDescriptor {
     binary_supported: bool,
 }
 
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CommitAuthorizationPresentation {
+    IdentityNotConfigured,
+    ConnectionRequired,
+    #[default]
+    ReviewRequired,
+    ReadyToAuthorize,
+    AuthorizedPending,
+    ReviewStale,
+    AuthorizationFailed,
+    AuthorizationRevoked,
+}
+
+#[cfg(target_os = "windows")]
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -995,6 +1062,11 @@ pub(crate) enum FrontendError {
     RepositoryActionStale,
     ModelConfigurationInvalid,
     ModelConfigurationBusy,
+    CommitIdentityInvalid,
+    CommitIdentitySaveFailed,
+    CommitAuthorizationUnavailable,
+    CommitAuthorizationStale,
+    CommitAuthorizationFailed,
 }
 
 #[cfg(target_os = "windows")]
@@ -1565,6 +1637,79 @@ fn set_model_configuration(
     {
         emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
     }
+    *state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitIdentityPresentation {
+    configured: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn commit_identity(state: State<'_, DesktopAppState>) -> CommitIdentityPresentation {
+    CommitIdentityPresentation {
+        configured: state
+            .commit_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_commit_identity(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+    name: String,
+    email: String,
+) -> Result<(), FrontendError> {
+    let identity = DesktopCommitIdentity { name, email };
+    identity
+        .validate()
+        .map_err(|_| FrontendError::CommitIdentityInvalid)?;
+    let selection = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .selection
+        .clone();
+    state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .save_identity(&selection, identity.clone())
+        .map_err(|_| {
+            emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
+            FrontendError::CommitIdentitySaveFailed
+        })?;
+    *state
+        .commit_identity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity);
+    *state
+        .commit_identity_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    *state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
     Ok(())
 }
 
@@ -1835,12 +1980,23 @@ struct CanonicalStagedReviewFile<'a> {
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum StagedReviewPresentation {
     NoStagedChanges,
-    ReviewAvailable,
+    ReviewAvailable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        review_id: Option<String>,
+        can_authorize: bool,
+        authorization_state: CommitAuthorizationPresentation,
+    },
     ReviewBinaryUnsupported,
-    ReviewUnavailable { reason: &'static str },
+    ReviewUnavailable {
+        reason: &'static str,
+    },
 }
 
 #[cfg(target_os = "windows")]
@@ -1966,7 +2122,11 @@ fn desktop_snapshot(
     } else if staged_diff.iter().any(|file| file.binary) {
         StagedReviewPresentation::ReviewBinaryUnsupported
     } else {
-        StagedReviewPresentation::ReviewAvailable
+        StagedReviewPresentation::ReviewAvailable {
+            review_id: None,
+            can_authorize: false,
+            authorization_state: CommitAuthorizationPresentation::ReviewRequired,
+        }
     };
     Ok(RepositorySnapshot {
         path,
@@ -1978,9 +2138,10 @@ fn desktop_snapshot(
 }
 
 #[cfg(target_os = "windows")]
-async fn desktop_repository_snapshot(
+async fn desktop_repository_snapshot_with_review(
     repository: &DesktopRepository,
-) -> Result<RepositorySnapshot, RepositoryObservationStage> {
+    commit_control: Option<Arc<RepositoryCommitControl>>,
+) -> Result<(RepositorySnapshot, Option<RepositoryCommitReview>), RepositoryObservationStage> {
     let input = ToolInput(serde_json::json!({}));
     let status = repository
         .status
@@ -1992,18 +2153,39 @@ async fn desktop_repository_snapshot(
         .execute(input.clone(), ToolContext::default())
         .await
         .map_err(|_| RepositoryObservationStage::WorktreeDiffExecution)?;
-    let staged_diff = repository
-        .staged_diff
-        .execute(input, ToolContext::default())
-        .await
-        .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?;
+    let (staged_diff, review) = if let Some(control) = commit_control {
+        let (presentation, review) = control
+            .review_current_staged_snapshot()
+            .await
+            .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?;
+        (presentation, review)
+    } else {
+        (
+            repository
+                .staged_diff
+                .execute(input, ToolContext::default())
+                .await
+                .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?,
+            None,
+        )
+    };
     desktop_snapshot(
         repository.display_path.clone(),
         status,
         worktree_diff,
         staged_diff,
     )
+    .map(|snapshot| (snapshot, review))
     .map_err(|_| RepositoryObservationStage::NormalizedOutput)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+async fn desktop_repository_snapshot(
+    repository: &DesktopRepository,
+) -> Result<RepositorySnapshot, RepositoryObservationStage> {
+    desktop_repository_snapshot_with_review(repository, None)
+        .await
+        .map(|(snapshot, _)| snapshot)
 }
 
 #[cfg(target_os = "windows")]
@@ -2107,6 +2289,8 @@ fn install_repository_workflow(
     repository: &DesktopRepository,
     repository_generation: u64,
     mut snapshot: RepositorySnapshot,
+    commit_review: Option<RepositoryCommitReview>,
+    identity_generation: u64,
 ) -> RepositorySnapshot {
     let mut workflow = state
         .repository_workflow
@@ -2115,9 +2299,15 @@ fn install_repository_workflow(
     workflow.observation_generation += 1;
     workflow.actions.clear();
     workflow.review = None;
+    workflow.commit_review = None;
+    workflow.review_selector = None;
+    workflow.authorization = CommitAuthorizationPresentation::AuthorizationRevoked;
     let observation_generation = workflow.observation_generation;
-    let review_digest = matches!(snapshot.review, StagedReviewPresentation::ReviewAvailable)
-        .then(|| staged_review_digest(&snapshot.staged_diff));
+    let review_digest = matches!(
+        snapshot.review,
+        StagedReviewPresentation::ReviewAvailable { .. }
+    )
+    .then(|| staged_review_digest(&snapshot.staged_diff));
     for entry in &mut snapshot.status_entries {
         let Some(target) = observe_regular_target(&repository.root, &entry.path) else {
             if !entry.tracked && entry.worktree_state == "untracked" {
@@ -2196,6 +2386,21 @@ fn install_repository_workflow(
             binary_supported: true,
         });
     }
+    if let Some(commit_review) = commit_review {
+        workflow.next_action += 1;
+        let selector = format!(
+            "review-{repository_generation}-{observation_generation}-{identity_generation}-{}",
+            workflow.next_action
+        );
+        workflow.commit_review = Some(commit_review);
+        workflow.review_selector = Some(selector.clone());
+        workflow.authorization = CommitAuthorizationPresentation::ReadyToAuthorize;
+        snapshot.review = StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(selector),
+            can_authorize: true,
+            authorization_state: workflow.authorization,
+        };
+    }
     snapshot
 }
 
@@ -2217,17 +2422,65 @@ async fn refresh_repository_workflow(
     let Some(repository) = repository else {
         return Err(FrontendError::RepositoryNotSelected);
     };
-    let snapshot = match desktop_repository_snapshot(&repository).await {
+    let (control, identity_generation) = {
+        let model_generation = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
+        let connected_context_current = matches!(
+            &*state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ConnectionState::Connected {
+                repository_generation,
+                model_generation: connected_model_generation,
+                ..
+            } if *repository_generation == generation
+                && *connected_model_generation == model_generation
+        );
+        let identity_generation = *state
+            .commit_identity_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let capability = state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            capability
+                .as_ref()
+                .filter(|capability| {
+                    connected_context_current
+                        && capability.repository_generation == generation
+                        && capability.model_generation == model_generation
+                        && capability.identity_generation == identity_generation
+                })
+                .map(|capability| Arc::clone(&capability.control)),
+            identity_generation,
+        )
+    };
+    // Task 148 intentionally treats every explicit observation refresh as an
+    // authorization boundary, even if the staged presentation is identical.
+    if let Some(control) = &control {
+        control.clear_authorization().await;
+    }
+    let result = desktop_repository_snapshot_with_review(&repository, control).await;
+    let (snapshot, review) = match result {
         Ok(snapshot) => snapshot,
-        Err(_) => RepositorySnapshot {
-            path: repository.display_path.clone(),
-            status_entries: Vec::new(),
-            worktree_diff: Vec::new(),
-            staged_diff: Vec::new(),
-            review: StagedReviewPresentation::ReviewUnavailable {
-                reason: "bounded staged observation failed",
+        Err(_) => (
+            RepositorySnapshot {
+                path: repository.display_path.clone(),
+                status_entries: Vec::new(),
+                worktree_diff: Vec::new(),
+                staged_diff: Vec::new(),
+                review: StagedReviewPresentation::ReviewUnavailable {
+                    reason: "bounded staged observation failed",
+                },
             },
-        },
+            None,
+        ),
     };
     if *state
         .repository_generation
@@ -2242,11 +2495,35 @@ async fn refresh_repository_workflow(
         &repository,
         generation,
         snapshot,
+        review,
+        identity_generation,
     ))
 }
 
 #[cfg(target_os = "windows")]
+async fn revoke_repository_commit_context(state: &DesktopAppState) {
+    let capability = state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(capability) = capability {
+        // Dropping Desktop's capability must not rely on every Arc holder
+        // disappearing before the one-shot approval becomes unusable.
+        capability.control.clear_authorization().await;
+    }
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+}
+
+#[cfg(target_os = "windows")]
 fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepository) {
+    *state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     *state
         .repository
         .lock()
@@ -2313,6 +2590,100 @@ async fn repository_snapshot(
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitAuthorizationResult {
+    authorization_state: CommitAuthorizationPresentation,
+}
+
+#[cfg(target_os = "windows")]
+async fn authorize_repository_commit_review(
+    state: &DesktopAppState,
+    review_id: &str,
+) -> Result<CommitAuthorizationResult, FrontendError> {
+    let repository_generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let model_generation = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generation;
+    let identity_generation = *state
+        .commit_identity_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let control = state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|capability| {
+            capability.repository_generation == repository_generation
+                && capability.model_generation == model_generation
+                && capability.identity_generation == identity_generation
+        })
+        .map(|capability| Arc::clone(&capability.control))
+        .ok_or(FrontendError::CommitAuthorizationUnavailable)?;
+    // Every explicit human attempt supersedes any earlier one-shot approval,
+    // including stale or duplicate selector submissions.
+    control.clear_authorization().await;
+    let review = {
+        let mut workflow = state
+            .repository_workflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let valid = workflow.review.as_ref().is_some_and(|review| {
+            review.repository_generation == repository_generation
+                && review.observation_generation == workflow.observation_generation
+                && review.complete
+                && review.binary_supported
+        }) && workflow.review_selector.as_deref() == Some(review_id);
+        if !valid {
+            workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
+            return Err(FrontendError::CommitAuthorizationStale);
+        }
+        match workflow.commit_review.take() {
+            Some(review) => review,
+            None => {
+                workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
+                return Err(FrontendError::CommitAuthorizationStale);
+            }
+        }
+    };
+    match control.authorize_reviewed_snapshot(&review).await {
+        Ok(()) => {
+            let mut workflow = state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workflow.authorization = CommitAuthorizationPresentation::AuthorizedPending;
+            Ok(CommitAuthorizationResult {
+                authorization_state: workflow.authorization,
+            })
+        }
+        Err(_) => {
+            let mut workflow = state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
+            Err(FrontendError::CommitAuthorizationFailed)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn repository_authorize_commit_review(
+    state: State<'_, DesktopAppState>,
+    review_id: String,
+) -> Result<CommitAuthorizationResult, FrontendError> {
+    authorize_repository_commit_review(state.inner(), &review_id).await
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RepositoryIndexActionResult {
@@ -2330,6 +2701,15 @@ async fn repository_index_action(
     action_id: String,
     kind: RepositoryIndexActionKind,
 ) -> Result<RepositoryIndexActionResult, FrontendError> {
+    let control = state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|capability| Arc::clone(&capability.control));
+    if let Some(control) = control {
+        control.clear_authorization().await;
+    }
     let generation = *state
         .repository_generation
         .lock()
@@ -2647,6 +3027,7 @@ async fn connect_codex(
             }
         }
     };
+    let capability_repository = repository.clone();
     match resolve_prepare_and_connect_codex(
         resolve_codex_executable,
         model_config,
@@ -2696,6 +3077,36 @@ async fn connect_codex(
                 repository_generation,
                 model_generation,
             };
+            drop(connection);
+            let identity = state
+                .commit_identity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let identity_generation = *state
+                .commit_identity_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let (Some(repository), Some(identity)) = (capability_repository, identity)
+                && let Ok((tool, control)) = RepositoryCommitTool::compose(
+                    &repository.git_executable,
+                    &repository.root,
+                    identity.name,
+                    identity.email,
+                )
+            {
+                *state
+                    .commit_capability
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(DesktopCommitCapability {
+                        repository_generation,
+                        model_generation,
+                        identity_generation,
+                        _tool: tool,
+                        control: Arc::new(control),
+                    });
+            }
             Ok(ConnectionResult::connected())
         }
         Err(frontend_error) => {
@@ -2723,6 +3134,7 @@ async fn disconnect_codex(
         return Err(FrontendError::ChatAlreadyRunning);
     }
     let runtime = {
+        revoke_repository_commit_context(state.inner()).await;
         let mut connection = state
             .connection
             .lock()
@@ -3331,14 +3743,17 @@ fn main() -> ExitCode {
         .invoke_handler(tauri::generate_handler![
             app_status,
             model_configuration,
+            commit_identity,
             desktop_preferences_warning,
             set_model_configuration,
+            set_commit_identity,
             reset_model_preferences,
             test_llama_cpp_endpoint,
             choose_repository,
             connect_codex,
             disconnect_codex,
             repository_snapshot,
+            repository_authorize_commit_review,
             repository_stage_action,
             repository_unstage_action,
             send_chat,
@@ -3383,24 +3798,26 @@ mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
     use super::{
         ActivityEvent, ActivityResult, CancelRecoveryOutcome, ChatEvent, ChatState,
-        CodexExecutableSourcePresentation, ConnectRequest, ConnectionState,
-        ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME, DesktopAppState,
-        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
-        DesktopRepository, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
-        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
-        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
+        CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
+        ConnectionState, ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME,
+        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
+        FrontendError, GracefulCancelOutcome, HardShutdownOutcome, LlamaCppReadinessProbe,
+        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
+        ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
         PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState,
         RepositoryIndexActionKind, RepositoryObservationStage, ResumePair, SendChatResult,
-        TerminalOwnership, activity_event, apply_model_selection, await_cancel_recovery,
-        await_graceful_cancel, await_hard_shutdown, begin_chat, clear_conversation_allowed,
-        connect_prepared_codex, connection_context_is_current, current_app_status,
-        desktop_repository_snapshot, desktop_tool_registry, frontend_error,
-        model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        refresh_repository_workflow, replace_selected_repository, repository_index_action,
-        repository_selection_allowed, repository_tool_authority, request_connect,
-        resolve_codex_executable, resolve_prepare_and_connect_codex, same_arc,
-        selected_git_executable, validate_prompt,
+        StagedReviewPresentation, TerminalOwnership, activity_event, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, clear_conversation_allowed, connect_prepared_codex,
+        connection_context_is_current, current_app_status, desktop_repository_snapshot,
+        desktop_repository_snapshot_with_review, desktop_tool_registry, frontend_error,
+        install_repository_workflow, model_configuration_status, prepare_codex_connection,
+        publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
+        repository_index_action, repository_selection_allowed, repository_tool_authority,
+        request_connect, resolve_codex_executable, resolve_prepare_and_connect_codex,
+        revoke_repository_commit_context, same_arc, selected_git_executable, validate_prompt,
     };
     use futures::StreamExt;
     use rah_protocol::{
@@ -3412,7 +3829,7 @@ mod tests {
         CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
         CodexRuntime,
     };
-    use rah_tools::ToolContext;
+    use rah_tools::{RepositoryCommitTool, ToolContext};
     use std::{
         collections::HashMap,
         ffi::OsString,
@@ -3849,6 +4266,536 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn restored_identity_and_fresh_bound_review_serialize_authorize_presentation() {
+        let storage = TestRepository::new();
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        };
+        let initial = DesktopAppState::new(storage.0.clone());
+        let selection = initial.model.lock().unwrap().selection.clone();
+        initial
+            .preferences
+            .lock()
+            .unwrap()
+            .save_identity(&selection, identity.clone())
+            .expect("identity persists before restart");
+        drop(initial);
+
+        let state = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            *state.commit_identity.lock().unwrap(),
+            Some(identity.clone())
+        );
+        assert!(state.commit_capability.lock().unwrap().is_none());
+
+        let repository = TestRepository::git_repository(GitRepositoryState::Staged);
+        let git = TestRepository::native_git();
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&git, &repository.0).expect("staged repository constructs"),
+        );
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let selected = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("repository remains selected");
+        let (tool, control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            identity.name,
+            identity.email,
+        )
+        .expect("current paired commit capability constructs");
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: tool,
+            control: Arc::new(control),
+        });
+
+        let control = state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control));
+        let (snapshot, review) = desktop_repository_snapshot_with_review(&selected, control)
+            .await
+            .expect("fresh bound staged review");
+        let snapshot = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id,
+            can_authorize,
+            authorization_state,
+        } = &snapshot.review
+        else {
+            panic!("staged textual review must be available");
+        };
+        assert!(review_id.is_some());
+        assert!(*can_authorize);
+        assert_eq!(
+            *authorization_state,
+            super::CommitAuthorizationPresentation::ReadyToAuthorize
+        );
+        let serialized = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        assert_eq!(serialized["review"]["state"], "review_available");
+        assert_eq!(serialized["review"]["canAuthorize"], true);
+        assert!(serialized["review"]["reviewId"].is_string());
+        assert_eq!(
+            serialized["review"]["authorizationState"],
+            "ready_to_authorize"
+        );
+        assert!(serialized["review"]["can_authorize"].is_null());
+        assert!(serialized["review"]["review_id"].is_null());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn binary_staged_review_is_not_authorizable_and_forged_selector_has_no_effect() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        };
+        *state.commit_identity.lock().unwrap() = Some(identity.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("binary repository constructs"),
+        );
+        fs::write(repository.0.join("binary.dat"), [0_u8, 159, 146, 150])
+            .expect("binary fixture writes");
+        let git = TestRepository::native_git();
+        assert!(
+            Command::new(&git)
+                .args(["add", "binary.dat"])
+                .current_dir(&repository.0)
+                .status()
+                .expect("binary fixture stages")
+                .success()
+        );
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let selected = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("repository selected");
+        let (tool, control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            identity.name,
+            identity.email,
+        )
+        .expect("current paired commit capability constructs");
+        let control = Arc::new(control);
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: tool,
+            control: Arc::clone(&control),
+        });
+        let git_output = |arguments: &[&str]| {
+            Command::new(&git)
+                .args(arguments)
+                .current_dir(&repository.0)
+                .output()
+                .expect("Git state command should start")
+        };
+        let head_before = git_output(&["rev-parse", "HEAD"]);
+        let refs_before = git_output(&["show-ref", "--head"]);
+        let worktree_before = fs::read(repository.0.join("binary.dat")).expect("worktree reads");
+
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .expect("binary staged observation succeeds");
+        assert!(snapshot.staged_diff.iter().any(|file| file.binary));
+        assert!(review.is_none());
+        let index_before = fs::read(repository.0.join(".git/index")).expect("index reads");
+        let snapshot = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        assert!(matches!(
+            snapshot.review,
+            StagedReviewPresentation::ReviewBinaryUnsupported
+        ));
+        {
+            let workflow = state.repository_workflow.lock().unwrap();
+            assert!(workflow.commit_review.is_none());
+            assert!(workflow.review_selector.is_none());
+            assert_ne!(
+                workflow.authorization,
+                CommitAuthorizationPresentation::ReadyToAuthorize
+            );
+        }
+        assert!(matches!(
+            authorize_repository_commit_review(&state, "review-forged").await,
+            Err(FrontendError::CommitAuthorizationStale)
+        ));
+        assert!(!control.has_pending_authorization().await);
+        assert_eq!(
+            git_output(&["rev-parse", "HEAD"]).stdout,
+            head_before.stdout
+        );
+        assert_eq!(
+            git_output(&["show-ref", "--head"]).stdout,
+            refs_before.stdout
+        );
+        assert_eq!(
+            fs::read(repository.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(repository.0.join("binary.dat")).unwrap(),
+            worktree_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authorize_then_refresh_revokes_pending_and_rotates_review_selector_without_commit() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Staged);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        };
+        *state.commit_identity.lock().unwrap() = Some(identity.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("staged repository constructs"),
+        );
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let selected = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("repository selected");
+        let (tool, control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            identity.name,
+            identity.email,
+        )
+        .expect("current paired commit capability constructs");
+        let control = Arc::new(control);
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: tool,
+            control: Arc::clone(&control),
+        });
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .expect("fresh bound staged review");
+        let first = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(old_review_id),
+            can_authorize: true,
+            authorization_state: super::CommitAuthorizationPresentation::ReadyToAuthorize,
+        } = first.review
+        else {
+            panic!("fresh review must be ready to authorize: {first:#?}");
+        };
+        let git_output = |arguments: &[&str]| {
+            Command::new(TestRepository::native_git())
+                .args(arguments)
+                .current_dir(&repository.0)
+                .output()
+                .expect("Git state command should start")
+        };
+        let head_before = git_output(&["rev-parse", "HEAD"]);
+        let refs_before = git_output(&["show-ref", "--head"]);
+        let index_before = fs::read(repository.0.join(".git/index")).expect("index reads");
+        let worktree_before = fs::read(repository.0.join("tracked.txt")).expect("worktree reads");
+        let count_before = git_output(&["rev-list", "--count", "HEAD"]);
+
+        let authorized = authorize_repository_commit_review(&state, &old_review_id)
+            .await
+            .expect("current review authorizes");
+        assert_eq!(
+            authorized.authorization_state,
+            super::CommitAuthorizationPresentation::AuthorizedPending
+        );
+        assert!(control.has_pending_authorization().await);
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            super::CommitAuthorizationPresentation::AuthorizedPending
+        );
+
+        control.clear_authorization().await;
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .expect("fresh bound staged review after revocation");
+        let refreshed = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(new_review_id),
+            can_authorize: true,
+            authorization_state: super::CommitAuthorizationPresentation::ReadyToAuthorize,
+        } = refreshed.review
+        else {
+            panic!("refresh must create a new ready review: {refreshed:#?}");
+        };
+        assert_ne!(old_review_id, new_review_id);
+        assert!(!control.has_pending_authorization().await);
+        assert!(matches!(
+            authorize_repository_commit_review(&state, &old_review_id).await,
+            Err(FrontendError::CommitAuthorizationStale)
+        ));
+        assert_eq!(
+            git_output(&["rev-parse", "HEAD"]).stdout,
+            head_before.stdout
+        );
+        assert_eq!(
+            git_output(&["show-ref", "--head"]).stdout,
+            refs_before.stdout
+        );
+        assert_eq!(
+            fs::read(repository.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(repository.0.join("tracked.txt")).unwrap(),
+            worktree_before
+        );
+        assert_eq!(
+            git_output(&["rev-list", "--count", "HEAD"]).stdout,
+            count_before.stdout
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnect_revokes_pending_authorization_and_never_restores_old_review() {
+        let repository = TestRepository::git_repository(GitRepositoryState::Staged);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        };
+        *state.commit_identity.lock().unwrap() = Some(identity.clone());
+        replace_selected_repository(
+            &state,
+            DesktopRepository::new(&TestRepository::native_git(), &repository.0)
+                .expect("staged repository constructs"),
+        );
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let selected = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("repository selected");
+        let (tool, control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            identity.name.clone(),
+            identity.email.clone(),
+        )
+        .expect("current paired commit capability constructs");
+        let control = Arc::new(control);
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: tool,
+            control: Arc::clone(&control),
+        });
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .expect("fresh bound review");
+        let first = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(old_review_id),
+            can_authorize: true,
+            authorization_state: super::CommitAuthorizationPresentation::ReadyToAuthorize,
+        } = first.review
+        else {
+            panic!("fresh review must be ready to authorize: {first:#?}");
+        };
+        let git_output = |arguments: &[&str]| {
+            Command::new(TestRepository::native_git())
+                .args(arguments)
+                .current_dir(&repository.0)
+                .output()
+                .expect("Git state command should start")
+        };
+        let head_before = git_output(&["rev-parse", "HEAD"]);
+        let refs_before = git_output(&["show-ref", "--head"]);
+        let index_before = fs::read(repository.0.join(".git/index")).expect("index reads");
+        let worktree_before = fs::read(repository.0.join("tracked.txt")).expect("worktree reads");
+        let count_before = git_output(&["rev-list", "--count", "HEAD"]);
+
+        authorize_repository_commit_review(&state, &old_review_id)
+            .await
+            .expect("authorize");
+        assert!(control.has_pending_authorization().await);
+        revoke_repository_commit_context(&state).await;
+
+        assert!(
+            !control.has_pending_authorization().await,
+            "disconnect clears the control, not merely presentation"
+        );
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        {
+            let workflow = state.repository_workflow.lock().unwrap();
+            assert!(workflow.commit_review.is_none());
+            assert!(workflow.review_selector.is_none());
+            assert_ne!(
+                workflow.authorization,
+                super::CommitAuthorizationPresentation::AuthorizedPending
+            );
+        }
+        assert!(matches!(
+            authorize_repository_commit_review(&state, &old_review_id).await,
+            Err(FrontendError::CommitAuthorizationUnavailable)
+        ));
+        let (snapshot, review) = desktop_repository_snapshot_with_review(&selected, None)
+            .await
+            .expect("redacted snapshot observation");
+        let disconnected = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let serialized = serde_json::to_value(&disconnected).expect("snapshot serializes");
+        assert_ne!(
+            serialized["review"]["authorizationState"],
+            "authorized_pending"
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id,
+            can_authorize,
+            authorization_state,
+        } = disconnected.review
+        else {
+            panic!("staged review remains observable but un-authorizable");
+        };
+        assert!(review_id.is_none());
+        assert!(!can_authorize);
+        assert_ne!(
+            authorization_state,
+            super::CommitAuthorizationPresentation::AuthorizedPending
+        );
+
+        let (tool, fresh_control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            identity.name,
+            identity.email,
+        )
+        .expect("reconnect creates fresh capability");
+        let fresh_control = Arc::new(fresh_control);
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: tool,
+            control: Arc::clone(&fresh_control),
+        });
+        assert!(!fresh_control.has_pending_authorization().await);
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&fresh_control)))
+                .await
+                .expect("fresh reconnect review");
+        let reconnected = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(new_review_id),
+            can_authorize: true,
+            authorization_state: super::CommitAuthorizationPresentation::ReadyToAuthorize,
+        } = reconnected.review
+        else {
+            panic!("reconnect requires a fresh review");
+        };
+        assert_ne!(old_review_id, new_review_id);
+        assert!(!fresh_control.has_pending_authorization().await);
+        assert_eq!(
+            git_output(&["rev-parse", "HEAD"]).stdout,
+            head_before.stdout
+        );
+        assert_eq!(
+            git_output(&["show-ref", "--head"]).stdout,
+            refs_before.stdout
+        );
+        assert_eq!(
+            fs::read(repository.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            fs::read(repository.0.join("tracked.txt")).unwrap(),
+            worktree_before
+        );
+        assert_eq!(
+            git_output(&["rev-list", "--count", "HEAD"]).stdout,
+            count_before.stdout
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn observed_single_target_stage_and_unstage_refresh_and_consume_selectors() {
         let repository = TestRepository::git_repository(GitRepositoryState::Modified);
         let storage = TestRepository::new();
@@ -3886,7 +4833,7 @@ mod tests {
             .expect("staged snapshot");
         assert!(matches!(
             snapshot.review,
-            super::StagedReviewPresentation::ReviewAvailable
+            super::StagedReviewPresentation::ReviewAvailable { .. }
         ));
         let unstage = snapshot
             .staged_diff
@@ -5905,7 +6852,7 @@ mod tests {
             (
                 Some(b"{\"version\":2,\"model\":{\"provider\":\"inherit\"}}".to_vec()),
                 DesktopModelSelection::default(),
-                Some(PreferencesWarning::RestoreFailed),
+                None,
             ),
         ] {
             let storage = TestRepository::new();

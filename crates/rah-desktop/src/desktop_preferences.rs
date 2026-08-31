@@ -1,7 +1,8 @@
 //! Private, closed v1 persistence for inactive Desktop model preferences.
 
 use crate::{
-    DesktopModelProvider, DesktopModelSelection, ProviderEndpoint, ProviderHost, ProviderScheme,
+    DesktopCommitIdentity, DesktopModelProvider, DesktopModelSelection, ProviderEndpoint,
+    ProviderHost, ProviderScheme,
 };
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
@@ -162,6 +163,7 @@ pub(crate) enum Warning {
 pub(crate) struct Preferences {
     directory: PathBuf,
     warning: Option<Warning>,
+    identity: Option<DesktopCommitIdentity>,
 }
 
 impl Preferences {
@@ -170,22 +172,25 @@ impl Preferences {
         let path = directory.join(FILE);
         let loaded = match bounded_read(&path) {
             Ok(Some(bytes)) => match parse(&bytes) {
-                Ok(selection) => (None, selection),
+                Ok((selection, identity)) => (None, selection, identity),
                 Err(()) => (
                     Some(Warning::RestoreFailed),
                     DesktopModelSelection::default(),
+                    None,
                 ),
             },
-            Ok(None) => (None, DesktopModelSelection::default()),
+            Ok(None) => (None, DesktopModelSelection::default(), None),
             Err(()) => (
                 Some(Warning::RestoreFailed),
                 DesktopModelSelection::default(),
+                None,
             ),
         };
         (
             Self {
                 directory,
                 warning: loaded.0,
+                identity: loaded.2,
             },
             loaded.1,
         )
@@ -196,7 +201,8 @@ impl Preferences {
     }
 
     pub(crate) fn save(&mut self, selection: &DesktopModelSelection) -> Result<(), Warning> {
-        let bytes = canonical(selection).map_err(|_| Warning::SaveFailed)?;
+        let bytes =
+            canonical(selection, self.identity.as_ref()).map_err(|_| Warning::SaveFailed)?;
         let destination = self.directory.join(FILE);
         if matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
             return Ok(());
@@ -206,6 +212,26 @@ impl Preferences {
 
     pub(crate) fn reset(&mut self) -> Result<(), Warning> {
         self.save(&DesktopModelSelection::default())
+    }
+
+    /// Returns the inactive persisted preference without transferring durable
+    /// ownership out of the preferences writer. Model saves must retain it.
+    pub(crate) fn identity(&self) -> Option<DesktopCommitIdentity> {
+        self.identity.clone()
+    }
+
+    pub(crate) fn save_identity(
+        &mut self,
+        selection: &DesktopModelSelection,
+        identity: DesktopCommitIdentity,
+    ) -> Result<(), Warning> {
+        let bytes = canonical(selection, Some(&identity)).map_err(|_| Warning::SaveFailed)?;
+        let destination = self.directory.join(FILE);
+        if !matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
+            atomic(&self.directory, &bytes).map_err(|_| Warning::SaveFailed)?;
+        }
+        self.identity = Some(identity);
+        Ok(())
     }
 }
 
@@ -225,18 +251,21 @@ fn bounded_read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
     Ok(Some(bytes))
 }
 
-fn canonical(selection: &DesktopModelSelection) -> Result<Vec<u8>, ()> {
+fn canonical(
+    selection: &DesktopModelSelection,
+    identity: Option<&DesktopCommitIdentity>,
+) -> Result<Vec<u8>, ()> {
     selection.validate().map_err(|_| ())?;
     let json = match selection.provider {
         DesktopModelProvider::Inherit => {
-            r#"{"version":1,"model":{"provider":"inherit"}}"#.to_owned()
+            r#"{"version":2,"model":{"provider":"inherit"}}"#.to_owned()
         }
         DesktopModelProvider::OpenAi
         | DesktopModelProvider::Ollama
         | DesktopModelProvider::LmStudio => {
             let provider = provider_name(selection.provider);
             format!(
-                r#"{{"version":1,"model":{{"provider":"{provider}","model":{}}}}}"#,
+                r#"{{"version":2,"model":{{"provider":"{provider}","model":{}}}}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?
             )
         }
@@ -249,12 +278,20 @@ fn canonical(selection: &DesktopModelSelection) -> Result<Vec<u8>, ()> {
                 return Err(());
             }
             format!(
-                r#"{{"version":1,"model":{{"provider":"llama_cpp","model":{},"endpoint":{{"scheme":"http","host":{},"port":{}}}}}}}"#,
+                r#"{{"version":2,"model":{{"provider":"llama_cpp","model":{},"endpoint":{{"scheme":"http","host":{},"port":{}}}}}}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?,
                 serde_json::to_string(&ip.to_string()).map_err(|_| ())?,
                 endpoint.port
             )
         }
+    };
+    let json = if let Some(identity) = identity {
+        identity.validate()?;
+        let model =
+            serde_json::from_str::<serde_json::Value>(&json).map_err(|_| ())?["model"].clone();
+        serde_json::to_string(&serde_json::json!({"version":2,"model":model,"commit_identity":{"name":identity.name,"email":identity.email}})).map_err(|_| ())?
+    } else {
+        json
     };
     let mut bytes = json.into_bytes();
     bytes.push(b'\n');
@@ -266,7 +303,7 @@ fn canonical(selection: &DesktopModelSelection) -> Result<Vec<u8>, ()> {
 }
 #[cfg(test)]
 pub(crate) fn test_canonical(selection: &DesktopModelSelection) -> Result<Vec<u8>, ()> {
-    canonical(selection)
+    canonical(selection, None)
 }
 
 fn provider_name(provider: DesktopModelProvider) -> &'static str {
@@ -282,6 +319,7 @@ fn provider_name(provider: DesktopModelProvider) -> &'static str {
 struct Root {
     version: Option<u64>,
     model: Option<Model>,
+    commit_identity: Option<CommitIdentity>,
 }
 #[derive(Default)]
 struct Model {
@@ -295,14 +333,19 @@ struct Endpoint {
     host: Option<String>,
     port: Option<u16>,
 }
+#[derive(Default)]
+struct CommitIdentity {
+    name: Option<String>,
+    email: Option<String>,
+}
 
-fn parse(bytes: &[u8]) -> Result<DesktopModelSelection, ()> {
+fn parse(bytes: &[u8]) -> Result<(DesktopModelSelection, Option<DesktopCommitIdentity>), ()> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         return Err(());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     let root: Root = serde_json::from_str(text).map_err(|_| ())?;
-    if root.version != Some(1) {
+    if !matches!(root.version, Some(1 | 2)) {
         return Err(());
     }
     let model = root.model.ok_or(())?;
@@ -339,15 +382,28 @@ fn parse(bytes: &[u8]) -> Result<DesktopModelSelection, ()> {
         llama_cpp_endpoint: endpoint,
     };
     result.validate().map_err(|_| ())?;
-    Ok(result)
+    let identity = match (root.version, root.commit_identity) {
+        (Some(1), None) | (Some(2), None) => None,
+        (Some(1), Some(_)) => return Err(()),
+        (Some(2), Some(value)) => Some(DesktopCommitIdentity {
+            name: value.name.ok_or(())?,
+            email: value.email.ok_or(())?,
+        }),
+        _ => return Err(()),
+    };
+    if let Some(identity) = &identity {
+        identity.validate()?;
+    }
+    Ok((result, identity))
 }
 
 macro_rules! closed_map { ($name:ident, $type:ty, { $($field:literal => $slot:ident : $value:ty),* $(,)? }) => {
 impl<'de> Deserialize<'de> for $type { fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { struct V; impl<'de> Visitor<'de> for V { type Value = $type; fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("closed preferences object") } fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<$type, A::Error> { let mut value: $type = Default::default(); while let Some(key) = map.next_key::<String>()? { match key.as_str() { $($field => { if value.$slot.is_some() { return Err(de::Error::duplicate_field($field)); } value.$slot = Some(map.next_value::<$value>()?); }),* _ => return Err(de::Error::unknown_field(&key, &[$($field),*])), } } Ok(value) } } d.deserialize_map(V) } }
 }; }
-closed_map!(RootMap, Root, { "version" => version: u64, "model" => model: Model });
+closed_map!(RootMap, Root, { "version" => version: u64, "model" => model: Model, "commit_identity" => commit_identity: CommitIdentity });
 closed_map!(ModelMap, Model, { "provider" => provider: String, "model" => model: String, "endpoint" => endpoint: Endpoint });
 closed_map!(EndpointMap, Endpoint, { "scheme" => scheme: String, "host" => host: String, "port" => port: u16 });
+closed_map!(CommitIdentityMap, CommitIdentity, { "name" => name: String, "email" => email: String });
 
 fn temp_name(n: u64) -> String {
     format!("{FILE}.preferences-tmp-{}-{n}", std::process::id())
@@ -560,29 +616,29 @@ mod tests {
         let mut all = vec![
             (
                 DesktopModelSelection::default(),
-                r#"{"version":1,"model":{"provider":"inherit"}}"#,
+                r#"{"version":2,"model":{"provider":"inherit"}}"#,
             ),
             (
                 explicit(DesktopModelProvider::OpenAi),
-                r#"{"version":1,"model":{"provider":"openai","model":"model"}}\n"#,
+                r#"{"version":2,"model":{"provider":"openai","model":"model"}}\n"#,
             ),
             (
                 explicit(DesktopModelProvider::Ollama),
-                r#"{"version":1,"model":{"provider":"ollama","model":"model"}}\n"#,
+                r#"{"version":2,"model":{"provider":"ollama","model":"model"}}\n"#,
             ),
             (
                 explicit(DesktopModelProvider::LmStudio),
-                r#"{"version":1,"model":{"provider":"lm_studio","model":"model"}}\n"#,
+                r#"{"version":2,"model":{"provider":"lm_studio","model":"model"}}\n"#,
             ),
         ];
         for (host, expected) in [
             (
                 "127.0.0.1",
-                r#"{"version":1,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
+                r#"{"version":2,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
             ),
             (
                 "::1",
-                r#"{"version":1,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
+                r#"{"version":2,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
             ),
         ] {
             all.push((
@@ -599,16 +655,127 @@ mod tests {
             ));
         }
         for (selection, expected) in all {
-            let bytes = canonical(&selection).unwrap();
+            let bytes = canonical(&selection, None).unwrap();
             assert_eq!(
                 bytes,
                 format!("{}\n", expected.trim_end_matches(r#"\n"#)).as_bytes()
             );
-            assert_eq!(parse(&bytes).unwrap(), selection);
+            assert_eq!(parse(&bytes).unwrap(), (selection, None));
             assert!(bytes.ends_with(b"\n"));
             assert!(!std::str::from_utf8(&bytes).unwrap().contains("null"));
             assert!(!std::str::from_utf8(&bytes).unwrap().contains("/v1"));
         }
+    }
+
+    #[test]
+    fn v1_migrates_model_only_and_v2_restores_closed_identity() {
+        let selection = explicit(DesktopModelProvider::OpenAi);
+        let v1 = br#"{"version":1,"model":{"provider":"openai","model":"model"}}"#;
+        assert_eq!(parse(v1).unwrap(), (selection.clone(), None));
+
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".into(),
+            email: "rah-host@example.invalid".into(),
+        };
+        let bytes = canonical(&selection, Some(&identity)).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), (selection, Some(identity)));
+    }
+
+    #[test]
+    fn v2_identity_schema_and_values_fail_closed() {
+        for bytes in [
+            br#"{"version":3,"model":{"provider":"inherit"}}"#.as_slice(),
+            br#"{"version":"2","model":{"provider":"inherit"}}"#.as_slice(),
+            br#"{"version":2,"model":{"provider":"inherit"},"unknown":true}"#.as_slice(),
+            br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":"n","email":"e","unknown":true}}"#.as_slice(),
+            br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":" ","email":"e"}}"#.as_slice(),
+            br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":"n","email":"\u0000"}}"#.as_slice(),
+            br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":"n","email":"e"}} trailing"#.as_slice(),
+        ] {
+            assert!(parse(bytes).is_err(), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn identity_validation_rejects_empty_control_and_oversized_values() {
+        let valid = DesktopCommitIdentity {
+            name: "Name".into(),
+            email: "email@example.invalid".into(),
+        };
+        assert!(valid.validate().is_ok());
+        for (name, email) in [
+            ("", "e"),
+            ("n", ""),
+            ("   ", "e"),
+            ("n", "   "),
+            ("n\0", "e"),
+            ("n", "e\n"),
+        ] {
+            assert!(
+                DesktopCommitIdentity {
+                    name: name.into(),
+                    email: email.into()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            DesktopCommitIdentity {
+                name: "n".repeat(crate::COMMIT_IDENTITY_MAX_BYTES + 1),
+                email: "e".into()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DesktopCommitIdentity {
+                name: "n".into(),
+                email: "e".repeat(crate::COMMIT_IDENTITY_MAX_BYTES + 1)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn identity_save_is_atomic_and_survives_later_model_save() {
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TestDirectory::new();
+        let mut preferences = Preferences::start(directory.0.clone()).0;
+        let first = explicit(DesktopModelProvider::OpenAi);
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".into(),
+            email: "rah-host@example.invalid".into(),
+        };
+        preferences.save_identity(&first, identity.clone()).unwrap();
+        let durable = fs::read(directory.preference_path()).unwrap();
+        assert_eq!(preferences.identity(), Some(identity.clone()));
+        set_test_fault(directory.preference_path(), TestFault::ReplaceOther);
+        assert_eq!(
+            preferences.save_identity(
+                &first,
+                DesktopCommitIdentity {
+                    name: "New".into(),
+                    email: "new@example.invalid".into()
+                }
+            ),
+            Err(Warning::SaveFailed)
+        );
+        assert_eq!(preferences.identity(), Some(identity));
+        assert_eq!(fs::read(directory.preference_path()).unwrap(), durable);
+        clear_test_state();
+        preferences
+            .save(&explicit(DesktopModelProvider::Ollama))
+            .unwrap();
+        assert!(
+            parse(&fs::read(directory.preference_path()).unwrap())
+                .unwrap()
+                .1
+                .is_some()
+        );
     }
 
     #[test]
@@ -626,7 +793,7 @@ mod tests {
             b"".as_slice(), b" \n\t".as_slice(), b"{".as_slice(), b"{} trailing".as_slice(),
             b"\xef\xbb\xbf{\"version\":1,\"model\":{\"provider\":\"inherit\"}}".as_slice(),
             &[0xff][..], oversized.as_bytes(),
-            br#"{"model":{"provider":"inherit"}}"#, br#"{"version":2,"model":{"provider":"inherit"}}"#,
+            br#"{"model":{"provider":"inherit"}}"#,
             br#"{"version":1}"#, br#"{"version":1,"model":{"provider":"inherit"},"extra":true}"#,
             br#"{"version":1,"model":{"provider":"inherit","extra":true}}"#,
             br#"{"version":1,"model":{"provider":null}}"#, br#"{"version":1,"model":{"provider":"openai","model":null}}"#,
@@ -705,7 +872,7 @@ mod tests {
         preferences.save(&selection).unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&selection).unwrap()
+            canonical(&selection, None).unwrap()
         );
         let retained = fs::read(directory.preference_path()).unwrap();
         let non_loopback = DesktopModelSelection {
@@ -722,7 +889,7 @@ mod tests {
         preferences.reset().unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&DesktopModelSelection::default()).unwrap()
+            canonical(&DesktopModelSelection::default(), None).unwrap()
         );
     }
 
@@ -838,7 +1005,7 @@ mod tests {
         preferences.save(&next).unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&next).unwrap()
+            canonical(&next, None).unwrap()
         );
         assert_eq!(
             test_operations(&directory.preference_path()),

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repository-authorize-commit-review"
+description = "Enables the repository_authorize_commit_review command without any pre-configured scope."
+commands.allow = ["repository_authorize_commit_review"]
+
+[[permission]]
+identifier = "deny-repository-authorize-commit-review"
+description = "Denies the repository_authorize_commit_review command without any pre-configured scope."
+commands.deny = ["repository_authorize_commit_review"]
