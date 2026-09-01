@@ -36,8 +36,9 @@ use rah_runtime_codex::{
 use rah_tools::{
     EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryCommitControl,
     RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
-    RepositoryFileCreationTool, RepositoryFileInfoTool, RepositoryMultiFileEditTool,
-    RepositoryStatusTool, RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
+    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -883,13 +884,23 @@ struct DesktopRepository {
     status: Arc<RepositoryStatusTool>,
     worktree_diff: Arc<RepositoryDiffTool>,
     staged_diff: Arc<RepositoryDiffStagedTool>,
+    deletion_authority: Option<RepositoryFileDeletionAuthority>,
 }
 
 #[cfg(target_os = "windows")]
 impl DesktopRepository {
+    #[cfg(test)]
     fn new(
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
+    ) -> Result<Self, ToolError> {
+        Self::new_with_deletion_authority(git_executable, repository_root, None)
+    }
+
+    fn new_with_deletion_authority(
+        git_executable: &std::path::Path,
+        repository_root: &std::path::Path,
+        deletion_authority: Option<RepositoryFileDeletionAuthority>,
     ) -> Result<Self, ToolError> {
         #[cfg(test)]
         if startup_counter_tracking() {
@@ -907,6 +918,13 @@ impl DesktopRepository {
         let status = RepositoryStatusTool::new(git_executable, &repository_root)?;
         let worktree_diff = RepositoryDiffTool::new(git_executable, &repository_root)?;
         let staged_diff = RepositoryDiffStagedTool::new(git_executable, &repository_root)?;
+        if let Some(authority) = &deletion_authority
+            && !authority.matches_resources(git_executable, &repository_root)
+        {
+            return Err(ToolError::Execution {
+                message: "deletion authority does not match selected repository".to_owned(),
+            });
+        }
         Ok(Self {
             display_path: repository_root.display().to_string(),
             git_executable: git_executable.to_path_buf(),
@@ -914,6 +932,7 @@ impl DesktopRepository {
             status: Arc::new(status),
             worktree_diff: Arc::new(worktree_diff),
             staged_diff: Arc::new(staged_diff),
+            deletion_authority,
         })
     }
 }
@@ -2543,6 +2562,28 @@ async fn revoke_repository_commit_context(state: &DesktopAppState) {
 }
 
 #[cfg(target_os = "windows")]
+async fn invalidate_repository_commit_review(state: &DesktopAppState) {
+    let control = state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|capability| Arc::clone(&capability.control));
+    if let Some(control) = control {
+        control.clear_authorization().await;
+    }
+    let mut workflow = state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    workflow.actions.clear();
+    workflow.review = None;
+    workflow.commit_review = None;
+    workflow.review_selector = None;
+    workflow.authorization = CommitAuthorizationPresentation::AuthorizationRevoked;
+}
+
+#[cfg(target_os = "windows")]
 fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepository) {
     *state
         .commit_capability
@@ -2591,10 +2632,17 @@ fn choose_repository(
         .into_path()
         .map_err(|_| FrontendError::RepositoryDialogFailed)?;
     let git = selected_git_executable()?;
-    let repository = DesktopRepository::new(&git, &path).map_err(|error| {
-        tracing::warn!(error = %error, "selected repository is invalid");
-        FrontendError::RepositoryInvalid
-    })?;
+    let deletion_authority =
+        RepositoryFileDeletionAuthority::new(&git, &path).map_err(|error| {
+            tracing::warn!(error = %error, "selected repository cannot receive deletion authority");
+            FrontendError::RepositoryInvalid
+        })?;
+    let repository =
+        DesktopRepository::new_with_deletion_authority(&git, &path, Some(deletion_authority))
+            .map_err(|error| {
+                tracing::warn!(error = %error, "selected repository is invalid");
+                FrontendError::RepositoryInvalid
+            })?;
     repository_selection_allowed(
         *state
             .chat
@@ -2934,6 +2982,11 @@ fn desktop_tool_registry(
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(create_file))?;
         registry.register(Arc::new(edit_files))?;
+        if let Some(authority) = &repository.deletion_authority {
+            registry.register(Arc::new(RepositoryFileDeletionTool::from_authority(
+                authority.clone(),
+            )))?;
+        }
         if let Some(commit_tool) = commit_tool {
             registry.register(commit_tool)?;
         }
@@ -3265,7 +3318,11 @@ fn activity_event(
         } => tool_calls.remove(tool_call_id).map(|tool| {
             let refresh = matches!(
                 tool.as_str(),
-                "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
+                "repo.patch"
+                    | "repo.create-file"
+                    | "repo.edit-files"
+                    | "repo.delete-file"
+                    | "repo.commit"
             );
             let commit = (tool == "repo.commit")
                 .then(|| commit_activity_presentation(output))
@@ -3389,6 +3446,9 @@ async fn run_chat(
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
         if let Some((activity, refresh_repository)) = activity_event(&event, &mut tool_calls) {
+            if refresh_repository {
+                invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
+            }
             emit_activity_event(&app, activity);
             if refresh_repository {
                 emit_repository_refresh(&app);
@@ -3895,10 +3955,10 @@ mod tests {
         connect_prepared_codex, connection_context_is_current, current_app_status,
         desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_registry, frontend_error, install_repository_workflow,
-        model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        refresh_repository_workflow, replace_selected_repository, repository_index_action,
-        repository_selection_allowed, repository_tool_authority, request_connect,
-        resolve_codex_executable, resolve_prepare_and_connect_codex,
+        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
+        publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
+        repository_index_action, repository_selection_allowed, repository_tool_authority,
+        request_connect, resolve_codex_executable, resolve_prepare_and_connect_codex,
         revoke_repository_commit_context, same_arc, selected_git_executable, validate_prompt,
     };
     use futures::StreamExt;
@@ -3911,7 +3971,8 @@ mod tests {
         CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
         CodexRuntime,
     };
-    use rah_tools::{RepositoryCommitTool, ToolContext};
+    use rah_tools::{RepositoryCommitTool, RepositoryFileDeletionAuthority, ToolContext};
+    use sha2::{Digest, Sha256};
     use std::{
         collections::HashMap,
         ffi::OsString,
@@ -4141,6 +4202,14 @@ mod tests {
             let executable =
                 std::env::current_exe().expect("current test executable should be available");
             DesktopRepository::new(&executable, &self.0).expect("test repository should construct")
+        }
+
+        fn deletion_repository(&self) -> DesktopRepository {
+            let git = Self::native_git();
+            let authority = RepositoryFileDeletionAuthority::new(&git, &self.0)
+                .expect("host deletion authority should construct");
+            DesktopRepository::new_with_deletion_authority(&git, &self.0, Some(authority))
+                .expect("selected deletion repository should construct")
         }
 
         fn native_git() -> PathBuf {
@@ -4641,7 +4710,16 @@ mod tests {
             super::CommitAuthorizationPresentation::AuthorizedPending
         );
 
-        control.clear_authorization().await;
+        invalidate_repository_commit_review(&state).await;
+        assert!(!control.has_pending_authorization().await);
+        assert!(
+            state
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .commit_review
+                .is_none()
+        );
         let (snapshot, review) =
             desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
                 .await
@@ -5655,6 +5733,127 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn desktop_delete_file_uses_host_authority_refreshes_and_does_not_stage() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("authorized Desktop registry should build");
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.delete-file")
+            .expect("host authority exposes deletion tool");
+        assert_eq!(definition.permission, PermissionLevel::Execute);
+        assert_eq!(
+            definition.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "expected_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "expected_file_byte_length": {"type": "integer", "minimum": 0, "maximum": 1024 * 1024}
+                },
+                "required": ["path", "expected_file_sha256", "expected_file_byte_length"],
+                "additionalProperties": false
+            })
+        );
+        let target = fixture.0.join("tracked.txt");
+        let bytes = fs::read(&target).expect("tracked target should be readable");
+        let index_before = Command::new(TestRepository::native_git())
+            .args(["ls-files", "--stage"])
+            .current_dir(&fixture.0)
+            .output()
+            .expect("index should be readable");
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.delete-file"),
+                    input: ToolInput(serde_json::json!({
+                        "path": "tracked.txt",
+                        "expected_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+                        "expected_file_byte_length": bytes.len()
+                    })),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("bridge dispatch should return a bounded result");
+        assert!(!output.is_error);
+        assert!(
+            matches!(&output.content[0], ToolContent::Json(value) if value["status"] == "deleted_verified")
+        );
+        assert!(
+            !target.exists(),
+            "successful deletion is visible in worktree"
+        );
+        let index_after = Command::new(TestRepository::native_git())
+            .args(["ls-files", "--stage"])
+            .current_dir(&fixture.0)
+            .output()
+            .expect("index should remain readable");
+        assert_eq!(index_after.stdout, index_before.stdout);
+        let status = Command::new(TestRepository::native_git())
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&fixture.0)
+            .output()
+            .expect("status should be readable");
+        assert!(!String::from_utf8_lossy(&status.stdout).contains("D  tracked.txt"));
+        assert!(String::from_utf8_lossy(&status.stdout).contains(" D tracked.txt"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_delete_file_requires_authority_and_rejects_stale_preimage_without_replay() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let without_authority = fixture.desktop_repository();
+        let registry = desktop_tool_registry(Some(&without_authority), None)
+            .expect("registry without deletion authority should build");
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .all(|definition| definition.name.as_str() != "repo.delete-file")
+        );
+
+        let repository = fixture.deletion_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("authorized registry should build");
+        let bytes = fs::read(fixture.0.join("tracked.txt")).expect("target should be readable");
+        let request = || ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("repo.delete-file"),
+            input: ToolInput(serde_json::json!({
+                "path": "tracked.txt",
+                "expected_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "expected_file_byte_length": bytes.len()
+            })),
+        };
+        fs::write(fixture.0.join("tracked.txt"), b"newer user bytes\n")
+            .expect("fixture should simulate a user edit");
+        let first = registry
+            .execute(request(), ToolContext::default())
+            .await
+            .expect("stale deletion should return a bounded result");
+        assert!(first.is_error);
+        assert!(
+            matches!(&first.content[0], ToolContent::Json(value) if value["status"] == "precondition_failed")
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("tracked.txt")).unwrap(),
+            b"newer user bytes\n"
+        );
+        let retry = registry
+            .execute(request(), ToolContext::default())
+            .await
+            .expect("retry should return a bounded result");
+        assert!(retry.is_error);
+        assert_eq!(
+            fs::read(fixture.0.join("tracked.txt")).unwrap(),
+            b"newer user bytes\n"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn desktop_registry_commit_requires_its_paired_control_and_is_one_shot() {
         let fixture = TestRepository::git_repository(GitRepositoryState::Staged);
         let repository = DesktopRepository::new(&TestRepository::native_git(), &fixture.0)
@@ -6066,6 +6265,45 @@ mod tests {
             serialized,
             r#"{"kind":"tool_finished","tool":"repo.commit","result":"success","commit":{"status":"committed_verified","commitOid":"0123456789abcdef0123456789abcdef01234567"}}"#
         );
+    }
+
+    #[test]
+    fn deleted_file_activity_refreshes_repository_without_frontend_authority() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.delete-file"),
+                input: ToolInput(serde_json::json!({
+                    "path": "tracked.txt",
+                    "expected_file_sha256": "0".repeat(64),
+                    "expected_file_byte_length": 1
+                })),
+            },
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output: ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "path": "tracked.txt",
+                    "status": "deleted_verified",
+                    "uncertain": false
+                }))],
+                is_error: false,
+            },
+        };
+        let mut calls = HashMap::new();
+        assert!(activity_event(&requested, &mut calls).is_some());
+        let (event, refresh) = activity_event(&finished, &mut calls).expect("delete finishes");
+        assert!(refresh);
+        let serialized = serde_json::to_string(&event).expect("activity serializes");
+        assert_eq!(
+            serialized,
+            r#"{"kind":"tool_finished","tool":"repo.delete-file","result":"success"}"#
+        );
+        assert!(!serialized.contains("sha256"));
     }
 
     #[test]
