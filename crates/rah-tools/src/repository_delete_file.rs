@@ -32,8 +32,14 @@ pub struct RepositoryFileDeletionTool {
     policy: Arc<RepositoryFileDeletionPolicy>,
 }
 
-impl RepositoryFileDeletionTool {
-    /// Constructs deletion authority from host-selected identities.
+/// Opaque host-created authority for one bounded repository file deletion.
+#[derive(Clone)]
+pub struct RepositoryFileDeletionAuthority {
+    policy: Arc<RepositoryFileDeletionPolicy>,
+}
+
+impl RepositoryFileDeletionAuthority {
+    /// Constructs deletion authority from host-selected repository identities.
     pub fn new(
         git_executable: impl AsRef<Path>,
         repository_root: impl AsRef<Path>,
@@ -44,6 +50,33 @@ impl RepositoryFileDeletionTool {
                 repository_root.as_ref(),
             )?),
         })
+    }
+
+    /// Tests whether this host authority is bound to the selected resources.
+    pub fn matches_resources(&self, git_executable: &Path, repository_root: &Path) -> bool {
+        self.policy
+            .matches_resources(git_executable, repository_root)
+    }
+}
+
+impl RepositoryFileDeletionTool {
+    /// Constructs deletion authority from host-selected identities.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self::from_authority(RepositoryFileDeletionAuthority::new(
+            git_executable,
+            repository_root,
+        )?))
+    }
+
+    /// Constructs a tool from an authority already created by the trusted host.
+    #[must_use]
+    pub fn from_authority(authority: RepositoryFileDeletionAuthority) -> Self {
+        Self {
+            policy: authority.policy,
+        }
     }
 }
 
@@ -133,6 +166,11 @@ struct RepositoryFileDeletionPolicy {
 }
 
 impl RepositoryFileDeletionPolicy {
+    fn matches_resources(&self, git: &Path, root: &Path) -> bool {
+        fs::canonicalize(git).ok().as_deref() == Some(self.git.as_path())
+            && fs::canonicalize(root).ok().as_deref() == Some(self.root.as_path())
+    }
+
     fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
         if !root.is_absolute() || !git.is_absolute() {
             return Err(policy_error("host identities must be absolute"));

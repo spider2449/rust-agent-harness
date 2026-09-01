@@ -5,8 +5,9 @@ use std::sync::Arc;
 use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, RepositoryCommitControl,
     RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
-    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
+    RepositoryFileDeletionAuthority, RepositoryFileDeletionTool, RepositoryFileInfoTool,
+    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry,
+    TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -58,6 +59,14 @@ impl EffectiveProfileComposition {
 pub async fn compose(
     profile: TrustedStaticProfile,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
+    compose_with_repository_file_deletion_authority(profile, None).await
+}
+
+/// Composes a profile using a deletion authority separately constructed by the host.
+pub async fn compose_with_repository_file_deletion_authority(
+    profile: TrustedStaticProfile,
+    deletion_authority: Option<RepositoryFileDeletionAuthority>,
+) -> Result<EffectiveProfileComposition, ProfileError> {
     let mut registry = ToolRegistry::new();
     let mut repository_commit_control = None;
     for definition in profile.registry().definitions() {
@@ -97,6 +106,24 @@ pub async fn compose(
                 RepositoryFileCreationTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for deletion in profile.repository_file_deletions() {
+        let executable = profile
+            .executable_resource(deletion.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(deletion.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let authority = deletion_authority
+            .as_ref()
+            .filter(|authority| authority.matches_resources(executable, repository))
+            .ok_or(ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(RepositoryFileDeletionTool::from_authority(
+                authority.clone(),
+            )))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
     }
 
@@ -254,7 +281,11 @@ pub async fn compose(
         if capability.enabled
             && (matches!(
                 capability.capability_id.as_str(),
-                "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
+                "repo.patch"
+                    | "repo.create-file"
+                    | "repo.edit-files"
+                    | "repo.commit"
+                    | "repo.delete-file"
             ) || matches!(
                 capability.capability_id.as_str(),
                 "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"

@@ -27,6 +27,7 @@ pub struct TrustedStaticProfile {
     effective: EffectiveProfile,
     repository_worktree_patches: Vec<RepositoryWorktreePatchProfile>,
     repository_file_creations: Vec<RepositoryFileCreationProfile>,
+    repository_file_deletions: Vec<RepositoryFileDeletionProfile>,
     repository_multi_file_edits: Vec<RepositoryMultiFileEditProfile>,
     repository_observers: Vec<RepositoryObserverProfile>,
     repository_commits: Vec<RepositoryCommitProfile>,
@@ -76,6 +77,7 @@ impl TrustedStaticProfile {
         let mut capabilities = Vec::with_capacity(profile.capabilities.len());
         let mut repository_worktree_patches = Vec::new();
         let mut repository_file_creations = Vec::new();
+        let mut repository_file_deletions = Vec::new();
         let mut repository_multi_file_edits = Vec::new();
         let mut repository_observers = Vec::new();
         let mut repository_commits = Vec::new();
@@ -84,6 +86,7 @@ impl TrustedStaticProfile {
                 inventory,
                 repository_worktree_patch,
                 repository_file_creation,
+                repository_file_deletion,
                 repository_multi_file_edit,
                 repository_observer,
                 repository_commit,
@@ -94,6 +97,9 @@ impl TrustedStaticProfile {
             }
             if let Some(repository_file_creation) = repository_file_creation {
                 repository_file_creations.push(repository_file_creation);
+            }
+            if let Some(repository_file_deletion) = repository_file_deletion {
+                repository_file_deletions.push(repository_file_deletion);
             }
             if let Some(repository_multi_file_edit) = repository_multi_file_edit {
                 repository_multi_file_edits.push(repository_multi_file_edit);
@@ -137,6 +143,7 @@ impl TrustedStaticProfile {
             },
             repository_worktree_patches,
             repository_file_creations,
+            repository_file_deletions,
             repository_multi_file_edits,
             repository_observers,
             repository_commits,
@@ -190,6 +197,12 @@ impl TrustedStaticProfile {
     #[must_use]
     pub fn repository_file_creations(&self) -> &[RepositoryFileCreationProfile] {
         &self.repository_file_creations
+    }
+
+    /// Returns closed host-only `repo.delete-file` selections.
+    #[must_use]
+    pub fn repository_file_deletions(&self) -> &[RepositoryFileDeletionProfile] {
+        &self.repository_file_deletions
     }
 
     /// Returns closed, host-only `repo.edit-files` declarations for effective composition.
@@ -484,6 +497,13 @@ pub struct RepositoryFileCreationProfile {
     repository: String,
 }
 
+/// Closed symbolic selection for an already host-authorized deletion policy.
+#[derive(Clone, Debug)]
+pub struct RepositoryFileDeletionProfile {
+    executable: String,
+    repository: String,
+}
+
 /// Closed host-only binding needed to construct the bounded `repo.edit-files` tool.
 ///
 /// This contains symbolic resource identities only. The private
@@ -526,6 +546,7 @@ type CapabilityBuildResult = (
     EffectiveCapability,
     Option<RepositoryWorktreePatchProfile>,
     Option<RepositoryFileCreationProfile>,
+    Option<RepositoryFileDeletionProfile>,
     Option<RepositoryMultiFileEditProfile>,
     Option<RepositoryObserverProfile>,
     Option<RepositoryCommitProfile>,
@@ -583,6 +604,17 @@ impl RepositoryFileCreationProfile {
     }
 }
 
+impl RepositoryFileDeletionProfile {
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+}
+
 impl RepositoryMultiFileEditProfile {
     #[must_use]
     pub fn executable(&self) -> &str {
@@ -616,6 +648,7 @@ fn build_capability(
             None,
             None,
             None,
+            None,
         ));
     }
 
@@ -635,6 +668,7 @@ fn build_capability(
                 validation: "configured",
             },
             Some(binding),
+            None,
             None,
             None,
             None,
@@ -662,6 +696,29 @@ fn build_capability(
             None,
             None,
             None,
+            None,
+        ));
+    }
+
+    if capability.name == "repo.delete-file" {
+        let binding = repository_file_deletion_binding(capability)?;
+        executable(resources, Some(binding.executable()))?;
+        directory(resources, Some(binding.repository()))?;
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: true,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "configured",
+            },
+            None,
+            None,
+            Some(binding),
+            None,
+            None,
+            None,
         ));
     }
 
@@ -680,6 +737,7 @@ fn build_capability(
                 resources: symbolic_resources,
                 validation: "configured",
             },
+            None,
             None,
             None,
             Some(binding),
@@ -705,6 +763,7 @@ fn build_capability(
             None,
             None,
             None,
+            None,
             Some(binding),
         ));
     }
@@ -724,6 +783,7 @@ fn build_capability(
                 resources: symbolic_resources,
                 validation: "configured",
             },
+            None,
             None,
             None,
             None,
@@ -780,6 +840,7 @@ fn build_capability(
             resources: symbolic_resources,
             validation: "validated",
         },
+        None,
         None,
         None,
         None,
@@ -915,7 +976,8 @@ fn capability_contract(
             .collect(),
         ),
         "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
-        | "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" => (
+        | "repo.delete-file" | "repo.file-info" | "repo.status" | "repo.diff"
+        | "repo.diff-staged" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -1029,6 +1091,39 @@ fn repository_multi_file_edit_binding(
     validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
     validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
     Ok(RepositoryMultiFileEditProfile {
+        executable: executable.clone(),
+        repository: repository.clone(),
+    })
+}
+
+fn repository_file_deletion_binding(
+    capability: &Capability,
+) -> Result<RepositoryFileDeletionProfile, ProfileError> {
+    if capability.workspace.is_some()
+        || capability.max_bytes.is_some()
+        || capability.cwd_resource.is_some()
+        || capability.identity_name.is_some()
+        || capability.identity_email.is_some()
+    {
+        return Err(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        });
+    }
+    let executable = capability
+        .executable
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let repository = capability
+        .repository
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
+    validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
+    Ok(RepositoryFileDeletionProfile {
         executable: executable.clone(),
         repository: repository.clone(),
     })

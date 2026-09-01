@@ -12,14 +12,17 @@ use std::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use rah_cli::profile_composition::{EffectiveProfileComposition, compose};
+use rah_cli::profile_composition::{
+    EffectiveProfileComposition, compose, compose_with_repository_file_deletion_authority,
+};
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
     RequestId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{
-    EchoTool, FsReadTool, Tool, ToolContext, ToolError, ToolRegistry, TrustedStaticProfile,
+    EchoTool, FsReadTool, RepositoryFileDeletionAuthority, Tool, ToolContext, ToolError,
+    ToolRegistry, TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -343,6 +346,76 @@ struct RepositoryCreateFileFixture {
     target: PathBuf,
     unrelated: PathBuf,
     profile: PathBuf,
+}
+
+struct RepositoryDeleteFileFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    target: PathBuf,
+    unrelated: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryDeleteFileFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(
+            &root,
+            &["config", "user.name", "RAH delete-file bridge test"],
+        );
+        let target = root.join("src").join("obsolete.rs");
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(&target, b"obsolete\n").unwrap();
+        let unrelated = root.join("protected.txt");
+        fs::write(&unrelated, b"protected\n").unwrap();
+        git(&root, &["add", "--", "src/obsolete.rs", "protected.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task161-delete-file-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "worktree": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.delete-file", "enabled": true, "permission": "execute",
+                "executable": "git", "repository": "worktree"
+            }]
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap()).unwrap();
+        Self {
+            _base: base,
+            root,
+            target,
+            unrelated,
+            profile,
+        }
+    }
+
+    async fn compose_authorized(&self) -> EffectiveProfileComposition {
+        let authority = RepositoryFileDeletionAuthority::new(git_executable(), &self.root)
+            .expect("host should construct deletion authority");
+        compose_with_repository_file_deletion_authority(
+            TrustedStaticProfile::load(&self.profile).unwrap(),
+            Some(authority),
+        )
+        .await
+        .expect("authorized deletion composition should succeed")
+    }
+
+    fn request(&self) -> Value {
+        let bytes = fs::read(&self.target).unwrap();
+        json!({"path":"src/obsolete.rs","expected_file_sha256":sha256_hex(&bytes),"expected_file_byte_length":bytes.len()})
+    }
+
+    fn index(&self) -> Vec<u8> {
+        fs::read(self.root.join(".git/index")).unwrap()
+    }
 }
 
 struct RepositoryMultiFileEditFixture {
@@ -1518,6 +1591,141 @@ async fn trusted_profile_composed_repo_create_file_preserves_schema_permission_d
         events
             .iter()
             .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_delete_file_uses_host_authority_and_generic_bridge() {
+    let fixture = RepositoryDeleteFileFixture::new("delete-file-success");
+    let index = fixture.index();
+    let static_profile = TrustedStaticProfile::load(&fixture.profile).unwrap();
+    assert!(static_profile.registry().definitions().is_empty());
+    assert!(compose(static_profile).await.is_err());
+    let composition = fixture.compose_authorized().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .next()
+        .expect("effective composer should publish repo.delete-file");
+    assert_eq!(definition.name, ToolName::new("repo.delete-file"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema,
+        json!({"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":1024},"expected_file_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"expected_file_byte_length":{"type":"integer","minimum":0,"maximum":1048576}},"required":["path","expected_file_sha256","expected_file_byte_length"],"additionalProperties":false})
+    );
+    assert!(
+        !format!("{:?}", composition.effective_profile())
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    assert_eq!(thread["params"]["dynamicTools"][0]["name"], "rah_tool_0");
+    assert_eq!(
+        thread["params"]["dynamicTools"][0]["inputSchema"],
+        definition.input_schema
+    );
+    for id in [json!(1601), json!("duplicate-delete-delivery")] {
+        peer.send(tool_request(
+            id,
+            "private-thread",
+            "private-turn",
+            "delete-once",
+            "rah_tool_0",
+            fixture.request(),
+        ));
+    }
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true, "{first}");
+    assert_eq!(response_json(&first)["status"], "deleted_verified");
+    assert!(!fixture.target.exists());
+    assert_eq!(fs::read(&fixture.unrelated).unwrap(), b"protected\n");
+    assert_eq!(fixture.index(), index);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_delete_file_rejects_stale_preimage_through_bridge() {
+    let fixture = RepositoryDeleteFileFixture::new("delete-file-stale");
+    let original = fixture.request();
+    let index = fixture.index();
+    let composition = fixture.compose_authorized().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+    fs::write(&fixture.target, b"newer user version\n").unwrap();
+    peer.send(tool_request(
+        json!(1602),
+        "private-thread",
+        "private-turn",
+        "stale-delete",
+        "rah_tool_0",
+        original,
+    ));
+    let response = peer.next_sent().await;
+    assert_eq!(response["result"]["success"], false, "{response}");
+    assert_eq!(response_json(&response)["status"], "precondition_failed");
+    assert_eq!(fs::read(&fixture.target).unwrap(), b"newer user version\n");
+    assert_eq!(fixture.index(), index);
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolFinished { .. }))
             .count(),
         1
     );
