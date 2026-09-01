@@ -11,16 +11,19 @@ param(
 
     # This host-only escape hatch makes deterministic recovery/testing possible.
     # It is deliberately not read from model or tool input.
-    [string]$SourcePath
+    [string]$SourcePath,
+
+    [string]$SourceCodeModeHostPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ManifestVersion = 1
+$ManifestVersion = 2
 $Platform = 'windows-x86_64'
 $Architecture = 'x86_64'
 $BinaryName = 'codex.exe'
+$CodeModeHostName = 'codex-code-mode-host.exe'
 
 function Write-Diagnostic([string]$Message) {
     [Console]::Error.WriteLine($Message)
@@ -123,6 +126,12 @@ function Get-NativeBinaryFromPackage([string]$PackageRoot) {
     return $null
 }
 
+function Get-CodeModeHostForBinary([string]$NativePath) {
+    $candidate = Join-Path (Split-Path -Parent $NativePath) $CodeModeHostName
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $null }
+    return (Assert-NativeWindowsExecutable ([IO.Path]::GetFullPath($candidate)))
+}
+
 function Get-GlobalCodexPackageRoots {
     $roots = [Collections.Generic.List[string]]::new()
     $npm = Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -151,8 +160,9 @@ function Find-InstalledNative([string]$RequestedVersion) {
         $binary = Get-NativeBinaryFromPackage $packageRoot
         if ($null -eq $binary) { continue }
         $reported = Get-ExactVersion $binary
-        if ($reported -eq "codex-cli $RequestedVersion") {
-            $matches.Add([pscustomobject]@{ Path = $binary; Source = 'npm-global'; SourcePackage = "@openai/codex@$($package.version)" })
+        $codeModeHost = Get-CodeModeHostForBinary $binary
+        if ($reported -eq "codex-cli $RequestedVersion" -and $null -ne $codeModeHost) {
+            $matches.Add([pscustomobject]@{ Path = $binary; CodeModeHostPath = $codeModeHost; Source = 'npm-global'; SourcePackage = "@openai/codex@$($package.version)" })
         }
     }
     $unique = @($matches | Group-Object Path | ForEach-Object { $_.Group[0] })
@@ -178,11 +188,15 @@ function Acquire-IsolatedNative([string]$RequestedVersion) {
         }
         $binary = Get-NativeBinaryFromPackage $packageRoot
         if ($null -eq $binary) { Fail "isolated npm package did not contain the Windows x64 native Codex executable" }
+        $codeModeHost = Get-CodeModeHostForBinary $binary
+        if ($null -eq $codeModeHost) { Fail "isolated npm package did not contain the Windows x64 Codex code-mode host" }
         $reported = Get-ExactVersion $binary
         if ($reported -ne "codex-cli $RequestedVersion") { Fail "isolated native binary version mismatch: $reported" }
         $staged = Join-Path $temporaryRoot $BinaryName
+        $stagedCodeModeHost = Join-Path $temporaryRoot $CodeModeHostName
         [IO.File]::Copy($binary, $staged, $true)
-        return [pscustomobject]@{ Path = $staged; Source = 'npm-isolated'; SourcePackage = "@openai/codex@$platformPackageVersion"; TemporaryRoot = $temporaryRoot }
+        [IO.File]::Copy($codeModeHost, $stagedCodeModeHost, $true)
+        return [pscustomobject]@{ Path = $staged; CodeModeHostPath = $stagedCodeModeHost; Source = 'npm-isolated'; SourcePackage = "@openai/codex@$platformPackageVersion"; TemporaryRoot = $temporaryRoot }
     } catch {
         if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
         throw
@@ -191,11 +205,11 @@ function Acquire-IsolatedNative([string]$RequestedVersion) {
 
 function Read-Manifest([string]$ManifestPath) {
     try { $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json } catch { Fail "manifest is not valid JSON: $ManifestPath" }
-    $allowed = @('manifest_version', 'version', 'reported_version', 'sha256', 'platform', 'architecture', 'binary', 'source', 'source_package', 'archived_at_utc')
+    $allowed = @('manifest_version', 'version', 'reported_version', 'sha256', 'platform', 'architecture', 'binary', 'code_mode_host', 'code_mode_host_sha256', 'source', 'source_package', 'archived_at_utc')
     foreach ($property in $manifest.PSObject.Properties.Name) {
         if ($property -notin $allowed) { Fail "manifest has unsupported property: $property" }
     }
-    foreach ($property in @('manifest_version', 'version', 'reported_version', 'sha256', 'platform', 'architecture', 'binary', 'source')) {
+    foreach ($property in @('manifest_version', 'version', 'reported_version', 'sha256', 'platform', 'architecture', 'binary', 'code_mode_host', 'code_mode_host_sha256', 'source', 'source_package', 'archived_at_utc')) {
         if ($null -eq $manifest.$property -or [string]::IsNullOrWhiteSpace([string]$manifest.$property)) { Fail "manifest is missing $property" }
     }
     return $manifest
@@ -215,11 +229,16 @@ function Verify-Baseline([string]$RequestedVersion) {
     if ($manifest.version -ne $RequestedVersion -or $manifest.reported_version -ne "codex-cli $RequestedVersion") { Fail "manifest version does not match requested version: $RequestedVersion" }
     if ($manifest.platform -ne $Platform -or $manifest.architecture -ne $Architecture) { Fail "baseline is not compatible with Windows x64" }
     if ($manifest.binary -ne $BinaryName) { Fail "baseline binary must be $BinaryName" }
+    if ($manifest.code_mode_host -ne $CodeModeHostName) { Fail "baseline code-mode host must be $CodeModeHostName" }
     if ($manifest.sha256 -notmatch '^[0-9a-f]{64}$') { Fail 'manifest SHA-256 must be lowercase hexadecimal' }
+    if ($manifest.code_mode_host_sha256 -notmatch '^[0-9a-f]{64}$') { Fail 'manifest code-mode host SHA-256 must be lowercase hexadecimal' }
     $binary = Assert-NativeWindowsExecutable ([IO.Path]::GetFullPath((Join-Path $directory $manifest.binary)))
+    $codeModeHost = Assert-NativeWindowsExecutable ([IO.Path]::GetFullPath((Join-Path $directory $manifest.code_mode_host)))
+    if ((Split-Path -Parent $codeModeHost) -ne [IO.Path]::GetFullPath($directory)) { Fail 'baseline code-mode host must be inside the certified directory' }
     if ((Get-Hash $binary) -ne $manifest.sha256) { Fail "baseline SHA-256 mismatch: $RequestedVersion" }
+    if ((Get-Hash $codeModeHost) -ne $manifest.code_mode_host_sha256) { Fail "baseline code-mode host SHA-256 mismatch: $RequestedVersion" }
     if ((Get-ExactVersion $binary) -ne $manifest.reported_version) { Fail "baseline native binary version mismatch: $RequestedVersion" }
-    return [pscustomobject]@{ Binary = $binary; Manifest = $manifest; ManifestPath = $manifestPath }
+    return [pscustomobject]@{ Binary = $binary; CodeModeHost = $codeModeHost; Manifest = $manifest; ManifestPath = $manifestPath }
 }
 
 function Save-Baseline([string]$RequestedVersion) {
@@ -228,7 +247,9 @@ function Save-Baseline([string]$RequestedVersion) {
     try {
         if (-not [string]::IsNullOrWhiteSpace($SourcePath)) {
             $native = Assert-NativeWindowsExecutable ([IO.Path]::GetFullPath($SourcePath))
-            $acquired = [pscustomobject]@{ Path = $native; Source = 'host-path'; SourcePackage = $null; TemporaryRoot = $null }
+            if ([string]::IsNullOrWhiteSpace($SourceCodeModeHostPath)) { Fail '-SourceCodeModeHostPath is required with -SourcePath' }
+            $codeModeHost = Assert-NativeWindowsExecutable ([IO.Path]::GetFullPath($SourceCodeModeHostPath))
+            $acquired = [pscustomobject]@{ Path = $native; CodeModeHostPath = $codeModeHost; Source = 'host-path'; SourcePackage = 'host-provided-exact-version-bundle'; TemporaryRoot = $null }
         } else {
             try { $acquired = Acquire-IsolatedNative $RequestedVersion } catch {
                 Write-Diagnostic "isolated acquisition unavailable: $($_.Exception.Message); checking the exact installed global package"
@@ -240,12 +261,13 @@ function Save-Baseline([string]$RequestedVersion) {
         $reported = Get-ExactVersion $acquired.Path
         if ($reported -ne "codex-cli $RequestedVersion") { Fail "source native binary version mismatch: $reported" }
         $sourceHash = Get-Hash $acquired.Path
+        $sourceCodeModeHostHash = Get-Hash $acquired.CodeModeHostPath
         $root = Get-StoreRoot
         [IO.Directory]::CreateDirectory($root) | Out-Null
         $destination = Join-Path $root $RequestedVersion
         if (Test-Path -LiteralPath $destination) {
             $verified = Verify-Baseline $RequestedVersion
-            if ($verified.Manifest.sha256 -eq $sourceHash) {
+            if ($verified.Manifest.sha256 -eq $sourceHash -and $verified.Manifest.code_mode_host_sha256 -eq $sourceCodeModeHostHash) {
                 Write-Diagnostic "baseline $RequestedVersion already exists with the same SHA-256"
                 return
             }
@@ -255,9 +277,13 @@ function Save-Baseline([string]$RequestedVersion) {
         [IO.Directory]::CreateDirectory($staging) | Out-Null
         try {
             $persisted = Join-Path $staging $BinaryName
+            $persistedCodeModeHost = Join-Path $staging $CodeModeHostName
             [IO.File]::Copy($acquired.Path, $persisted, $false)
+            [IO.File]::Copy($acquired.CodeModeHostPath, $persistedCodeModeHost, $false)
             $persistedHash = Get-Hash $persisted
+            $persistedCodeModeHostHash = Get-Hash $persistedCodeModeHost
             if ($persistedHash -ne $sourceHash) { Fail 'persisted baseline SHA-256 differs from source' }
+            if ($persistedCodeModeHostHash -ne $sourceCodeModeHostHash) { Fail 'persisted code-mode host SHA-256 differs from source' }
             $manifest = [ordered]@{
                 manifest_version = $ManifestVersion
                 version = $RequestedVersion
@@ -266,6 +292,8 @@ function Save-Baseline([string]$RequestedVersion) {
                 platform = $Platform
                 architecture = $Architecture
                 binary = $BinaryName
+                code_mode_host = $CodeModeHostName
+                code_mode_host_sha256 = $sourceCodeModeHostHash
                 source = $acquired.Source
                 source_package = $acquired.SourcePackage
                 archived_at_utc = [DateTime]::UtcNow.ToString('o')

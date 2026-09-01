@@ -17,6 +17,7 @@ const BASELINE_HOME_OVERRIDE: &str = "CODEX_BASELINE_HOME";
 const BASELINE_DIRECTORY: &str = "codex-baselines";
 const MANIFEST_NAME: &str = "manifest.json";
 const BINARY_NAME: &str = "codex.exe";
+const CODE_MODE_HOST_NAME: &str = "codex-code-mode-host.exe";
 const REPORTED_VERSION_PREFIX: &str = "codex-cli ";
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -111,8 +112,10 @@ where
     let baseline_version = supported_baseline_version()?;
     let manifest = parse_manifest(&manifest_path)?;
     let binary = required_string(&manifest, "binary")?;
+    let code_mode_host = required_string(&manifest, "code_mode_host")?;
     if binary != BINARY_NAME
-        || manifest.get("manifest_version").and_then(Value::as_u64) != Some(1)
+        || code_mode_host != CODE_MODE_HOST_NAME
+        || manifest.get("manifest_version").and_then(Value::as_u64) != Some(2)
         || required_string(&manifest, "version")? != baseline_version
         || required_string(&manifest, "reported_version")? != SUPPORTED_CODEX_VERSION
         || required_string(&manifest, "platform")? != "windows-x86_64"
@@ -121,7 +124,8 @@ where
         return Err(BaselineError::Invalid);
     }
     let expected_hash = required_string(&manifest, "sha256")?;
-    if !is_lowercase_sha256(expected_hash) {
+    let expected_code_mode_host_hash = required_string(&manifest, "code_mode_host_sha256")?;
+    if !is_lowercase_sha256(expected_hash) || !is_lowercase_sha256(expected_code_mode_host_hash) {
         return Err(BaselineError::Invalid);
     }
     let executable = directory.join(binary);
@@ -147,7 +151,35 @@ where
     if version_reader(&executable)? != SUPPORTED_CODEX_VERSION {
         return Err(BaselineError::Invalid);
     }
+    verify_sibling_executable(directory, code_mode_host, expected_code_mode_host_hash)?;
     Ok(executable)
+}
+
+fn verify_sibling_executable(
+    directory: &Path,
+    name: &str,
+    expected_hash: &str,
+) -> Result<PathBuf, BaselineError> {
+    let path = directory.join(name);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| BaselineError::Invalid)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(BaselineError::Invalid);
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| BaselineError::Invalid)?;
+    let canonical_parent = canonical.parent().ok_or(BaselineError::Invalid)?;
+    let canonical_directory = fs::canonicalize(directory).map_err(|_| BaselineError::Invalid)?;
+    if canonical_parent != canonical_directory || canonical.file_name() != Some(OsStr::new(name)) {
+        return Err(BaselineError::Invalid);
+    }
+    let metadata = fs::symlink_metadata(&canonical).map_err(|_| BaselineError::Invalid)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(BaselineError::Invalid);
+    }
+    let bytes = fs::read(&canonical).map_err(|_| BaselineError::Invalid)?;
+    if bytes.get(..2) != Some(b"MZ") || sha256_hex(&bytes)? != expected_hash {
+        return Err(BaselineError::Invalid);
+    }
+    Ok(canonical)
 }
 
 /// Converts the adapter's fixed reported-version pin into the one permitted
@@ -173,7 +205,7 @@ fn parse_manifest(path: &Path) -> Result<serde_json::Map<String, Value>, Baselin
     let value: Value = serde_json::from_slice(&fs::read(path).map_err(|_| BaselineError::Invalid)?)
         .map_err(|_| BaselineError::Invalid)?;
     let object = value.as_object().cloned().ok_or(BaselineError::Invalid)?;
-    const ALLOWED: [&str; 10] = [
+    const ALLOWED: [&str; 12] = [
         "manifest_version",
         "version",
         "reported_version",
@@ -181,17 +213,21 @@ fn parse_manifest(path: &Path) -> Result<serde_json::Map<String, Value>, Baselin
         "platform",
         "architecture",
         "binary",
+        "code_mode_host",
+        "code_mode_host_sha256",
         "source",
         "source_package",
         "archived_at_utc",
     ];
-    const REQUIRED: [&str; 9] = [
+    const REQUIRED: [&str; 11] = [
         "version",
         "reported_version",
         "sha256",
         "platform",
         "architecture",
         "binary",
+        "code_mode_host",
+        "code_mode_host_sha256",
         "source",
         "source_package",
         "archived_at_utc",
@@ -249,23 +285,31 @@ mod tests {
         fn binary(&self) -> PathBuf {
             self.directory().join("codex.exe")
         }
+        fn code_mode_host(&self) -> PathBuf {
+            self.directory().join("codex-code-mode-host.exe")
+        }
         fn manifest(&self) -> PathBuf {
             self.directory().join("manifest.json")
         }
 
         fn write_valid(&self) {
             fs::write(self.binary(), b"MZ certified fixture").unwrap();
+            fs::write(self.code_mode_host(), b"MZ code mode host fixture").unwrap();
             let hash = sha256_hex(&fs::read(self.binary()).unwrap()).unwrap();
+            let code_mode_host_hash =
+                sha256_hex(&fs::read(self.code_mode_host()).unwrap()).unwrap();
             fs::write(
                 self.manifest(),
                 serde_json::to_vec(&json!({
-                    "manifest_version": 1,
+                    "manifest_version": 2,
                     "version": supported_baseline_version().unwrap(),
                     "reported_version": SUPPORTED_CODEX_VERSION,
                     "sha256": hash,
                     "platform": "windows-x86_64",
                     "architecture": "x86_64",
                     "binary": "codex.exe",
+                    "code_mode_host": "codex-code-mode-host.exe",
+                    "code_mode_host_sha256": code_mode_host_hash,
                     "source": "fixture",
                     "source_package": "fixture",
                     "archived_at_utc": "2026-08-27T00:00:00Z"
@@ -371,7 +415,7 @@ mod tests {
             (
                 "manifest_version",
                 Box::new(|m| {
-                    m.insert("manifest_version".into(), json!(2));
+                    m.insert("manifest_version".into(), json!(1));
                 }),
             ),
             (
@@ -402,6 +446,18 @@ mod tests {
                 "binary",
                 Box::new(|m| {
                     m.insert("binary".into(), json!("other.exe"));
+                }),
+            ),
+            (
+                "code_mode_host",
+                Box::new(|m| {
+                    m.insert("code_mode_host".into(), json!("other.exe"));
+                }),
+            ),
+            (
+                "code_mode_host_sha",
+                Box::new(|m| {
+                    m.insert("code_mode_host_sha256".into(), json!("A".repeat(64)));
                 }),
             ),
             (
@@ -443,6 +499,30 @@ mod tests {
             resolve_with(None, fixture.0.clone(), wrong_version),
             Err(BaselineError::Invalid)
         ));
+    }
+
+    #[test]
+    fn missing_or_modified_code_mode_host_is_rejected() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.code_mode_host()).unwrap();
+        assert!(matches!(resolve(&fixture), Err(BaselineError::Invalid)));
+
+        fixture.write_valid();
+        fs::write(fixture.code_mode_host(), b"MZ modified host").unwrap();
+        assert!(matches!(resolve(&fixture), Err(BaselineError::Invalid)));
+    }
+
+    #[test]
+    fn code_mode_host_reparse_point_is_rejected_when_supported() {
+        use std::os::windows::fs::symlink_file;
+
+        let fixture = Fixture::new();
+        let target = fixture.directory().join("host-target.exe");
+        fs::write(&target, b"MZ code mode host fixture").unwrap();
+        fs::remove_file(fixture.code_mode_host()).unwrap();
+        if symlink_file(&target, fixture.code_mode_host()).is_ok() {
+            assert!(matches!(resolve(&fixture), Err(BaselineError::Invalid)));
+        }
     }
 
     #[test]
