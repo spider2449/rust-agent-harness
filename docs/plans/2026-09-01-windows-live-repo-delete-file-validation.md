@@ -70,9 +70,10 @@ The primary live gate is **NOT VALIDATED / BLOCKED BEFORE TOOL REQUEST**.
 - No replay or retry was performed after the pre-effect failure.
 - `RAH_REPO_DELETE_FILE_LIVE_OK`: not observed.
 
-The empty evidence file is itself evidence that the newly added sink did not
-observe a dynamic deletion call. It does not prove that a tool was advertised,
-and deterministic bridge tests do not substitute for the missing live event.
+The configured evidence file was not created during this attempted turn. This
+shows that the newly added sink did not persist a dynamic deletion call, but it
+does not prove that a tool was advertised; deterministic bridge tests do not
+substitute for the missing live event.
 
 ## Evidence gap and disposition
 
