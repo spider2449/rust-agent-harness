@@ -1,24 +1,28 @@
 # RAH v0.12 Release Gate
 
-**RELEASE PREPARATION — NOT YET RELEASED**
+**RELEASED — HISTORICAL RELEASE RECORD**
 
-## Candidate identity
+## Release identity
 
-- Candidate release: `RAH v0.12.0`.
-- Release-preparation starting checkpoint:
-  `62d4adba6fe2c7cb1893b405b6964c38bb95352c`
-  (`docs: audit v0.12 Desktop authoring milestone`).
-- Task 152 exact-head CI: `33477249271` — PASS.
-- Eventual release commit / peeled tag target: PENDING until the Task 153
-  release-preparation commit exists.
-- Annotated tag `v0.12.0`: NOT CREATED.
-- Tag object: NOT CREATED.
-- Task 153 exact-head CI: PENDING in this committed candidate document.
-- GitHub Release: NOT PUBLISHED.
+- Release: `RAH v0.12.0`.
+- Release commit: `d1c1cd470fd337f141abb9675fb4642ccd2e00b0`.
+- Annotated tag: `v0.12.0`.
+- Tag object: `4d002a8bc67b1877e692bb0aafd764fc5eb47b65`.
+- Tag peeled target: `d1c1cd470fd337f141abb9675fb4642ccd2e00b0`.
+- Task 153 exact-head CI: `33479033004` — PASS.
+- Task 154 tag CI: `33479751261` — PASS.
+- GitHub Release: [RAH v0.12.0](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.12.0), published `2026-09-01T06:58:38Z`; `draft=false`, `prerelease=false`.
 - Certified Codex baseline: exactly `codex-cli 0.149.0`.
 - Verified live platform: Windows.
 
-RAH v0.11.0 remains the last released version while this candidate is prepared.
+## Commit lineage
+
+- **RELEASE COMMIT:** `d1c1cd470fd337f141abb9675fb4642ccd2e00b0`
+  (`docs: prepare RAH v0.12.0 release`) is the immutable `v0.12.0` tag
+  target.
+- **POST-RELEASE CLEANUP COMMIT:** the Task 155 documentation-only commit is
+  a descendant of the release commit. It is not the release commit and must
+  never be described as the `v0.12.0` tag target.
 
 ## Authority summary
 
@@ -109,9 +113,9 @@ claimed for this validated RAH path.
 
 ## Dependency record
 
-v0.12 introduces no Cargo dependency. Task 153 must have
+v0.12 introduced no Cargo dependency. The release-preparation change had
 **DEPENDENCY DELTA = NONE**; only workspace-local `Cargo.lock` package-version
-records required by the version bump are allowed.
+records required by the version bump were included.
 
 ## Deterministic release checklist
 
@@ -125,9 +129,12 @@ records required by the version bump are allowed.
 - [x] `cargo build -p rah-desktop --release`
 - [x] `scripts/test-codex-baseline.ps1 -NativeCodex <certified-codex.exe>`
 - [x] `scripts/codex-baseline.ps1 verify 0.149.0`
-- [ ] Task 153 release-preparation commit created and pushed
-- [ ] Local `HEAD == origin/master`
-- [ ] Task 153 exact-head CI PASS
+- [x] Task 153 release-preparation commit created and pushed
+- [x] Local `HEAD == origin/master` at the release commit before tagging
+- [x] Task 153 exact-head CI PASS (`33479033004`)
+- [x] Task 154 annotated tag `v0.12.0` created and pushed
+- [x] Task 154 tag CI PASS (`33479751261`)
+- [x] GitHub Release published (`2026-09-01T06:58:38Z`)
 
 ## Desktop release artifact record
 
@@ -139,7 +146,5 @@ records required by the version bump are allowed.
   `36b9594cd91e6a28d88b8334e05bcceeb303387f7d525e82d23658abac15acd6`.
 - Adjacent `sqlite3.dll`: NO; SQLite remains bundled.
 
-This document intentionally retains pending release-commit and exact-head-CI
-fields in the candidate commit. Task 154/post-release work may convert the
-actual immutable identities into historical release data after a tag and
-publication exist.
+This completed record preserves the Task 153 candidate evidence and records
+the later Task 154 tag and publication facts without rewriting their chronology.

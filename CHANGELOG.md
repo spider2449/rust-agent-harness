@@ -2,8 +2,12 @@
 
 ## v0.12.0 — 2026-09-01
 
-Release preparation for the audited v0.12 Desktop repository-authoring
-milestone. This candidate is not yet tagged or released.
+Released as `RAH v0.12.0` for the audited Desktop repository-authoring
+milestone. The immutable release commit is
+`d1c1cd470fd337f141abb9675fb4642ccd2e00b0`; annotated tag `v0.12.0` has
+object ID `4d002a8bc67b1877e692bb0aafd764fc5eb47b65` and peels to that commit.
+Task 153 candidate CI run `33479033004` and Task 154 tag CI run `33479751261`
+passed. The GitHub Release was published on `2026-09-01T06:58:38Z`.
 
 ### Added
 
