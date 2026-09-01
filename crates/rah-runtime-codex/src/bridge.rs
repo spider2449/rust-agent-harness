@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
     sync::{Arc, Mutex},
 };
 
@@ -99,6 +100,13 @@ pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
         let snapshot = ToolSnapshot { definition };
         dynamic_tools.push(dynamic_tool_spec(&alias, &snapshot));
         by_name.insert(snapshot.definition.name.clone(), alias.clone());
+        if snapshot.definition.name == ToolName::new("repo.delete-file") {
+            append_live_evidence(json!({
+                "event": "tool_advertised",
+                "public_tool": snapshot.definition.name.as_str(),
+                "private_alias": alias.clone(),
+            }));
+        }
         by_alias.insert(alias, snapshot);
     }
 
@@ -326,6 +334,12 @@ async fn handle_request(
             tool_call: call.clone(),
         },
     );
+    append_live_evidence(json!({
+        "event": "tool_requested",
+        "public_tool": call.name.as_str(),
+        "private_alias": params.tool.clone(),
+        "request": live_request_fields(&call.name, &call.input.0),
+    }));
 
     let current = config
         .registry
@@ -365,6 +379,10 @@ async fn handle_request(
             tool_call_id: call.id.clone(),
         },
     );
+    append_live_evidence(json!({
+        "event": "tool_started",
+        "public_tool": call.name.as_str(),
+    }));
     calls.insert(
         key.clone(),
         CallEntry {
@@ -408,6 +426,8 @@ fn finish_execution(
     let response = match completion.result {
         Ok(output) => {
             let response = output_response(&output);
+            let live_error = output.is_error;
+            let live_result = live_result_fields(&output);
             connection.publish_rah_event(
                 completion.key.thread_id.clone(),
                 completion.key.turn_id.clone(),
@@ -417,6 +437,12 @@ fn finish_execution(
                     output,
                 },
             );
+            append_live_evidence(json!({
+                "event": "tool_finished",
+                "public_tool": completion.call.name.as_str(),
+                "is_error": live_error,
+                "result": live_result,
+            }));
             response
         }
         Err(_) => {
@@ -444,6 +470,41 @@ fn finish_execution(
         connection.respond_result(id, response.clone());
     }
     entry.state = CallState::Completed(response);
+}
+
+fn live_request_fields(tool: &ToolName, input: &Value) -> Value {
+    if tool.as_str() != "repo.delete-file" {
+        return Value::Null;
+    }
+    json!({
+        "path": input.get("path").cloned().unwrap_or(Value::Null),
+        "expected_sha256": input.get("expected_sha256").cloned().unwrap_or(Value::Null),
+        "expected_byte_length": input.get("expected_byte_length").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn live_result_fields(output: &ToolOutput) -> Value {
+    let [ToolContent::Text(text)] = output.content.as_slice() else {
+        return Value::Null;
+    };
+    serde_json::from_str(text).unwrap_or(Value::Null)
+}
+
+fn append_live_evidence(record: Value) {
+    let Some(path) = std::env::var_os("RAH_LIVE_EVIDENCE_PATH") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
 }
 
 async fn reconcile(

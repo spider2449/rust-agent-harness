@@ -3396,6 +3396,26 @@ fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
 }
 
 #[cfg(target_os = "windows")]
+fn append_live_evidence(record: serde_json::Value) {
+    use std::io::Write;
+
+    let Some(path) = std::env::var_os("RAH_LIVE_EVIDENCE_PATH") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+#[cfg(target_os = "windows")]
 fn emit_repository_refresh(app: &AppHandle) {
     if let Err(error) = app.emit("repository_snapshot_refresh", ()) {
         tracing::warn!(error = %error, "failed to request desktop repository refresh");
@@ -3451,6 +3471,10 @@ async fn run_chat(
             }
             emit_activity_event(&app, activity);
             if refresh_repository {
+                append_live_evidence(serde_json::json!({
+                    "event": "repository_refresh",
+                    "reason": "repo.delete-file",
+                }));
                 emit_repository_refresh(&app);
             }
         }
@@ -3473,6 +3497,11 @@ async fn run_chat(
                     return;
                 }
                 let assistant_text = output.message.content.clone();
+                append_live_evidence(serde_json::json!({
+                    "event": "desktop_completed",
+                    "final_text": assistant_text,
+                    "marker_observed": assistant_text.contains("RAH_REPO_DELETE_FILE_LIVE_OK"),
+                }));
                 let committed = app
                     .state::<DesktopAppState>()
                     .conversation
