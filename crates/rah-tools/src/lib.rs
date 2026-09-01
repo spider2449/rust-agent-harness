@@ -18,6 +18,7 @@ mod host_execute;
 mod native_repository_create;
 mod repository_commit;
 mod repository_create_file;
+mod repository_delete_file;
 mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
@@ -45,6 +46,7 @@ pub use repository_commit::{
     RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
 };
 pub use repository_create_file::{REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryFileCreationTool};
+pub use repository_delete_file::{REPOSITORY_DELETE_FILE_TOOL_NAME, RepositoryFileDeletionTool};
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};
 pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInfoTool};

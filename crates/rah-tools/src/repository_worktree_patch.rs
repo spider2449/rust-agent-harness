@@ -1200,7 +1200,7 @@ fn validate_preconditions(
     Ok(())
 }
 
-fn parse_logical_path(value: &str, limit: usize) -> Result<PathBuf, ToolError> {
+pub(crate) fn parse_logical_path(value: &str, limit: usize) -> Result<PathBuf, ToolError> {
     if value.is_empty()
         || value.len() > limit
         || value.contains('\0')
@@ -1238,7 +1238,7 @@ fn parse_logical_path(value: &str, limit: usize) -> Result<PathBuf, ToolError> {
     Ok(path)
 }
 
-fn validate_existing_target(root: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
+pub(crate) fn validate_existing_target(root: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
     validate_directory_path(root, root, "repository root")?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -1262,7 +1262,11 @@ fn validate_existing_target(root: &Path, relative: &Path) -> Result<PathBuf, Too
     Ok(canonical)
 }
 
-fn validate_directory_path(root: &Path, directory: &Path, label: &str) -> Result<(), ToolError> {
+pub(crate) fn validate_directory_path(
+    root: &Path,
+    directory: &Path,
+    label: &str,
+) -> Result<(), ToolError> {
     if !is_beneath(directory, root) {
         return Err(policy_error(format!("{label} escapes the repository root")));
     }
@@ -1359,7 +1363,7 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {
     Ok(canonical)
 }
 
-fn reject_reparse_ancestry(path: &Path, label: &str) -> Result<(), ToolError> {
+pub(crate) fn reject_reparse_ancestry(path: &Path, label: &str) -> Result<(), ToolError> {
     for ancestor in path.ancestors() {
         if ancestor.exists() {
             reject_link_or_reparse(ancestor, label)?;
@@ -1368,7 +1372,7 @@ fn reject_reparse_ancestry(path: &Path, label: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ToolError> {
+pub(crate) fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ToolError> {
     let metadata = fs::symlink_metadata(path).map_err(fs_error)?;
     if metadata.file_type().is_symlink() {
         return Err(policy_error(format!("{label} must not be a symbolic link")));
@@ -1383,7 +1387,7 @@ fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn reject_unsupported_file_attributes(metadata: &fs::Metadata) -> Result<(), ToolError> {
+pub(crate) fn reject_unsupported_file_attributes(metadata: &fs::Metadata) -> Result<(), ToolError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -1601,7 +1605,7 @@ fn redacted_precondition_reason(reason: &str) -> &'static str {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -1610,11 +1614,11 @@ struct FileIdentity {
     volume_serial: u32,
     #[cfg(windows)]
     file_index: u64,
-    link_count: u32,
+    pub(crate) link_count: u32,
 }
 
 impl FileIdentity {
-    fn capture(path: &Path) -> Result<Self, ToolError> {
+    pub(crate) fn capture(path: &Path) -> Result<Self, ToolError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
