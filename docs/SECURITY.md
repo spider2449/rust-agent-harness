@@ -1,4 +1,4 @@
-# RAH v0.11 Milestone Security Model
+# RAH v0.12 Candidate Security Model
 
 ## ADR 0016 bounded repository commit authority
 
@@ -8,6 +8,12 @@ authoritative. The trusted host owns the authority: the public model input is
 only a bounded UTF-8 `message`; it cannot select repository, native Git,
 branch/ref, parent, index/tree/hash, identity, hooks, config/environment,
 argv, remote, or credential.
+
+The v0.12 Desktop workflow does not add authority around that existing
+exception. Human Stage / Unstage remain host actions. The host observes the
+staged review, and human Authorize arms the opaque Rust-only reviewed snapshot.
+Frontend presentation is not authorization, and model request or Execute
+permission is not commit authorization.
 
 Trusted Profile composition has a closed `repo.commit` schema with symbolic
 repository and executable resources, explicit host identity, and an `Execute`

@@ -1,4 +1,4 @@
-# RAH v0.11 Milestone Architecture
+# RAH v0.12 Candidate Architecture
 
 ## Ownership boundaries
 
@@ -77,6 +77,13 @@ supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
 Repository-scoped transcript storage uses an opaque SHA-256 namespace rather
 than a raw path. Its private SQLite backend is storage only: it is not exposed
 as SQL to models or tools and does not grant repository mutation authority.
+
+The v0.12 Desktop workflow productizes existing bounded capabilities without
+changing their authority: model bounded authoring is followed by host-owned
+Stage / Unstage, host-observed staged review, and an explicit host-owned
+reviewed-snapshot authorization before message-only `repo.commit`. The
+frontend presents sanitized host state only. `RepositoryCommitReview` remains
+opaque and Rust-only; it is neither model data nor frontend authority.
 
 The public `RepositoryWorktreePatchTool` constructor fixes a host-selected Git
 executable and repository root. Its closed request schema permits only a

@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.12.0 — 2026-09-01
+
+Release preparation for the audited v0.12 Desktop repository-authoring
+milestone. This candidate is not yet tagged or released.
+
+### Added
+
+- Windows Desktop end-to-end bounded repository workflow: model bounded
+  repository authoring, human Stage / Unstage, host-observed staged review,
+  human reviewed-snapshot authorization, message-only `repo.commit`, verified
+  Git commit result, and Desktop repository refresh.
+
+### Verified
+
+- The existing authority boundaries are productized through Desktop; v0.12
+  introduces no new authority. Model request is not authorization; Execute
+  permission is not commit authorization; human Stage / Unstage are host
+  actions; human Authorize is the reviewed-snapshot authorization event; and
+  the frontend does not own authorization.
+- `RepositoryCommitReview` remains opaque and Rust-only. `repo.commit` remains
+  message-only, does not auto-stage, and uncertain external effects are not
+  replayed.
+- Windows live validation reused the Task 151 certified `codex-cli 0.149.0`
+  bundle with closed manifest schema v2. The demonstrated complete pair is
+  `codex.exe` and `codex-code-mode-host.exe`, each with a closed identity and
+  SHA-256; the Task 151 hardening closes only the Desktop verifier gap that
+  could accept a directory missing the code-mode host.
+- The bounded repository-safe authoring path was live-proven. At
+  `D:\\rah-task151-clean`, exactly one independently verified Git commit effect
+  was observed: `90683f5eaab129a75e815879e69586ff75de5e86`, with no second
+  commit or replay. This fixture commit is not the RAH v0.12 release commit.
+
+### Security and limitations
+
+- No generic Git, shell/process, or `fs.write` authority is introduced. There
+  is no branch/ref, network, credential, or rollback authority.
+- The exact live edit Tool label and exact live `repo.commit` activity-event
+  counts were not durably retained. They remain documented non-blocking
+  observability gaps; no unsupported lifecycle counts are asserted.
+- Windows is live-certified. Unix/macOS live validation is not claimed. Task
+  120 remains **DEFERRED / NOT VALIDATED** and transport confinement remains
+  **NOT CLAIMED**.
+
 ## v0.11.0 — 2026-08-30
 
 Released as `RAH v0.11.0`. The immutable annotated tag `v0.11.0` has object

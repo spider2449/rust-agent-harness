@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.11 release: host-reviewed bounded repository commit
+## v0.12 candidate: Desktop bounded repository authoring and review
 
 RAH v0.10.0 established the existing bounded Desktop host configuration.
 Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
@@ -25,22 +25,23 @@ Remote llama.cpp generation proof remains **DEFERRED / NOT VALIDATED**. A
 bounded initial endpoint is not transport confinement: redirect, proxy, DNS,
 peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
 
-### Bounded repository commit
+### Desktop authoring, review, and bounded repository commit
 
-RAH v0.11 adds one deliberately narrow final step to the existing local
-repository workflow:
+The v0.12 candidate productizes the existing bounded Desktop local repository
+workflow:
 
 ```text
-inspect -> edit/create -> stage/review -> host-reviewed bounded commit
+inspect -> model bounded authoring -> human Stage / Unstage -> host-observed staged review -> human reviewed-snapshot authorization -> message-only bounded commit -> verified result / refresh
 ```
 
-The only new model-visible Tool is `repo.commit`, with the closed input
+The model-visible commit Tool is `repo.commit`, with the closed input
 `{"message":"..."}`. It requires `PermissionLevel::Execute` as an outer gate,
 but Execute alone is not repository-history authority. A trusted profile must
 compose the exact host-selected repository, native Git executable, and identity,
 and the host must separately authorize one fresh reviewed staged snapshot for
-each call. The authorization is in-memory, one-shot, and never restored or
-replayed.
+each call. Stage / Unstage are host actions, not model Tool authority; the
+frontend presents host-owned state but does not own authorization. The
+authorization is in-memory, one-shot, and never restored or replayed.
 
 `repo.commit` creates at most one ordinary commit from the already staged
 snapshot on the current attached branch. It never stages files, accepts no
