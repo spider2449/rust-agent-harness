@@ -37,8 +37,9 @@ use rah_tools::{
     EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryCommitControl,
     RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
-    RepositoryFileInfoTool, RepositoryMultiFileEditTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
+    ToolContext, ToolError, ToolRegistry,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -885,6 +886,7 @@ struct DesktopRepository {
     worktree_diff: Arc<RepositoryDiffTool>,
     staged_diff: Arc<RepositoryDiffStagedTool>,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
+    rename_authority: Option<RepositoryFileRenameAuthority>,
 }
 
 #[cfg(target_os = "windows")]
@@ -894,13 +896,14 @@ impl DesktopRepository {
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
     ) -> Result<Self, ToolError> {
-        Self::new_with_deletion_authority(git_executable, repository_root, None)
+        Self::new_with_authorities(git_executable, repository_root, None, None)
     }
 
-    fn new_with_deletion_authority(
+    fn new_with_authorities(
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
         deletion_authority: Option<RepositoryFileDeletionAuthority>,
+        rename_authority: Option<RepositoryFileRenameAuthority>,
     ) -> Result<Self, ToolError> {
         #[cfg(test)]
         if startup_counter_tracking() {
@@ -925,6 +928,13 @@ impl DesktopRepository {
                 message: "deletion authority does not match selected repository".to_owned(),
             });
         }
+        if let Some(authority) = &rename_authority
+            && !authority.matches_resources(git_executable, &repository_root)
+        {
+            return Err(ToolError::Execution {
+                message: "rename authority does not match selected repository".to_owned(),
+            });
+        }
         Ok(Self {
             display_path: repository_root.display().to_string(),
             git_executable: git_executable.to_path_buf(),
@@ -933,6 +943,7 @@ impl DesktopRepository {
             worktree_diff: Arc::new(worktree_diff),
             staged_diff: Arc::new(staged_diff),
             deletion_authority,
+            rename_authority,
         })
     }
 }
@@ -2637,12 +2648,23 @@ fn choose_repository(
             tracing::warn!(error = %error, "selected repository cannot receive deletion authority");
             FrontendError::RepositoryInvalid
         })?;
-    let repository =
-        DesktopRepository::new_with_deletion_authority(&git, &path, Some(deletion_authority))
-            .map_err(|error| {
-                tracing::warn!(error = %error, "selected repository is invalid");
-                FrontendError::RepositoryInvalid
-            })?;
+    let rename_authority = match RepositoryFileRenameAuthority::new(&git, &path) {
+        Ok(authority) => Some(authority),
+        Err(error) => {
+            tracing::warn!(error = %error, "selected repository cannot receive rename authority");
+            None
+        }
+    };
+    let repository = DesktopRepository::new_with_authorities(
+        &git,
+        &path,
+        Some(deletion_authority),
+        rename_authority,
+    )
+    .map_err(|error| {
+        tracing::warn!(error = %error, "selected repository is invalid");
+        FrontendError::RepositoryInvalid
+    })?;
     repository_selection_allowed(
         *state
             .chat
@@ -2987,6 +3009,11 @@ fn desktop_tool_registry(
                 authority.clone(),
             )))?;
         }
+        if let Some(authority) = &repository.rename_authority {
+            registry.register(Arc::new(RepositoryFileRenameTool::from_authority(
+                authority.clone(),
+            )))?;
+        }
         if let Some(commit_tool) = commit_tool {
             registry.register(commit_tool)?;
         }
@@ -2996,6 +3023,8 @@ fn desktop_tool_registry(
         "selected_repository": repository.is_some(),
         "deletion_authority_present": repository
             .is_some_and(|value| value.deletion_authority.is_some()),
+        "rename_authority_present": repository
+            .is_some_and(|value| value.rename_authority.is_some()),
         "registry_contains_repo_delete_file": registry
             .definitions()
             .iter()
@@ -3161,6 +3190,9 @@ async fn connect_codex(
                 "deletion_authority_present": repository
                     .as_ref()
                     .is_some_and(|value| value.deletion_authority.is_some()),
+                "rename_authority_present": repository
+                    .as_ref()
+                    .is_some_and(|value| value.rename_authority.is_some()),
                 "bridge_enabled": true,
             }));
             CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
@@ -3347,6 +3379,7 @@ fn activity_event(
                     | "repo.create-file"
                     | "repo.edit-files"
                     | "repo.delete-file"
+                    | "repo.rename-file"
                     | "repo.commit"
             );
             let commit = (tool == "repo.commit")
@@ -3498,7 +3531,7 @@ async fn run_chat(
             if refresh_repository {
                 append_live_evidence(serde_json::json!({
                     "event": "repository_refresh",
-                    "reason": "repo.delete-file",
+                    "reason": "repository_mutation",
                 }));
                 emit_repository_refresh(&app);
             }
@@ -4025,7 +4058,10 @@ mod tests {
         CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
         CodexRuntime,
     };
-    use rah_tools::{RepositoryCommitTool, RepositoryFileDeletionAuthority, ToolContext};
+    use rah_tools::{
+        RepositoryCommitTool, RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority,
+        ToolContext,
+    };
     use sha2::{Digest, Sha256};
     use std::{
         collections::HashMap,
@@ -4262,8 +4298,16 @@ mod tests {
             let git = Self::native_git();
             let authority = RepositoryFileDeletionAuthority::new(&git, &self.0)
                 .expect("host deletion authority should construct");
-            DesktopRepository::new_with_deletion_authority(&git, &self.0, Some(authority))
+            DesktopRepository::new_with_authorities(&git, &self.0, Some(authority), None)
                 .expect("selected deletion repository should construct")
+        }
+
+        fn rename_repository(&self) -> DesktopRepository {
+            let git = Self::native_git();
+            let authority = RepositoryFileRenameAuthority::new(&git, &self.0)
+                .expect("host rename authority should construct");
+            DesktopRepository::new_with_authorities(&git, &self.0, None, Some(authority))
+                .expect("selected rename repository should construct")
         }
 
         fn native_git() -> PathBuf {
@@ -5905,6 +5949,297 @@ mod tests {
             fs::read(fixture.0.join("tracked.txt")).unwrap(),
             b"newer user bytes\n"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_rename_file_uses_host_authority_and_preserves_repository_state() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let without_authority = fixture.desktop_repository();
+        let registry = desktop_tool_registry(Some(&without_authority), None)
+            .expect("registry without rename authority should build");
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .all(|definition| definition.name.as_str() != "repo.rename-file")
+        );
+
+        let repository = fixture.rename_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("registry with rename authority should build");
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.rename-file")
+            .expect("host authority exposes rename tool");
+        assert_eq!(definition.permission, PermissionLevel::Execute);
+        assert_eq!(
+            definition.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "destination_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "expected_source_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "expected_source_file_byte_length": {"type": "integer", "minimum": 0, "maximum": 1024 * 1024}
+                },
+                "required": ["source_path", "destination_path", "expected_source_file_sha256", "expected_source_file_byte_length"],
+                "additionalProperties": false
+            })
+        );
+
+        let source = fixture.0.join("tracked.txt");
+        let bytes = fs::read(&source).expect("source should be readable");
+        let index_before = fs::read(fixture.0.join(".git/index")).expect("index should read");
+        let head_before = Command::new(TestRepository::native_git())
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&fixture.0)
+            .output()
+            .expect("HEAD should read")
+            .stdout;
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.rename-file"),
+                    input: ToolInput(serde_json::json!({
+                        "source_path": "tracked.txt",
+                        "destination_path": "nested/moved.txt",
+                        "expected_source_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+                        "expected_source_file_byte_length": bytes.len()
+                    })),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("rename dispatch should return a bounded result");
+        assert!(!output.is_error);
+        assert!(matches!(&output.content[0], ToolContent::Json(value)
+            if value["status"] == "renamed_verified"));
+        assert!(!source.exists());
+        assert_eq!(fs::read(fixture.0.join("nested/moved.txt")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(fixture.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            Command::new(TestRepository::native_git())
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap()
+                .stdout,
+            head_before
+        );
+        let status = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["status", "--porcelain=v1"])
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(status.contains(" D tracked.txt"));
+        assert!(status.contains("?? nested/moved.txt"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_rename_file_refreshes_same_directory_activity_without_frontend_authority() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.rename_repository();
+        let registry = desktop_tool_registry(Some(&repository), None).unwrap();
+        let bytes = fs::read(fixture.0.join("tracked.txt")).unwrap();
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.rename-file"),
+                    input: ToolInput(serde_json::json!({
+                        "source_path": "tracked.txt",
+                        "destination_path": "renamed.txt",
+                        "expected_source_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+                        "expected_source_file_byte_length": bytes.len()
+                    })),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(&output.content[0], ToolContent::Json(value)
+            if value["status"] == "renamed_verified"));
+
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.rename-file"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output,
+        };
+        let mut calls = HashMap::new();
+        assert!(activity_event(&requested, &mut calls).is_some());
+        let (event, refresh) = activity_event(&finished, &mut calls).unwrap();
+        assert!(refresh);
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"kind":"tool_finished","tool":"repo.rename-file","result":"success"}"#
+        );
+        assert!(!fixture.0.join("tracked.txt").exists());
+        assert_eq!(fs::read(fixture.0.join("renamed.txt")).unwrap(), bytes);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_rename_file_rejects_stale_source_and_destination_collision_without_retry() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.rename_repository();
+        let registry = desktop_tool_registry(Some(&repository), None).unwrap();
+        let bytes = fs::read(fixture.0.join("tracked.txt")).unwrap();
+        let request = |destination: &str| ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("repo.rename-file"),
+            input: ToolInput(serde_json::json!({
+            "source_path": "tracked.txt",
+            "destination_path": destination,
+            "expected_source_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "expected_source_file_byte_length": bytes.len()
+            })),
+        };
+        let case_only = registry
+            .execute(request("TRACKED.TXT"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(case_only.is_error);
+        assert!(matches!(&case_only.content[0], ToolContent::Json(value)
+            if value["status"] == "precondition_failed"));
+        assert_eq!(fs::read(fixture.0.join("tracked.txt")).unwrap(), bytes);
+
+        fs::write(fixture.0.join("tracked.txt"), b"newer source\n").unwrap();
+        let stale = registry
+            .execute(request("nested/stale.txt"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(stale.is_error);
+        assert!(matches!(&stale.content[0], ToolContent::Json(value)
+            if value["status"] == "precondition_failed"));
+        assert_eq!(
+            fs::read(fixture.0.join("tracked.txt")).unwrap(),
+            b"newer source\n"
+        );
+        assert!(!fixture.0.join("nested/stale.txt").exists());
+
+        fs::write(fixture.0.join("tracked.txt"), &bytes).unwrap();
+        fs::write(fixture.0.join("nested/collision.txt"), b"protected\n").unwrap();
+        let collision = registry
+            .execute(request("nested/collision.txt"), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(collision.is_error);
+        assert!(matches!(&collision.content[0], ToolContent::Json(value)
+            if value["status"] == "precondition_failed"));
+        assert_eq!(fs::read(fixture.0.join("tracked.txt")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(fixture.0.join("nested/collision.txt")).unwrap(),
+            b"protected\n"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_successful_rename_revokes_reviewed_commit_authorization() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        fs::write(fixture.0.join("nested/ordinary.txt"), b"reviewed\n").unwrap();
+        assert!(
+            Command::new(&git)
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = fixture.rename_repository();
+        let (commit_tool, control) = RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .unwrap();
+        let control = Arc::new(control);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        *state.commit_identity.lock().unwrap() = Some(DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        });
+        replace_selected_repository(&state, repository);
+        let selected = state.repository.lock().unwrap().clone().unwrap();
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: Arc::new(commit_tool),
+            control: Arc::clone(&control),
+        });
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .unwrap();
+        let snapshot = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(review_id),
+            ..
+        } = snapshot.review
+        else {
+            panic!("staged review should be available");
+        };
+        authorize_repository_commit_review(&state, &review_id)
+            .await
+            .unwrap();
+        assert!(control.has_pending_authorization().await);
+
+        let bytes = fs::read(fixture.0.join("tracked.txt")).unwrap();
+        let registry = desktop_tool_registry(Some(&selected), None).unwrap();
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.rename-file"),
+                    input: ToolInput(serde_json::json!({
+                        "source_path": "tracked.txt",
+                        "destination_path": "renamed.txt",
+                        "expected_source_file_sha256": format!("{:x}", Sha256::digest(&bytes)),
+                        "expected_source_file_byte_length": bytes.len()
+                    })),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(&output.content[0], ToolContent::Json(value)
+            if value["status"] == "renamed_verified"));
+        invalidate_repository_commit_review(&state).await;
+        assert!(!control.has_pending_authorization().await);
+        assert!(matches!(
+            authorize_repository_commit_review(&state, &review_id).await,
+            Err(FrontendError::CommitAuthorizationStale)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
