@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MAX_TRACKED_CALLS: usize = 128;
+const MAX_LIVE_RESULT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct BridgeConfig {
@@ -499,10 +500,64 @@ fn live_request_fields(tool: &ToolName, input: &Value) -> Value {
 }
 
 fn live_result_fields(output: &ToolOutput) -> Value {
-    let [ToolContent::Text(text)] = output.content.as_slice() else {
-        return Value::Null;
-    };
-    serde_json::from_str(text).unwrap_or(Value::Null)
+    match output.content.as_slice() {
+        [] => Value::Null,
+        [content] => live_content_value(content),
+        contents => bounded_json_value(&Value::Array(
+            contents
+                .iter()
+                .map(|content| match content {
+                    ToolContent::Text(text) => json!({
+                        "type": "text",
+                        "value": bounded_text_value(text),
+                    }),
+                    ToolContent::Json(value) => json!({
+                        "type": "json",
+                        "value": bounded_json_value(value),
+                    }),
+                })
+                .collect(),
+        )),
+    }
+}
+
+fn live_content_value(content: &ToolContent) -> Value {
+    match content {
+        ToolContent::Json(value) => bounded_json_value(value),
+        ToolContent::Text(text) => serde_json::from_str(text)
+            .map(|value| bounded_json_value(&value))
+            .unwrap_or_else(|_| bounded_text_value(text)),
+    }
+}
+
+fn bounded_json_value(value: &Value) -> Value {
+    let serialized = value.to_string();
+    if serialized.len() <= MAX_LIVE_RESULT_BYTES {
+        value.clone()
+    } else {
+        json!({
+            "truncated": true,
+            "serialized_bytes": serialized.len(),
+        })
+    }
+}
+
+fn bounded_text_value(text: &str) -> Value {
+    if text.len() <= MAX_LIVE_RESULT_BYTES {
+        return Value::String(text.to_owned());
+    }
+    let max_text_bytes = MAX_LIVE_RESULT_BYTES.saturating_sub(64);
+    let end = text
+        .char_indices()
+        .take_while(|(index, _)| *index < max_text_bytes)
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    json!({
+        "truncated": true,
+        "text": &text[..end],
+        "original_bytes": text.len(),
+    })
 }
 
 fn append_live_evidence(record: Value) {
@@ -659,10 +714,10 @@ fn publish_failure(
 
 #[cfg(test)]
 mod tests {
-    use rah_protocol::ToolName;
+    use rah_protocol::{ToolContent, ToolName, ToolOutput};
     use serde_json::json;
 
-    use super::live_request_fields;
+    use super::{live_request_fields, live_result_fields};
 
     #[test]
     fn live_request_fields_records_repo_delete_file_schema_fields() {
@@ -680,5 +735,95 @@ mod tests {
                 "expected_file_byte_length": 26,
             })
         );
+    }
+
+    #[test]
+    fn live_finished_evidence_preserves_structured_json_results() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "renamed_verified",
+                "source_path": "src/old.txt",
+                "destination_path": "dst/new.txt",
+            }))],
+            is_error: false,
+        };
+        let evidence = json!({
+            "event": "tool_finished",
+            "is_error": output.is_error,
+            "result": live_result_fields(&output),
+        });
+
+        assert_eq!(evidence["is_error"], false);
+        assert_eq!(evidence["result"]["status"], "renamed_verified");
+        assert_eq!(evidence["result"]["source_path"], "src/old.txt");
+        assert_eq!(evidence["result"]["destination_path"], "dst/new.txt");
+    }
+
+    #[test]
+    fn live_finished_evidence_preserves_delete_json_results() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "deleted_verified",
+                "uncertain": false,
+                "path": "delete-target.txt",
+            }))],
+            is_error: false,
+        };
+
+        assert_eq!(live_result_fields(&output)["status"], "deleted_verified");
+        assert_eq!(live_result_fields(&output)["uncertain"], false);
+        assert_eq!(live_result_fields(&output)["path"], "delete-target.txt");
+    }
+
+    #[test]
+    fn live_finished_evidence_preserves_text_compatibility() {
+        let plain = ToolOutput {
+            content: vec![ToolContent::Text("plain result".to_owned())],
+            is_error: false,
+        };
+        let json_text = ToolOutput {
+            content: vec![ToolContent::Text(r#"{"status":"ok"}"#.to_owned())],
+            is_error: false,
+        };
+
+        assert_eq!(live_result_fields(&plain), json!("plain result"));
+        assert_eq!(live_result_fields(&json_text), json!({"status": "ok"}));
+    }
+
+    #[test]
+    fn live_finished_evidence_represents_empty_and_multiple_content_items() {
+        let empty = ToolOutput {
+            content: vec![],
+            is_error: false,
+        };
+        let multiple = ToolOutput {
+            content: vec![
+                ToolContent::Text("first".to_owned()),
+                ToolContent::Json(json!({"status": "second"})),
+            ],
+            is_error: false,
+        };
+
+        assert_eq!(live_result_fields(&empty), serde_json::Value::Null);
+        assert_eq!(live_result_fields(&multiple)[0]["type"], "text");
+        assert_eq!(live_result_fields(&multiple)[0]["value"], "first");
+        assert_eq!(live_result_fields(&multiple)[1]["type"], "json");
+        assert_eq!(
+            live_result_fields(&multiple)[1]["value"]["status"],
+            "second"
+        );
+    }
+
+    #[test]
+    fn live_finished_evidence_bounds_oversized_content() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Text("x".repeat(20 * 1024))],
+            is_error: false,
+        };
+
+        let result = live_result_fields(&output);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["original_bytes"], 20 * 1024);
+        assert!(result.to_string().len() <= super::MAX_LIVE_RESULT_BYTES);
     }
 }
