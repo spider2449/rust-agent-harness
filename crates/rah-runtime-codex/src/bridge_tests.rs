@@ -870,7 +870,7 @@ async fn experimental_api_and_generic_tool_definitions_are_bridge_only() {
         {
             "type": "function",
             "name": "rah_tool_1",
-            "description": "Looks up a deterministic test record.",
+            "description": "RAH public tool `record.lookup`. Looks up a deterministic test record.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -919,7 +919,7 @@ async fn fs_read_is_advertised_by_private_alias_and_resolves_to_exact_rah_name()
         &json!({
             "type": "function",
             "name": "rah_tool_0",
-            "description": "Reads a UTF-8 text file within the configured workspace.",
+            "description": "RAH public tool `fs.read`. Reads a UTF-8 text file within the configured workspace.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -1630,6 +1630,10 @@ async fn trusted_profile_composed_repo_delete_file_uses_host_authority_and_gener
     .await;
     let (handle, thread) = start_bridge(&runtime, &mut peer).await;
     assert_eq!(thread["params"]["dynamicTools"][0]["name"], "rah_tool_0");
+    assert_eq!(
+        thread["params"]["dynamicTools"][0]["description"],
+        "RAH public tool `repo.delete-file`. Deletes one clean HEAD-tracked repository-relative file."
+    );
     assert_eq!(
         thread["params"]["dynamicTools"][0]["inputSchema"],
         definition.input_schema
@@ -3132,7 +3136,10 @@ async fn trusted_profile_composed_repo_commit_is_message_only_host_armed_and_nev
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     );
-    assert_eq!(dynamic["description"], definition.description);
+    assert_eq!(
+        dynamic["description"],
+        format!("RAH public tool `repo.commit`. {}", definition.description)
+    );
     assert_eq!(dynamic["inputSchema"], definition.input_schema);
     let schema = dynamic["inputSchema"].to_string();
     for forbidden in [

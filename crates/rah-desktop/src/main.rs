@@ -2991,6 +2991,22 @@ fn desktop_tool_registry(
             registry.register(commit_tool)?;
         }
     }
+    append_live_evidence(serde_json::json!({
+        "event": "desktop_registry_composed",
+        "selected_repository": repository.is_some(),
+        "deletion_authority_present": repository
+            .is_some_and(|value| value.deletion_authority.is_some()),
+        "registry_contains_repo_delete_file": registry
+            .definitions()
+            .iter()
+            .any(|definition| definition.name.as_str() == "repo.delete-file"),
+        "relevant_tool_names": registry
+            .definitions()
+            .into_iter()
+            .filter(|definition| definition.name.as_str().starts_with("repo."))
+            .map(|definition| definition.name.to_string())
+            .collect::<Vec<_>>(),
+    }));
     Ok(Arc::new(registry))
 }
 
@@ -3138,6 +3154,15 @@ async fn connect_codex(
                     tracing::error!(error = %error, "failed to construct desktop tool registry");
                     FrontendError::ToolRegistryFailed
                 })?;
+            append_live_evidence(serde_json::json!({
+                "event": "desktop_connection_context",
+                "repository_generation": repository_generation,
+                "selected_repository": repository.is_some(),
+                "deletion_authority_present": repository
+                    .as_ref()
+                    .is_some_and(|value| value.deletion_authority.is_some()),
+                "bridge_enabled": true,
+            }));
             CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
                 prepared.executable,
                 registry,

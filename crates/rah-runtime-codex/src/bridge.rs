@@ -105,6 +105,7 @@ pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
                 "event": "tool_advertised",
                 "public_tool": snapshot.definition.name.as_str(),
                 "private_alias": alias.clone(),
+                "dynamic_definition_emitted": true,
             }));
         }
         by_alias.insert(alias, snapshot);
@@ -118,10 +119,18 @@ pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
 }
 
 fn dynamic_tool_spec(alias: &str, snapshot: &ToolSnapshot) -> Value {
+    let description = if alias == snapshot.definition.name.as_str() {
+        snapshot.definition.description.clone()
+    } else {
+        format!(
+            "RAH public tool `{}`. {}",
+            snapshot.definition.name, snapshot.definition.description
+        )
+    };
     json!({
         "type": "function",
         "name": alias,
-        "description": snapshot.definition.description,
+        "description": description,
         "inputSchema": snapshot.definition.input_schema,
         "deferLoading": false
     })

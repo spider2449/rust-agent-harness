@@ -105,3 +105,38 @@ Codex claim.
 
 Task 163 is not complete. Exact-head CI, push, and milestone/release work must
 not be claimed from this run.
+
+## Task 163A diagnosis and corrective change
+
+Source tracing of the actual Desktop path found that the selected repository
+does construct `RepositoryFileDeletionAuthority`, stores it in the Rust-owned
+`DesktopRepository`, and passes it through the Desktop registry builder used by
+`connect_codex`. The registry contains exactly one public `repo.delete-file`
+definition when host authority is present, and none when it is absent.
+Reconnect creates a fresh registry from the current selected repository
+context, so a stale generation cannot restore an old authority.
+
+The divergence was at the final Generic Codex Tool Bridge translation. Dotted
+RAH names such as `repo.delete-file` are deliberately mapped to private
+`rah_tool_N` function names for Codex, but the emitted description contained
+only the capability description and did not identify the public RAH name. The
+Desktop prompt named `repo.delete-file`, while the actual dynamic function
+definition was opaque to the model. Deterministic bridge tests exercised the
+private alias directly and therefore did not reproduce this model-facing
+availability failure.
+
+The bridge now prefixes aliased dynamic definitions with the canonical public
+RAH tool name. This generic translation fix does not create authority, alter
+the deletion policy, or add a Desktop-only registration path. Tests cover
+authorized and missing-authority composition, one public definition, private
+alias routing, Execute admission, stale preconditions, generation isolation,
+and no replay. The live path emits bounded opt-in evidence for selected
+repository generation, authority presence, relevant registry names,
+public-to-private alias mapping, and dynamic-definition emission. Absolute
+paths and secrets are not persisted.
+
+Task 163 remains incomplete. The remaining requirement is a fresh real Windows
+Desktop validation from the exact corrective commit, including one live
+request/start/finish, one verified unstaged deletion, unchanged sentinel,
+index, HEAD and refs, no replay, completion, cleanup, and
+`RAH_REPO_DELETE_FILE_LIVE_OK`.
