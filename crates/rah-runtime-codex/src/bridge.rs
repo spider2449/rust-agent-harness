@@ -487,8 +487,14 @@ fn live_request_fields(tool: &ToolName, input: &Value) -> Value {
     }
     json!({
         "path": input.get("path").cloned().unwrap_or(Value::Null),
-        "expected_sha256": input.get("expected_sha256").cloned().unwrap_or(Value::Null),
-        "expected_byte_length": input.get("expected_byte_length").cloned().unwrap_or(Value::Null),
+        "expected_file_sha256": input
+            .get("expected_file_sha256")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "expected_file_byte_length": input
+            .get("expected_file_byte_length")
+            .cloned()
+            .unwrap_or(Value::Null),
     })
 }
 
@@ -649,4 +655,30 @@ fn publish_failure(
             message: message.to_owned(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use rah_protocol::ToolName;
+    use serde_json::json;
+
+    use super::live_request_fields;
+
+    #[test]
+    fn live_request_fields_records_repo_delete_file_schema_fields() {
+        let input = json!({
+            "path": "delete-target.txt",
+            "expected_file_sha256": "a".repeat(64),
+            "expected_file_byte_length": 26,
+        });
+
+        assert_eq!(
+            live_request_fields(&ToolName::new("repo.delete-file"), &input),
+            json!({
+                "path": "delete-target.txt",
+                "expected_file_sha256": "a".repeat(64),
+                "expected_file_byte_length": 26,
+            })
+        );
+    }
 }

@@ -54,6 +54,12 @@ change the deletion contract, or persist absolute repository paths or secrets.
    length `26`. Codex replied in the Desktop conversation that the tool was
    unavailable. No target deletion occurred and no live evidence record was
    emitted.
+6. A second live attempt from the corrective bridge path discovered and
+   invoked the tool. The result was `precondition_failed`; no deletion
+   occurred. The restored Windows worktree contained the target as 27-byte
+   CRLF, while the authorized `HEAD` blob was 26-byte LF. This correctly failed
+   ADR 0017's raw-byte-equality precondition. No staging, commit, ref, or replay
+   effect occurred.
 
 ## Observed live result
 
@@ -75,13 +81,22 @@ shows that the newly added sink did not persist a dynamic deletion call, but it
 does not prove that a tool was advertised; deterministic bridge tests do not
 substitute for the missing live event.
 
+The second live attempt closed the earlier availability gap: the tool was
+discoverable and invoked, and the bounded evidence recorded the live request
+and lifecycle. Its `precondition_failed` result is valid fail-closed behavior,
+not a deletion. The target remained present, and no staging, commit, ref, or
+replay effect occurred because the raw-byte precondition failed.
+
 ## Evidence gap and disposition
 
-The live Desktop connection did not expose `repo.delete-file` to the model in
-the attempted turn, despite the selected repository's Rust-owned deletion
-authority being constructed. This blocks Task 163 completion because the
-required real Desktop/trusted-host/runtime path and exact lifecycle counts
-were not exercised. No authority boundary was changed to bypass this gap.
+The first live Desktop connection did not expose `repo.delete-file` to the model
+in the attempted turn, despite the selected repository's Rust-owned deletion
+authority being constructed. The second attempt repaired that availability gap
+and exercised the real request lifecycle, but failed before deletion because
+the restored Windows worktree bytes did not equal the authorized `HEAD` blob.
+Task 163 therefore remains incomplete: the required verified unstaged deletion
+and success marker were not observed. No authority boundary was changed to
+bypass either result.
 
 The disposable repository remains inspectable for diagnosis. No negative stale
 preimage case was started, because doing so would not repair the primary live
