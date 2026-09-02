@@ -1,17 +1,24 @@
 # RAH v0.13 Release Gate
 
-**RELEASE PREPARATION — NOT YET RELEASED**
+**HISTORICAL RELEASE EVIDENCE — RAH v0.13.0 RELEASED**
+
+This document records the completed v0.13.0 release gate. It is historical
+evidence, not an active release checklist.
 
 ## Release identity
 
-- Release candidate: `RAH v0.13.0`.
+- Release: `RAH v0.13.0`.
 - Starting HEAD: `0de2b2839fbd03d648ebbf2ba3f7d470d94ce794`.
 - Starting exact-head CI: run `33586765389` — PASS.
 - Task 164 milestone audit: PASS; v0.13 release preparation may begin.
-- Release-preparation commit: pending.
-- Exact-head CI for the release-preparation commit: pending.
-- Tag: not created.
-- GitHub Release: not published.
+- Release commit: `a432d7ecc4a5a564288e2bd50b550055b94920cf`.
+- Exact-head release CI: run `33588660637` — PASS.
+- Annotated tag: `v0.13.0`.
+- Tag object: `4a40d8fd0f6065c771dd1a78e4808df0cd02c8e7`.
+- Peeled tag target: `a432d7ecc4a5a564288e2bd50b550055b94920cf`.
+- Remote tag verification: COMPLETE; the immutable tag was not moved.
+- GitHub Release: published (`draft=false`, `prerelease=false`).
+- Post-publication verification: COMPLETE.
 
 ## Completed milestone scope
 
@@ -25,7 +32,9 @@
 | 162 | COMPLETE | Desktop selected-repository integration |
 | 163 | COMPLETE | Windows live validation |
 | 164 | COMPLETE | v0.13 milestone audit — PASS |
-| 165 | RELEASE PREPARATION | Version, documentation, gate, validation, commit, push, exact-head CI |
+| 165 | COMPLETE | Version, documentation, gate, validation, commit, push, exact-head CI |
+| 166 | COMPLETE | Immutable tag and GitHub Release publication |
+| 167 | COMPLETE | Post-release documentation/state cleanup |
 
 ## v0.13 authority and capability boundary
 
@@ -86,7 +95,7 @@ Equivalent Linux or macOS live validation is not claimed.
   generic filesystem/shell/process/Git authority, staging/commit automation,
   and branch/ref/history/network Git remain out of scope.
 
-## Release-preparation checklist
+## Completed release gate
 
 - [x] Workspace packages are `0.13.0`; edition remains `2024`.
 - [x] Cargo.lock contains only corresponding workspace-local version changes.
@@ -94,16 +103,16 @@ Equivalent Linux or macOS live validation is not claimed.
   the exact native `codex-cli 0.149.0` baseline test/verify was not runnable
   because only native `0.152.1` is installed (the recorded Task 163 baseline
   remains the live evidence).
-- [ ] Release-preparation commit created and pushed.
-- [ ] Local `HEAD == origin/master` after push.
-- [ ] Exact-head CI for the release-preparation commit passes.
+- [x] Release-preparation commit created and pushed.
+- [x] Local `HEAD == origin/master` after push.
+- [x] Exact-head CI for the release-preparation commit passes.
 
-## Not yet done
+## Post-publication completion
 
-- v0.13.0 tag creation.
-- GitHub Release publication.
-- Post-release cleanup.
+- [x] Annotated tag created.
+- [x] Remote tag verified without movement.
+- [x] GitHub Release published.
+- [x] Post-publication verification complete.
 
-Task 166 is the separate tag and release-publication task after the exact-head
-CI pass. No tag, GitHub Release, or release artifact publication is part of
-Task 165.
+Task 166 completed the separate tag and release-publication step after the
+exact-head CI pass. Task 167 completed this post-release documentation cleanup.

@@ -1,9 +1,13 @@
 # Changelog
 
-## v0.13.0 — 2026-09-02 (release candidate)
+## v0.13.0 — 2026-09-02
 
-Release preparation for the completed bounded repository file-deletion
-milestone. This is not yet a tag or GitHub Release.
+Released as `RAH v0.13.0` for the completed bounded repository file-deletion
+milestone. The immutable release commit is
+`a432d7ecc4a5a564288e2bd50b550055b94920cf`; annotated tag `v0.13.0` has tag
+object ID `4a40d8fd0f6065c771dd1a78e4808df0cd02c8e7` and peels to that commit.
+Exact-head release CI run `33588660637` passed, and the GitHub Release was
+published.
 
 ### Added
 
