@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use rah_cli::profile_composition::{
     EffectiveProfileComposition, compose, compose_with_repository_file_deletion_authority,
+    compose_with_repository_file_rename_authority,
 };
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
@@ -21,8 +22,8 @@ use rah_protocol::{
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{
-    EchoTool, FsReadTool, RepositoryFileDeletionAuthority, Tool, ToolContext, ToolError,
-    ToolRegistry, TrustedStaticProfile,
+    EchoTool, FsReadTool, RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority, Tool,
+    ToolContext, ToolError, ToolRegistry, TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -354,6 +355,84 @@ struct RepositoryDeleteFileFixture {
     target: PathBuf,
     unrelated: PathBuf,
     profile: PathBuf,
+}
+
+struct RepositoryRenameFileFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    source: PathBuf,
+    destination: PathBuf,
+    profile: PathBuf,
+}
+
+impl RepositoryRenameFileFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir(root.join("dst")).unwrap();
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(
+            &root,
+            &["config", "user.name", "RAH rename-file bridge test"],
+        );
+        let source = root.join("src").join("old.txt");
+        fs::write(&source, b"rename bridge bytes\n").unwrap();
+        git(&root, &["add", "--", "src/old.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task172-rename-file-bridge",
+            "resources": {
+                "executables": { "git": { "path": git_executable(), "kind": "native" } },
+                "repositories": { "worktree": { "path": &root } }
+            },
+            "capabilities": [{
+                "name": "repo.rename-file", "enabled": true, "permission": "execute",
+                "executable": "git", "repository": "worktree"
+            }]
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap()).unwrap();
+        let destination = root.join("dst").join("new.txt");
+        Self {
+            _base: base,
+            root,
+            source,
+            destination,
+            profile,
+        }
+    }
+
+    async fn compose_authorized(&self) -> EffectiveProfileComposition {
+        let authority = RepositoryFileRenameAuthority::new(git_executable(), &self.root)
+            .expect("host should construct rename authority");
+        compose_with_repository_file_rename_authority(
+            TrustedStaticProfile::load(&self.profile).unwrap(),
+            Some(authority),
+        )
+        .await
+        .expect("authorized rename composition should succeed")
+    }
+
+    fn request(&self) -> Value {
+        let bytes = fs::read(&self.source).unwrap();
+        json!({
+            "source_path": "src/old.txt",
+            "destination_path": "dst/new.txt",
+            "expected_source_file_sha256": sha256_hex(&bytes),
+            "expected_source_file_byte_length": bytes.len()
+        })
+    }
+
+    fn metadata(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            git_output(&self.root, &["rev-parse", "HEAD"]),
+            git_output(&self.root, &["show-ref"]),
+            fs::read(self.root.join(".git").join("index")).unwrap(),
+        )
+    }
 }
 
 impl RepositoryDeleteFileFixture {
@@ -1594,6 +1673,178 @@ async fn trusted_profile_composed_repo_create_file_preserves_schema_permission_d
             .count(),
         1
     );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_rename_file_requires_host_authority() {
+    let fixture = RepositoryRenameFileFixture::new("rename-file-missing-authority");
+    let profile = TrustedStaticProfile::load(&fixture.profile).unwrap();
+    assert!(compose(profile).await.is_err());
+    assert!(fixture.source.exists());
+    assert!(!fixture.destination.exists());
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_rename_file_uses_generic_bridge_once() {
+    let fixture = RepositoryRenameFileFixture::new("rename-file-success");
+    let before = fixture.metadata();
+    let composition = fixture.compose_authorized().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == ToolName::new("repo.rename-file"))
+        .expect("effective composer should publish repo.rename-file");
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema,
+        json!({"type":"object","properties":{"source_path":{"type":"string","minLength":1,"maxLength":1024},"destination_path":{"type":"string","minLength":1,"maxLength":1024},"expected_source_file_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"expected_source_file_byte_length":{"type":"integer","minimum":0,"maximum":1048576}},"required":["source_path","destination_path","expected_source_file_sha256","expected_source_file_byte_length"],"additionalProperties":false})
+    );
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let dynamic = thread["params"]["dynamicTools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| {
+            tool["description"]
+                .as_str()
+                .unwrap()
+                .contains("repo.rename-file")
+        })
+        .unwrap();
+    let alias = dynamic["name"].as_str().unwrap().to_owned();
+    assert_ne!(alias, "repo.rename-file");
+    assert_eq!(dynamic["inputSchema"], definition.input_schema);
+    let request = fixture.request();
+    peer.send(tool_request(
+        json!(1721),
+        "private-thread",
+        "private-turn",
+        "rename-once",
+        &alias,
+        request.clone(),
+    ));
+    peer.send(tool_request(
+        json!("duplicate-rename-delivery"),
+        "private-thread",
+        "private-turn",
+        "rename-once",
+        &alias,
+        request,
+    ));
+    let first = peer.next_sent().await;
+    let second = peer.next_sent().await;
+    assert_eq!(first["result"], second["result"]);
+    assert_eq!(first["result"]["success"], true, "{first}");
+    assert_eq!(response_json(&first)["status"], "renamed_verified");
+    assert!(!fixture.source.exists());
+    assert_eq!(
+        fs::read(&fixture.destination).unwrap(),
+        b"rename bridge bytes\n"
+    );
+    assert_eq!(fixture.metadata(), before);
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_rename_file_rejects_stale_preimage() {
+    let fixture = RepositoryRenameFileFixture::new("rename-file-stale");
+    let request = fixture.request();
+    let composition = fixture.compose_authorized().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(&fixture.source, b"newer user version\n").unwrap();
+    peer.send(tool_request(
+        json!(1722),
+        "private-thread",
+        "private-turn",
+        "stale-rename",
+        &alias,
+        request,
+    ));
+    let response = peer.next_sent().await;
+    assert!(!response["result"]["success"].as_bool().unwrap());
+    assert_eq!(response_json(&response)["status"], "precondition_failed");
+    assert!(fixture.source.exists());
+    assert!(!fixture.destination.exists());
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn trusted_profile_composed_repo_rename_file_rejects_destination_collision() {
+    let fixture = RepositoryRenameFileFixture::new("rename-file-collision");
+    let composition = fixture.compose_authorized().await;
+    let (runtime, mut peer, _) = connected_bridge(
+        composition.registry_handle(),
+        vec![PermissionLevel::Execute],
+    )
+    .await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let alias = thread["params"]["dynamicTools"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(&fixture.destination, b"independent destination\n").unwrap();
+    peer.send(tool_request(
+        json!(1723),
+        "private-thread",
+        "private-turn",
+        "collision-rename",
+        &alias,
+        fixture.request(),
+    ));
+    let response = peer.next_sent().await;
+    assert!(!response["result"]["success"].as_bool().unwrap());
+    assert_eq!(response_json(&response)["status"], "precondition_failed");
+    assert_eq!(fs::read(&fixture.source).unwrap(), b"rename bridge bytes\n");
+    assert_eq!(
+        fs::read(&fixture.destination).unwrap(),
+        b"independent destination\n"
+    );
+    finish_turn(&peer, "completed");
+    let _ = handle.into_events().collect::<Vec<_>>().await;
     runtime.shutdown().await.unwrap();
     composition.shutdown().await;
 }

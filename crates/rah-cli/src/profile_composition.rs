@@ -6,8 +6,8 @@ use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, RepositoryCommitControl,
     RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
     RepositoryFileDeletionAuthority, RepositoryFileDeletionTool, RepositoryFileInfoTool,
-    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry,
-    TrustedStaticProfile,
+    RepositoryFileRenameAuthority, RepositoryFileRenameTool, RepositoryMultiFileEditTool,
+    RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -59,13 +59,29 @@ impl EffectiveProfileComposition {
 pub async fn compose(
     profile: TrustedStaticProfile,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
-    compose_with_repository_file_deletion_authority(profile, None).await
+    compose_with_repository_file_authorities(profile, None, None).await
 }
 
 /// Composes a profile using a deletion authority separately constructed by the host.
 pub async fn compose_with_repository_file_deletion_authority(
     profile: TrustedStaticProfile,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
+) -> Result<EffectiveProfileComposition, ProfileError> {
+    compose_with_repository_file_authorities(profile, deletion_authority, None).await
+}
+
+/// Composes a profile using a rename authority separately constructed by the host.
+pub async fn compose_with_repository_file_rename_authority(
+    profile: TrustedStaticProfile,
+    rename_authority: Option<RepositoryFileRenameAuthority>,
+) -> Result<EffectiveProfileComposition, ProfileError> {
+    compose_with_repository_file_authorities(profile, None, rename_authority).await
+}
+
+async fn compose_with_repository_file_authorities(
+    profile: TrustedStaticProfile,
+    deletion_authority: Option<RepositoryFileDeletionAuthority>,
+    rename_authority: Option<RepositoryFileRenameAuthority>,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
     let mut registry = ToolRegistry::new();
     let mut repository_commit_control = None;
@@ -122,6 +138,24 @@ pub async fn compose_with_repository_file_deletion_authority(
             .ok_or(ProfileError::ConstructionFailed)?;
         registry
             .register(Arc::new(RepositoryFileDeletionTool::from_authority(
+                authority.clone(),
+            )))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    for rename in profile.repository_file_renames() {
+        let executable = profile
+            .executable_resource(rename.executable())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let repository = profile
+            .repository_resource(rename.repository())
+            .map_err(|_| ProfileError::ConstructionFailed)?;
+        let authority = rename_authority
+            .as_ref()
+            .filter(|authority| authority.matches_resources(executable, repository))
+            .ok_or(ProfileError::ConstructionFailed)?;
+        registry
+            .register(Arc::new(RepositoryFileRenameTool::from_authority(
                 authority.clone(),
             )))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
@@ -286,6 +320,7 @@ pub async fn compose_with_repository_file_deletion_authority(
                     | "repo.edit-files"
                     | "repo.commit"
                     | "repo.delete-file"
+                    | "repo.rename-file"
             ) || matches!(
                 capability.capability_id.as_str(),
                 "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"

@@ -73,8 +73,8 @@ pub use trusted_profile::{
     EffectiveCapability, EffectiveProfile, EffectiveProvider, McpExpectedToolProfile,
     McpProviderProfile, ProcessPluginExpectedToolProfile, ProcessPluginProfile, ProfileError,
     RepositoryCommitProfile, RepositoryFileCreationProfile, RepositoryFileDeletionProfile,
-    RepositoryMultiFileEditProfile, RepositoryObserverProfile, RepositoryWorktreePatchProfile,
-    TrustedStaticProfile,
+    RepositoryFileRenameProfile, RepositoryMultiFileEditProfile, RepositoryObserverProfile,
+    RepositoryWorktreePatchProfile, TrustedStaticProfile,
 };
 
 /// Neutral execution context supplied by the runtime to a tool.

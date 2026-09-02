@@ -28,6 +28,7 @@ pub struct TrustedStaticProfile {
     repository_worktree_patches: Vec<RepositoryWorktreePatchProfile>,
     repository_file_creations: Vec<RepositoryFileCreationProfile>,
     repository_file_deletions: Vec<RepositoryFileDeletionProfile>,
+    repository_file_renames: Vec<RepositoryFileRenameProfile>,
     repository_multi_file_edits: Vec<RepositoryMultiFileEditProfile>,
     repository_observers: Vec<RepositoryObserverProfile>,
     repository_commits: Vec<RepositoryCommitProfile>,
@@ -78,6 +79,7 @@ impl TrustedStaticProfile {
         let mut repository_worktree_patches = Vec::new();
         let mut repository_file_creations = Vec::new();
         let mut repository_file_deletions = Vec::new();
+        let mut repository_file_renames = Vec::new();
         let mut repository_multi_file_edits = Vec::new();
         let mut repository_observers = Vec::new();
         let mut repository_commits = Vec::new();
@@ -90,6 +92,7 @@ impl TrustedStaticProfile {
                 repository_multi_file_edit,
                 repository_observer,
                 repository_commit,
+                repository_file_rename,
             ) = build_capability(capability, &profile.resources, &mut registry)?;
             capabilities.push(inventory);
             if let Some(repository_worktree_patch) = repository_worktree_patch {
@@ -100,6 +103,9 @@ impl TrustedStaticProfile {
             }
             if let Some(repository_file_deletion) = repository_file_deletion {
                 repository_file_deletions.push(repository_file_deletion);
+            }
+            if let Some(repository_file_rename) = repository_file_rename {
+                repository_file_renames.push(repository_file_rename);
             }
             if let Some(repository_multi_file_edit) = repository_multi_file_edit {
                 repository_multi_file_edits.push(repository_multi_file_edit);
@@ -144,6 +150,7 @@ impl TrustedStaticProfile {
             repository_worktree_patches,
             repository_file_creations,
             repository_file_deletions,
+            repository_file_renames,
             repository_multi_file_edits,
             repository_observers,
             repository_commits,
@@ -203,6 +210,12 @@ impl TrustedStaticProfile {
     #[must_use]
     pub fn repository_file_deletions(&self) -> &[RepositoryFileDeletionProfile] {
         &self.repository_file_deletions
+    }
+
+    /// Returns closed host-only `repo.rename-file` selections.
+    #[must_use]
+    pub fn repository_file_renames(&self) -> &[RepositoryFileRenameProfile] {
+        &self.repository_file_renames
     }
 
     /// Returns closed, host-only `repo.edit-files` declarations for effective composition.
@@ -504,6 +517,13 @@ pub struct RepositoryFileDeletionProfile {
     repository: String,
 }
 
+/// Closed symbolic selection for an already host-authorized rename policy.
+#[derive(Clone, Debug)]
+pub struct RepositoryFileRenameProfile {
+    executable: String,
+    repository: String,
+}
+
 /// Closed host-only binding needed to construct the bounded `repo.edit-files` tool.
 ///
 /// This contains symbolic resource identities only. The private
@@ -550,6 +570,7 @@ type CapabilityBuildResult = (
     Option<RepositoryMultiFileEditProfile>,
     Option<RepositoryObserverProfile>,
     Option<RepositoryCommitProfile>,
+    Option<RepositoryFileRenameProfile>,
 );
 
 /// Closed host-only binding needed to construct one fixed repository observer.
@@ -615,6 +636,18 @@ impl RepositoryFileDeletionProfile {
     }
 }
 
+impl RepositoryFileRenameProfile {
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+}
+
 impl RepositoryMultiFileEditProfile {
     #[must_use]
     pub fn executable(&self) -> &str {
@@ -649,6 +682,7 @@ fn build_capability(
             None,
             None,
             None,
+            None,
         ));
     }
 
@@ -668,6 +702,7 @@ fn build_capability(
                 validation: "configured",
             },
             Some(binding),
+            None,
             None,
             None,
             None,
@@ -697,6 +732,7 @@ fn build_capability(
             None,
             None,
             None,
+            None,
         ));
     }
 
@@ -719,6 +755,30 @@ fn build_capability(
             None,
             None,
             None,
+            None,
+        ));
+    }
+
+    if capability.name == "repo.rename-file" {
+        let binding = repository_file_rename_binding(capability)?;
+        executable(resources, Some(binding.executable()))?;
+        directory(resources, Some(binding.repository()))?;
+        return Ok((
+            EffectiveCapability {
+                capability_id: capability.name.clone(),
+                enabled: true,
+                registered: false,
+                permission,
+                resources: symbolic_resources,
+                validation: "configured",
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(binding),
         ));
     }
 
@@ -743,6 +803,7 @@ fn build_capability(
             Some(binding),
             None,
             None,
+            None,
         ));
     }
 
@@ -765,6 +826,7 @@ fn build_capability(
             None,
             None,
             Some(binding),
+            None,
         ));
     }
 
@@ -788,6 +850,7 @@ fn build_capability(
             None,
             None,
             Some(binding),
+            None,
             None,
         ));
     }
@@ -840,6 +903,7 @@ fn build_capability(
             resources: symbolic_resources,
             validation: "validated",
         },
+        None,
         None,
         None,
         None,
@@ -976,8 +1040,8 @@ fn capability_contract(
             .collect(),
         ),
         "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
-        | "repo.delete-file" | "repo.file-info" | "repo.status" | "repo.diff"
-        | "repo.diff-staged" => (
+        | "repo.delete-file" | "repo.rename-file" | "repo.file-info" | "repo.status"
+        | "repo.diff" | "repo.diff-staged" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -1124,6 +1188,39 @@ fn repository_file_deletion_binding(
     validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
     validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
     Ok(RepositoryFileDeletionProfile {
+        executable: executable.clone(),
+        repository: repository.clone(),
+    })
+}
+
+fn repository_file_rename_binding(
+    capability: &Capability,
+) -> Result<RepositoryFileRenameProfile, ProfileError> {
+    if capability.workspace.is_some()
+        || capability.max_bytes.is_some()
+        || capability.cwd_resource.is_some()
+        || capability.identity_name.is_some()
+        || capability.identity_email.is_some()
+    {
+        return Err(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        });
+    }
+    let executable = capability
+        .executable
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    let repository = capability
+        .repository
+        .as_ref()
+        .ok_or(ProfileError::InvalidProfile {
+            reason: "capability_binding",
+        })?;
+    validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
+    validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
+    Ok(RepositoryFileRenameProfile {
         executable: executable.clone(),
         repository: repository.clone(),
     })
