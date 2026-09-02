@@ -26,6 +26,7 @@ mod repository_multi_file_edit;
 mod repository_multi_file_preflight;
 mod repository_mutation;
 mod repository_observer;
+mod repository_rename_file;
 mod repository_status;
 mod repository_worktree_patch;
 mod shell_exec;
@@ -56,6 +57,9 @@ pub use repository_multi_file_edit::{
     REPOSITORY_EDIT_FILES_TOOL_NAME, RepositoryMultiFileEditTool,
 };
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
+pub use repository_rename_file::{
+    REPOSITORY_RENAME_FILE_TOOL_NAME, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+};
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{
     REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryWorktreePatchTool,
