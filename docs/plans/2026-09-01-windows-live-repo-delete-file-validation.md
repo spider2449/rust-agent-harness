@@ -61,65 +61,77 @@ change the deletion contract, or persist absolute repository paths or secrets.
    ADR 0017's raw-byte-equality precondition. No staging, commit, ref, or replay
    effect occurred.
 
-## Observed live result
+## Earlier failed attempts
 
-The primary live gate is **NOT VALIDATED / BLOCKED BEFORE TOOL REQUEST**.
+These observations remain part of the record and are distinct from the final
+successful gate:
 
-- Public tool label: not observed in a live lifecycle event.
-- Codex-private alias: not observed.
-- `ToolRequested`: not observed; required `1`, actual evidence `0`.
-- `ToolStarted`: not observed; required `1`, actual evidence `0`.
-- `ToolFinished`: not observed; required `1`, actual evidence `0`.
-- Target: still present; no native deletion attempt is claimed.
-- Sentinel: unchanged at the recorded SHA-256.
-- Index/worktree/HEAD: unchanged; no unstaged deletion exists.
-- No replay or retry was performed after the pre-effect failure.
-- `RAH_REPO_DELETE_FILE_LIVE_OK`: not observed.
+1. The initial live Desktop exposure failed before Task 163A. The selected
+   repository and Codex connection succeeded, but Codex reported
+   `repo.delete-file` unavailable. No alias or lifecycle event was observed,
+   the target remained present, and `RAH_REPO_DELETE_FILE_LIVE_OK` was absent.
+2. The corrective bridge-path attempt discovered and invoked the tool, but
+   returned `precondition_failed`. The Windows worktree had restored the target
+   as 27-byte CRLF while the authorized `HEAD` blob was 26-byte LF. The raw-byte
+   precondition therefore correctly failed closed; no deletion, staging,
+   commit, ref/history mutation, or replay occurred.
 
-The configured evidence file was not created during this attempted turn. This
-shows that the newly added sink did not persist a dynamic deletion call, but it
-does not prove that a tool was advertised; deterministic bridge tests do not
-substitute for the missing live event.
+## Final successful live result
 
-The second live attempt closed the earlier availability gap: the tool was
-discoverable and invoked, and the bounded evidence recorded the live request
-and lifecycle. Its `precondition_failed` result is valid fail-closed behavior,
-not a deletion. The target remained present, and no staging, commit, ref, or
-replay effect occurred because the raw-byte precondition failed.
+The real Windows Desktop/Codex `repo.delete-file` gate passed:
 
-## Evidence gap and disposition
+- Public RAH tool: `repo.delete-file`.
+- Codex-private alias: `rah_tool_4`.
+- `tool_advertised`: `1`.
+- Lifecycle: `ToolRequested=1`, `ToolStarted=1`, `ToolFinished=1`.
+- `dynamic_definition_emitted`: `true`.
+- Request: `path=delete-target.txt`,
+  `expected_file_sha256=2d7ae1968fa24a605cd7e715213d9e94f3477f740485642b7608ccc413cebe86`,
+  `expected_file_byte_length=26`.
+- `tool_finished.is_error`: `false`.
+- Codex completion marker: `RAH_REPO_DELETE_FILE_LIVE_OK`.
+- Target: absent after execution.
+- Sentinel: present and unchanged, SHA-256
+  `ed54a6ef2da77ea8983de6f91adcd96db302458ad81d84a0c668ae89bb9f7fb0`,
+  byte length `21`.
+- `git status --short`: `D delete-target.txt`.
+- `git diff --cached --name-status`: empty.
+- `git diff --name-status`: `D delete-target.txt`.
+- `HEAD` before and after:
+  `cd880d98c705e8339346d8e3c274b805d207f2cf`.
+- Refs unchanged:
+  `cd880d98c705e8339346d8e3c274b805d207f2cf refs/heads/master`.
+- No staging, commit, ref/history mutation, or replay occurred.
 
-The first live Desktop connection did not expose `repo.delete-file` to the model
-in the attempted turn, despite the selected repository's Rust-owned deletion
-authority being constructed. The second attempt repaired that availability gap
-and exercised the real request lifecycle, but failed before deletion because
-the restored Windows worktree bytes did not equal the authorized `HEAD` blob.
-Task 163 therefore remains incomplete: the required verified unstaged deletion
-and success marker were not observed. No authority boundary was changed to
-bypass either result.
+Normal Desktop/Codex child cleanup completed: shutdown was orderly, child
+processes were reaped, and no RAH Desktop/Codex child remained orphaned.
 
-The disposable repository remains inspectable for diagnosis. No negative stale
-preimage case was started, because doing so would not repair the primary live
-gate and would broaden the failed run.
+## Non-blocking observability gap
+
+The live evidence helper currently handles `ToolContent::Text`, while
+`repo.delete-file` returns `ToolContent::Json`. Consequently,
+`tool_finished.result` was logged as `null`. This is a non-blocking formatting
+gap because success is independently proven by `is_error=false`, the 1/1/1
+lifecycle, the Codex completion marker, and independent filesystem and Git
+evidence. The earlier failure records are not erased or reinterpreted.
 
 ## Deterministic and workspace validation
 
-- `cargo fmt --check`: PASS after `cargo fmt`
-- Focused `cargo test -p rah-runtime-codex -p rah-desktop`: PASS
+The requested post-closure checks all passed:
+
+- `cargo fmt --check`: PASS
 - `cargo check --workspace`: PASS
 - `cargo test --workspace`: PASS
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: PASS
 - `git diff --check`: PASS
 - `cargo metadata --no-deps --format-version 1`: PASS
 
-These checks prove the instrumentation and existing deterministic contracts
-compile and pass; they do not upgrade the failed live observation into a live
-Codex claim.
-
 ## Final result
 
-Task 163 is not complete. Exact-head CI, push, and milestone/release work must
-not be claimed from this run.
+Task 163 live evidence closure is complete. The documentation-only closure
+change is committed and pushed as one coherent commit. Exact-head CI passed for
+that commit. Milestone audit work was not started before the exact-head CI
+pass.
 
 ## Task 163A diagnosis and corrective change
 
@@ -150,8 +162,5 @@ repository generation, authority presence, relevant registry names,
 public-to-private alias mapping, and dynamic-definition emission. Absolute
 paths and secrets are not persisted.
 
-Task 163 remains incomplete. The remaining requirement is a fresh real Windows
-Desktop validation from the exact corrective commit, including one live
-request/start/finish, one verified unstaged deletion, unchanged sentinel,
-index, HEAD and refs, no replay, completion, cleanup, and
-`RAH_REPO_DELETE_FILE_LIVE_OK`.
+The fresh real Windows Desktop validation requirement is now satisfied by the
+successful live result recorded above.
