@@ -1,4 +1,22 @@
-# RAH v0.12 Candidate Security Model
+# RAH v0.13 Candidate Security Model
+
+## ADR 0017 bounded repository file deletion authority
+
+`repo.delete-file` is a separate host-owned authority for exactly one explicit
+repository-relative regular file. The target must be clean, HEAD-tracked, and
+match the exact authorized HEAD blob preimage, including raw bytes, SHA-256,
+and byte length. The operation makes one native worktree deletion attempt and
+does not stage, commit, alter refs/history, or grant rename/move, directory or
+recursive deletion, arbitrary untracked deletion, generic filesystem,
+shell/process, or Git authority.
+
+Model requests, provider metadata, Execute permission, Tool definitions,
+Trusted Profile composition, and frontend state cannot manufacture this
+authority. The Generic Codex Tool Bridge uses the canonical public name and
+private provider aliases only for translation. Uncertain effects are not
+automatically replayed or rolled back. Windows is live-certified using
+`codex-cli 0.149.0`; deterministic Windows and Ubuntu/Linux CI/test evidence
+does not establish Linux live certification.
 
 ## ADR 0016 bounded repository commit authority
 

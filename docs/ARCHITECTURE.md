@@ -1,4 +1,4 @@
-# RAH v0.12 Candidate Architecture
+# RAH v0.13 Candidate Architecture
 
 ## Ownership boundaries
 
@@ -71,6 +71,19 @@ revalidates repository, executable, hooks, attached HEAD, branch, compound
 index snapshot, and postconditions under the shared RAH repository mutation
 lease. This is neither generic Git nor branch/ref authority.
 
+ADR 0017 adds `repo.delete-file` as a separate private, host-owned deletion
+authority. It admits one explicitly named repository-relative regular file
+only when the clean HEAD-tracked target matches the exact authorized HEAD
+blob preimage, including raw bytes, SHA-256, and byte length. It performs one
+native worktree deletion attempt and leaves the index unchanged, so the result
+is an unstaged deletion. It does not add rename/move, directory or recursive
+deletion, arbitrary untracked deletion, generic filesystem or shell authority,
+staging, commit, or ref/history/network Git authority. Execute remains only an
+outer dispatch permission; model requests, provider metadata, Trusted Profile
+composition, Tool definitions, and frontend state cannot manufacture the
+separate host authority. The Generic Codex Tool Bridge translates the
+canonical public name through a private alias without changing authorization.
+
 Desktop repository context is host-owned. The selected canonical repository
 supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
 `thread/start`; no-repository mode uses a neutral app-owned workspace.
@@ -78,8 +91,10 @@ Repository-scoped transcript storage uses an opaque SHA-256 namespace rather
 than a raw path. Its private SQLite backend is storage only: it is not exposed
 as SQL to models or tools and does not grant repository mutation authority.
 
-The v0.12 Desktop workflow productizes existing bounded capabilities without
-changing their authority: model bounded authoring is followed by host-owned
+The v0.13 Desktop workflow productizes existing bounded capabilities and adds
+the separately authorized deletion capability without collapsing authority
+boundaries. The existing workflow remains: model bounded authoring is followed
+by host-owned
 Stage / Unstage, host-observed staged review, and an explicit host-owned
 reviewed-snapshot authorization before message-only `repo.commit`. The
 frontend presents sanitized host state only. `RepositoryCommitReview` remains

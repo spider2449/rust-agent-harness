@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.12 candidate: Desktop bounded repository authoring and review
+## v0.13 candidate: Desktop bounded repository authoring, deletion, and review
 
 RAH v0.10.0 established the existing bounded Desktop host configuration.
 Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
@@ -25,9 +25,9 @@ Remote llama.cpp generation proof remains **DEFERRED / NOT VALIDATED**. A
 bounded initial endpoint is not transport confinement: redirect, proxy, DNS,
 peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
 
-### Desktop authoring, review, and bounded repository commit
+### Desktop authoring, deletion, review, and bounded repository commit
 
-The v0.12 candidate productizes the existing bounded Desktop local repository
+The v0.13 candidate productizes the existing bounded Desktop local repository
 workflow:
 
 ```text
@@ -51,6 +51,24 @@ Uncertain external effects are not retried or rolled back. Windows local live
 validation is certified with the complete official Codex 0.149.0 runtime
 (including its same-version code-mode host); Ubuntu CI is deterministic
 evidence, not Linux live certification.
+
+The v0.13 candidate adds `repo.delete-file`, a separate ADR 0017 authority for
+deleting exactly one explicitly named repository-relative regular file. The
+target must be clean, HEAD-tracked, and match the exact authorized HEAD blob
+preimage, including SHA-256 and byte length. The operation makes one native
+worktree deletion attempt, never auto-stages, and does not grant commit, ref,
+history, or network Git authority. Trusted Profile composition and the Generic
+Codex Tool Bridge can expose the capability only when the host has already
+constructed the separate deletion authority; neither model requests,
+provider metadata, Execute permission, tool definitions, nor the frontend can
+manufacture it. The canonical public tool name is `repo.delete-file`; any
+provider-private alias is an implementation detail.
+
+Windows live-certified v0.13 evidence used `codex-cli 0.149.0` and observed
+one request, start, and finish, verified deletion of the intended target, an
+unchanged sentinel and index, an unstaged deletion, unchanged HEAD/refs/
+history, no replay, and `RAH_REPO_DELETE_FILE_LIVE_OK`. Linux live
+certification is not established.
 
 ## Preserved bounded repository mutation and workflow inspection
 
@@ -466,6 +484,11 @@ old records. The workflow uses only the repository `GITHUB_TOKEN` with
   ref mutation, rollback, or automatic replay authority. Partial files can
   remain after a possible effect and are reported conservatively; ADR 0013 is
   the separate accepted creation authority.
+- `repo.delete-file` deletes only one clean HEAD-tracked regular file whose raw
+  bytes match the exact authorized HEAD blob preimage, including SHA-256 and
+  byte length. It is a separate ADR 0017 authority, leaves deletion unstaged,
+  and has no directory/recursive, untracked, rename/move, generic filesystem,
+  staging, commit, ref/history, or network Git authority.
 - Repository observers are best-effort point-in-time observations, not a
   snapshot transaction or cross-process lock. They provide no intentional
   mutation authority, file creation/deletion/rename, generic patches/hunks,

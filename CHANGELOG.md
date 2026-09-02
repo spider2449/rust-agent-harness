@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.13.0 — 2026-09-02 (release candidate)
+
+Release preparation for the completed bounded repository file-deletion
+milestone. This is not yet a tag or GitHub Release.
+
+### Added
+
+- `repo.delete-file`, a bounded capability under separate ADR 0017 deletion
+  authority. It accepts one explicitly named repository-relative regular file
+  only when the clean HEAD-tracked target matches the exact authorized HEAD
+  preimage, including raw bytes, SHA-256, and byte length.
+- Generic Codex Tool Bridge integration and canonical public tool-name
+  discoverability for aliased tools. Provider-private aliases remain
+  implementation details.
+- Desktop selected-repository integration for the host-created deletion
+  authority.
+
+### Verified
+
+- No automatic staging: successful deletion remains an unstaged worktree
+  deletion with an unchanged Git index. No commit, ref, or history operation
+  is included.
+- Trusted Profile composition cannot manufacture deletion authority; model
+  requests, provider metadata, Execute permission, tool definitions, and the
+  frontend are not authority.
+- Windows live validation using `codex-cli 0.149.0` observed public
+  `repo.delete-file`, private alias `rah_tool_4` for that run only, and exactly
+  `ToolRequested = 1`, `ToolStarted = 1`, `ToolFinished = 1`. The intended
+  target was deleted, the sentinel and index were unchanged, the deletion was
+  unstaged, HEAD/refs/history were unchanged, no replay occurred, and
+  `RAH_REPO_DELETE_FILE_LIVE_OK` was observed.
+
+### Limitations
+
+- The capability does not provide rename/move, directory or recursive
+  deletion, arbitrary untracked deletion, generic `fs.write`/`fs.unlink`,
+  generic shell/process or Git authority, automatic staging or commit, or
+  branch/ref/history/network Git authority.
+- The initial aliased-tool discoverability failure is preserved as a failed
+  observation that led to the generic canonical-name description fix. The
+  CRLF/raw-byte `precondition_failed` observation is preserved as fail-closed
+  behavior, not a successful deletion.
+- In Task 163 evidence, `tool_finished.result` may be `null` because the helper
+  did not capture `ToolContent::Json`; the JSON result was not captured. Task
+  164 classified this as non-blocking observability technical debt.
+- Deterministic validation is established on Windows and Ubuntu/Linux where
+  CI/tests provide evidence. Windows is live-certified; Linux live
+  certification is not yet established, and equivalent macOS live validation
+  is not claimed.
+- Task 120 remains **DEFERRED / NOT VALIDATED** and transport confinement
+  remains **NOT CLAIMED**. Process supervision is not OS sandboxing, and
+  uncertain effects are not automatically replayed or rolled back.
+
 ## v0.12.0 — 2026-09-01
 
 Released as `RAH v0.12.0` for the audited Desktop repository-authoring
