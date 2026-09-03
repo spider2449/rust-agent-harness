@@ -22,8 +22,8 @@ use desktop_preferences::{Preferences, Warning as PreferencesWarning};
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
 use rah_protocol::{
-    AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-    RequestId, SessionId, ToolContent, ToolInput,
+    AgentErrorCode, AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole,
+    PermissionLevel, RequestId, SessionId, ToolContent, ToolInput,
 };
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
@@ -45,7 +45,6 @@ use rah_tools::{
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use sha2::{Digest, Sha256};
-#[cfg(all(test, target_os = "windows"))]
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use std::{
@@ -92,6 +91,9 @@ const CANCEL_HARD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const NEUTRAL_WORKSPACE_DIRECTORY: &str = "codex-neutral-workspace";
 #[cfg(target_os = "windows")]
 const COMMIT_IDENTITY_MAX_BYTES: usize = 1024;
+
+#[cfg(target_os = "windows")]
+static LIVE_EVIDENCE_PROCESS_SALT: OnceLock<String> = OnceLock::new();
 
 /// Test-only evidence that constructing Desktop state does not activate optional authorities.
 #[cfg(all(test, target_os = "windows"))]
@@ -171,6 +173,8 @@ enum ConnectionState {
         source: CodexExecutableSource,
         repository_generation: u64,
         model_generation: u64,
+        connection_generation: u64,
+        repository_fingerprint: Option<String>,
     },
     Disconnecting,
     Error(FrontendError),
@@ -314,6 +318,7 @@ struct DesktopAppState {
     chat: Mutex<ChatState>,
     active_chat: Mutex<Option<ActiveChat>>,
     next_chat_generation: Mutex<u64>,
+    next_connection_generation: Mutex<u64>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     repository_workflow: Mutex<RepositoryWorkflowState>,
@@ -387,6 +392,7 @@ impl DesktopAppState {
             chat: Mutex::new(ChatState::Idle),
             active_chat: Mutex::new(None),
             next_chat_generation: Mutex::new(0),
+            next_connection_generation: Mutex::new(0),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
@@ -419,6 +425,29 @@ fn repository_persistence_key(root: &Path) -> String {
         digest.update(unit.to_le_bytes());
     }
     format!("repo-sha256:{:x}", digest.finalize())
+}
+
+/// Returns a process-local correlation identifier for a canonical repository.
+///
+/// The salt prevents this diagnostic value from being a durable or
+/// dictionary-friendly path hash. It is correlation metadata only, not a
+/// repository identity, authorization token, or security boundary.
+#[cfg(target_os = "windows")]
+fn repository_context_fingerprint(root: &Path) -> String {
+    let salt = LIVE_EVIDENCE_PROCESS_SALT.get_or_init(|| {
+        format!(
+            "rah-desktop-live-evidence:{}:{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        )
+    });
+    let mut digest = Sha256::new();
+    digest.update(salt.as_bytes());
+    digest.update([0]);
+    digest.update(root.as_os_str().to_string_lossy().as_bytes());
+    format!("repo-context:{:x}", digest.finalize())
 }
 
 #[cfg(target_os = "windows")]
@@ -1594,6 +1623,17 @@ fn connection_context_is_current(
 }
 
 #[cfg(target_os = "windows")]
+fn connection_publication_is_current(
+    captured_repository_generation: u64,
+    current_repository_generation: u64,
+    captured_connection_generation: u64,
+    current_connection_generation: u64,
+) -> bool {
+    captured_repository_generation == current_repository_generation
+        && captured_connection_generation == current_connection_generation
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn app_status(state: State<'_, DesktopAppState>) -> AppStatus {
     state.status()
@@ -2600,6 +2640,7 @@ fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepos
         .commit_capability
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let repository_fingerprint = repository_context_fingerprint(&repository.root);
     *state
         .repository
         .lock()
@@ -2608,6 +2649,15 @@ fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepos
         .repository_generation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    let repository_generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    append_live_evidence(serde_json::json!({
+        "event": "repository_selected",
+        "repository_generation": repository_generation,
+        "repository_fingerprint": repository_fingerprint,
+    }));
     *state
         .repository_workflow
         .lock()
@@ -2632,6 +2682,12 @@ fn choose_repository(
     repository_selection_allowed(
         *state
             .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    repository_selection_allowed_for_connection(
+        &state
+            .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
@@ -2668,6 +2724,12 @@ fn choose_repository(
     repository_selection_allowed(
         *state
             .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    repository_selection_allowed_for_connection(
+        &state
+            .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
@@ -3124,6 +3186,15 @@ async fn connect_codex(
         }
     }
 
+    let connection_generation = {
+        let mut generation = state
+            .next_connection_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+        *generation
+    };
+
     let (repository, repository_generation, neutral_workspace) = {
         let repository = state
             .repository
@@ -3174,6 +3245,10 @@ async fn connect_codex(
         _ => None,
     };
     let commit_tool = commit_capability.as_ref().map(|(tool, _)| Arc::clone(tool));
+    let repository_fingerprint = repository
+        .as_ref()
+        .map(|value| repository_context_fingerprint(&value.root));
+    let connection_repository_fingerprint = repository_fingerprint.clone();
     match resolve_prepare_and_connect_codex(
         resolve_codex_executable,
         model_config,
@@ -3184,8 +3259,10 @@ async fn connect_codex(
                     FrontendError::ToolRegistryFailed
                 })?;
             append_live_evidence(serde_json::json!({
-                "event": "desktop_connection_context",
+                "event": "connection_started",
                 "repository_generation": repository_generation,
+                "repository_fingerprint": connection_repository_fingerprint,
+                "connection_generation": connection_generation,
                 "selected_repository": repository.is_some(),
                 "deletion_authority_present": repository
                     .as_ref()
@@ -3226,17 +3303,61 @@ async fn connect_codex(
     .await
     {
         Ok((runtime, source)) => {
+            let runtime = Arc::new(runtime);
+            let published_fingerprint = repository_fingerprint.clone();
+            let current_repository_generation = *state
+                .repository_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current_connection_generation = *state
+                .next_connection_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stale = !connection_publication_is_current(
+                repository_generation,
+                current_repository_generation,
+                connection_generation,
+                current_connection_generation,
+            );
+            if stale {
+                append_live_evidence(serde_json::json!({
+                    "event": "connection_publication_rejected_stale",
+                    "captured_repository_generation": repository_generation,
+                    "current_repository_generation": current_repository_generation,
+                    "connection_generation": connection_generation,
+                }));
+                if let Err(error) = runtime.shutdown().await {
+                    tracing::warn!(error = %error, "stale Codex desktop runtime shutdown failed");
+                }
+                let mut connection = state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if matches!(*connection, ConnectionState::Connecting) {
+                    *connection = ConnectionState::NotConnected;
+                }
+                return Err(FrontendError::CodexReconnectRequired);
+            }
             let mut connection = state
                 .connection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *connection = ConnectionState::Connected {
-                runtime: Arc::new(runtime),
+                runtime,
                 source,
                 repository_generation,
                 model_generation,
+                connection_generation,
+                repository_fingerprint,
             };
             drop(connection);
+            append_live_evidence(serde_json::json!({
+                "event": "connection_published",
+                "repository_generation": repository_generation,
+                "repository_fingerprint": published_fingerprint,
+                "model_generation": model_generation,
+                "connection_generation": connection_generation,
+            }));
             if let Some((tool, control)) = commit_capability {
                 *state
                     .commit_capability
@@ -3337,6 +3458,17 @@ fn begin_chat(chat: &mut ChatState) -> Result<(), FrontendError> {
 #[cfg(target_os = "windows")]
 fn repository_selection_allowed(chat: ChatState) -> Result<(), FrontendError> {
     if chat != ChatState::Idle {
+        Err(FrontendError::RepositoryBusy)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn repository_selection_allowed_for_connection(
+    connection: &ConnectionState,
+) -> Result<(), FrontendError> {
+    if matches!(connection, ConnectionState::Connecting) {
         Err(FrontendError::RepositoryBusy)
     } else {
         Ok(())
@@ -3474,6 +3606,39 @@ fn append_live_evidence(record: serde_json::Value) {
 }
 
 #[cfg(target_os = "windows")]
+fn append_desktop_context_evidence(
+    event: &str,
+    repository_generation: u64,
+    model_generation: u64,
+    connection_generation: u64,
+    session_generation: u64,
+    repository_fingerprint: Option<&str>,
+) {
+    append_live_evidence(serde_json::json!({
+        "event": event,
+        "repository_generation": repository_generation,
+        "repository_fingerprint": repository_fingerprint,
+        "model_generation": model_generation,
+        "runtime_generation": connection_generation,
+        "connection_generation": connection_generation,
+        "session_generation": session_generation,
+    }));
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_failure_stage(code: AgentErrorCode) -> &'static str {
+    match code {
+        AgentErrorCode::Tool | AgentErrorCode::PermissionDenied | AgentErrorCode::Sandbox => {
+            "tool_dispatch_failure"
+        }
+        AgentErrorCode::Model => "model_runtime_failure",
+        AgentErrorCode::InvalidRequest | AgentErrorCode::Session | AgentErrorCode::Internal => {
+            "terminal_disconnect_failure"
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn contains_live_completion_marker(text: &str) -> bool {
     const PREFIX: &str = "RAH_";
     const SUFFIX: &str = "_LIVE_OK";
@@ -3519,10 +3684,42 @@ async fn run_chat(
     conversation_epoch: u64,
     chat_generation: u64,
 ) {
+    let (repository_generation, model_generation, connection_generation, repository_fingerprint) = {
+        let state = app.state::<DesktopAppState>();
+        let connection = state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*connection {
+            ConnectionState::Connected {
+                repository_generation,
+                model_generation,
+                connection_generation,
+                repository_fingerprint,
+                ..
+            } => (
+                *repository_generation,
+                *model_generation,
+                *connection_generation,
+                repository_fingerprint.clone(),
+            ),
+            _ => return,
+        }
+    };
     let handle = match runtime.start(request).await {
         Ok(handle) => handle,
         Err(error) => {
             tracing::warn!(error = %error, "desktop chat turn failed to start");
+            append_live_evidence(serde_json::json!({
+                "event": "desktop_failure",
+                "failure_stage": "thread_or_turn_start_failure",
+                "repository_generation": repository_generation,
+                "repository_fingerprint": repository_fingerprint,
+                "model_generation": model_generation,
+                "runtime_generation": connection_generation,
+                "connection_generation": connection_generation,
+                "session_generation": chat_generation,
+            }));
             if app
                 .state::<DesktopAppState>()
                 .claim_start_failure(chat_generation)
@@ -3537,6 +3734,15 @@ async fn run_chat(
             return;
         }
     };
+
+    append_desktop_context_evidence(
+        "thread_start",
+        repository_generation,
+        model_generation,
+        connection_generation,
+        chat_generation,
+        repository_fingerprint.as_deref(),
+    );
 
     if !app.state::<DesktopAppState>().register_chat_session(
         chat_generation,
@@ -3554,6 +3760,19 @@ async fn run_chat(
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
         if let Some((activity, refresh_repository)) = activity_event(&event, &mut tool_calls) {
+            let activity_name = match &activity {
+                ActivityEvent::Requested { .. } => "tool_requested",
+                ActivityEvent::Started { .. } => "tool_started",
+                ActivityEvent::Finished { .. } => "tool_finished",
+            };
+            append_desktop_context_evidence(
+                activity_name,
+                repository_generation,
+                model_generation,
+                connection_generation,
+                chat_generation,
+                repository_fingerprint.as_deref(),
+            );
             if refresh_repository {
                 invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
             }
@@ -3587,8 +3806,13 @@ async fn run_chat(
                 let assistant_text = output.message.content.clone();
                 append_live_evidence(serde_json::json!({
                     "event": "desktop_completed",
-                    "final_text": assistant_text,
                     "marker_observed": contains_live_completion_marker(&assistant_text),
+                    "repository_generation": repository_generation,
+                    "repository_fingerprint": repository_fingerprint,
+                    "model_generation": model_generation,
+                    "runtime_generation": connection_generation,
+                    "connection_generation": connection_generation,
+                    "session_generation": chat_generation,
                 }));
                 let committed = app
                     .state::<DesktopAppState>()
@@ -3616,10 +3840,20 @@ async fn run_chat(
                 terminal = true;
                 break;
             }
-            AgentEvent::Failed { message, .. } => {
+            AgentEvent::Failed { code, message, .. } => {
                 // The frontend receives only a closed error code. Retain the
                 // adapter-provided stage privately for live diagnosis.
                 tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
+                append_live_evidence(serde_json::json!({
+                    "event": "desktop_failure",
+                    "failure_stage": desktop_failure_stage(code),
+                    "repository_generation": repository_generation,
+                    "repository_fingerprint": repository_fingerprint,
+                    "model_generation": model_generation,
+                    "runtime_generation": connection_generation,
+                    "connection_generation": connection_generation,
+                    "session_generation": chat_generation,
+                }));
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -3666,6 +3900,16 @@ async fn run_chat(
             .state::<DesktopAppState>()
             .claim_terminal(chat_generation, &runtime, &session_id)
     {
+        append_live_evidence(serde_json::json!({
+            "event": "desktop_failure",
+            "failure_stage": "terminal_disconnect_failure",
+            "repository_generation": repository_generation,
+            "repository_fingerprint": repository_fingerprint,
+            "model_generation": model_generation,
+            "runtime_generation": connection_generation,
+            "connection_generation": connection_generation,
+            "session_generation": chat_generation,
+        }));
         emit_chat_event(
             &app,
             ChatEvent::Failed {
@@ -3723,6 +3967,14 @@ async fn send_chat(
         current_repository_generation,
         current_model_generation,
     ) {
+        append_live_evidence(serde_json::json!({
+            "event": "desktop_failure",
+            "failure_stage": "pre_turn_stale_generation_rejection",
+            "repository_generation": current_repository_generation,
+            "model_generation": current_model_generation,
+            "runtime_generation": identity.repository_generation,
+            "session_generation": chat_generation,
+        }));
         state.finish_chat(chat_generation);
         return Err(FrontendError::CodexReconnectRequired);
     }
@@ -4069,13 +4321,14 @@ mod tests {
         StagedReviewPresentation, TerminalOwnership, activity_event, apply_model_selection,
         authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
         await_hard_shutdown, begin_chat, clear_conversation_allowed, commit_activity_presentation,
-        connect_prepared_codex, connection_context_is_current, current_app_status,
-        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        connect_prepared_codex, connection_context_is_current, connection_publication_is_current,
+        current_app_status, desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_registry, frontend_error, install_repository_workflow,
         invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
         publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
-        repository_index_action, repository_selection_allowed, repository_tool_authority,
-        request_connect, resolve_codex_executable, resolve_prepare_and_connect_codex,
+        repository_context_fingerprint, repository_index_action, repository_selection_allowed,
+        repository_selection_allowed_for_connection, repository_tool_authority, request_connect,
+        resolve_codex_executable, resolve_prepare_and_connect_codex,
         revoke_repository_commit_context, same_arc, selected_git_executable, validate_prompt,
     };
     use futures::StreamExt;
@@ -4099,7 +4352,7 @@ mod tests {
         fs,
         io::{Read, Write},
         net::{Ipv4Addr, SocketAddrV4, TcpListener},
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::Command,
         sync::{
             Arc, Mutex,
@@ -5792,6 +6045,36 @@ mod tests {
         assert!(matches!(connection, ConnectionState::Connecting));
         assert_eq!(request_connect(&mut connection), ConnectRequest::InProgress);
         assert!(matches!(connection, ConnectionState::Connecting));
+    }
+
+    #[test]
+    fn connecting_repository_selection_is_rejected_deterministically() {
+        assert_eq!(
+            repository_selection_allowed_for_connection(&ConnectionState::Connecting),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            repository_selection_allowed_for_connection(&ConnectionState::NotConnected),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn stale_connection_publication_cannot_match_a_new_repository_generation() {
+        assert!(connection_publication_is_current(4, 4, 9, 9));
+        assert!(!connection_publication_is_current(4, 5, 9, 9));
+        assert!(!connection_publication_is_current(4, 4, 9, 10));
+    }
+
+    #[test]
+    fn repository_context_fingerprint_is_opaque_and_process_stable() {
+        let first = repository_context_fingerprint(Path::new(r"C:\\fixtures\\a"));
+        let same = repository_context_fingerprint(Path::new(r"C:\\fixtures\\a"));
+        let other = repository_context_fingerprint(Path::new(r"C:\\fixtures\\b"));
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert!(!first.contains("fixtures"));
+        assert!(first.starts_with("repo-context:"));
     }
 
     #[test]

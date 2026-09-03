@@ -294,11 +294,15 @@ async function loadStatus(invoke) {
   button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
   button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
   const connected = status.codexStatus === "connected";
+  const reconnectRequired = status.repositoryToolsStatus === "reconnect required"
+    || status.modelConfigurationStatus === "reconnect required";
   const prompt = document.querySelector("#chat-prompt");
   const send = document.querySelector("#chat-send");
-  document.querySelector("#chat-hint").textContent = connected ? (chatRunning ? "Chat running" : "Chat ready") : "Connect Codex to chat";
-  prompt.disabled = !connected || chatRunning;
-  send.disabled = !connected;
+  document.querySelector("#chat-hint").textContent = connected
+    ? (reconnectRequired ? "Reconnect Codex to chat" : (chatRunning ? "Chat running" : "Chat ready"))
+    : "Connect Codex to chat";
+  prompt.disabled = !connected || reconnectRequired || chatRunning;
+  send.disabled = !connected || reconnectRequired;
   send.textContent = chatRunning ? "Cancel Turn" : "Send";
   document.querySelector("#new-conversation").disabled = chatRunning;
   document.querySelector("#resume-previous-conversation").disabled = !resumeAvailable
@@ -308,6 +312,7 @@ async function loadStatus(invoke) {
     || status.modelConfigurationStatus === "reconnect required"
     || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
+  document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
   const endpointControls = document.querySelector("#llama-cpp-endpoint");
