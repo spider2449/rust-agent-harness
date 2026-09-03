@@ -1,4 +1,4 @@
-# RAH v0.13 Candidate Architecture
+# RAH v0.14.0 Release-Preparation Architecture
 
 ## Ownership boundaries
 
@@ -84,6 +84,19 @@ composition, Tool definitions, and frontend state cannot manufacture the
 separate host authority. The Generic Codex Tool Bridge translates the
 canonical public name through a private alias without changing authorization.
 
+ADR 0018 adds `repo.rename-file` as a separate private, host-owned rename/move
+authority. `RepositoryFileRenamePolicy` accepts exactly one clean,
+HEAD-tracked regular file and an explicit absent destination in the same
+repository, for either a same-directory rename or a cross-directory move. The
+source SHA-256 and byte length are mandatory request preconditions. The host
+revalidates repository, source, destination, HEAD, index, branch, runtime, and
+repository-generation identity immediately before one native no-replace
+filesystem effect. It does not use `git mv`, copy-delete, generic
+`fs.rename`, shell/process fallback, staging, or commit. A possible effect is
+`uncertain` and is never replayed. This authority is distinct from creation,
+deletion, content mutation, index mutation, and commit/history mutation; the
+Generic Codex Tool Bridge and Desktop only expose it after host composition.
+
 Desktop repository context is host-owned. The selected canonical repository
 supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
 `thread/start`; no-repository mode uses a neutral app-owned workspace.
@@ -91,7 +104,7 @@ Repository-scoped transcript storage uses an opaque SHA-256 namespace rather
 than a raw path. Its private SQLite backend is storage only: it is not exposed
 as SQL to models or tools and does not grant repository mutation authority.
 
-The v0.13 Desktop workflow productizes existing bounded capabilities and adds
+The v0.14 Desktop workflow retains the v0.13 bounded capabilities and adds
 the separately authorized deletion capability without collapsing authority
 boundaries. The existing workflow remains: model bounded authoring is followed
 by host-owned
@@ -154,7 +167,8 @@ select providers or profile authority.
 
 The host-owned Execute surface includes `host.cargo.version`, `host.git.status`,
 `host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed observers
-`repo.file-info`, `repo.status`, `repo.diff`, and `repo.diff-staged`. The first
+`repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`, and
+`repo.rename-file`. The first
 two and the observers are fixed, host-constructed inspection capabilities.
 Stage and unstage use the private `RepositoryMutationPolicy` to prove one
 authorized index-only effect for one host-selected target. They never grant

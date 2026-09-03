@@ -2811,7 +2811,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rah-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2829,11 +2829,11 @@ dependencies = [
 
 [[package]]
 name = "rah-core"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "rah-desktop"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "futures",
  "rah-protocol",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "rah-model"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "rah-protocol"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "rah-runtime"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "rah-runtime-codex"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "rah-sandbox"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "rah-session"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "rah-tools"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "rah-tools-mcp"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "rah-protocol",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "rah-tools-plugin"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "rah-protocol",

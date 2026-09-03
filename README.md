@@ -5,7 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.13 candidate: Desktop bounded repository authoring, deletion, and review
+## v0.14.0 release preparation: bounded repository rename/move
+
+RAH v0.14.0 is prepared but not yet released. It adds the separate,
+host-owned `repo.rename-file` capability described below. The v0.13 bounded
+deletion capability remains distinct.
 
 RAH v0.10.0 established the existing bounded Desktop host configuration.
 Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
@@ -27,7 +31,7 @@ peer-identity, and effective-destination guarantees are **NOT CLAIMED**.
 
 ### Desktop authoring, deletion, review, and bounded repository commit
 
-The v0.13 candidate productizes the existing bounded Desktop local repository
+The v0.14 candidate retains the existing bounded Desktop local repository
 workflow:
 
 ```text
@@ -52,7 +56,7 @@ validation is certified with the complete official Codex 0.149.0 runtime
 (including its same-version code-mode host); Ubuntu CI is deterministic
 evidence, not Linux live certification.
 
-The v0.13 candidate adds `repo.delete-file`, a separate ADR 0017 authority for
+The v0.13 release added `repo.delete-file`, a separate ADR 0017 authority for
 deleting exactly one explicitly named repository-relative regular file. The
 target must be clean, HEAD-tracked, and match the exact authorized HEAD blob
 preimage, including SHA-256 and byte length. The operation makes one native
@@ -69,6 +73,17 @@ one request, start, and finish, verified deletion of the intended target, an
 unchanged sentinel and index, an unstaged deletion, unchanged HEAD/refs/
 history, no replay, and `RAH_REPO_DELETE_FILE_LIVE_OK`. Linux live
 certification is not established.
+
+RAH v0.14 adds `repo.rename-file` under accepted ADR 0018. It moves exactly
+one clean, HEAD-tracked regular file within the selected repository, either in
+the same directory or to another existing directory in that repository. The
+request supplies `source_path`, `destination_path`,
+`expected_source_file_sha256`, and `expected_source_file_byte_length`. The
+destination must be absent and is never overwritten. The host revalidates
+repository and runtime-generation identity immediately before one native
+no-replace rename/move attempt; a possible effect is never replayed. This is
+not generic filesystem rename authority, and it grants no create, delete,
+content-write, index, commit, shell, process, or Git authority.
 
 ## Preserved bounded repository mutation and workflow inspection
 
@@ -489,6 +504,10 @@ old records. The workflow uses only the repository `GITHUB_TOKEN` with
   byte length. It is a separate ADR 0017 authority, leaves deletion unstaged,
   and has no directory/recursive, untracked, rename/move, generic filesystem,
   staging, commit, ref/history, or network Git authority.
+- `repo.rename-file` moves only one clean HEAD-tracked regular file within the
+  selected repository under ADR 0018. It has no directory/recursive move,
+  overwrite, case-only Windows rename, generic filesystem, shell/process, or
+  Git authority; create and delete remain separate authorities.
 - Repository observers are best-effort point-in-time observations, not a
   snapshot transaction or cross-process lock. They provide no intentional
   mutation authority, file creation/deletion/rename, generic patches/hunks,

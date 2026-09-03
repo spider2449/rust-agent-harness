@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.14.0 — 2026-09-03 (release preparation)
+
+Prepared for the bounded repository file rename/move milestone. This version
+is not yet released; the tag and GitHub Release remain pending.
+
+### Added / changed
+
+- A separate host-owned bounded repository file rename/move authority through
+  the public `repo.rename-file` Tool.
+- Same-directory rename and same-repository cross-directory move for exactly
+  one clean HEAD-tracked regular file, guarded by exact source SHA-256 and
+  byte-length preconditions and no-replace destination semantics.
+- Host-owned authority composition, Desktop integration, and Generic Codex
+  Tool Bridge integration for the canonical public capability.
+
+### Security / hardening
+
+- Immediate pre-effect repository, source, destination, HEAD, index, branch,
+  runtime, and repository-generation identity revalidation followed by one
+  native no-replace effect.
+- Possible-effect uncertainty is not replayed. There is no `git mv`,
+  copy-delete fallback, automatic staging, or rollback guarantee.
+- Repository-generation lifecycle hardening, stale runtime/connection
+  publication protections, and reconnect requirements across repository
+  switches.
+- Complete live-evidence request, advertisement, marker, and structured-result
+  observations, with process-wide atomic JSONL evidence serialization.
+
+### Validation
+
+- Deterministic validation on Windows and Ubuntu/Linux where CI/tests provide
+  evidence.
+- Windows live `repo.rename-file` certification PASS using the certified
+  `codex-cli 0.149.0` pair (`codex.exe` and `codex-code-mode-host.exe`).
+- Task 176 v0.14 milestone audit PASS.
+
+This is distinct from the v0.13 `repo.delete-file` capability.
+
 ## v0.13.0 — 2026-09-02
 
 Released as `RAH v0.13.0` for the completed bounded repository file-deletion

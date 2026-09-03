@@ -1,8 +1,33 @@
-# RAH v0.13 Candidate Security Model
+# RAH v0.14.0 Release-Preparation Security Model
+
+## ADR 0018 bounded repository file rename/move authority
+
+`repo.rename-file` is a separate host-owned authority for exactly one clean,
+HEAD-tracked regular file in the selected repository. It permits a
+same-directory rename or same-repository cross-directory move when the source
+matches the exact expected raw-byte SHA-256 and byte length. The explicit
+destination must already have an existing parent and must not exist; there is
+no overwrite or replacement.
+
+Immediately before one native no-replace filesystem effect, the host
+revalidates repository, source, destination, HEAD, index, branch, runtime, and
+repository-generation identity. It does not use generic `fs.rename`, `git mv`,
+copy-delete, or shell/process fallback, and never stages or commits. A possible
+effect is `uncertain` and is not replayed; no rollback guarantee is made.
+
+Model requests, provider metadata, Execute permission, Tool definitions,
+Trusted Profile composition, and frontend state are not authorization. Rename
+authority does not imply creation, deletion, arbitrary content-write, index,
+commit/history, branch/ref, network Git, shell, or process authority. Create and
+delete are separate authorities. Process supervision is not OS sandboxing, and
+network isolation is not claimed.
+
+Windows is live-certified for this capability using the complete certified
+`codex-cli 0.149.0` pair; Linux live certification is not established.
 
 ## ADR 0017 bounded repository file deletion authority
 
-`repo.delete-file` is a separate host-owned authority for exactly one explicit
+`repo.delete-file` remains a separate host-owned authority for exactly one explicit
 repository-relative regular file. The target must be clean, HEAD-tracked, and
 match the exact authorized HEAD blob preimage, including raw bytes, SHA-256,
 and byte length. The operation makes one native worktree deletion attempt and
@@ -72,7 +97,8 @@ evidence only; Linux and macOS live parity are not claimed.
 ## v0.9 boundary and preserved capabilities
 
 The public/host Execute capabilities include `host.cargo.version`,
-`host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed
+`host.git.status`, `host.git.stage`, `host.git.unstage`, `repo.create-file`,
+`repo.edit-files`, `repo.rename-file`, and the fixed
 repository observers `repo.file-info`, `repo.status`, `repo.diff`, and
 `repo.diff-staged`. They are
 host-constructed, capability-specific tools, not generic model-selected process
