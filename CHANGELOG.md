@@ -1,9 +1,14 @@
 # Changelog
 
-## v0.14.0 — 2026-09-03 (release preparation)
+## v0.14.0 — 2026-09-03
 
-Prepared for the bounded repository file rename/move milestone. This version
-is not yet released; the tag and GitHub Release remain pending.
+Released as `RAH v0.14.0` for the bounded repository file rename/move milestone.
+The immutable release commit is
+`52506521bdf838784dd45bb54df2d6bcff8bcd08`; annotated tag `v0.14.0` has tag
+object ID `9193423e96dd0cda2fd8f5ed5619ab2b58483acc` and peels to that commit.
+Task 177 exact-head release CI run `33727731967` passed. The GitHub Release was
+published at
+<https://github.com/spider2449/rust-agent-harness/releases/tag/v0.14.0>.
 
 ### Added / changed
 
@@ -37,6 +42,19 @@ is not yet released; the tag and GitHub Release remain pending.
 - Task 176 v0.14 milestone audit PASS.
 
 This is distinct from the v0.13 `repo.delete-file` capability.
+
+### Limitations
+
+- No directory or recursive move, overwrite/replacement, Windows case-only
+  rename in v1, untracked-file rename, dirty-file rename, or cross-volume
+  copy-delete fallback.
+- No generic `fs.rename`, generic filesystem mutation, shell/process authority,
+  generic Git authority, or network Git.
+- No rollback or transaction guarantee; timeout, cancellation, or disconnect
+  does not imply rollback, and possible effects are not replayed.
+- Process supervision is not OS sandboxing. Network isolation is not claimed.
+- Windows is live-certified; Ubuntu/Linux has deterministic validation only,
+  and Linux live certification is not established.
 
 ## v0.13.0 — 2026-09-02
 

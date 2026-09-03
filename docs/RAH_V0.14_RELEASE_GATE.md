@@ -1,23 +1,25 @@
-# RAH v0.14 Release Gate
+# RAH v0.14 Release Record
 
-**RELEASE PREPARATION — NOT YET RELEASED**
+**RELEASED — HISTORICAL RECORD**
 
 ## 1. Release candidate identity
 
-- Target: `v0.14.0`.
+- Release: `RAH v0.14.0`.
 - Starting HEAD: `ffe091530c5b29fbef579d1fdf8ada4986937d2b`.
 - Task 176 exact-head CI: run `33726778388` — PASS.
-- Prepared release commit: TBD until Task 177 commit exists.
-- Tag: not created.
-- GitHub Release: not published.
+- Status: `RELEASED`.
+- Immutable release commit:
+  `52506521bdf838784dd45bb54df2d6bcff8bcd08`.
+- Annotated tag: `v0.14.0`.
+- Tag object:
+  `9193423e96dd0cda2fd8f5ed5619ab2b58483acc`.
+- GitHub Release:
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.14.0>.
 
 ## 2. Workspace metadata
 
-- Expected workspace packages: 12.
-- Expected package version: all `0.14.0`.
-- Expected Rust edition: `2024`.
-- Dependency drift: none; only workspace-local Cargo.lock version records may
-  change.
+- Workspace: 12 packages, all `0.14.0`, Rust edition `2024`.
+- Dependency drift: none.
 
 ## 3. Scope and authority
 
@@ -90,13 +92,16 @@ tests and CI only; Linux live certification is not established.
 - Process supervision is not OS sandboxing; network isolation is not claimed.
 - Linux live certification is not established.
 
-## 10. Later release checklist
+## 10. Completed release checklist
 
-- [ ] Complete Task 177 local validation and candidate review.
-- [ ] Commit and push the prepared release candidate.
-- [ ] Verify exact-head CI passes for the Task 177 commit.
-- [ ] Create annotated tag `v0.14.0` at the exact prepared commit (Task 178).
-- [ ] Push and verify the immutable tag target (Task 178).
-- [ ] Publish and verify the GitHub Release (Task 178).
+- [x] Release candidate prepared.
+- [x] Exact-head CI passed: Task 177, run `33727731967`.
+- [x] Annotated tag created: `v0.14.0` (Task 178).
+- [x] Tag pushed (Task 178).
+- [x] Immutable tag target verified (Task 178).
+- [x] GitHub Release published (Task 178).
+- [x] Release publication verified (Task 178).
 
-No tag or GitHub Release has been created by Task 177.
+Task 177 prepared the release candidate. Task 178 created and pushed the
+annotated tag and published the GitHub Release. Task 179 records the completed
+post-release state; it does not move the tag or republish the release.
