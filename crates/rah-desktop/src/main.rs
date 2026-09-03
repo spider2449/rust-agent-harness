@@ -3588,22 +3588,7 @@ fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
 
 #[cfg(target_os = "windows")]
 fn append_live_evidence(record: serde_json::Value) {
-    use std::io::Write;
-
-    let Some(path) = std::env::var_os("RAH_LIVE_EVIDENCE_PATH") else {
-        return;
-    };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
-        return;
-    };
-    let Ok(line) = serde_json::to_string(&record) else {
-        return;
-    };
-    let _ = writeln!(file, "{line}");
+    rah_protocol::live_evidence::append(&record);
 }
 
 #[cfg(target_os = "windows")]

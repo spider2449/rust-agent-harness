@@ -3,6 +3,7 @@
 mod agent;
 mod events;
 mod identifiers;
+pub mod live_evidence;
 mod tools;
 
 pub use agent::{AgentInput, AgentOptions, AgentOutput, AgentRequest, Message, MessageRole};
