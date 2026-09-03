@@ -3474,6 +3474,36 @@ fn append_live_evidence(record: serde_json::Value) {
 }
 
 #[cfg(target_os = "windows")]
+fn contains_live_completion_marker(text: &str) -> bool {
+    const PREFIX: &str = "RAH_";
+    const SUFFIX: &str = "_LIVE_OK";
+
+    for (start, _) in text.match_indices(PREFIX) {
+        if start > 0 && text.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let candidate = &text[start..]
+            .split(|character: char| {
+                !character.is_ascii_uppercase() && !character.is_ascii_digit() && character != '_'
+            })
+            .next()
+            .unwrap_or_default();
+        let end = start + candidate.len();
+        let has_token_suffix = text
+            .as_bytes()
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+        if !has_token_suffix
+            && candidate.ends_with(SUFFIX)
+            && candidate.len() > PREFIX.len() + SUFFIX.len()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
 fn emit_repository_refresh(app: &AppHandle) {
     if let Err(error) = app.emit("repository_snapshot_refresh", ()) {
         tracing::warn!(error = %error, "failed to request desktop repository refresh");
@@ -3558,7 +3588,7 @@ async fn run_chat(
                 append_live_evidence(serde_json::json!({
                     "event": "desktop_completed",
                     "final_text": assistant_text,
-                    "marker_observed": assistant_text.contains("RAH_REPO_DELETE_FILE_LIVE_OK"),
+                    "marker_observed": contains_live_completion_marker(&assistant_text),
                 }));
                 let committed = app
                     .state::<DesktopAppState>()
@@ -8069,5 +8099,28 @@ mod tests {
             let serialized = serde_json::to_string(&warning).unwrap();
             assert!(!preferences.iter().any(|name| serialized.contains(name)));
         }
+    }
+
+    #[test]
+    fn live_completion_marker_requires_a_complete_marker() {
+        assert!(super::contains_live_completion_marker(
+            "RAH_REPO_RENAME_FILE_LIVE_OK"
+        ));
+        assert!(super::contains_live_completion_marker(
+            "prelude.RAH_REPO_RENAME_FILE_LIVE_OK"
+        ));
+        assert!(!super::contains_live_completion_marker(
+            "the marker is absent"
+        ));
+        assert!(!super::contains_live_completion_marker(
+            "RAH_REPO_RENAME_FILE_LIVE_O"
+        ));
+        assert!(!super::contains_live_completion_marker(
+            "RAH_REPO_RENAME_FILE_LIVE_OK_extra"
+        ));
+        assert!(!super::contains_live_completion_marker(
+            "XRAH_REPO_RENAME_FILE_LIVE_OK"
+        ));
+        assert!(!super::contains_live_completion_marker("RAH__LIVE_OK"));
     }
 }

@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MAX_TRACKED_CALLS: usize = 128;
+const MAX_LIVE_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_LIVE_RESULT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone)]
@@ -101,14 +102,7 @@ pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
         let snapshot = ToolSnapshot { definition };
         dynamic_tools.push(dynamic_tool_spec(&alias, &snapshot));
         by_name.insert(snapshot.definition.name.clone(), alias.clone());
-        if snapshot.definition.name == ToolName::new("repo.delete-file") {
-            append_live_evidence(json!({
-                "event": "tool_advertised",
-                "public_tool": snapshot.definition.name.as_str(),
-                "private_alias": alias.clone(),
-                "dynamic_definition_emitted": true,
-            }));
-        }
+        append_live_evidence(tool_advertised_evidence(&snapshot.definition.name, &alias));
         by_alias.insert(alias, snapshot);
     }
 
@@ -348,7 +342,7 @@ async fn handle_request(
         "event": "tool_requested",
         "public_tool": call.name.as_str(),
         "private_alias": params.tool.clone(),
-        "request": live_request_fields(&call.name, &call.input.0),
+        "request": live_request_fields(&call.input.0),
     }));
 
     let current = config
@@ -482,57 +476,117 @@ fn finish_execution(
     entry.state = CallState::Completed(response);
 }
 
-fn live_request_fields(tool: &ToolName, input: &Value) -> Value {
-    if tool.as_str() != "repo.delete-file" {
-        return Value::Null;
-    }
+fn tool_advertised_evidence(tool: &ToolName, alias: &str) -> Value {
     json!({
-        "path": input.get("path").cloned().unwrap_or(Value::Null),
-        "expected_file_sha256": input
-            .get("expected_file_sha256")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "expected_file_byte_length": input
-            .get("expected_file_byte_length")
-            .cloned()
-            .unwrap_or(Value::Null),
+        "event": "tool_advertised",
+        "public_tool": tool.as_str(),
+        "private_alias": alias,
+        "dynamic_definition_emitted": true,
     })
+}
+
+fn live_request_fields(input: &Value) -> Value {
+    bounded_json_value(&redact_live_value(input, 0), MAX_LIVE_REQUEST_BYTES)
+}
+
+fn redact_live_value(value: &Value, depth: usize) -> Value {
+    if depth > 8 {
+        return json!({ "truncated": true, "reason": "nesting_limit" });
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let value = if is_sensitive_live_key(key) {
+                        Value::String("[redacted]".to_owned())
+                    } else {
+                        redact_live_value(value, depth + 1)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| redact_live_value(value, depth + 1))
+                .collect(),
+        ),
+        Value::String(value) if looks_like_absolute_path(value) => {
+            Value::String("[redacted-path]".to_owned())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn is_sensitive_live_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "authorization",
+        "credential",
+        "environment",
+        "executable",
+        "authority",
+        "identity",
+        "password",
+        "repository_root",
+        "cwd",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
+}
+
+fn looks_like_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("\\\\")
+        || (value.len() >= 3
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value.as_bytes()[1] == b':'
+            && matches!(value.as_bytes()[2], b'\\' | b'/'))
 }
 
 fn live_result_fields(output: &ToolOutput) -> Value {
     match output.content.as_slice() {
         [] => Value::Null,
         [content] => live_content_value(content),
-        contents => bounded_json_value(&Value::Array(
-            contents
-                .iter()
-                .map(|content| match content {
-                    ToolContent::Text(text) => json!({
-                        "type": "text",
-                        "value": bounded_text_value(text),
-                    }),
-                    ToolContent::Json(value) => json!({
-                        "type": "json",
-                        "value": bounded_json_value(value),
-                    }),
-                })
-                .collect(),
-        )),
+        contents => bounded_json_value(
+            &Value::Array(
+                contents
+                    .iter()
+                    .map(|content| match content {
+                        ToolContent::Text(text) => json!({
+                            "type": "text",
+                            "value": bounded_text_value(text),
+                        }),
+                        ToolContent::Json(value) => json!({
+                            "type": "json",
+                            "value": bounded_json_value(value, MAX_LIVE_RESULT_BYTES),
+                        }),
+                    })
+                    .collect(),
+            ),
+            MAX_LIVE_RESULT_BYTES,
+        ),
     }
 }
 
 fn live_content_value(content: &ToolContent) -> Value {
     match content {
-        ToolContent::Json(value) => bounded_json_value(value),
+        ToolContent::Json(value) => bounded_json_value(value, MAX_LIVE_RESULT_BYTES),
         ToolContent::Text(text) => serde_json::from_str(text)
-            .map(|value| bounded_json_value(&value))
+            .map(|value| bounded_json_value(&value, MAX_LIVE_RESULT_BYTES))
             .unwrap_or_else(|_| bounded_text_value(text)),
     }
 }
 
-fn bounded_json_value(value: &Value) -> Value {
+fn bounded_json_value(value: &Value, max_bytes: usize) -> Value {
     let serialized = value.to_string();
-    if serialized.len() <= MAX_LIVE_RESULT_BYTES {
+    if serialized.len() <= max_bytes {
         value.clone()
     } else {
         json!({
@@ -717,7 +771,7 @@ mod tests {
     use rah_protocol::{ToolContent, ToolName, ToolOutput};
     use serde_json::json;
 
-    use super::{live_request_fields, live_result_fields};
+    use super::{live_request_fields, live_result_fields, tool_advertised_evidence};
 
     #[test]
     fn live_request_fields_records_repo_delete_file_schema_fields() {
@@ -728,13 +782,67 @@ mod tests {
         });
 
         assert_eq!(
-            live_request_fields(&ToolName::new("repo.delete-file"), &input),
+            live_request_fields(&input),
             json!({
                 "path": "delete-target.txt",
                 "expected_file_sha256": "a".repeat(64),
                 "expected_file_byte_length": 26,
             })
         );
+    }
+
+    #[test]
+    fn live_request_fields_capture_generic_rename_request_without_absolute_paths_or_secrets() {
+        let input = json!({
+            "source_path": "rename-source.txt",
+            "destination_path": "destination/renamed-target.txt",
+            "expected_source_file_sha256": "a".repeat(64),
+            "expected_source_file_byte_length": 23,
+            "api_key": "do-not-persist",
+            "repository_root": "C:\\private\\repo",
+        });
+
+        assert_eq!(
+            live_request_fields(&input),
+            json!({
+                "source_path": "rename-source.txt",
+                "destination_path": "destination/renamed-target.txt",
+                "expected_source_file_sha256": "a".repeat(64),
+                "expected_source_file_byte_length": 23,
+                "api_key": "[redacted]",
+                "repository_root": "[redacted]",
+            })
+        );
+        assert!(
+            !live_request_fields(&input)
+                .to_string()
+                .contains("do-not-persist")
+        );
+        assert!(
+            !live_request_fields(&input)
+                .to_string()
+                .contains("C:\\private\\repo")
+        );
+    }
+
+    #[test]
+    fn live_request_fields_bounds_generic_input() {
+        let input = json!({"value": "x".repeat(20 * 1024)});
+        let evidence = live_request_fields(&input);
+        assert_eq!(evidence["truncated"], true);
+        assert!(evidence.to_string().len() <= super::MAX_LIVE_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn each_dynamic_tool_has_canonical_advertisement_and_actual_alias() {
+        let first = tool_advertised_evidence(&ToolName::new("repo.rename-file"), "rah_tool_10");
+        let second = tool_advertised_evidence(&ToolName::new("repo.delete-file"), "rah_tool_4");
+        assert_eq!(first["public_tool"], "repo.rename-file");
+        assert_eq!(first["private_alias"], "rah_tool_10");
+        assert_eq!(second["public_tool"], "repo.delete-file");
+        assert_eq!(second["private_alias"], "rah_tool_4");
+        assert_ne!(first["private_alias"], second["private_alias"]);
+        assert_eq!(first["dynamic_definition_emitted"], true);
     }
 
     #[test]
