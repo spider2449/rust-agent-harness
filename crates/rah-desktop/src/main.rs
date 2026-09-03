@@ -45,6 +45,7 @@ use rah_tools::{
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use std::{
