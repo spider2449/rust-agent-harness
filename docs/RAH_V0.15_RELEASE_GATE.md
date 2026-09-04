@@ -1,16 +1,21 @@
 # RAH v0.15.0 Release Gate
 
-**RELEASE PREPARATION — NOT RELEASED**
+**RELEASED — HISTORICAL RECORD**
 
-## 1. Release candidate identity
+## 1. Release identity
 
-- Target: `RAH v0.15.0`.
+- Release: `RAH v0.15.0`.
+- Status: `RELEASED`.
 - Starting HEAD / Task 187 audit commit:
   `5e6ebd8b84d61b5018388c06df908553c5d77f33`.
 - Task 187 exact-head CI: run `33828160578` — PASS; ready for v0.15 release
   preparation.
-- Prepared release commit: `TBD until Task 188 commit exists`.
-- No tag has been created and no GitHub Release has been published.
+- Immutable release commit:
+  `6b66a357cacea4b1fcf21131cbc9e72fab90d59c`.
+- Annotated tag: `v0.15.0`.
+- Tag object: `6ca031e66972b5e04dcade6766d6156a9c3e1a9b`.
+- GitHub Release:
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.15.0>.
 
 ## 2. Workspace metadata
 
@@ -97,16 +102,18 @@ authority, generic `fs.mkdir`, generic filesystem mutation, shell/process
 mkdir, automatic staging/commit, rollback/compensation, or retry/replay after
 possible effect. Linux live certification is not established.
 
-## 10. Release checklist
+## 10. Completed release checklist
 
-- [x] Release-preparation metadata and documentation prepared.
-- [x] Deterministic validation passed.
+- [x] Release candidate prepared.
+- [x] Exact-head CI passed: Task 188, run `33829088735`.
 - [x] Task 186 Windows live evidence reviewed and preserved.
 - [x] Task 187 milestone audit confirmed.
-- [ ] Task 188 commit created and pushed.
-- [ ] Exact-head CI passed for the Task 188 commit.
-- [ ] Annotated `v0.15.0` tag created and pushed (Task 189).
-- [ ] Immutable tag target and GitHub Release publication verified (Task 189).
+- [x] Annotated `v0.15.0` tag created (Task 189).
+- [x] Tag pushed (Task 189).
+- [x] Immutable tag target verified (Task 189).
+- [x] GitHub Release published (Task 189).
+- [x] Release publication verified (Task 189).
 
-v0.15.0 is not yet released. Tagging and publication are deferred to Task
-189; this task must not begin that work.
+Task 188 prepared the release candidate. Task 189 created and pushed the
+annotated tag and published the GitHub Release. Task 190 records the completed
+post-release state; it does not move the tag or republish the release.

@@ -2,9 +2,12 @@
 
 ## v0.15.0 — 2026-09-04
 
-Prepared for release; v0.15.0 is not released yet. This milestone adds
-bounded one-leaf repository directory creation, distinct from v0.14's bounded
-repository file rename/move.
+Released as `RAH v0.15.0` for the bounded repository directory-creation
+milestone. The immutable release commit is
+`6b66a357cacea4b1fcf21131cbc9e72fab90d59c`; annotated tag `v0.15.0` has tag
+object ID `6ca031e66972b5e04dcade6766d6156a9c3e1a9b` and peels to that commit.
+The GitHub Release was published at
+<https://github.com/spider2449/rust-agent-harness/releases/tag/v0.15.0>.
 
 ### Added
 
@@ -48,6 +51,16 @@ repository file rename/move.
   staging, commit, rollback, or replay authority.
 - Windows is live-certified; Ubuntu/Linux has deterministic validation only,
   and Linux live certification is not established.
+
+### Release record
+
+- Release commit: `6b66a357cacea4b1fcf21131cbc9e72fab90d59c`.
+- Annotated tag: `v0.15.0`.
+- Tag object: `6ca031e66972b5e04dcade6766d6156a9c3e1a9b`.
+- GitHub Release:
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.15.0>.
+- Task 188 exact-head CI run `33829088735` passed.
+- Windows `repo.create-directory` live certification passed in Task 186.
 
 ## v0.14.0 — 2026-09-03
 

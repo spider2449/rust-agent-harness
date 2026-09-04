@@ -5,9 +5,9 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.15.0 release preparation: bounded repository directory creation
+## v0.15.0 released: bounded repository directory creation
 
-RAH v0.15.0 is prepared but not yet released. It adds the separate,
+RAH v0.15.0 is released. It adds the separate,
 host-owned `repo.create-directory` capability described below. The v0.14
 bounded file rename/move capability remains distinct.
 
