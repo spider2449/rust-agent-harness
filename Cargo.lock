@@ -2817,11 +2817,10 @@ dependencies = [
  "clap",
  "futures",
  "rah-model",
+ "rah-profile-composition",
  "rah-protocol",
  "rah-runtime",
  "rah-tools",
- "rah-tools-mcp",
- "rah-tools-plugin",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -2861,6 +2860,18 @@ dependencies = [
  "futures",
  "rah-protocol",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rah-profile-composition"
+version = "0.16.0"
+dependencies = [
+ "rah-protocol",
+ "rah-tools",
+ "rah-tools-mcp",
+ "rah-tools-plugin",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

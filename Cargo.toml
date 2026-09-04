@@ -4,6 +4,7 @@ members = [
     "crates/rah-core",
     "crates/rah-desktop",
     "crates/rah-model",
+    "crates/rah-profile-composition",
     "crates/rah-protocol",
     "crates/rah-runtime",
     "crates/rah-runtime-codex",
