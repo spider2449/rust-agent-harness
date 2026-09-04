@@ -5,11 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.14.0 release preparation: bounded repository rename/move
+## v0.15.0 release preparation: bounded repository directory creation
 
-RAH v0.14.0 is prepared but not yet released. It adds the separate,
-host-owned `repo.rename-file` capability described below. The v0.13 bounded
-deletion capability remains distinct.
+RAH v0.15.0 is prepared but not yet released. It adds the separate,
+host-owned `repo.create-directory` capability described below. The v0.14
+bounded file rename/move capability remains distinct.
 
 RAH v0.10.0 established the existing bounded Desktop host configuration.
 Desktop selects a certified `codex-cli 0.149.0` baseline, accepts one
@@ -84,6 +84,13 @@ repository and runtime-generation identity immediately before one native
 no-replace rename/move attempt; a possible effect is never replayed. This is
 not generic filesystem rename authority, and it grants no create, delete,
 content-write, index, commit, shell, process, or Git authority.
+
+RAH v0.15 adds `repo.create-directory` under accepted ADR 0019. It creates
+exactly one new ordinary directory leaf at an explicit repository-relative
+path. The parent must already exist and the destination must be absent. This
+separate `RepositoryDirectoryCreationPolicy` does not recursively create
+parents, ensure an existing directory, create placeholder files, or mutate
+Git. A possible effect is never replayed or rolled back.
 
 ## Preserved bounded repository mutation and workflow inspection
 
@@ -508,6 +515,12 @@ old records. The workflow uses only the repository `GITHUB_TOKEN` with
   selected repository under ADR 0018. It has no directory/recursive move,
   overwrite, case-only Windows rename, generic filesystem, shell/process, or
   Git authority; create and delete remain separate authorities.
+- `repo.create-directory` creates exactly one new ordinary directory leaf under
+  ADR 0019. Its parent must already exist and its destination must be absent.
+  It has no recursive mkdir, ensure-directory, placeholder/.gitkeep, implicit
+  file creation, generic filesystem, shell/process, Git, retry, replay, or
+  rollback authority. A clean Git status is expected because Git does not
+  track empty directories; filesystem postconditions prove creation.
 - Repository observers are best-effort point-in-time observations, not a
   snapshot transaction or cross-process lock. They provide no intentional
   mutation authority, file creation/deletion/rename, generic patches/hunks,

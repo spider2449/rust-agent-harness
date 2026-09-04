@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.15.0 — 2026-09-04
+
+Prepared for release; v0.15.0 is not released yet. This milestone adds
+bounded one-leaf repository directory creation, distinct from v0.14's bounded
+repository file rename/move.
+
+### Added
+
+- Public `repo.create-directory` and separate host-owned
+  `RepositoryDirectoryCreationPolicy` authority.
+- Exactly one ordinary directory leaf at an explicit repository-relative path;
+  the parent must already exist and the destination must be absent.
+
+### Security / authority
+
+- Directory creation is separate from file create/delete/rename and Execute;
+  parent and destination validation, immediate pre-effect revalidation, and
+  handle-/descriptor-relative native effects are preserved.
+- One possible-effect attempt is allowed: no recursive mkdir, retry/replay,
+  rollback/compensation, placeholder files, or Git mutation.
+
+### Composition
+
+- ToolRegistry composition and Generic Codex Tool Bridge integration preserve
+  the public name, exact request/schema, structured result, and private alias
+  boundary. Without host authority, the Tool is omitted.
+
+### Desktop
+
+- Host-owned selected-repository and repository-generation binding, stale
+  runtime protection, repository refresh, reviewed-commit revocation, and
+  Git-clean empty-directory handling are preserved.
+
+### Validation
+
+- Deterministic core, composition, Desktop, metadata, and release validation.
+- Windows live `repo.create-directory` certification PASS using the certified
+  `codex-cli 0.149.0` pair.
+- Task 187 v0.15 milestone audit PASS.
+
+### Limitations
+
+- No recursive/tree creation, multiple directories per request, directory
+  deletion or rename/move, overwrite, symlink/junction/reparse creation,
+  implicit file or placeholder creation, generic `fs.mkdir`, shell/process,
+  staging, commit, rollback, or replay authority.
+- Windows is live-certified; Ubuntu/Linux has deterministic validation only,
+  and Linux live certification is not established.
+
 ## v0.14.0 — 2026-09-03
 
 Released as `RAH v0.14.0` for the bounded repository file rename/move milestone.

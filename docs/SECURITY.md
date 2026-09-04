@@ -1,4 +1,30 @@
-# RAH v0.14.0 Release-Preparation Security Model
+# RAH v0.15.0 Release-Preparation Security Model
+
+## ADR 0019 bounded repository directory creation authority
+
+`repo.create-directory` is a separate host-owned authority for exactly one
+new ordinary directory leaf at an explicit repository-relative path. Its
+parent must already exist and its destination must be absent. It uses the
+host-bound `RepositoryDirectoryCreationPolicy`, immediate pre-effect
+revalidation, and one handle-relative Windows or descriptor-relative
+Unix/Linux native attempt. The verified result is
+`directory_created_verified` with `uncertain=false`.
+
+This is not generic `fs.mkdir`, recursive `mkdir -p`, ensure-directory,
+directory-tree, shell/process, or fallback authority. It does not create
+placeholder files, mutate Git, stage, commit, or alter refs. It is separate
+from file create/delete/rename, content mutation, index mutation, reviewed
+commit/history mutation, and Execute. Model requests, provider metadata,
+Tool definitions, Trusted Profile composition, and frontend state are not
+authorization; no existing authority implies directory creation.
+
+The operation is one possible-effect attempt only. Timeout, cancellation,
+disconnect, or crash does not imply rollback or compensation, and a possible
+effect is never retried or replayed. Desktop binds the authority to the
+selected repository and repository generation; verified directory creation
+invalidates reviewed-commit authorization and refreshes repository state even
+if `git status --short` is empty. Git does not track empty directories, so
+clean Git status is not proof that no filesystem mutation occurred.
 
 ## ADR 0018 bounded repository file rename/move authority
 

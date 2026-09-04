@@ -1,4 +1,4 @@
-# RAH v0.14.0 Release-Preparation Architecture
+# RAH v0.15.0 Release-Preparation Architecture
 
 ## Ownership boundaries
 
@@ -97,6 +97,23 @@ filesystem effect. It does not use `git mv`, copy-delete, generic
 deletion, content mutation, index mutation, and commit/history mutation; the
 Generic Codex Tool Bridge and Desktop only expose it after host composition.
 
+ADR 0019 adds `repo.create-directory` as a separate private, host-owned
+`RepositoryDirectoryCreationPolicy`. It accepts exactly one explicit
+repository-relative destination path and creates exactly one ordinary
+directory leaf under an existing parent when the destination is absent. It
+does not create parents, ensure an existing directory, create placeholders, or
+mutate Git. The host revalidates repository and repository-generation identity
+immediately before one handle-relative Windows or descriptor-relative
+Unix/Linux effect. A possible effect is never replayed or compensated.
+
+Directory creation shares the repository mutation lease with other RAH-owned
+repository filesystem mutations while remaining distinct authority from file
+creation, deletion, rename/move, content mutation, index mutation, and
+reviewed commit/history mutation. Desktop binds it to the selected repository
+and generation; a verified filesystem mutation triggers refresh and reviewed-
+commit authorization revocation even when `git status --short` remains clean,
+because Git does not track empty directories.
+
 Desktop repository context is host-owned. The selected canonical repository
 supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
 `thread/start`; no-repository mode uses a neutral app-owned workspace.
@@ -168,7 +185,7 @@ select providers or profile authority.
 The host-owned Execute surface includes `host.cargo.version`, `host.git.status`,
 `host.git.stage`, `host.git.unstage`, `repo.create-file`, `repo.edit-files`, and the fixed observers
 `repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`, and
-`repo.rename-file`. The first
+  `repo.rename-file`, and `repo.create-directory`. The first
 two and the observers are fixed, host-constructed inspection capabilities.
 Stage and unstage use the private `RepositoryMutationPolicy` to prove one
 authorized index-only effect for one host-selected target. They never grant
