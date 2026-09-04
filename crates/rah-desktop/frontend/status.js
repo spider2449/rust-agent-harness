@@ -21,6 +21,7 @@ let resumeAvailable = false;
 let resumeUsed = false;
 let renderedModelConfiguration = null;
 let renderedCommitReview = null;
+let renderedTrustedProfileSelection = null;
 const maxActivityEntries = 100;
 
 const authorityStatusLabels = {
@@ -83,6 +84,10 @@ function errorMessage(error) {
     codex_start_failed: "Codex failed to start",
     codex_connection_failed: "Codex connection failed",
     tool_registry_failed: "Desktop tool registry unavailable",
+    profile_invalid: "Trusted Profile is invalid or unsupported",
+    profile_first_party_capabilities_unsupported: "Desktop v0.17 accepts provider-only Trusted Profiles; remove first-party capabilities",
+    profile_dialog_failed: "Trusted Profile picker failed",
+    profile_busy: "Trusted Profile selection is available only while Codex is disconnected",
     chat_empty_prompt: "Enter a message before sending",
     chat_prompt_too_large: "Message is too large",
     codex_not_connected: "Connect Codex to chat",
@@ -222,6 +227,21 @@ async function refreshEffectiveAuthority(invoke) {
     error.textContent = "Effective authority snapshot unavailable";
     error.hidden = false;
   }
+}
+
+function renderTrustedProfileSelection(selection) {
+  renderedTrustedProfileSelection = selection;
+  document.querySelector("#trusted-profile-state").textContent = selection.selected
+    ? "Configured — providers inactive"
+    : "Not selected";
+  document.querySelector("#trusted-profile-id").textContent = selection.profileId ?? "Not selected";
+  document.querySelector("#trusted-profile-mcp-count").textContent = String(selection.mcpProviderCount ?? 0);
+  document.querySelector("#trusted-profile-plugin-count").textContent = String(selection.processPluginCount ?? 0);
+  document.querySelector("#trusted-profile-tool-count").textContent = String(selection.expectedToolCount ?? 0);
+}
+
+async function refreshTrustedProfileSelection(invoke) {
+  renderTrustedProfileSelection(await invoke("trusted_profile_selection"));
 }
 
 function modelHint(provider) {
@@ -440,6 +460,9 @@ async function loadStatus(invoke) {
     || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
   document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
+  const profileSelectionAllowed = ["not connected", "error"].includes(status.codexStatus) && !chatRunning;
+  document.querySelector("#choose-trusted-profile").disabled = !profileSelectionAllowed;
+  document.querySelector("#clear-trusted-profile").disabled = !profileSelectionAllowed || !renderedTrustedProfileSelection?.selected;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
   const endpointControls = document.querySelector("#llama-cpp-endpoint");
@@ -597,6 +620,32 @@ async function initializeDesktop() {
   });
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
+  });
+  document.querySelector("#choose-trusted-profile").addEventListener("click", async () => {
+    const error = document.querySelector("#trusted-profile-error");
+    error.hidden = true;
+    try {
+      await invoke("choose_trusted_profile");
+      await refreshTrustedProfileSelection(invoke);
+      await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
+    } catch (profileError) {
+      error.textContent = errorMessage(profileError);
+      error.hidden = false;
+    }
+  });
+  document.querySelector("#clear-trusted-profile").addEventListener("click", async () => {
+    const error = document.querySelector("#trusted-profile-error");
+    error.hidden = true;
+    try {
+      await invoke("clear_trusted_profile");
+      await refreshTrustedProfileSelection(invoke);
+      await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
+    } catch (profileError) {
+      error.textContent = errorMessage(profileError);
+      error.hidden = false;
+    }
   });
   document.querySelector("#choose-repository").addEventListener("click", async () => {
     const error = document.querySelector("#repository-error");
@@ -802,6 +851,7 @@ async function initializeDesktop() {
       showChatError(error);
     }
   });
+  await refreshTrustedProfileSelection(invoke);
   await loadStatus(invoke);
   await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);

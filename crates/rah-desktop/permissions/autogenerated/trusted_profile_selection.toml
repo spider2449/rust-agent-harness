@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trusted-profile-selection"
+description = "Enables the trusted_profile_selection command without any pre-configured scope."
+commands.allow = ["trusted_profile_selection"]
+
+[[permission]]
+identifier = "deny-trusted-profile-selection"
+description = "Denies the trusted_profile_selection command without any pre-configured scope."
+commands.deny = ["trusted_profile_selection"]
