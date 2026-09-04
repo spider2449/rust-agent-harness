@@ -1,0 +1,47 @@
+name: Task 205 validation
+
+on:
+  push:
+    branches:
+      - task205-impl-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Apply Task 205 implementation
+        run: python .github/task205_apply.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Build external provider fixtures
+        run: cargo build -p rah-tools-mcp --bin rah-mcp-echo-server -p rah-tools-plugin --bin rah-plugin-echo
+      - name: Test Desktop
+        run: cargo test -p rah-desktop
+      - name: Lint Desktop
+        run: cargo clippy -p rah-desktop --all-targets --all-features -- -D warnings
+      - name: Verify frontend syntax
+        run: node --check crates/rah-desktop/frontend/status.js
+      - name: Verify diff and lockfile
+        shell: bash
+        run: |
+          git diff --check
+          git diff --exit-code f254cff62847277e4087c26c3e73010fdd6604e0 -- Cargo.lock
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          rm -f .github/task205_apply.py .github/workflows/task205-validate.yml
+          git add -A
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: activate trusted profile providers in Desktop"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
