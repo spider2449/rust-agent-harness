@@ -33,8 +33,8 @@ impl DesktopProviderActivation {
         let profile = selection
             .load_for_activation()
             .map_err(ProviderActivationError::Profile)?;
-        let permissions = configured_external_permissions(&profile)
-            .map_err(ProviderActivationError::Profile)?;
+        let permissions =
+            configured_external_permissions(&profile).map_err(ProviderActivationError::Profile)?;
         let composition = rah_profile_composition::compose(profile)
             .await
             .map_err(|_| ProviderActivationError::ProviderUnavailable)?;
