@@ -226,7 +226,7 @@ impl RepositoryDirectoryCreationPolicy {
     fn revalidate(&self, request: &CreateDirectoryRequest, pre: &PreState) -> Result<(), ()> {
         let current = self.capture(request)?;
         if current.path != pre.path
-            || current.parent_identity != pre.parent_identity
+            || !current.parent_identity.same_object(&pre.parent_identity)
             || current.git != pre.git
         {
             return Err(());
@@ -244,8 +244,9 @@ impl RepositoryDirectoryCreationPolicy {
         {
             return Err(());
         }
-        if FileIdentity::capture(pre.path.parent().ok_or(())?).map_err(|_| ())?
-            != pre.parent_identity
+        if !FileIdentity::capture(pre.path.parent().ok_or(())?)
+            .map_err(|_| ())?
+            .same_object(&pre.parent_identity)
         {
             return Err(());
         }
@@ -260,8 +261,9 @@ impl RepositoryDirectoryCreationPolicy {
     fn known_no_effect(&self, pre: &PreState) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
         if fs::symlink_metadata(&pre.path).is_ok()
-            || FileIdentity::capture(pre.path.parent().ok_or(())?).map_err(|_| ())?
-                != pre.parent_identity
+            || !FileIdentity::capture(pre.path.parent().ok_or(())?)
+                .map_err(|_| ())?
+                .same_object(&pre.parent_identity)
             || git_snapshot(&self.root).map_err(|_| ())? != pre.git
         {
             return Err(());
@@ -274,8 +276,8 @@ impl RepositoryDirectoryCreationPolicy {
         let root = fs::canonicalize(&self.root).map_err(fs_error)?;
         let dot_git = root.join(".git");
         if root != self.root
-            || FileIdentity::capture(&root)? != self.root_identity
-            || FileIdentity::capture(&dot_git)? != self.dot_git_identity
+            || !FileIdentity::capture(&root)?.same_object(&self.root_identity)
+            || !FileIdentity::capture(&dot_git)?.same_object(&self.dot_git_identity)
         {
             return Err(policy_error("repository identity changed"));
         }

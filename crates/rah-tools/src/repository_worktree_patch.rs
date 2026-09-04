@@ -1618,6 +1618,21 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.device == other.device && self.inode == other.inode
+        }
+        #[cfg(windows)]
+        {
+            self.volume_serial == other.volume_serial && self.file_index == other.file_index
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self == other
+        }
+    }
+
     pub(crate) fn capture(path: &Path) -> Result<Self, ToolError> {
         #[cfg(unix)]
         {
