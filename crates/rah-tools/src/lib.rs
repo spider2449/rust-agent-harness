@@ -17,6 +17,7 @@ mod git_unstage;
 mod host_execute;
 mod native_repository_create;
 mod repository_commit;
+mod repository_create_directory;
 mod repository_create_file;
 mod repository_delete_file;
 mod repository_diff;
@@ -45,6 +46,10 @@ pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
 pub use repository_commit::{
     RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
+};
+pub use repository_create_directory::{
+    REPOSITORY_CREATE_DIRECTORY_TOOL_NAME, RepositoryDirectoryCreationAuthority,
+    RepositoryDirectoryCreationTool,
 };
 pub use repository_create_file::{REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryFileCreationTool};
 pub use repository_delete_file::{

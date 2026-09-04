@@ -73,6 +73,26 @@ pub(crate) fn create_new(
     }
 }
 
+/// Creates exactly one ordinary directory entry relative to an authorized parent.
+pub(crate) fn create_directory(parent: &NativeParent, name: &str) -> Result<(), NativeCreateError> {
+    if !valid_name(name) {
+        return Err(NativeCreateError::InvalidName);
+    }
+    #[cfg(unix)]
+    {
+        unix::create_directory(parent, name)
+    }
+    #[cfg(windows)]
+    {
+        windows::create_directory(parent, name)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (parent, name);
+        Err(NativeCreateError::InvalidParent)
+    }
+}
+
 #[allow(dead_code)]
 fn validate_relative(path: &Path) -> Result<(), NativeCreateError> {
     if path.is_absolute() {
@@ -171,6 +191,24 @@ mod unix {
             )));
         }
         file.sync_all().map_err(NativeCreateError::WriteFailed)
+    }
+
+    pub(super) fn create_directory(
+        parent: &NativeParent,
+        name: &str,
+    ) -> Result<(), NativeCreateError> {
+        let name = CString::new(name).map_err(|_| NativeCreateError::InvalidName)?;
+        let result = unsafe { libc::mkdirat(parent.fd.as_raw_fd(), name.as_ptr(), 0o777) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                Err(NativeCreateError::AlreadyExists)
+            } else {
+                Err(NativeCreateError::Io(error))
+            }
+        }
     }
 }
 
@@ -338,6 +376,58 @@ mod windows {
             )));
         };
         f.sync_all().map_err(NativeCreateError::WriteFailed)
+    }
+
+    pub(super) fn create_directory(
+        parent: &NativeParent,
+        name: &str,
+    ) -> Result<(), NativeCreateError> {
+        let mut n = name.encode_utf16().collect::<Vec<_>>();
+        let mut us = UNICODE_STRING {
+            Length: (n.len() * 2) as u16,
+            MaximumLength: (n.len() * 2) as u16,
+            Buffer: n.as_mut_ptr(),
+        };
+        let attrs = OBJECT_ATTRIBUTES {
+            Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: parent.handle.as_raw_handle() as HANDLE,
+            ObjectName: &mut us,
+            Attributes: 0,
+            SecurityDescriptor: std::ptr::null(),
+            SecurityQualityOfService: std::ptr::null(),
+        };
+        let mut out = INVALID_HANDLE_VALUE;
+        let mut ios = IO_STATUS_BLOCK {
+            Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
+            Information: 0,
+        };
+        let status = unsafe {
+            NtCreateFile(
+                &mut out,
+                FILE_READ_ATTRIBUTES | FILE_ADD_FILE | FILE_TRAVERSE | SYNCHRONIZE,
+                &attrs,
+                &mut ios,
+                std::ptr::null(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_CREATE,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::AlreadyExists {
+                Err(NativeCreateError::AlreadyExists)
+            } else {
+                Err(NativeCreateError::Io(error))
+            };
+        }
+        if out != INVALID_HANDLE_VALUE {
+            let _directory = unsafe { fs::File::from_raw_handle(out) };
+        }
+        Ok(())
     }
 }
 
