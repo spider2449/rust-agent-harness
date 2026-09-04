@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rah_tools::TrustedStaticProfile;
 use serde::Serialize;
@@ -52,6 +52,12 @@ impl TrustedProfilePresentation {
 }
 
 impl DesktopTrustedProfileSelection {
+    pub(crate) fn load_for_activation(
+        &self,
+    ) -> Result<TrustedStaticProfile, ProfileSelectionError> {
+        load_provider_only_static_profile(&self.source)
+    }
+
     #[must_use]
     pub(crate) fn presentation(&self) -> TrustedProfilePresentation {
         // Read the host-only source solely to preserve the invariant locally;
@@ -74,14 +80,21 @@ impl DesktopTrustedProfileSelection {
 ///
 /// `TrustedStaticProfile::load` is intentionally non-spawning. The returned
 /// selection retains only configured intent; the loaded profile is dropped.
-pub(crate) fn load_provider_only_profile(
-    source: PathBuf,
-) -> Result<DesktopTrustedProfileSelection, ProfileSelectionError> {
+fn load_provider_only_static_profile(
+    source: &Path,
+) -> Result<TrustedStaticProfile, ProfileSelectionError> {
     let profile =
-        TrustedStaticProfile::load(&source).map_err(|_| ProfileSelectionError::InvalidProfile)?;
+        TrustedStaticProfile::load(source).map_err(|_| ProfileSelectionError::InvalidProfile)?;
     if !profile.effective_profile().capabilities.is_empty() {
         return Err(ProfileSelectionError::FirstPartyCapabilities);
     }
+    Ok(profile)
+}
+
+pub(crate) fn load_provider_only_profile(
+    source: PathBuf,
+) -> Result<DesktopTrustedProfileSelection, ProfileSelectionError> {
+    let profile = load_provider_only_static_profile(&source)?;
 
     let mcp_provider_count = u32::try_from(profile.mcp_providers().len())
         .map_err(|_| ProfileSelectionError::InvalidProfile)?;

@@ -86,6 +86,7 @@ function errorMessage(error) {
     tool_registry_failed: "Desktop tool registry unavailable",
     profile_invalid: "Trusted Profile is invalid or unsupported",
     profile_first_party_capabilities_unsupported: "Desktop v0.17 accepts provider-only Trusted Profiles; remove first-party capabilities",
+    profile_activation_failed: "Trusted Profile providers could not be activated",
     profile_dialog_failed: "Trusted Profile picker failed",
     profile_busy: "Trusted Profile selection is available only while Codex is disconnected",
     chat_empty_prompt: "Enter a message before sending",

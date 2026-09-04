@@ -11,6 +11,8 @@ mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
 #[cfg(target_os = "windows")]
+mod provider_composition;
+#[cfg(target_os = "windows")]
 mod trusted_profile_selection;
 
 #[cfg(target_os = "windows")]
@@ -31,9 +33,14 @@ use effective_authority::{
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
+use provider_composition::{
+    DesktopProviderActivation, ProviderActivationError, desktop_allowed_permissions,
+    merge_tool_registries,
+};
+#[cfg(target_os = "windows")]
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole,
-    PermissionLevel, RequestId, SessionId, ToolContent, ToolInput,
+    RequestId, SessionId, ToolContent, ToolInput,
 };
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
@@ -345,6 +352,11 @@ struct DesktopAppState {
     commit_capability: Mutex<Option<DesktopCommitCapability>>,
     /// Explicit host-selected Trusted Profile intent. Static selection never activates providers.
     trusted_profile: Mutex<Option<DesktopTrustedProfileSelection>>,
+    trusted_profile_generation: Mutex<u64>,
+    /// One effective provider composition owned by the currently published connection.
+    /// Kept outside `ConnectionState` so hard recovery can asynchronously reap providers
+    /// after synchronously withdrawing the usable runtime state.
+    provider_activation: Mutex<Option<DesktopProviderActivation>>,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -420,6 +432,8 @@ impl DesktopAppState {
             commit_identity_generation: Mutex::new(0),
             commit_capability: Mutex::new(None),
             trusted_profile: Mutex::new(None),
+            trusted_profile_generation: Mutex::new(0),
+            provider_activation: Mutex::new(None),
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
@@ -870,16 +884,22 @@ impl DesktopAppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some();
+        let provider_active = self
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
         let mut status = current_app_status(
             &connection,
             repository_selected,
             repository_generation,
             model_generation,
         );
-        status.profile_status = if profile_selected {
-            "configured; providers inactive"
-        } else {
-            "not loaded"
+        status.profile_status = match (&*connection, profile_selected, provider_active) {
+            (ConnectionState::Connected { .. }, true, true) => "active",
+            (ConnectionState::Connecting, true, _) => "activating",
+            (_, true, _) => "configured; providers inactive",
+            _ => "not loaded",
         };
         status
     }
@@ -908,6 +928,18 @@ impl DesktopAppState {
             && let Err(error) = runtime.shutdown().await
         {
             tracing::warn!(error = %error, "failed to shut down Codex during desktop exit");
+        }
+        self.shutdown_provider_activation().await;
+    }
+
+    async fn shutdown_provider_activation(&self) {
+        let activation = self
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(activation) = activation {
+            activation.shutdown().await;
         }
     }
 
@@ -1138,6 +1170,7 @@ pub(crate) enum FrontendError {
     ToolRegistryFailed,
     ProfileInvalid,
     ProfileFirstPartyCapabilitiesUnsupported,
+    ProfileActivationFailed,
     ProfileDialogFailed,
     ProfileBusy,
     ChatEmptyPrompt,
@@ -1681,6 +1714,99 @@ fn connection_publication_is_current(
 }
 
 #[cfg(target_os = "windows")]
+fn connection_activation_publication_is_current(captured: [u64; 4], current: [u64; 4]) -> bool {
+    captured == current
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderPublicationRejectionReason {
+    Superseded,
+    DuplicateOwner,
+}
+
+#[cfg(target_os = "windows")]
+struct PendingConnectedPublication {
+    runtime: Arc<CodexRuntime>,
+    activation: Option<DesktopProviderActivation>,
+    source: CodexExecutableSource,
+    repository_generation: u64,
+    model_generation: u64,
+    connection_generation: u64,
+    repository_fingerprint: Option<String>,
+    composition: Arc<DesktopToolComposition>,
+}
+
+#[cfg(target_os = "windows")]
+struct RejectedProviderPublication {
+    runtime: Arc<CodexRuntime>,
+    activation: Option<DesktopProviderActivation>,
+    reason: ProviderPublicationRejectionReason,
+}
+
+#[cfg(target_os = "windows")]
+fn publish_connected_provider_state(
+    state: &DesktopAppState,
+    pending: PendingConnectedPublication,
+) -> Result<(), Box<RejectedProviderPublication>> {
+    let mut connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !matches!(*connection, ConnectionState::Connecting) {
+        let PendingConnectedPublication {
+            runtime,
+            activation,
+            ..
+        } = pending;
+        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::Superseded,
+        }));
+    }
+
+    let mut published_provider = state
+        .provider_activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if published_provider.is_some() {
+        let PendingConnectedPublication {
+            runtime,
+            activation,
+            ..
+        } = pending;
+        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::DuplicateOwner,
+        }));
+    }
+
+    let PendingConnectedPublication {
+        runtime,
+        activation,
+        source,
+        repository_generation,
+        model_generation,
+        connection_generation,
+        repository_fingerprint,
+        composition,
+    } = pending;
+    *published_provider = activation;
+    *connection = ConnectionState::Connected {
+        runtime,
+        source,
+        repository_generation,
+        model_generation,
+        connection_generation,
+        repository_fingerprint,
+        composition,
+    };
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn safe_repository_display_name(root: &Path) -> Option<String> {
     let name = root.file_name()?.to_str()?;
     if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
@@ -1957,6 +2083,11 @@ fn choose_trusted_profile(
         .trusted_profile
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
+    let mut generation = state
+        .trusted_profile_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *generation = generation.wrapping_add(1);
     Ok(())
 }
 
@@ -1964,10 +2095,19 @@ fn choose_trusted_profile(
 #[tauri::command]
 fn clear_trusted_profile(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
     ensure_trusted_profile_selection_allowed(state.inner())?;
-    *state
+    let changed = state
         .trusted_profile
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .is_some();
+    if changed {
+        let mut generation = state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+    }
     Ok(())
 }
 
@@ -3447,16 +3587,16 @@ fn desktop_tool_registry(
 }
 
 #[cfg(target_os = "windows")]
-fn desktop_tool_composition(
+fn desktop_tool_composition_from_registry(
+    registry: Arc<ToolRegistry>,
     repository: Option<&DesktopRepository>,
-    commit_tool: Option<Arc<RepositoryCommitTool>>,
-) -> Result<Arc<DesktopToolComposition>, ToolError> {
-    let registry = desktop_tool_registry(repository, commit_tool.clone())?;
-    Ok(Arc::new(effective_authority::compose(
+    commit_tool_present: bool,
+) -> Arc<DesktopToolComposition> {
+    Arc::new(effective_authority::compose(
         registry,
         repository,
-        commit_tool.is_some(),
-    )))
+        commit_tool_present,
+    ))
 }
 
 /// Resolves host executable selection and combines it with the already chosen,
@@ -3582,6 +3722,18 @@ async fn connect_codex(
             }
         }
     };
+    let (profile_selection, profile_generation) = {
+        let selection = state
+            .trusted_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let generation = *state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (selection, generation)
+    };
     let identity = state
         .commit_identity
         .lock()
@@ -3603,16 +3755,79 @@ async fn connect_codex(
         _ => None,
     };
     let commit_tool = commit_capability.as_ref().map(|(tool, _)| Arc::clone(tool));
-    let composition = desktop_tool_composition(repository.as_deref(), commit_tool.clone())
-        .map_err(|error| {
-            tracing::error!(error = %error, "failed to construct desktop tool composition");
-            FrontendError::ToolRegistryFailed
-        })?;
-    let registry = Arc::clone(&composition.registry);
+    let first_party_registry =
+        match desktop_tool_registry(repository.as_deref(), commit_tool.clone()) {
+            Ok(registry) => registry,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to construct Desktop first-party registry");
+                let frontend_error = FrontendError::ToolRegistryFailed;
+                *state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    ConnectionState::Error(frontend_error);
+                return Err(frontend_error);
+            }
+        };
+
+    let mut provider_activation = match profile_selection.as_ref() {
+        Some(selection) => match DesktopProviderActivation::activate(selection).await {
+            Ok(activation) => Some(activation),
+            Err(error) => {
+                let frontend_error = match error {
+                    ProviderActivationError::Profile(error) => profile_selection_error(error),
+                    ProviderActivationError::ProviderUnavailable => {
+                        FrontendError::ProfileActivationFailed
+                    }
+                };
+                tracing::warn!(reason = ?error, "Desktop provider activation failed");
+                *state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    ConnectionState::Error(frontend_error);
+                return Err(frontend_error);
+            }
+        },
+        None => None,
+    };
+    let registry = match merge_tool_registries(
+        first_party_registry.as_ref(),
+        provider_activation
+            .as_ref()
+            .map(DesktopProviderActivation::registry),
+    ) {
+        Ok(registry) => registry,
+        Err(error) => {
+            tracing::warn!(error = %error, "Desktop final Tool registry merge failed");
+            if let Some(activation) = provider_activation.take() {
+                activation.shutdown().await;
+            }
+            let frontend_error = FrontendError::ToolRegistryFailed;
+            *state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                ConnectionState::Error(frontend_error);
+            return Err(frontend_error);
+        }
+    };
+    let allowed_permissions = desktop_allowed_permissions(
+        repository.is_some(),
+        provider_activation
+            .as_ref()
+            .map_or(&[], DesktopProviderActivation::permissions),
+    );
+    let composition = desktop_tool_composition_from_registry(
+        Arc::clone(&registry),
+        repository.as_deref(),
+        commit_tool.is_some(),
+    );
     let repository_fingerprint = repository
         .as_ref()
         .map(|value| repository_context_fingerprint(&value.root));
     let connection_repository_fingerprint = repository_fingerprint.clone();
+    let selected_profile = profile_selection.is_some();
     match resolve_prepare_and_connect_codex(
         resolve_codex_executable,
         model_config,
@@ -3621,8 +3836,11 @@ async fn connect_codex(
                 "event": "connection_started",
                 "repository_generation": repository_generation,
                 "repository_fingerprint": connection_repository_fingerprint,
+                "model_generation": model_generation,
+                "profile_generation": profile_generation,
                 "connection_generation": connection_generation,
                 "selected_repository": repository.is_some(),
+                "selected_profile": selected_profile,
                 "deletion_authority_present": repository
                     .as_ref()
                     .is_some_and(|value| value.deletion_authority.is_some()),
@@ -3634,15 +3852,7 @@ async fn connect_codex(
             CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
                 prepared.executable,
                 registry,
-                if repository.is_some() {
-                    vec![
-                        PermissionLevel::None,
-                        PermissionLevel::Read,
-                        PermissionLevel::Execute,
-                    ]
-                } else {
-                    vec![PermissionLevel::None]
-                },
+                allowed_permissions,
                 prepared.model_config,
                 if let Some(repository) = repository.as_deref() {
                     repository.root.as_path()
@@ -3668,25 +3878,49 @@ async fn connect_codex(
                 .repository_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current_model_generation = state
+                .model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generation;
+            let current_profile_generation = *state
+                .trusted_profile_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let current_connection_generation = *state
                 .next_connection_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let stale = !connection_publication_is_current(
-                repository_generation,
-                current_repository_generation,
-                connection_generation,
-                current_connection_generation,
+            let stale = !connection_activation_publication_is_current(
+                [
+                    repository_generation,
+                    model_generation,
+                    profile_generation,
+                    connection_generation,
+                ],
+                [
+                    current_repository_generation,
+                    current_model_generation,
+                    current_profile_generation,
+                    current_connection_generation,
+                ],
             );
             if stale {
                 append_live_evidence(serde_json::json!({
                     "event": "connection_publication_rejected_stale",
                     "captured_repository_generation": repository_generation,
                     "current_repository_generation": current_repository_generation,
+                    "captured_model_generation": model_generation,
+                    "current_model_generation": current_model_generation,
+                    "captured_profile_generation": profile_generation,
+                    "current_profile_generation": current_profile_generation,
                     "connection_generation": connection_generation,
                 }));
                 if let Err(error) = runtime.shutdown().await {
                     tracing::warn!(error = %error, "stale Codex desktop runtime shutdown failed");
+                }
+                if let Some(activation) = provider_activation.take() {
+                    activation.shutdown().await;
                 }
                 let mut connection = state
                     .connection
@@ -3697,12 +3931,10 @@ async fn connect_codex(
                 }
                 return Err(FrontendError::CodexReconnectRequired);
             }
-            let mut connection = state
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *connection = ConnectionState::Connected {
+
+            let pending = PendingConnectedPublication {
                 runtime,
+                activation: provider_activation.take(),
                 source,
                 repository_generation,
                 model_generation,
@@ -3710,13 +3942,44 @@ async fn connect_codex(
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
             };
-            drop(connection);
+            if let Err(rejected) = publish_connected_provider_state(state.inner(), pending) {
+                let RejectedProviderPublication {
+                    runtime,
+                    activation,
+                    reason,
+                } = *rejected;
+                if let Err(error) = runtime.shutdown().await {
+                    tracing::warn!(error = %error, "rejected Codex runtime shutdown failed");
+                }
+                if let Some(activation) = activation {
+                    activation.shutdown().await;
+                }
+                return match reason {
+                    ProviderPublicationRejectionReason::Superseded => {
+                        Err(FrontendError::CodexReconnectRequired)
+                    }
+                    ProviderPublicationRejectionReason::DuplicateOwner => {
+                        state.shutdown_provider_activation().await;
+                        let frontend_error = FrontendError::ProfileActivationFailed;
+                        let mut connection = state
+                            .connection
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if matches!(*connection, ConnectionState::Connecting) {
+                            *connection = ConnectionState::Error(frontend_error);
+                        }
+                        Err(frontend_error)
+                    }
+                };
+            }
             append_live_evidence(serde_json::json!({
                 "event": "connection_published",
                 "repository_generation": repository_generation,
                 "repository_fingerprint": published_fingerprint,
                 "model_generation": model_generation,
+                "profile_generation": profile_generation,
                 "connection_generation": connection_generation,
+                "profile_active": selected_profile,
             }));
             if let Some((tool, control)) = commit_capability {
                 *state
@@ -3734,6 +3997,9 @@ async fn connect_codex(
             Ok(ConnectionResult::connected())
         }
         Err(frontend_error) => {
+            if let Some(activation) = provider_activation.take() {
+                activation.shutdown().await;
+            }
             let mut connection = state
                 .connection
                 .lock()
@@ -3765,18 +4031,30 @@ async fn disconnect_codex(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match std::mem::replace(&mut *connection, ConnectionState::Disconnecting) {
             ConnectionState::Connected { runtime, .. } => Some(runtime),
-            state => {
-                *connection = state;
+            previous => {
+                *connection = previous;
                 None
             }
         }
     };
 
+    let activation = state
+        .provider_activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let Some(runtime) = runtime else {
+        if let Some(activation) = activation {
+            activation.shutdown().await;
+        }
         return Ok(ConnectionResult::not_connected());
     };
 
-    if let Err(error) = runtime.shutdown().await {
+    let runtime_result = runtime.shutdown().await;
+    if let Some(activation) = activation {
+        activation.shutdown().await;
+    }
+    if let Err(error) = runtime_result {
         tracing::warn!(error = %error, "Codex desktop disconnection failed");
         let frontend_error = frontend_error(&error);
         let mut connection = state
@@ -4411,6 +4689,7 @@ async fn cancel_chat(
             if hard != HardShutdownOutcome::Completed {
                 tracing::warn!("bounded hard Codex shutdown did not complete successfully");
             }
+            state.shutdown_provider_activation().await;
             state.finish_hard_recovery(hard == HardShutdownOutcome::Completed);
             // This is a Desktop recovery outcome, not a claim that a remote provider request
             // rolled back.
@@ -6422,6 +6701,30 @@ mod tests {
         assert!(connection_publication_is_current(4, 4, 9, 9));
         assert!(!connection_publication_is_current(4, 5, 9, 9));
         assert!(!connection_publication_is_current(4, 4, 9, 10));
+    }
+
+    #[test]
+    fn activation_publication_requires_repository_model_profile_and_connection_currentness() {
+        assert!(super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [5, 5, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 7, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 8, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 6, 10],
+        ));
     }
 
     #[test]
