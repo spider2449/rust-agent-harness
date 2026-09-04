@@ -36,7 +36,35 @@ jobs:
         shell: bash
         run: |
           git diff --check
-          git diff --exit-code f254cff62847277e4087c26c3e73010fdd6604e0 -- Cargo.lock
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          base_ref = "f254cff62847277e4087c26c3e73010fdd6604e0"
+          base = subprocess.check_output(
+              ["git", "show", f"{base_ref}:Cargo.lock"],
+              text=True,
+          )
+          current = Path("Cargo.lock").read_text(encoding="utf-8")
+          before = '''name = "rah-desktop"
+          version = "0.16.0"
+          dependencies = [
+           "futures",
+           "rah-protocol",
+          '''
+          after = '''name = "rah-desktop"
+          version = "0.16.0"
+          dependencies = [
+           "futures",
+           "rah-profile-composition",
+           "rah-protocol",
+          '''
+          if current.count(after) != 1:
+              raise SystemExit("Cargo.lock does not contain the one expected rah-desktop workspace dependency addition")
+          normalized = current.replace(after, before, 1)
+          if normalized != base:
+              raise SystemExit("Cargo.lock contains drift beyond the expected rah-profile-composition membership addition")
+          PY
       - name: Commit validated implementation
         shell: bash
         run: |
