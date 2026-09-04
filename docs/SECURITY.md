@@ -1,4 +1,31 @@
-# RAH v0.15.0 Release-Preparation Security Model
+# RAH v0.16.0 Release-Preparation Security Model
+
+## Effective Authority Review
+
+The Effective Authority panel consumes a host-owned, closed,
+backend-sanitized DTO. Raw repository paths, secrets, provider stderr and
+endpoints, private Tool aliases, and review handles are excluded before
+frontend serialization/rendering. Provider metadata cannot self-classify or
+escalate authority. Unknown schema or status values fail closed.
+
+The snapshot is an observation of configured, effective, and runtime-advertised
+state. Advertisement or display does not mean unconditional authorization:
+requests still pass ToolRegistry lookup, PermissionLevel gates, applicable host
+policy, repository/workspace constraints, generation/precondition checks, and
+separate one-shot reviewed-commit authorization where applicable. A review
+state is presentation state, not an authority token.
+
+Backend-derived stale or reconnect-required state cannot be labelled Current.
+Inspection and Refresh Authority have zero lifecycle, Tool, repository, chat,
+authority, or persistence side effects. The panel grants no authority, does
+not dynamically grant or revoke permissions, does not reload profiles or
+manage provider lifecycles, and persists/restores no authority.
+
+v0.16 adds no authority. It adds no generic shell, filesystem, Git, branch/ref,
+network, or provider lifecycle authority, and makes no OS-sandbox, network
+isolation, or rollback guarantee. MCP and Process Plugin remain existing
+host-controlled Tool providers; their Effective Authority presentation is not
+currently reachable through the Desktop composition path.
 
 ## ADR 0019 bounded repository directory creation authority
 

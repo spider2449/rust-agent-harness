@@ -5,6 +5,30 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## v0.16.0 release candidate: Effective Authority Review
+
+RAH v0.16.0 is prepared as a release candidate. The Desktop Effective
+Authority panel is an informational review surface for the current host-composed
+Tool inventory. It distinguishes configured, effective, and runtime-advertised
+state and shows generation-aware repository/runtime current, stale, and
+reconnect-required state, public Tool names, host-derived effect/authority/
+permission/source classifications, bounded unavailable-capability reasons, and
+reviewed-commit presentation state.
+
+The panel does not grant, revoke, edit, reload, or otherwise compose authority.
+Refresh Authority is read-only. Model Tool requests remain subject to
+ToolRegistry lookup, host PermissionLevel and policy checks, repository/workspace
+constraints, generation/precondition checks, and one-shot reviewed-commit
+authorization where applicable. Configured, effective, advertised, and
+individual request authorization remain distinct. No new model-accessible
+authority was added.
+
+Windows Effective Authority live certification is PASS using the certified
+`codex-cli 0.149.0` baseline; Linux live certification is not established.
+MCP and Process Plugin remain existing Tool providers, but their Effective
+Authority presentation is not currently reachable through the Desktop
+composition path and is not claimed as live-certified in v0.16.
+
 ## v0.15.0 released: bounded repository directory creation
 
 RAH v0.15.0 is released. It adds the separate,

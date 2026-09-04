@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.16.0 — Release candidate
+
+Prepared as the `RAH v0.16.0` release candidate for the host-owned Effective
+Authority Review UX. This is preparation only; v0.16.0 has not been released.
+
+### Added
+
+- A read-only, backend-sanitized Desktop authority inventory showing public
+  Tool names, host-derived effect/authority/permission/source classifications,
+  and bounded unavailable-capability reasons.
+- Clear configured, effective, and runtime-advertised state, with
+  generation-aware Current, stale, and reconnect-required classification.
+- Presentation of reviewed-commit state without exposing review authority or
+  handles.
+
+### Security / authority
+
+- Backend sanitization is applied before frontend serialization/rendering;
+  unknown schema and status values fail closed.
+- Refresh Authority is observational and has zero Tool, lifecycle,
+  repository, chat, or authority side effects.
+- Tool visibility or advertisement is not unconditional execution
+  authorization. Requests still pass ToolRegistry lookup, PermissionLevel,
+  host policy, repository/workspace constraints, generation checks, and any
+  one-shot reviewed-commit authorization.
+- No new model-accessible authority or ADR was added.
+
+### Validation
+
+- Deterministic cross-layer security hardening and Windows live certification
+  PASS using the certified `codex-cli 0.149.0` baseline.
+- Linux live certification is not established.
+
 ## v0.15.0 — 2026-09-04
 
 Released as `RAH v0.15.0` for the bounded repository directory-creation

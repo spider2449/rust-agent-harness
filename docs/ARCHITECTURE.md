@@ -1,4 +1,34 @@
-# RAH v0.15.0 Release-Preparation Architecture
+# RAH v0.16.0 Release-Preparation Architecture
+
+## Effective Authority observability path
+
+The v0.16 Desktop review is an observation path over existing host-owned
+composition and lifecycle state:
+
+```text
+Desktop host state
+        -> sanitized EffectiveAuthoritySnapshot
+        -> read-only Tauri command
+        -> Effective Authority panel
+```
+
+The backend is the sanitization boundary. It derives currentness from the
+repository/runtime generation and publication checks, exposes public Tool
+names and closed host-derived classifications, and excludes private aliases
+and sensitive provider or repository details. The frontend only renders the
+sanitized DTO; it is not an authority or security source.
+
+Configured intent, effective composition, runtime advertisement, and
+unconditional execution authorization are distinct states. A visible or
+advertised Tool still passes ToolRegistry lookup, host permission and policy
+checks, repository/workspace constraints, generation/preconditions, and any
+separate reviewed-commit authorization. Stale or reconnect-required inventory
+cannot become Current for a new repository or model context.
+
+Inspection and Refresh Authority do not compose, reload, spawn, reconnect,
+execute, persist, or mutate authority. MCP and Process Plugin adapters remain
+Tool providers under the existing architecture; their authority-review
+presentation is not currently reachable through the Desktop composition path.
 
 ## Ownership boundaries
 
