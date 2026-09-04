@@ -47,6 +47,12 @@ impl RepositoryDirectoryCreationAuthority {
             )?),
         })
     }
+
+    /// Confirms that this opaque authority is bound to the selected root.
+    #[must_use]
+    pub fn matches_repository_root(&self, repository_root: &Path) -> bool {
+        self.policy.root == repository_root
+    }
 }
 
 impl RepositoryDirectoryCreationTool {

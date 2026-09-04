@@ -36,6 +36,7 @@ use rah_runtime_codex::{
 use rah_tools::{
     EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryCommitControl,
     RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
     RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
@@ -915,6 +916,7 @@ struct DesktopRepository {
     status: Arc<RepositoryStatusTool>,
     worktree_diff: Arc<RepositoryDiffTool>,
     staged_diff: Arc<RepositoryDiffStagedTool>,
+    directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
     rename_authority: Option<RepositoryFileRenameAuthority>,
 }
@@ -926,12 +928,13 @@ impl DesktopRepository {
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
     ) -> Result<Self, ToolError> {
-        Self::new_with_authorities(git_executable, repository_root, None, None)
+        Self::new_with_authorities(git_executable, repository_root, None, None, None)
     }
 
     fn new_with_authorities(
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
+        directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
         deletion_authority: Option<RepositoryFileDeletionAuthority>,
         rename_authority: Option<RepositoryFileRenameAuthority>,
     ) -> Result<Self, ToolError> {
@@ -958,6 +961,14 @@ impl DesktopRepository {
                 message: "deletion authority does not match selected repository".to_owned(),
             });
         }
+        if let Some(authority) = &directory_creation_authority
+            && !authority.matches_repository_root(&repository_root)
+        {
+            return Err(ToolError::Execution {
+                message: "directory creation authority does not match selected repository"
+                    .to_owned(),
+            });
+        }
         if let Some(authority) = &rename_authority
             && !authority.matches_resources(git_executable, &repository_root)
         {
@@ -972,6 +983,7 @@ impl DesktopRepository {
             status: Arc::new(status),
             worktree_diff: Arc::new(worktree_diff),
             staged_diff: Arc::new(staged_diff),
+            directory_creation_authority,
             deletion_authority,
             rename_authority,
         })
@@ -2712,9 +2724,15 @@ fn choose_repository(
             None
         }
     };
+    let directory_creation_authority = RepositoryDirectoryCreationAuthority::new(&path)
+        .map_err(|error| {
+            tracing::warn!(error = %error, "selected repository cannot receive directory creation authority");
+            FrontendError::RepositoryInvalid
+        })?;
     let repository = DesktopRepository::new_with_authorities(
         &git,
         &path,
+        Some(directory_creation_authority),
         Some(deletion_authority),
         rename_authority,
     )
@@ -3066,6 +3084,11 @@ fn desktop_tool_registry(
         registry.register(Arc::new(diff_staged))?;
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(create_file))?;
+        if let Some(authority) = &repository.directory_creation_authority {
+            registry.register(Arc::new(RepositoryDirectoryCreationTool::from_authority(
+                authority.clone(),
+            )))?;
+        }
         registry.register(Arc::new(edit_files))?;
         if let Some(authority) = &repository.deletion_authority {
             registry.register(Arc::new(RepositoryFileDeletionTool::from_authority(
@@ -3088,6 +3111,8 @@ fn desktop_tool_registry(
             .is_some_and(|value| value.deletion_authority.is_some()),
         "rename_authority_present": repository
             .is_some_and(|value| value.rename_authority.is_some()),
+        "directory_creation_authority_present": repository
+            .is_some_and(|value| value.directory_creation_authority.is_some()),
         "registry_contains_repo_delete_file": registry
             .definitions()
             .iter()
@@ -3510,6 +3535,7 @@ fn activity_event(
                 tool.as_str(),
                 "repo.patch"
                     | "repo.create-file"
+                    | "repo.create-directory"
                     | "repo.edit-files"
                     | "repo.delete-file"
                     | "repo.rename-file"
@@ -4328,8 +4354,8 @@ mod tests {
         CodexRuntime,
     };
     use rah_tools::{
-        RepositoryCommitTool, RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority,
-        ToolContext,
+        RepositoryCommitTool, RepositoryDirectoryCreationAuthority,
+        RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority, ToolContext,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -4567,15 +4593,23 @@ mod tests {
             let git = Self::native_git();
             let authority = RepositoryFileDeletionAuthority::new(&git, &self.0)
                 .expect("host deletion authority should construct");
-            DesktopRepository::new_with_authorities(&git, &self.0, Some(authority), None)
+            DesktopRepository::new_with_authorities(&git, &self.0, None, Some(authority), None)
                 .expect("selected deletion repository should construct")
+        }
+
+        fn directory_repository(&self) -> DesktopRepository {
+            let git = Self::native_git();
+            let authority = RepositoryDirectoryCreationAuthority::new(&self.0)
+                .expect("host directory creation authority should construct");
+            DesktopRepository::new_with_authorities(&git, &self.0, Some(authority), None, None)
+                .expect("selected directory repository should construct")
         }
 
         fn rename_repository(&self) -> DesktopRepository {
             let git = Self::native_git();
             let authority = RepositoryFileRenameAuthority::new(&git, &self.0)
                 .expect("host rename authority should construct");
-            DesktopRepository::new_with_authorities(&git, &self.0, None, Some(authority))
+            DesktopRepository::new_with_authorities(&git, &self.0, None, None, Some(authority))
                 .expect("selected rename repository should construct")
         }
 
@@ -6542,6 +6576,113 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn desktop_verified_directory_creation_revokes_reviewed_commit_authorization() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        fs::write(fixture.0.join("reviewed.txt"), b"reviewed\n")
+            .expect("review fixture should be written");
+        assert!(
+            Command::new(&git)
+                .args(["add", "reviewed.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("Git add should start")
+                .success()
+        );
+        fs::create_dir(fixture.0.join("parent")).expect("directory parent should exist");
+        let repository = fixture.directory_repository();
+        let (commit_tool, control) = RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .expect("commit capability should compose");
+        let control = Arc::new(control);
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        *state.commit_identity.lock().unwrap() = Some(DesktopCommitIdentity {
+            name: "RAH Host".to_owned(),
+            email: "rah-host@example.invalid".to_owned(),
+        });
+        replace_selected_repository(&state, repository);
+        let selected = state.repository.lock().unwrap().clone().unwrap();
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        *state.commit_capability.lock().unwrap() = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: Arc::new(commit_tool),
+            control: Arc::clone(&control),
+        });
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&selected, Some(Arc::clone(&control)))
+                .await
+                .expect("review snapshot should be available");
+        let snapshot = install_repository_workflow(
+            &state,
+            &selected,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(review_id),
+            ..
+        } = snapshot.review
+        else {
+            panic!("staged review should be available");
+        };
+        authorize_repository_commit_review(&state, &review_id)
+            .await
+            .expect("review should authorize");
+        assert!(control.has_pending_authorization().await);
+
+        let registry = desktop_tool_registry(Some(&selected), None).unwrap();
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.create-directory"),
+                    input: ToolInput(serde_json::json!({"path":"parent/empty"})),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("directory creation should return a result");
+        assert!(matches!(&output.content[0], ToolContent::Json(value)
+            if value["status"] == "directory_created_verified"));
+
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.create-directory"),
+                input: ToolInput(serde_json::json!({"path":"parent/empty"})),
+            },
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output,
+        };
+        let mut calls = HashMap::new();
+        activity_event(&requested, &mut calls).expect("requested activity");
+        let (_, refresh) = activity_event(&finished, &mut calls).expect("finished activity");
+        assert!(refresh);
+        invalidate_repository_commit_review(&state).await;
+        assert!(!control.has_pending_authorization().await);
+        assert!(matches!(
+            authorize_repository_commit_review(&state, &review_id).await,
+            Err(FrontendError::CommitAuthorizationStale)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn desktop_registry_commit_requires_its_paired_control_and_is_one_shot() {
         let fixture = TestRepository::git_repository(GitRepositoryState::Staged);
         let repository = DesktopRepository::new(&TestRepository::native_git(), &fixture.0)
@@ -6806,6 +6947,119 @@ mod tests {
         assert!(
             outside.is_err(),
             "fs.read must not escape the selected root"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn desktop_directory_creation_is_explicit_and_git_clean() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        fs::create_dir(fixture.0.join("parent")).expect("directory parent should exist");
+        let repository = fixture.directory_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("directory-authorized registry should build");
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.create-directory")
+        );
+
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.create-directory"),
+                    input: ToolInput(serde_json::json!({"path":"parent/empty"})),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("directory dispatch should return a result");
+        assert!(!output.is_error);
+        assert!(matches!(&output.content[0], ToolContent::Json(value)
+            if value["status"] == "directory_created_verified"
+                && value["uncertain"] == false));
+        assert!(fixture.0.join("parent/empty").is_dir());
+        assert_eq!(
+            String::from_utf8(
+                Command::new(TestRepository::native_git())
+                    .args(["status", "--porcelain=v1"])
+                    .current_dir(&fixture.0)
+                    .output()
+                    .expect("Git status should run")
+                    .stdout,
+            )
+            .expect("Git status should be UTF-8"),
+            ""
+        );
+
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("repo.create-directory"),
+                input: ToolInput(serde_json::json!({"path":"parent/empty"})),
+            },
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output,
+        };
+        let mut calls = HashMap::new();
+        assert!(activity_event(&requested, &mut calls).is_some());
+        let (_, refresh) = activity_event(&finished, &mut calls).expect("finished activity");
+        assert!(refresh);
+    }
+
+    #[test]
+    fn desktop_directory_authority_is_not_inferred_from_other_repository_tools() {
+        let fixture = TestRepository::new();
+        let repository = fixture.desktop_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("authority-free registry should build");
+        assert!(
+            !registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.create-directory")
+        );
+    }
+
+    #[test]
+    fn directory_authority_snapshot_changes_with_repository_generation() {
+        let repository_a_fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b_fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_a = repository_a_fixture.directory_repository();
+        let repository_b = repository_b_fixture.directory_repository();
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+
+        replace_selected_repository(&state, repository_a);
+        let selected_a = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+        assert!(
+            selected_a
+                .directory_creation_authority
+                .as_ref()
+                .is_some_and(|authority| authority.matches_repository_root(&selected_a.root))
+        );
+
+        replace_selected_repository(&state, repository_b);
+        let selected_b = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
+        assert!(
+            selected_b
+                .directory_creation_authority
+                .as_ref()
+                .is_some_and(|authority| authority.matches_repository_root(&selected_b.root))
+        );
+        assert!(
+            !selected_a
+                .directory_creation_authority
+                .as_ref()
+                .is_some_and(|authority| authority.matches_repository_root(&selected_b.root))
         );
     }
 
