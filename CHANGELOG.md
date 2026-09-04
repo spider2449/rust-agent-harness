@@ -1,9 +1,13 @@
 # Changelog
 
-## v0.16.0 — Release candidate
+## v0.16.0 — 2026-09-04
 
-Prepared as the `RAH v0.16.0` release candidate for the host-owned Effective
-Authority Review UX. This is preparation only; v0.16.0 has not been released.
+Released as `RAH v0.16.0` for the host-owned Effective Authority Review UX.
+The immutable release commit is
+`509a5ba8daefeabbf91da50853402a1661099668`; annotated tag `v0.16.0` has tag
+object ID `c6ada41ed3c5edc677e392597c7d65dd5e9e69de` and peels to that commit.
+The GitHub Release was published at
+<https://github.com/spider2449/rust-agent-harness/releases/tag/v0.16.0>.
 
 ### Added
 
@@ -32,6 +36,16 @@ Authority Review UX. This is preparation only; v0.16.0 has not been released.
 - Deterministic cross-layer security hardening and Windows live certification
   PASS using the certified `codex-cli 0.149.0` baseline.
 - Linux live certification is not established.
+
+### Release record
+
+- Release commit: `509a5ba8daefeabbf91da50853402a1661099668`.
+- Annotated tag: `v0.16.0`.
+- Tag object: `c6ada41ed3c5edc677e392597c7d65dd5e9e69de`.
+- GitHub Release:
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.16.0>.
+- Exact-head release-source CI run `33848123910` passed.
+- Tag-triggered CI run `33848713329` succeeded.
 
 ## v0.15.0 — 2026-09-04
 

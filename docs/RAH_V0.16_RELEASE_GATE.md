@@ -1,17 +1,22 @@
 # RAH v0.16.0 Release Gate
 
-**RELEASE CANDIDATE PREPARED — NOT RELEASED**
+**RELEASED — HISTORICAL RELEASE RECORD**
 
 ## 1. Release identity
 
-- Release candidate: `RAH v0.16.0`.
+- Release: `RAH v0.16.0`.
+- Status: `RELEASED`.
 - Milestone: Host-owned Effective Authority Review UX.
 - Task 197 audit: `aeb9df521522817e62edca661417b02be095a3fe` — PASS.
 - Task 197 exact-head CI: run `33847133836` — PASS.
-- Task 198 release-preparation commit: to be recorded after commit.
-- Exact-head CI for Task 198: required and must PASS.
-- No `v0.16.0` tag exists during Task 198.
-- No GitHub Release exists during Task 198.
+- Immutable release commit: `509a5ba8daefeabbf91da50853402a1661099668`.
+- Task 198 exact-head CI: run `33848123910` — PASS.
+- Annotated tag: `v0.16.0`.
+- Tag object: `c6ada41ed3c5edc677e392597c7d65dd5e9e69de`.
+- GitHub Release:
+  <https://github.com/spider2449/rust-agent-harness/releases/tag/v0.16.0>.
+- GitHub Release: published; draft `false`; prerelease `false`.
+- Tag-triggered CI: run `33848713329` — success.
 
 ## 2. Immutable prior release
 
@@ -93,5 +98,22 @@ Task 198 must record PASS for the full release suite: Cargo format/check/test/
 clippy, `git diff --check`, Cargo metadata audit, frontend Node checks and
 `status_authority_test.js`, and `cargo build -p rah-desktop --release`.
 
-The eventual release tag must point exactly to the Task 198 release-preparation
-commit and may be created only by Task 199 after exact-head CI PASS.
+Task 199 created the annotated tag and published the GitHub Release after the
+Task 198 exact-head CI passed. The v0.16.0 tag remains on the immutable release
+commit above; Task 200 is a later documentation-only cleanup commit on master
+and must not become the tag target. The GitHub Release targets the immutable
+v0.16.0 tag.
+
+## 9. Completed release checklist
+
+- [x] Release candidate prepared.
+- [x] Exact-head CI passed: Task 198, run `33848123910`.
+- [x] Task 196 initial INCONCLUSIVE result and Task 196A Windows PASS evidence
+  preserved.
+- [x] Annotated `v0.16.0` tag created and pushed (Task 199).
+- [x] Immutable tag target verified.
+- [x] GitHub Release published and verified (Task 199).
+- [x] Tag-triggered CI succeeded: run `33848713329`.
+
+Task 200 records the completed post-release state. It does not move the tag or
+republish the release.

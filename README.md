@@ -5,9 +5,9 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## v0.16.0 release candidate: Effective Authority Review
+## RAH v0.16.0 released: Effective Authority Review
 
-RAH v0.16.0 is prepared as a release candidate. The Desktop Effective
+RAH v0.16.0 is released. The Desktop Effective
 Authority panel is an informational review surface for the current host-composed
 Tool inventory. It distinguishes configured, effective, and runtime-advertised
 state and shows generation-aware repository/runtime current, stale, and
