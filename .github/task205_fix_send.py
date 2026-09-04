@@ -202,3 +202,251 @@ new = r'''            let pending = PendingConnectedPublication {
             }
 '''
 replace_once(main, old, new)
+
+# Task 205 clippy cleanup. These rewrites are behavior-neutral: profile
+# currentness is required only before publication; the connected state cannot
+# change its selected profile while live.
+replace_once(
+    main,
+    '''        composition: Arc<DesktopToolComposition>,
+        profile_generation: u64,
+    },
+''',
+    '''        composition: Arc<DesktopToolComposition>,
+    },
+''',
+)
+replace_once(
+    main,
+    '''    composition: Arc<DesktopToolComposition>,
+    profile_generation: u64,
+}
+''',
+    '''    composition: Arc<DesktopToolComposition>,
+}
+''',
+)
+replace_once(
+    main,
+    '''        repository_fingerprint,
+        composition,
+        profile_generation,
+    } = pending;
+''',
+    '''        repository_fingerprint,
+        composition,
+    } = pending;
+''',
+)
+replace_once(
+    main,
+    '''        repository_fingerprint,
+        composition,
+        profile_generation,
+    };
+''',
+    '''        repository_fingerprint,
+        composition,
+    };
+''',
+)
+replace_once(
+    main,
+    '''                repository_fingerprint,
+                composition: Arc::clone(&composition),
+                profile_generation,
+            };
+''',
+    '''                repository_fingerprint,
+                composition: Arc::clone(&composition),
+            };
+''',
+)
+
+replace_once(
+    main,
+    '''#[cfg(target_os = "windows")]
+fn connection_activation_publication_is_current(
+    captured_repository_generation: u64,
+    current_repository_generation: u64,
+    captured_model_generation: u64,
+    current_model_generation: u64,
+    captured_profile_generation: u64,
+    current_profile_generation: u64,
+    captured_connection_generation: u64,
+    current_connection_generation: u64,
+) -> bool {
+    captured_repository_generation == current_repository_generation
+        && captured_model_generation == current_model_generation
+        && captured_profile_generation == current_profile_generation
+        && captured_connection_generation == current_connection_generation
+}
+''',
+    '''#[cfg(target_os = "windows")]
+fn connection_activation_publication_is_current(
+    captured: [u64; 4],
+    current: [u64; 4],
+) -> bool {
+    captured == current
+}
+''',
+)
+replace_once(
+    main,
+    '''            let stale = !connection_activation_publication_is_current(
+                repository_generation,
+                current_repository_generation,
+                model_generation,
+                current_model_generation,
+                profile_generation,
+                current_profile_generation,
+                connection_generation,
+                current_connection_generation,
+            );
+''',
+    '''            let stale = !connection_activation_publication_is_current(
+                [
+                    repository_generation,
+                    model_generation,
+                    profile_generation,
+                    connection_generation,
+                ],
+                [
+                    current_repository_generation,
+                    current_model_generation,
+                    current_profile_generation,
+                    current_connection_generation,
+                ],
+            );
+''',
+)
+replace_once(
+    main,
+    '''    #[test]
+    fn activation_publication_requires_repository_model_profile_and_connection_currentness() {
+        assert!(super::connection_activation_publication_is_current(
+            4, 4, 5, 5, 6, 6, 9, 9
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            4, 5, 5, 5, 6, 6, 9, 9
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            4, 4, 5, 7, 6, 6, 9, 9
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            4, 4, 5, 5, 6, 8, 9, 9
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            4, 4, 5, 5, 6, 6, 9, 10
+        ));
+    }
+''',
+    '''    #[test]
+    fn activation_publication_requires_repository_model_profile_and_connection_currentness() {
+        assert!(super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [5, 5, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 7, 6, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 8, 9],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 5, 6, 9],
+            [4, 5, 6, 10],
+        ));
+    }
+''',
+)
+
+replace_once(
+    main,
+    '''#[cfg(target_os = "windows")]
+fn desktop_tool_composition(
+    repository: Option<&DesktopRepository>,
+    commit_tool: Option<Arc<RepositoryCommitTool>>,
+) -> Result<Arc<DesktopToolComposition>, ToolError> {
+    let registry = desktop_tool_registry(repository, commit_tool.clone())?;
+    Ok(desktop_tool_composition_from_registry(
+        registry,
+        repository,
+        commit_tool.is_some(),
+    ))
+}
+
+''',
+    '',
+)
+
+replace_once(
+    main,
+    ''') -> Result<(), RejectedProviderPublication> {
+''',
+    ''') -> Result<(), Box<RejectedProviderPublication>> {
+''',
+)
+replace_once(
+    main,
+    '''        return Err(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::Superseded,
+        });
+''',
+    '''        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::Superseded,
+        }));
+''',
+)
+replace_once(
+    main,
+    '''        return Err(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::DuplicateOwner,
+        });
+''',
+    '''        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::DuplicateOwner,
+        }));
+''',
+)
+replace_once(
+    main,
+    '''            if let Err(rejected) = publish_connected_provider_state(state.inner(), pending) {
+                if let Err(error) = rejected.runtime.shutdown().await {
+''',
+    '''            if let Err(rejected) = publish_connected_provider_state(state.inner(), pending) {
+                let RejectedProviderPublication {
+                    runtime,
+                    activation,
+                    reason,
+                } = *rejected;
+                if let Err(error) = runtime.shutdown().await {
+''',
+)
+replace_once(
+    main,
+    '''                if let Some(activation) = rejected.activation {
+                    activation.shutdown().await;
+                }
+                return match rejected.reason {
+''',
+    '''                if let Some(activation) = activation {
+                    activation.shutdown().await;
+                }
+                return match reason {
+''',
+)
