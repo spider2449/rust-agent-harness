@@ -415,6 +415,25 @@ mod tests {
             reviewed_commit: ReviewedCommitState::ReviewRequired,
         };
         let json = serde_json::to_string(&snapshot).expect("snapshot serializes");
+        let repeated_json = serde_json::to_string(&snapshot).expect("snapshot reserializes");
+        assert_eq!(json, repeated_json);
+        let object =
+            serde_json::from_str::<serde_json::Value>(&json).expect("snapshot is an object");
+        for field in [
+            "schemaVersion",
+            "status",
+            "repository",
+            "connection",
+            "configured",
+            "effectiveTools",
+            "unavailableCapabilities",
+            "reviewedCommit",
+        ] {
+            assert!(
+                object.get(field).is_some(),
+                "missing snapshot field: {field}"
+            );
+        }
         for secret in [
             r#"C:\Users\SECRET_USER\private-repo"#,
             "SUPER_SECRET_TOKEN",
@@ -428,6 +447,47 @@ mod tests {
         assert!(json.contains("certified_side_by_side"));
         assert!(json.contains("authority_not_granted"));
         assert!(json.contains("connected_current"));
+    }
+
+    #[test]
+    fn every_desktop_tool_name_has_explicit_host_classification() {
+        let names = [
+            "echo",
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.create-directory",
+            "repo.delete-file",
+            "repo.rename-file",
+            "repo.commit",
+        ];
+        for name in names {
+            assert!(
+                metadata(name).is_some(),
+                "missing host classification: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tool_names_fail_closed_in_composition() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(rah_tools::EchoTool::new()))
+            .expect("echo registers");
+        let composition = compose(Arc::new(registry), None, false);
+        assert_eq!(composition.tools.len(), 1);
+        assert!(
+            composition
+                .tools
+                .iter()
+                .all(|tool| metadata(&tool.public_tool_name).is_some())
+        );
     }
 
     #[test]

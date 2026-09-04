@@ -137,8 +137,12 @@ function renderAuthorityValue(label, value) {
 function renderEffectiveAuthority(snapshot) {
   const statusElement = document.querySelector("#effective-authority-status");
   const error = document.querySelector("#effective-authority-error");
-  if (!snapshot || snapshot.schemaVersion !== 1) {
-    statusElement.textContent = "Authority snapshot version unavailable";
+  const unsupportedSchema = !snapshot || snapshot.schemaVersion !== 1;
+  const unsupportedStatus = !unsupportedSchema && !Object.hasOwn(authorityStatusLabels, snapshot.status);
+  if (unsupportedSchema || unsupportedStatus) {
+    statusElement.textContent = unsupportedSchema
+      ? "Authority snapshot version unavailable"
+      : "Authority snapshot unavailable";
     statusElement.dataset.state = "unavailable";
     error.hidden = true;
     document.querySelector("#effective-authority-summary").replaceChildren();
