@@ -87,6 +87,35 @@
           <p id="staged-review-state">No staged changes</p>
           <button id="authorize-commit" type="button" hidden>Authorize Commit</button>
         </section>
+        <section class="authority-review" aria-labelledby="effective-authority-title">
+          <div class="authority-heading">
+            <h2 id="effective-authority-title">Effective Authority</h2>
+            <button id="refresh-effective-authority" type="button">Refresh Authority</button>
+          </div>
+          <p id="effective-authority-error" class="connection-error" hidden></p>
+          <p id="effective-authority-status" class="authority-status" aria-live="polite">Authority snapshot loading…</p>
+          <p id="effective-authority-currentness-note" class="authority-note authority-warning" hidden></p>
+          <p class="authority-note">Inventory is informational. Model requests remain subject to host permission and policy checks.</p>
+          <dl id="effective-authority-summary" class="authority-summary"></dl>
+          <div class="authority-layer-notes">
+            <p><strong>Configured</strong> — Host intent/configuration known to RAH.</p>
+            <p><strong>Effective</strong> — Successfully composed into the host Tool inventory.</p>
+            <p><strong>Advertised</strong> — Published to the currently connected runtime.</p>
+          </div>
+          <p class="authority-note">Requests still require host permission and policy checks.</p>
+          <section aria-labelledby="effective-tools-title">
+            <h3 id="effective-tools-title">Effective Tools</h3>
+            <ul id="effective-tools" class="authority-list"></ul>
+          </section>
+          <section aria-labelledby="unavailable-capabilities-title">
+            <h3 id="unavailable-capabilities-title">Unavailable capabilities</h3>
+            <ul id="unavailable-capabilities" class="authority-list"></ul>
+          </section>
+          <details>
+            <summary>Advanced context</summary>
+            <dl id="effective-authority-advanced" class="authority-summary"></dl>
+          </details>
+        </section>
         <section class="chat" aria-labelledby="chat-title">
           <h2 id="chat-title">Chat</h2>
           <p id="chat-hint">Connect Codex to chat</p>

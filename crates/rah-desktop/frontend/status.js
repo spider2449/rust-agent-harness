@@ -23,6 +23,29 @@ let renderedModelConfiguration = null;
 let renderedCommitReview = null;
 const maxActivityEntries = 100;
 
+const authorityStatusLabels = {
+  no_repository: "No repository selected",
+  disconnected: "Runtime disconnected",
+  connecting: "Connecting — effective runtime inventory pending",
+  connected_current: "Current",
+  reconnect_required: "Reconnect required",
+  stale: "Stale — not current authority",
+  unavailable: "Authority snapshot unavailable",
+};
+
+const authorityLabels = {
+  sourceKind: { built_in: "Built-in", trusted_profile: "Trusted Profile", repository_host: "Repository host", mcp: "MCP", process_plugin: "Process Plugin" },
+  repositoryIdentity: { current: "Current", not_selected: "Not selected", stale: "Stale", unknown: "Unknown / unavailable" },
+  connectionState: { not_connected: "Runtime disconnected", connecting: "Connecting", connected: "Connected", disconnecting: "Disconnecting", error: "Unavailable" },
+  effectClass: { read_only: "Read-only", repository_mutation: "Repository mutation", index_mutation: "Index mutation", commit: "Commit", execute: "Execute", external: "External" },
+  authorityCategory: { repository_observation: "Repository observation", repository_content_mutation: "Content mutation", repository_file_creation: "File creation", repository_file_deletion: "File deletion", repository_file_rename: "File rename / move", repository_directory_creation: "Directory creation", repository_index_mutation: "Index mutation", repository_commit: "Reviewed commit", read: "Read", execute: "Execute", external: "External provider" },
+  permission: { none: "None", read: "Read", write: "Write", execute: "Execute" },
+  sourceLabel: { desktop_builtin: "Desktop built-in", desktop_repository: "Desktop repository" },
+  unavailableState: { configured_unavailable: "Configured unavailable", not_effective: "Not effective" },
+  unavailableReason: { not_configured: "Not configured", authority_not_granted: "Host authority not granted", repository_required: "Select a repository", reconnect_required: "Reconnect required", provider_not_effective: "Provider not effective", provider_unavailable: "Provider unavailable", permission_not_configured: "Permission not configured", review_required: "Reviewed commit authorization required", stale_context: "Context is stale", unknown: "Unavailable reason unknown" },
+  reviewedCommit: { not_applicable: "Not applicable", identity_not_configured: "Identity not configured", review_required: "Review required", ready_to_authorize: "Ready to authorize", authorized_pending: "Authorized pending", stale: "Stale", authorization_revoked: "Authorization revoked", unavailable: "Unavailable" },
+};
+
 const tauriApiRetryDelayMs = 100;
 const tauriApiRetryAttempts = 20;
 
@@ -95,6 +118,106 @@ function errorMessage(error) {
     preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
+}
+
+function authorityLabel(group, value) {
+  return authorityLabels[group][value] ?? "Unknown / unavailable";
+}
+
+function renderAuthorityValue(label, value) {
+  const row = document.createElement("div");
+  const term = document.createElement("dt");
+  const detail = document.createElement("dd");
+  term.textContent = label;
+  detail.textContent = value;
+  row.append(term, detail);
+  return row;
+}
+
+function renderEffectiveAuthority(snapshot) {
+  const statusElement = document.querySelector("#effective-authority-status");
+  const error = document.querySelector("#effective-authority-error");
+  if (!snapshot || snapshot.schemaVersion !== 1) {
+    statusElement.textContent = "Authority snapshot version unavailable";
+    statusElement.dataset.state = "unavailable";
+    error.hidden = true;
+    document.querySelector("#effective-authority-summary").replaceChildren();
+    document.querySelector("#effective-tools").replaceChildren();
+    document.querySelector("#unavailable-capabilities").replaceChildren();
+    document.querySelector("#effective-authority-advanced").replaceChildren();
+    document.querySelector("#effective-authority-currentness-note").hidden = true;
+    return;
+  }
+  const statusText = authorityStatusLabels[snapshot.status] ?? "Unknown / unavailable";
+  statusElement.textContent = statusText;
+  statusElement.dataset.state = snapshot.status === "connected_current" ? "current" : "unavailable";
+  error.hidden = true;
+  const repository = snapshot.repository ?? {};
+  const connection = snapshot.connection ?? {};
+  const configured = snapshot.configured ?? {};
+  document.querySelector("#effective-authority-summary").replaceChildren(
+    renderAuthorityValue("Status", statusText),
+    renderAuthorityValue("Repository", repository.selected ? (repository.displayName ?? "Selected repository") : "No repository selected"),
+    renderAuthorityValue("Binding", snapshot.status === "connected_current" && repository.identity === "current" ? "Current" : authorityLabel("repositoryIdentity", repository.identity) === "Current" ? "Not current" : authorityLabel("repositoryIdentity", repository.identity)),
+    renderAuthorityValue("Runtime", connection.runtimeKind ?? authorityLabel("connectionState", connection.state)),
+    renderAuthorityValue("Runtime source", connection.runtimeSource ?? "Unknown / unavailable"),
+    renderAuthorityValue("Effective Tools", String((snapshot.effectiveTools ?? []).length)),
+    renderAuthorityValue("Unavailable", String((snapshot.unavailableCapabilities ?? []).length)),
+    renderAuthorityValue("Reviewed commit", authorityLabel("reviewedCommit", snapshot.reviewedCommit)),
+  );
+  document.querySelector("#effective-tools").replaceChildren(...(snapshot.effectiveTools?.length ? snapshot.effectiveTools.map(renderEffectiveTool) : [authorityListMessage("No effective Tools") ]));
+  document.querySelector("#unavailable-capabilities").replaceChildren(...(snapshot.unavailableCapabilities?.length ? snapshot.unavailableCapabilities.map(renderUnavailableCapability) : [authorityListMessage("No known unavailable capabilities") ]));
+  document.querySelector("#effective-authority-advanced").replaceChildren(
+    renderAuthorityValue("Configured source", configured.profileSource ? authorityLabel("sourceKind", configured.profileSource) : "Unknown / unavailable"),
+    renderAuthorityValue("Configured providers", String(configured.configuredProviderCount ?? 0)),
+    renderAuthorityValue("Configured capabilities", String(configured.configuredCapabilityCount ?? 0)),
+    renderAuthorityValue("Current repository generation", repository.currentGeneration == null ? "Not available" : String(repository.currentGeneration)),
+    renderAuthorityValue("Captured repository generation", repository.capturedGeneration == null ? "Not available" : String(repository.capturedGeneration)),
+    renderAuthorityValue("Captured model generation", connection.capturedModelGeneration == null ? "Not available" : String(connection.capturedModelGeneration)),
+    renderAuthorityValue("Captured connection generation", connection.capturedConnectionGeneration == null ? "Not available" : String(connection.capturedConnectionGeneration)),
+  );
+  const currentnessNote = document.querySelector("#effective-authority-currentness-note");
+  currentnessNote.textContent = "This runtime inventory is not current for the selected context.";
+  currentnessNote.hidden = !["reconnect_required", "stale"].includes(snapshot.status);
+}
+
+function authorityListMessage(text) {
+  const item = document.createElement("li");
+  item.textContent = text;
+  return item;
+}
+
+function renderEffectiveTool(tool) {
+  const item = document.createElement("li");
+  item.className = "authority-entry";
+  const title = document.createElement("strong");
+  title.textContent = tool.publicToolName;
+  const details = document.createElement("dl");
+  details.append(renderAuthorityValue("Source", `${authorityLabel("sourceKind", tool.sourceKind)} — ${authorityLabel("sourceLabel", tool.sourceLabel)}`), renderAuthorityValue("Effect", authorityLabel("effectClass", tool.effectClass)), renderAuthorityValue("Authority", authorityLabel("authorityCategory", tool.authorityCategory)), renderAuthorityValue("Dispatch permission", `${authorityLabel("permission", tool.permission)} classification`), renderAuthorityValue("Repository bound", tool.repositoryBound === true ? "Yes" : "No"), renderAuthorityValue("Runtime", tool.advertised === true ? "Advertised" : "Not advertised / host effective only"));
+  item.append(title, details);
+  return item;
+}
+
+function renderUnavailableCapability(capability) {
+  const item = document.createElement("li");
+  item.className = "authority-entry";
+  const title = document.createElement("strong");
+  title.textContent = capability.publicToolName ?? "Known capability";
+  const details = document.createElement("dl");
+  details.append(renderAuthorityValue("State", authorityLabel("unavailableState", capability.state)), renderAuthorityValue("Reason", authorityLabel("unavailableReason", capability.reason)));
+  item.append(title, details);
+  return item;
+}
+
+async function refreshEffectiveAuthority(invoke) {
+  const error = document.querySelector("#effective-authority-error");
+  try {
+    renderEffectiveAuthority(await invoke("get_effective_authority_snapshot"));
+  } catch {
+    renderEffectiveAuthority({ schemaVersion: 0 });
+    error.textContent = "Effective authority snapshot unavailable";
+    error.hidden = false;
+  }
 }
 
 function modelHint(provider) {
@@ -436,6 +559,7 @@ async function toggleCodexConnection(invoke) {
   } finally {
     try {
       await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
       if (disconnected) await refreshRepository(invoke);
     } catch (statusError) {
       console.error("failed to refresh desktop status", statusError);
@@ -462,6 +586,10 @@ async function initializeDesktop() {
   });
   await listen("repository_snapshot_refresh", () => {
     void refreshRepository(invoke);
+    void refreshEffectiveAuthority(invoke);
+  });
+  document.querySelector("#refresh-effective-authority").addEventListener("click", () => {
+    void refreshEffectiveAuthority(invoke);
   });
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
@@ -474,6 +602,7 @@ async function initializeDesktop() {
       await replaceTranscript(invoke);
       await loadStatus(invoke);
       await refreshRepository(invoke);
+      await refreshEffectiveAuthority(invoke);
     } catch (repositoryError) {
       error.textContent = errorMessage(repositoryError);
       error.hidden = false;
@@ -481,6 +610,7 @@ async function initializeDesktop() {
   });
   document.querySelector("#refresh-repository").addEventListener("click", () => {
     void refreshRepository(invoke);
+    void refreshEffectiveAuthority(invoke);
   });
   document.querySelector("#new-conversation").addEventListener("click", async () => {
     const chatError = document.querySelector("#chat-error");
@@ -522,6 +652,7 @@ async function initializeDesktop() {
       document.querySelector("#commit-identity-state").textContent = identity.configured ? "Configured" : "Not configured";
       await refreshRepository(invoke);
       await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
     } catch (error) {
       document.querySelector("#repository-error").textContent = errorMessage(error);
       document.querySelector("#repository-error").hidden = false;
@@ -534,6 +665,7 @@ async function initializeDesktop() {
       document.querySelector("#staged-review-state").textContent = result.authorizationState === "authorized_pending"
         ? "Authorized for one future commit request" : "Review authorization unavailable";
       document.querySelector("#authorize-commit").hidden = true;
+      await refreshEffectiveAuthority(invoke);
     } catch (error) {
       document.querySelector("#repository-error").textContent = errorMessage(error);
       document.querySelector("#repository-error").hidden = false;
@@ -548,6 +680,7 @@ async function initializeDesktop() {
     try {
       await invoke(button.dataset.repositoryAction === "stage" ? "repository_stage_action" : "repository_unstage_action", { actionId: button.dataset.actionId });
       await refreshRepository(invoke);
+      await refreshEffectiveAuthority(invoke);
     } catch (repositoryError) {
       error.textContent = errorMessage(repositoryError);
       error.hidden = false;
@@ -593,6 +726,7 @@ async function initializeDesktop() {
       });
       await refreshModelConfiguration(invoke);
       await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
       if ((await invoke("model_configuration")).status === "reconnect required") {
         error.textContent = "Reconnect Codex to activate this model configuration.";
         error.hidden = false;
@@ -609,6 +743,7 @@ async function initializeDesktop() {
       await invoke("reset_model_preferences");
       await refreshModelConfiguration(invoke);
       await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
     } catch (resetError) {
       error.textContent = errorMessage(resetError);
       error.hidden = false;
@@ -666,6 +801,7 @@ async function initializeDesktop() {
   await loadStatus(invoke);
   await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);
+  await refreshEffectiveAuthority(invoke);
   const identity = await invoke("commit_identity");
   document.querySelector("#commit-identity-state").textContent = identity.configured ? "Configured" : "Not configured";
   const preferencesWarning = await invoke("desktop_preferences_warning");

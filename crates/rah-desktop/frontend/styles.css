@@ -44,6 +44,78 @@ main {
   margin-top: 0.5rem;
 }
 
+.authority-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.authority-heading button {
+  flex: 0 0 auto;
+  margin-top: 1.5rem;
+}
+
+.authority-status {
+  font-weight: 700;
+}
+
+.authority-status[data-state="current"] {
+  color: #16713d;
+}
+
+.authority-warning {
+  color: #8a5b00;
+  font-weight: 600;
+}
+
+.authority-note,
+.authority-layer-notes p {
+  color: color-mix(in srgb, CanvasText 70%, transparent);
+}
+
+.authority-layer-notes {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  border-left: 3px solid color-mix(in srgb, CanvasText 25%, transparent);
+}
+
+.authority-layer-notes p {
+  margin: 0.35rem 0;
+}
+
+.authority-list {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
+.authority-entry {
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, CanvasText 7%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.authority-entry > strong {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.authority-entry dl {
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.authority-entry dl div {
+  padding-bottom: 0.5rem;
+}
+
+.authority-review details {
+  margin-top: 1rem;
+}
+
 .repository-entries,
 .repository-diff {
   display: grid;
