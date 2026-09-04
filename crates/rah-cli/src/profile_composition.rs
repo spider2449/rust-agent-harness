@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use rah_tools::{
     EffectiveCapability, EffectiveProfile, ProfileError, RepositoryCommitControl,
-    RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryFileCreationTool,
-    RepositoryFileDeletionAuthority, RepositoryFileDeletionTool, RepositoryFileInfoTool,
-    RepositoryFileRenameAuthority, RepositoryFileRenameTool, RepositoryMultiFileEditTool,
-    RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
+    RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
+    RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
+    RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, ToolRegistry,
+    TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -59,7 +61,19 @@ impl EffectiveProfileComposition {
 pub async fn compose(
     profile: TrustedStaticProfile,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
-    compose_with_repository_file_authorities(profile, None, None).await
+    compose_with_repository_file_authorities(profile, None, None, None).await
+}
+
+/// Composes a profile with a directory-creation authority supplied by the host.
+///
+/// The Trusted Profile schema does not manufacture this authority. The tool is
+/// registered only when the host explicitly supplies the opaque authority.
+pub async fn compose_with_repository_directory_creation_authority(
+    profile: TrustedStaticProfile,
+    directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
+) -> Result<EffectiveProfileComposition, ProfileError> {
+    compose_with_repository_file_authorities(profile, None, None, directory_creation_authority)
+        .await
 }
 
 /// Composes a profile using a deletion authority separately constructed by the host.
@@ -67,7 +81,7 @@ pub async fn compose_with_repository_file_deletion_authority(
     profile: TrustedStaticProfile,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
-    compose_with_repository_file_authorities(profile, deletion_authority, None).await
+    compose_with_repository_file_authorities(profile, deletion_authority, None, None).await
 }
 
 /// Composes a profile using a rename authority separately constructed by the host.
@@ -75,13 +89,14 @@ pub async fn compose_with_repository_file_rename_authority(
     profile: TrustedStaticProfile,
     rename_authority: Option<RepositoryFileRenameAuthority>,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
-    compose_with_repository_file_authorities(profile, None, rename_authority).await
+    compose_with_repository_file_authorities(profile, None, rename_authority, None).await
 }
 
 async fn compose_with_repository_file_authorities(
     profile: TrustedStaticProfile,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
     rename_authority: Option<RepositoryFileRenameAuthority>,
+    directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
 ) -> Result<EffectiveProfileComposition, ProfileError> {
     let mut registry = ToolRegistry::new();
     let mut repository_commit_control = None;
@@ -122,6 +137,14 @@ async fn compose_with_repository_file_authorities(
                 RepositoryFileCreationTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ))
+            .map_err(|_| ProfileError::DuplicateRegistration)?;
+    }
+
+    if let Some(authority) = directory_creation_authority {
+        registry
+            .register(Arc::new(RepositoryDirectoryCreationTool::from_authority(
+                authority,
+            )))
             .map_err(|_| ProfileError::DuplicateRegistration)?;
     }
 

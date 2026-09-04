@@ -13,8 +13,8 @@ use std::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use rah_cli::profile_composition::{
-    EffectiveProfileComposition, compose, compose_with_repository_file_deletion_authority,
-    compose_with_repository_file_rename_authority,
+    EffectiveProfileComposition, compose, compose_with_repository_directory_creation_authority,
+    compose_with_repository_file_deletion_authority, compose_with_repository_file_rename_authority,
 };
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
@@ -22,8 +22,9 @@ use rah_protocol::{
 };
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{
-    EchoTool, FsReadTool, RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority, Tool,
-    ToolContext, ToolError, ToolRegistry, TrustedStaticProfile,
+    EchoTool, FsReadTool, RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
+    RepositoryFileRenameAuthority, Tool, ToolContext, ToolError, ToolRegistry,
+    TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -347,6 +348,60 @@ struct RepositoryCreateFileFixture {
     target: PathBuf,
     unrelated: PathBuf,
     profile: PathBuf,
+}
+
+struct RepositoryCreateDirectoryFixture {
+    _base: TestDirectory,
+    root: PathBuf,
+    profile: PathBuf,
+    target: PathBuf,
+}
+
+impl RepositoryCreateDirectoryFixture {
+    fn new(label: &str) -> Self {
+        let base = TestDirectory::new();
+        let root = base.path().join(label);
+        let parent = root.join("existing");
+        fs::create_dir_all(&parent).expect("directory fixture parent should be created");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "rah-test@example.invalid"]);
+        git(
+            &root,
+            &["config", "user.name", "RAH create-directory bridge test"],
+        );
+        let anchor = root.join("anchor.txt");
+        fs::write(&anchor, b"fixture\n").expect("fixture anchor should be written");
+        git(&root, &["add", "--", "anchor.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let profile = root.join("trusted-profile.json");
+        let document = json!({
+            "profile_version": 1,
+            "profile_id": "task184-create-directory-bridge",
+            "resources": {},
+            "capabilities": []
+        });
+        fs::write(&profile, serde_json::to_vec(&document).unwrap())
+            .expect("trusted profile should be written");
+        let target = parent.join("new-directory");
+        Self {
+            _base: base,
+            root,
+            profile,
+            target,
+        }
+    }
+
+    async fn compose(&self) -> EffectiveProfileComposition {
+        let authority = RepositoryDirectoryCreationAuthority::new(&self.root)
+            .expect("host should construct directory creation authority");
+        compose_with_repository_directory_creation_authority(
+            TrustedStaticProfile::load(&self.profile).unwrap(),
+            Some(authority),
+        )
+        .await
+        .expect("authorized directory creation composition should succeed")
+    }
 }
 
 struct RepositoryDeleteFileFixture {
@@ -1649,6 +1704,104 @@ async fn trusted_profile_composed_repo_create_file_preserves_schema_permission_d
         .any(|line| line == b"?? src/created.rah\n")
     );
     fixture.assert_metadata_unchanged(&before);
+
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await.unwrap();
+    composition.shutdown().await;
+}
+
+#[tokio::test]
+async fn host_composed_repo_create_directory_uses_generic_bridge_once() {
+    let fixture = RepositoryCreateDirectoryFixture::new("create-directory-success");
+    let profile = TrustedStaticProfile::load(&fixture.profile).unwrap();
+    let without_authority = compose(profile).await.expect("profile should compose");
+    assert!(
+        without_authority
+            .registry()
+            .get(&ToolName::new("repo.create-directory"))
+            .is_none()
+    );
+    without_authority.shutdown().await;
+
+    let composition = fixture.compose().await;
+    let definition = composition
+        .registry()
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == ToolName::new("repo.create-directory"))
+        .expect("explicit host authority should publish repo.create-directory");
+    assert_eq!(definition.name, ToolName::new("repo.create-directory"));
+    assert_eq!(definition.permission, PermissionLevel::Execute);
+    assert_eq!(
+        definition.input_schema,
+        json!({
+            "type":"object",
+            "additionalProperties":false,
+            "required":["path"],
+            "properties":{"path":{"type":"string","minLength":1,"maxLength":1024}}
+        })
+    );
+
+    let executions = Arc::new(AtomicUsize::new(0));
+    let registry = counting_composed_registry(
+        &composition,
+        "repo.create-directory",
+        Arc::clone(&executions),
+    );
+    let (runtime, mut peer, _) = connected_bridge(registry, vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let dynamic = &thread["params"]["dynamicTools"][0];
+    let alias = dynamic["name"]
+        .as_str()
+        .expect("directory tool alias should be a string");
+    assert_eq!(alias, "rah_tool_0");
+    assert_ne!(alias, "repo.create-directory");
+    assert_eq!(dynamic["inputSchema"], definition.input_schema);
+
+    let request = json!({"path":"existing/new-directory"});
+    peer.send(tool_request(
+        json!(1840),
+        "private-thread",
+        "private-turn",
+        "create-directory-once",
+        alias,
+        request,
+    ));
+    let response = peer.next_sent().await;
+    assert_eq!(response["result"]["success"], true, "{response}");
+    assert_eq!(
+        response_json(&response),
+        json!({
+            "path":"existing/new-directory",
+            "status":"directory_created_verified",
+            "uncertain":false,
+            "git_metadata_changed":false
+        })
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(fixture.target.is_dir());
 
     finish_turn(&peer, "completed");
     let events = handle.into_events().collect::<Vec<_>>().await;
