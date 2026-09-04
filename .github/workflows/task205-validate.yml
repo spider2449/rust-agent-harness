@@ -19,7 +19,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Apply Task 205 implementation
-        run: python .github/task205_apply.py
+        run: |
+          python .github/task205_apply.py
+          python .github/task205_fix_send.py
       - name: Format
         run: cargo fmt --all
       - name: Build external provider fixtures
@@ -38,7 +40,7 @@ jobs:
       - name: Commit validated implementation
         shell: bash
         run: |
-          rm -f .github/task205_apply.py .github/workflows/task205-validate.yml
+          rm -f .github/task205_apply.py .github/task205_fix_send.py .github/workflows/task205-validate.yml
           git add -A
           git diff --cached --check
           git config user.name "github-actions[bot]"
