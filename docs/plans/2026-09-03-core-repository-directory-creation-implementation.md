@@ -20,6 +20,8 @@ work are outside this task.
 
 - Added the separate host-owned `RepositoryDirectoryCreationPolicy` and
   opaque `RepositoryDirectoryCreationAuthority`.
+- Added the crate-private directory-object identity comparison needed to avoid
+  treating normal Unix directory link-count changes as identity replacement.
 - Added the public `repo.create-directory` Tool with the closed request
   schema `{"path":"existing-parent/new-directory"}`.
 - Reused the shared repository mutation lease, logical path validation,
@@ -55,6 +57,9 @@ Validation results:
 - `cargo metadata --no-deps --format-version 1` — passed; 12 packages, all
   version `0.14.0`, all edition 2024, with no dependency drift.
 - `git diff --check` — passed.
+- Exact-head CI run `33824623988` for commit
+  `135b7c174cfdde33519ad6a4e574762641c0329d` — passed formatting, workspace
+  check, workspace tests, and workspace lint.
 
 The current Windows host executed the Windows-gated native helper tests. No
 Linux live-certification or Desktop/live validation was performed.
