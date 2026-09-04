@@ -10,6 +10,8 @@ mod desktop_preferences;
 mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
+#[cfg(target_os = "windows")]
+mod trusted_profile_selection;
 
 #[cfg(target_os = "windows")]
 use codex_baseline::{BaselineError, CodexExecutableSource, resolve as resolve_codex_executable};
@@ -73,6 +75,11 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 #[cfg(target_os = "windows")]
 use tauri_plugin_dialog::DialogExt;
+#[cfg(target_os = "windows")]
+use trusted_profile_selection::{
+    DesktopTrustedProfileSelection, ProfileSelectionError, TrustedProfilePresentation,
+    load_provider_only_profile,
+};
 
 #[cfg(target_os = "windows")]
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
@@ -336,6 +343,8 @@ struct DesktopAppState {
     commit_identity: Mutex<Option<DesktopCommitIdentity>>,
     commit_identity_generation: Mutex<u64>,
     commit_capability: Mutex<Option<DesktopCommitCapability>>,
+    /// Explicit host-selected Trusted Profile intent. Static selection never activates providers.
+    trusted_profile: Mutex<Option<DesktopTrustedProfileSelection>>,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -410,6 +419,7 @@ impl DesktopAppState {
             commit_identity: Mutex::new(identity),
             commit_identity_generation: Mutex::new(0),
             commit_capability: Mutex::new(None),
+            trusted_profile: Mutex::new(None),
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
@@ -855,12 +865,23 @@ impl DesktopAppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation;
-        current_app_status(
+        let profile_selected = self
+            .trusted_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let mut status = current_app_status(
             &connection,
             repository_selected,
             repository_generation,
             model_generation,
-        )
+        );
+        status.profile_status = if profile_selected {
+            "configured; providers inactive"
+        } else {
+            "not loaded"
+        };
+        status
     }
 
     fn close_started(&self) -> bool {
@@ -1115,6 +1136,10 @@ pub(crate) enum FrontendError {
     CodexStartFailed,
     CodexConnectionFailed,
     ToolRegistryFailed,
+    ProfileInvalid,
+    ProfileFirstPartyCapabilitiesUnsupported,
+    ProfileDialogFailed,
+    ProfileBusy,
     ChatEmptyPrompt,
     ChatPromptTooLarge,
     CodexNotConnected,
@@ -1850,6 +1875,100 @@ fn get_effective_authority_snapshot(
 #[tauri::command]
 fn app_status(state: State<'_, DesktopAppState>) -> AppStatus {
     state.status()
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_profile_selection_allowed(
+    chat: ChatState,
+    connection: &ConnectionState,
+) -> Result<(), FrontendError> {
+    if chat != ChatState::Idle
+        || !matches!(
+            connection,
+            ConnectionState::NotConnected | ConnectionState::Error(_)
+        )
+    {
+        Err(FrontendError::ProfileBusy)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_trusted_profile_selection_allowed(state: &DesktopAppState) -> Result<(), FrontendError> {
+    let chat = *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    trusted_profile_selection_allowed(chat, &connection)
+}
+
+#[cfg(target_os = "windows")]
+fn profile_selection_error(error: ProfileSelectionError) -> FrontendError {
+    match error {
+        ProfileSelectionError::InvalidProfile => FrontendError::ProfileInvalid,
+        ProfileSelectionError::FirstPartyCapabilities => {
+            FrontendError::ProfileFirstPartyCapabilitiesUnsupported
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn trusted_profile_selection(state: State<'_, DesktopAppState>) -> TrustedProfilePresentation {
+    state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or_else(TrustedProfilePresentation::none, |profile| {
+            profile.presentation()
+        })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn choose_trusted_profile(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    ensure_trusted_profile_selection_allowed(state.inner())?;
+    let selected = app.dialog().file().blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| FrontendError::ProfileDialogFailed)?;
+    // A connection may have started while the native picker was open.
+    ensure_trusted_profile_selection_allowed(state.inner())?;
+    let selection = load_provider_only_profile(path).map_err(|error| {
+        tracing::warn!(reason = ?error, "Desktop Trusted Profile static validation failed");
+        profile_selection_error(error)
+    })?;
+    // Static loading is intentionally not an activation lock. Revalidate host
+    // lifecycle immediately before publishing configured intent.
+    ensure_trusted_profile_selection_allowed(state.inner())?;
+    *state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn clear_trusted_profile(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+    ensure_trusted_profile_selection_allowed(state.inner())?;
+    *state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -4479,6 +4598,9 @@ fn main() -> ExitCode {
         })
         .invoke_handler(tauri::generate_handler![
             app_status,
+            trusted_profile_selection,
+            choose_trusted_profile,
+            clear_trusted_profile,
             model_configuration,
             commit_identity,
             desktop_preferences_warning,

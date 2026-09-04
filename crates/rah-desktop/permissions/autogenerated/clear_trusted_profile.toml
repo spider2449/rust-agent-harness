@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-trusted-profile"
+description = "Enables the clear_trusted_profile command without any pre-configured scope."
+commands.allow = ["clear_trusted_profile"]
+
+[[permission]]
+identifier = "deny-clear-trusted-profile"
+description = "Denies the clear_trusted_profile command without any pre-configured scope."
+commands.deny = ["clear_trusted_profile"]
