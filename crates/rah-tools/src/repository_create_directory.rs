@@ -239,7 +239,6 @@ impl RepositoryDirectoryCreationPolicy {
         let metadata = fs::symlink_metadata(&pre.path).map_err(|_| ())?;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
-            || FileIdentity::capture(&pre.path).map_err(|_| ())?.link_count != 1
             || reject_link_or_reparse(&pre.path, "created directory").is_err()
             || reject_reparse_ancestry(pre.path.parent().ok_or(())?, "directory parent").is_err()
         {
