@@ -7,6 +7,8 @@ mod conversation_persistence;
 #[cfg(target_os = "windows")]
 mod desktop_preferences;
 #[cfg(target_os = "windows")]
+mod effective_authority;
+#[cfg(target_os = "windows")]
 mod git_discovery;
 
 #[cfg(target_os = "windows")]
@@ -18,6 +20,12 @@ use conversation_persistence::{
 };
 #[cfg(target_os = "windows")]
 use desktop_preferences::{Preferences, Warning as PreferencesWarning};
+#[cfg(target_os = "windows")]
+use effective_authority::{
+    ConfiguredSummary, ConnectionBinding, ConnectionBindingState, DesktopToolComposition,
+    EffectiveAuthoritySnapshot, RepositoryBinding, RepositoryIdentity, RepositoryKind,
+    SnapshotStatus, SourceKind,
+};
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
@@ -177,6 +185,7 @@ enum ConnectionState {
         model_generation: u64,
         connection_generation: u64,
         repository_fingerprint: Option<String>,
+        composition: Arc<DesktopToolComposition>,
     },
     Disconnecting,
     Error(FrontendError),
@@ -1644,6 +1653,197 @@ fn connection_publication_is_current(
 ) -> bool {
     captured_repository_generation == current_repository_generation
         && captured_connection_generation == current_connection_generation
+}
+
+#[cfg(target_os = "windows")]
+fn safe_repository_display_name(root: &Path) -> Option<String> {
+    let name = root.file_name()?.to_str()?;
+    if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_effective_authority_snapshot(
+    state: State<'_, DesktopAppState>,
+) -> EffectiveAuthoritySnapshot {
+    let repository = state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let current_repository_generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_model_generation = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generation;
+    let connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workflow = state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let selected = repository.is_some();
+    let (connection_binding, composition, status) = match &*connection {
+        ConnectionState::Connected {
+            source,
+            repository_generation,
+            model_generation,
+            connection_generation,
+            composition,
+            ..
+        } => {
+            let context_current = connection_context_is_current(
+                *repository_generation,
+                *model_generation,
+                current_repository_generation,
+                current_model_generation,
+            );
+            let publication_current = connection_publication_is_current(
+                *repository_generation,
+                current_repository_generation,
+                *connection_generation,
+                *state
+                    .next_connection_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let repository_context_matches = selected || *repository_generation == 0;
+            let current = context_current
+                && publication_current
+                && repository_context_matches
+                && composition.registry.definitions().len() == composition.tools.len();
+            let status = if current {
+                SnapshotStatus::ConnectedCurrent
+            } else if context_current {
+                SnapshotStatus::Stale
+            } else {
+                SnapshotStatus::ReconnectRequired
+            };
+            (
+                ConnectionBinding {
+                    state: ConnectionBindingState::Connected,
+                    runtime_kind: Some("codex"),
+                    runtime_source: Some(effective_authority::source_label(*source)),
+                    captured_repository_generation: Some(*repository_generation),
+                    captured_model_generation: Some(*model_generation),
+                    captured_connection_generation: Some(*connection_generation),
+                    advertised: current,
+                },
+                Some(Arc::clone(composition)),
+                status,
+            )
+        }
+        ConnectionState::Connecting => (
+            ConnectionBinding {
+                state: ConnectionBindingState::Connecting,
+                runtime_kind: None,
+                runtime_source: None,
+                captured_repository_generation: None,
+                captured_model_generation: None,
+                captured_connection_generation: None,
+                advertised: false,
+            },
+            None,
+            SnapshotStatus::Connecting,
+        ),
+        ConnectionState::Disconnecting => (
+            ConnectionBinding {
+                state: ConnectionBindingState::Disconnecting,
+                runtime_kind: None,
+                runtime_source: None,
+                captured_repository_generation: None,
+                captured_model_generation: None,
+                captured_connection_generation: None,
+                advertised: false,
+            },
+            None,
+            SnapshotStatus::Stale,
+        ),
+        ConnectionState::Error(_) => (
+            ConnectionBinding {
+                state: ConnectionBindingState::Error,
+                runtime_kind: None,
+                runtime_source: None,
+                captured_repository_generation: None,
+                captured_model_generation: None,
+                captured_connection_generation: None,
+                advertised: false,
+            },
+            None,
+            SnapshotStatus::Unavailable,
+        ),
+        ConnectionState::NotConnected => (
+            ConnectionBinding {
+                state: ConnectionBindingState::NotConnected,
+                runtime_kind: None,
+                runtime_source: None,
+                captured_repository_generation: None,
+                captured_model_generation: None,
+                captured_connection_generation: None,
+                advertised: false,
+            },
+            None,
+            if selected {
+                SnapshotStatus::Disconnected
+            } else {
+                SnapshotStatus::NoRepository
+            },
+        ),
+    };
+    let mut effective_tools = composition
+        .as_ref()
+        .map_or_else(Vec::new, |value| value.tools.clone());
+    for tool in &mut effective_tools {
+        tool.advertised = connection_binding.advertised;
+    }
+    let unavailable_capabilities = composition
+        .as_ref()
+        .map_or_else(Vec::new, |value| value.unavailable.clone());
+    let repository_binding = RepositoryBinding {
+        selected,
+        display_name: repository
+            .as_deref()
+            .and_then(|value| safe_repository_display_name(&value.root)),
+        kind: if selected {
+            RepositoryKind::SelectedRepository
+        } else {
+            RepositoryKind::None
+        },
+        current_generation: selected.then_some(current_repository_generation),
+        captured_generation: connection_binding.captured_repository_generation,
+        identity: if !selected {
+            RepositoryIdentity::NotSelected
+        } else if connection_binding.advertised {
+            RepositoryIdentity::Current
+        } else if connection_binding.captured_repository_generation.is_some() {
+            RepositoryIdentity::Stale
+        } else {
+            RepositoryIdentity::Unknown
+        },
+    };
+    EffectiveAuthoritySnapshot {
+        schema_version: 1,
+        status,
+        repository: repository_binding,
+        connection: connection_binding,
+        configured: ConfiguredSummary {
+            profile_source: Some(SourceKind::BuiltIn),
+            configured_provider_count: 0,
+            configured_capability_count: effective_tools.len() as u32,
+        },
+        effective_tools,
+        unavailable_capabilities,
+        reviewed_commit: effective_authority::reviewed_commit(workflow.authorization, selected),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3127,6 +3327,19 @@ fn desktop_tool_registry(
     Ok(Arc::new(registry))
 }
 
+#[cfg(target_os = "windows")]
+fn desktop_tool_composition(
+    repository: Option<&DesktopRepository>,
+    commit_tool: Option<Arc<RepositoryCommitTool>>,
+) -> Result<Arc<DesktopToolComposition>, ToolError> {
+    let registry = desktop_tool_registry(repository, commit_tool.clone())?;
+    Ok(Arc::new(effective_authority::compose(
+        registry,
+        repository,
+        commit_tool.is_some(),
+    )))
+}
+
 /// Resolves host executable selection and combines it with the already chosen,
 /// host-owned model configuration. Presentation must use only `source` and
 /// never perform a second resolution.
@@ -3271,6 +3484,12 @@ async fn connect_codex(
         _ => None,
     };
     let commit_tool = commit_capability.as_ref().map(|(tool, _)| Arc::clone(tool));
+    let composition = desktop_tool_composition(repository.as_deref(), commit_tool.clone())
+        .map_err(|error| {
+            tracing::error!(error = %error, "failed to construct desktop tool composition");
+            FrontendError::ToolRegistryFailed
+        })?;
+    let registry = Arc::clone(&composition.registry);
     let repository_fingerprint = repository
         .as_ref()
         .map(|value| repository_context_fingerprint(&value.root));
@@ -3279,11 +3498,6 @@ async fn connect_codex(
         resolve_codex_executable,
         model_config,
         |prepared| async move {
-            let registry =
-                desktop_tool_registry(repository.as_deref(), commit_tool).map_err(|error| {
-                    tracing::error!(error = %error, "failed to construct desktop tool registry");
-                    FrontendError::ToolRegistryFailed
-                })?;
             append_live_evidence(serde_json::json!({
                 "event": "connection_started",
                 "repository_generation": repository_generation,
@@ -3375,6 +3589,7 @@ async fn connect_codex(
                 model_generation,
                 connection_generation,
                 repository_fingerprint,
+                composition: Arc::clone(&composition),
             };
             drop(connection);
             append_live_evidence(serde_json::json!({
@@ -4283,7 +4498,8 @@ fn main() -> ExitCode {
             new_conversation,
             clear_conversation_history,
             resume_previous_conversation,
-            conversation_transcript
+            conversation_transcript,
+            get_effective_authority_snapshot
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

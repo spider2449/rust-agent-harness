@@ -24,6 +24,7 @@ fn main() {
             "clear_conversation_history",
             "resume_previous_conversation",
             "conversation_transcript",
+            "get_effective_authority_snapshot",
         ]),
     ))
     .expect("failed to build Tauri desktop command permissions");
