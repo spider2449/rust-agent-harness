@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-trusted-profile"
+description = "Enables the restore_trusted_profile command without any pre-configured scope."
+commands.allow = ["restore_trusted_profile"]
+
+[[permission]]
+identifier = "deny-restore-trusted-profile"
+description = "Denies the restore_trusted_profile command without any pre-configured scope."
+commands.deny = ["restore_trusted_profile"]

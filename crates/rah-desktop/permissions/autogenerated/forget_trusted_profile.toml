@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-forget-trusted-profile"
+description = "Enables the forget_trusted_profile command without any pre-configured scope."
+commands.allow = ["forget_trusted_profile"]
+
+[[permission]]
+identifier = "deny-forget-trusted-profile"
+description = "Denies the forget_trusted_profile command without any pre-configured scope."
+commands.deny = ["forget_trusted_profile"]

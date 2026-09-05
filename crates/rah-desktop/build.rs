@@ -6,6 +6,8 @@ fn main() {
             "app_status",
             "trusted_profile_selection",
             "choose_trusted_profile",
+            "restore_trusted_profile",
+            "forget_trusted_profile",
             "clear_trusted_profile",
             "model_configuration",
             "set_model_configuration",

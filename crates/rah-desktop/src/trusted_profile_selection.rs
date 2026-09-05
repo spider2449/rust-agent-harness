@@ -31,6 +31,7 @@ pub(crate) enum ProfileSelectionError {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrustedProfilePresentation {
+    pub remembered: bool,
     pub selected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
@@ -42,8 +43,9 @@ pub(crate) struct TrustedProfilePresentation {
 
 impl TrustedProfilePresentation {
     #[must_use]
-    pub(crate) fn none() -> Self {
+    pub(crate) fn none(remembered: bool) -> Self {
         Self {
+            remembered,
             selected: false,
             profile_id: None,
             mcp_provider_count: 0,
@@ -68,10 +70,19 @@ impl DesktopTrustedProfileSelection {
 
     #[must_use]
     pub(crate) fn presentation(&self) -> TrustedProfilePresentation {
+        self.presentation_with_remembered(true)
+    }
+
+    #[must_use]
+    pub(crate) fn presentation_with_remembered(
+        &self,
+        remembered: bool,
+    ) -> TrustedProfilePresentation {
         // Read the host-only source solely to preserve the invariant locally;
         // no path-derived value crosses the IPC boundary.
         debug_assert!(self.source.is_absolute());
         TrustedProfilePresentation {
+            remembered,
             selected: true,
             profile_id: Some(self.profile_id.clone()),
             mcp_provider_count: self.mcp_provider_count,
@@ -200,6 +211,7 @@ mod tests {
         assert_eq!(
             presentation,
             TrustedProfilePresentation {
+                remembered: true,
                 selected: true,
                 profile_id: Some("desktop-provider-overlay".to_owned()),
                 mcp_provider_count: 0,
@@ -209,6 +221,29 @@ mod tests {
             }
         );
         let encoded = serde_json::to_string(&presentation).expect("presentation should encode");
+        assert!(!encoded.contains(&fixture.path().display().to_string()));
+    }
+
+    #[test]
+    fn presentation_distinguishes_remembered_only_from_selected_intent() {
+        let remembered_only = TrustedProfilePresentation::none(true);
+        assert!(remembered_only.remembered);
+        assert!(!remembered_only.selected);
+        assert_eq!(remembered_only.profile_id, None);
+        assert_eq!(remembered_only.expected_tool_count, 0);
+        let encoded = serde_json::to_string(&remembered_only).expect("presentation encodes");
+        assert!(encoded.contains(r#""remembered":true"#));
+        assert!(!encoded.contains("profile"));
+    }
+
+    #[test]
+    fn selected_presentation_can_report_that_preference_was_forgotten() {
+        let fixture = ProfileFile::write(base_profile());
+        let selection = load_provider_only_profile(fixture.path().to_path_buf()).unwrap();
+        let presentation = selection.presentation_with_remembered(false);
+        assert!(!presentation.remembered);
+        assert!(presentation.selected);
+        let encoded = serde_json::to_string(&presentation).expect("presentation encodes");
         assert!(!encoded.contains(&fixture.path().display().to_string()));
     }
 

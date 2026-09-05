@@ -24,6 +24,17 @@ assert.match(source, /renderEffectiveAuthority\(\{ schemaVersion: 0 \}\)/);
 assert.match(source, /invoke\("get_effective_authority_snapshot"\)/);
 assert.match(source, /function renderSourceLabel\(value\)/);
 assert.match(source, /renderSourceLabel\(tool\.sourceLabel\)/);
+assert.match(source, /Remembered — not restored/);
+assert.match(source, /No profile remembered/);
+assert.match(source, /Configured — providers inactive/);
+assert.match(source, /invoke\("restore_trusted_profile"\)/);
+assert.match(source, /invoke\("forget_trusted_profile"\)/);
+assert.match(source, /restore-trusted-profile/);
+assert.match(source, /forget-trusted-profile/);
+assert.match(source, /profileForgetAllowed/);
+assert.match(source, /\["not connected", "error", "connected"\]/);
+assert.equal(source.includes("Remembered"), true);
+assert.equal(source.includes("Clear Profile"), false);
 
 for (const forbidden of [
   "innerHTML",

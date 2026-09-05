@@ -23,7 +23,9 @@ use conversation_persistence::{
     SeparatorReason, Warning as ConversationPersistenceWarning,
 };
 #[cfg(target_os = "windows")]
-use desktop_preferences::{Preferences, Warning as PreferencesWarning};
+use desktop_preferences::{
+    Preferences, RememberedTrustedProfilePath, Warning as PreferencesWarning,
+};
 #[cfg(target_os = "windows")]
 use effective_authority::{
     ConfiguredSummary, ConnectionBinding, ConnectionBindingState, DesktopToolComposition,
@@ -361,7 +363,7 @@ struct DesktopAppState {
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
     preferences: Mutex<Preferences>,
-    model_apply_persistence: Mutex<()>,
+    preference_ordering: Mutex<()>,
     conversation: Mutex<DesktopConversationState>,
     persistence: Mutex<Persistence>,
     close_started: AtomicBool,
@@ -441,7 +443,7 @@ impl DesktopAppState {
                 readiness: ReadinessState::NotTested,
             }),
             preferences: Mutex::new(preferences),
-            model_apply_persistence: Mutex::new(()),
+            preference_ordering: Mutex::new(()),
             conversation: Mutex::new(DesktopConversationState::default()),
             persistence: Mutex::new(persistence),
             close_started: AtomicBool::new(false),
@@ -1172,6 +1174,8 @@ pub(crate) enum FrontendError {
     ProfileFirstPartyCapabilitiesUnsupported,
     ProfileActivationFailed,
     ProfileDialogFailed,
+    NoRememberedTrustedProfile,
+    TrustedProfilePreferenceSaveFailed,
     ProfileBusy,
     ChatEmptyPrompt,
     ChatPromptTooLarge,
@@ -2049,6 +2053,25 @@ fn trusted_profile_selection_allowed(
 }
 
 #[cfg(target_os = "windows")]
+fn trusted_profile_forget_allowed(
+    chat: ChatState,
+    connection: &ConnectionState,
+) -> Result<(), FrontendError> {
+    if chat != ChatState::Idle
+        || !matches!(
+            connection,
+            ConnectionState::NotConnected
+                | ConnectionState::Error(_)
+                | ConnectionState::Connected { .. }
+        )
+    {
+        Err(FrontendError::ProfileBusy)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn ensure_trusted_profile_selection_allowed(state: &DesktopAppState) -> Result<(), FrontendError> {
     let chat = *state
         .chat
@@ -2062,6 +2085,19 @@ fn ensure_trusted_profile_selection_allowed(state: &DesktopAppState) -> Result<(
 }
 
 #[cfg(target_os = "windows")]
+fn ensure_trusted_profile_forget_allowed(state: &DesktopAppState) -> Result<(), FrontendError> {
+    let chat = *state
+        .chat
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    trusted_profile_forget_allowed(chat, &connection)
+}
+
+#[cfg(target_os = "windows")]
 fn profile_selection_error(error: ProfileSelectionError) -> FrontendError {
     match error {
         ProfileSelectionError::InvalidProfile => FrontendError::ProfileInvalid,
@@ -2072,16 +2108,121 @@ fn profile_selection_error(error: ProfileSelectionError) -> FrontendError {
 }
 
 #[cfg(target_os = "windows")]
+fn publish_trusted_profile_selection(
+    state: &DesktopAppState,
+    selection: DesktopTrustedProfileSelection,
+) {
+    *state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
+    let mut generation = state
+        .trusted_profile_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *generation = generation.wrapping_add(1);
+}
+
+#[cfg(target_os = "windows")]
+fn clear_trusted_profile_selection(state: &DesktopAppState) -> bool {
+    let changed = state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .is_some();
+    if changed {
+        let mut generation = state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+    }
+    changed
+}
+
+#[cfg(target_os = "windows")]
+fn save_trusted_profile_preference(
+    state: &DesktopAppState,
+    path: RememberedTrustedProfilePath,
+) -> Result<(), PreferencesWarning> {
+    let _ordering = state
+        .preference_ordering
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let model_selection = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .selection
+        .clone();
+    state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .save_trusted_profile_path(&model_selection, path)
+}
+
+#[cfg(target_os = "windows")]
+fn restore_trusted_profile_selection(state: &DesktopAppState) -> Result<(), FrontendError> {
+    ensure_trusted_profile_selection_allowed(state)?;
+    let remembered_path = state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remembered_trusted_profile_path()
+        .ok_or(FrontendError::NoRememberedTrustedProfile)?;
+    let selection = load_provider_only_profile(remembered_path.path().to_path_buf()).map_err(|error| {
+        tracing::warn!(reason = ?error, "Desktop remembered Trusted Profile static validation failed");
+        profile_selection_error(error)
+    })?;
+    // Restore rereads the current source but never starts a provider or rewrites
+    // the remembered preference.
+    ensure_trusted_profile_selection_allowed(state)?;
+    publish_trusted_profile_selection(state, selection);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn forget_trusted_profile_preference(state: &DesktopAppState) -> Result<(), FrontendError> {
+    ensure_trusted_profile_forget_allowed(state)?;
+    let _ordering = state
+        .preference_ordering
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ensure_trusted_profile_forget_allowed(state)?;
+    let model_selection = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .selection
+        .clone();
+    state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget_trusted_profile_path(&model_selection)
+        .map_err(|_| FrontendError::TrustedProfilePreferenceSaveFailed)
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn trusted_profile_selection(state: State<'_, DesktopAppState>) -> TrustedProfilePresentation {
+    let remembered = state
+        .preferences
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remembered_trusted_profile_path()
+        .is_some();
     state
         .trusted_profile
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        .map_or_else(TrustedProfilePresentation::none, |profile| {
-            profile.presentation()
-        })
+        .map_or_else(
+            || TrustedProfilePresentation::none(remembered),
+            |profile| profile.presentation_with_remembered(remembered),
+        )
 }
 
 #[cfg(target_os = "windows")]
@@ -2100,42 +2241,50 @@ fn choose_trusted_profile(
         .map_err(|_| FrontendError::ProfileDialogFailed)?;
     // A connection may have started while the native picker was open.
     ensure_trusted_profile_selection_allowed(state.inner())?;
-    let selection = load_provider_only_profile(path).map_err(|error| {
+    let selection = load_provider_only_profile(path.clone()).map_err(|error| {
         tracing::warn!(reason = ?error, "Desktop Trusted Profile static validation failed");
         profile_selection_error(error)
     })?;
+    let remembered_path =
+        RememberedTrustedProfilePath::parse(path).map_err(|_| FrontendError::ProfileInvalid)?;
     // Static loading is intentionally not an activation lock. Revalidate host
-    // lifecycle immediately before publishing configured intent.
+    // lifecycle before the durable preference transaction.
     ensure_trusted_profile_selection_allowed(state.inner())?;
-    *state
-        .trusted_profile
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
-    let mut generation = state
-        .trusted_profile_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *generation = generation.wrapping_add(1);
+    save_trusted_profile_preference(state.inner(), remembered_path).map_err(|warning| {
+        emit_preferences_warning(&app, warning);
+        FrontendError::TrustedProfilePreferenceSaveFailed
+    })?;
+    // A lifecycle transition after durable save must win over publication;
+    // the remembered preference is intentionally left durable in that case.
+    ensure_trusted_profile_selection_allowed(state.inner())?;
+    publish_trusted_profile_selection(state.inner(), selection);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn restore_trusted_profile(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+    restore_trusted_profile_selection(state.inner())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn forget_trusted_profile(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    forget_trusted_profile_preference(state.inner()).inspect_err(|error| {
+        if *error == FrontendError::TrustedProfilePreferenceSaveFailed {
+            emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
+        }
+    })
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn clear_trusted_profile(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
     ensure_trusted_profile_selection_allowed(state.inner())?;
-    let changed = state
-        .trusted_profile
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .is_some();
-    if changed {
-        let mut generation = state
-            .trusted_profile_generation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *generation = generation.wrapping_add(1);
-    }
+    clear_trusted_profile_selection(state.inner());
     Ok(())
 }
 
@@ -2201,7 +2350,7 @@ fn set_model_configuration(
     llama_cpp_endpoint: Option<ProviderEndpointInput>,
 ) -> Result<(), FrontendError> {
     let _ordering = state
-        .model_apply_persistence
+        .preference_ordering
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let chat = *state
@@ -2269,6 +2418,10 @@ fn set_commit_identity(
     name: String,
     email: String,
 ) -> Result<(), FrontendError> {
+    let _ordering = state
+        .preference_ordering
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let identity = DesktopCommitIdentity { name, email };
     identity
         .validate()
@@ -2314,7 +2467,7 @@ fn reset_model_preferences(
     state: State<'_, DesktopAppState>,
 ) -> Result<(), FrontendError> {
     let _ordering = state
-        .model_apply_persistence
+        .preference_ordering
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let chat = *state
@@ -5058,6 +5211,8 @@ fn main() -> ExitCode {
             app_status,
             trusted_profile_selection,
             choose_trusted_profile,
+            restore_trusted_profile,
+            forget_trusted_profile,
             clear_trusted_profile,
             model_configuration,
             commit_identity,
@@ -5115,6 +5270,7 @@ fn main() {
 mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
     use super::effective_authority::{EffectClass, EffectiveToolEntry};
+    use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
         ActivityEvent, ActivityResult, CancelRecoveryOutcome, ChatEvent, ChatState,
         CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
@@ -5130,17 +5286,19 @@ mod tests {
         SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
         activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
         await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        clear_conversation_allowed, commit_activity_presentation, connect_prepared_codex,
-        connection_context_is_current, connection_publication_is_current, current_app_status,
-        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
-        desktop_tool_registry, frontend_error, install_repository_workflow,
-        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
-        publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
-        repository_context_fingerprint, repository_index_action, repository_selection_allowed,
-        repository_selection_allowed_for_connection, repository_tool_authority, request_connect,
-        resolve_codex_executable, resolve_prepare_and_connect_codex,
-        revoke_repository_commit_context, same_arc, selected_git_executable,
-        uncertain_external_effect_pending, validate_prompt,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
+        connect_prepared_codex, connection_context_is_current, connection_publication_is_current,
+        current_app_status, desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        desktop_tool_registry, forget_trusted_profile_preference, frontend_error,
+        install_repository_workflow, invalidate_repository_commit_review,
+        model_configuration_status, prepare_codex_connection, publish_readiness_result,
+        publish_trusted_profile_selection, refresh_repository_workflow,
+        replace_selected_repository, repository_context_fingerprint, repository_index_action,
+        repository_selection_allowed, repository_selection_allowed_for_connection,
+        repository_tool_authority, request_connect, resolve_codex_executable,
+        resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
+        revoke_repository_commit_context, same_arc, save_trusted_profile_preference,
+        selected_git_executable, uncertain_external_effect_pending, validate_prompt,
     };
     use futures::StreamExt;
     use rah_protocol::{
@@ -9344,6 +9502,212 @@ mod tests {
             super::startup_activation_snapshot(),
             super::StartupActivationCounters::default()
         );
+        clear_test_state();
+    }
+
+    #[test]
+    fn clear_selection_is_process_local_and_generation_is_exact() {
+        use super::desktop_preferences::RememberedTrustedProfilePath;
+
+        let storage = TestRepository::new();
+        let profile_path = storage.0.join("provider-profile.json");
+        fs::write(
+            &profile_path,
+            serde_json::json!({
+                "profile_version": 1,
+                "profile_id": "task215-profile",
+                "resources": { "executables": {}, "repositories": {} },
+                "capabilities": [],
+                "mcp_providers": [],
+                "process_plugins": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let remembered = RememberedTrustedProfilePath::parse(profile_path.clone()).unwrap();
+        let state = DesktopAppState::new(storage.0.clone());
+        state
+            .preferences
+            .lock()
+            .unwrap()
+            .save_trusted_profile_path(&DesktopModelSelection::default(), remembered.clone())
+            .unwrap();
+        let selection = load_provider_only_profile(profile_path).unwrap();
+
+        publish_trusted_profile_selection(&state, selection);
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 1);
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path()
+                .is_some()
+        );
+
+        assert!(clear_trusted_profile_selection(&state));
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 2);
+        assert!(state.trusted_profile.lock().unwrap().is_none());
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            Some(remembered)
+        );
+        assert!(!clear_trusted_profile_selection(&state));
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn restore_rereads_current_source_without_persisting_or_spawning() {
+        use super::desktop_preferences::RememberedTrustedProfilePath;
+
+        let storage = TestRepository::new();
+        let profile_path = storage.0.join("provider-profile.json");
+        let write_profile = |profile_id: &str| {
+            fs::write(
+                &profile_path,
+                serde_json::json!({
+                    "profile_version": 1,
+                    "profile_id": profile_id,
+                    "resources": { "executables": {}, "repositories": {} },
+                    "capabilities": [],
+                    "mcp_providers": [],
+                    "process_plugins": []
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write_profile("task215-before");
+        let remembered = RememberedTrustedProfilePath::parse(profile_path.clone()).unwrap();
+        let state = DesktopAppState::new(storage.0.clone());
+        save_trusted_profile_preference(&state, remembered.clone()).unwrap();
+
+        restore_trusted_profile_selection(&state).unwrap();
+        let first = state
+            .trusted_profile
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .presentation();
+        assert_eq!(first.profile_id.as_deref(), Some("task215-before"));
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 1);
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            Some(remembered.clone())
+        );
+
+        write_profile("task215-after");
+        restore_trusted_profile_selection(&state).unwrap();
+        let second = state
+            .trusted_profile
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .presentation();
+        assert_eq!(second.profile_id.as_deref(), Some("task215-after"));
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 2);
+
+        fs::write(&profile_path, b"{").unwrap();
+        assert_eq!(
+            restore_trusted_profile_selection(&state),
+            Err(FrontendError::ProfileInvalid)
+        );
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 2);
+        assert_eq!(
+            state
+                .trusted_profile
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .presentation()
+                .profile_id
+                .as_deref(),
+            Some("task215-after")
+        );
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            Some(remembered)
+        );
+    }
+
+    #[test]
+    fn forget_removes_only_preference_and_save_failure_is_non_destructive() {
+        use super::desktop_preferences::{
+            RememberedTrustedProfilePath, TestFault, clear_test_state, set_test_fault, test_lock,
+        };
+
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let path = storage.0.join("provider-profile.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "profile_version": 1,
+                "profile_id": "task215-forget",
+                "resources": { "executables": {}, "repositories": {} },
+                "capabilities": [],
+                "mcp_providers": [],
+                "process_plugins": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let remembered = RememberedTrustedProfilePath::parse(path.clone()).unwrap();
+        let state = DesktopAppState::new(storage.0.clone());
+        save_trusted_profile_preference(&state, remembered.clone()).unwrap();
+        publish_trusted_profile_selection(&state, load_provider_only_profile(path).unwrap());
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 1);
+
+        forget_trusted_profile_preference(&state).unwrap();
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            None
+        );
+        assert!(state.trusted_profile.lock().unwrap().is_some());
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 1);
+
+        save_trusted_profile_preference(&state, remembered.clone()).unwrap();
+        set_test_fault(
+            storage.0.join("desktop-preferences.json"),
+            TestFault::ReplaceOther,
+        );
+        assert_eq!(
+            forget_trusted_profile_preference(&state),
+            Err(FrontendError::TrustedProfilePreferenceSaveFailed)
+        );
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            Some(remembered)
+        );
+        assert!(state.trusted_profile.lock().unwrap().is_some());
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 1);
         clear_test_state();
     }
 

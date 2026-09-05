@@ -22,7 +22,7 @@
         <section class="profile" aria-labelledby="trusted-profile-title">
           <h2 id="trusted-profile-title">Trusted Profile</h2>
           <p id="trusted-profile-error" class="connection-error" hidden></p>
-          <p id="trusted-profile-state">Not selected</p>
+          <p id="trusted-profile-state">No profile remembered</p>
           <dl>
             <div><dt>Profile ID</dt><dd id="trusted-profile-id">Not selected</dd></div>
             <div><dt>MCP providers</dt><dd id="trusted-profile-mcp-count">0</dd></div>
@@ -31,9 +31,11 @@
           </dl>
           <div class="repository-actions">
             <button id="choose-trusted-profile" type="button">Choose Profile</button>
-            <button id="clear-trusted-profile" type="button" disabled>Clear Profile</button>
+            <button id="restore-trusted-profile" type="button" disabled>Restore</button>
+            <button id="forget-trusted-profile" type="button" disabled>Forget</button>
+            <button id="clear-trusted-profile" type="button" disabled>Clear Selection</button>
           </div>
-          <p class="model-hint">Configured intent only in this build. Static validation does not start, advertise, or connect MCP or Process Plugin providers.</p>
+          <p class="model-hint">Remembered path is a local preference only. Restore validates without spawning providers; Connect is required to activate them. Forget does not disconnect or stop an active composition.</p>
         </section>
         <section aria-labelledby="runtime-status-title">
           <h2 id="runtime-status-title">Runtime</h2>

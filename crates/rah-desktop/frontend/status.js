@@ -88,7 +88,9 @@ function errorMessage(error) {
     profile_first_party_capabilities_unsupported: "Desktop v0.17 accepts provider-only Trusted Profiles; remove first-party capabilities",
     profile_activation_failed: "Trusted Profile providers could not be activated",
     profile_dialog_failed: "Trusted Profile picker failed",
-    profile_busy: "Trusted Profile selection is available only while Codex is disconnected",
+    no_remembered_trusted_profile: "No Trusted Profile is remembered",
+    trusted_profile_preference_save_failed: "Trusted Profile preference could not be saved",
+    profile_busy: "Trusted Profile action is unavailable during the current activity",
     chat_empty_prompt: "Enter a message before sending",
     chat_prompt_too_large: "Message is too large",
     codex_not_connected: "Connect Codex to chat",
@@ -244,7 +246,7 @@ function renderTrustedProfileSelection(selection) {
   renderedTrustedProfileSelection = selection;
   document.querySelector("#trusted-profile-state").textContent = selection.selected
     ? "Configured — providers inactive"
-    : "Not selected";
+    : (selection.remembered ? "Remembered — not restored" : "No profile remembered");
   document.querySelector("#trusted-profile-id").textContent = selection.profileId ?? "Not selected";
   document.querySelector("#trusted-profile-mcp-count").textContent = String(selection.mcpProviderCount ?? 0);
   document.querySelector("#trusted-profile-plugin-count").textContent = String(selection.processPluginCount ?? 0);
@@ -473,6 +475,9 @@ async function loadStatus(invoke) {
   document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
   const profileSelectionAllowed = ["not connected", "error"].includes(status.codexStatus) && !chatRunning;
   document.querySelector("#choose-trusted-profile").disabled = !profileSelectionAllowed;
+  document.querySelector("#restore-trusted-profile").disabled = !profileSelectionAllowed || !renderedTrustedProfileSelection?.remembered;
+  const profileForgetAllowed = ["not connected", "error", "connected"].includes(status.codexStatus) && !chatRunning;
+  document.querySelector("#forget-trusted-profile").disabled = !profileForgetAllowed || !renderedTrustedProfileSelection?.remembered;
   document.querySelector("#clear-trusted-profile").disabled = !profileSelectionAllowed || !renderedTrustedProfileSelection?.selected;
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
@@ -637,6 +642,32 @@ async function initializeDesktop() {
     error.hidden = true;
     try {
       await invoke("choose_trusted_profile");
+      await refreshTrustedProfileSelection(invoke);
+      await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
+    } catch (profileError) {
+      error.textContent = errorMessage(profileError);
+      error.hidden = false;
+    }
+  });
+  document.querySelector("#restore-trusted-profile").addEventListener("click", async () => {
+    const error = document.querySelector("#trusted-profile-error");
+    error.hidden = true;
+    try {
+      await invoke("restore_trusted_profile");
+      await refreshTrustedProfileSelection(invoke);
+      await loadStatus(invoke);
+      await refreshEffectiveAuthority(invoke);
+    } catch (profileError) {
+      error.textContent = errorMessage(profileError);
+      error.hidden = false;
+    }
+  });
+  document.querySelector("#forget-trusted-profile").addEventListener("click", async () => {
+    const error = document.querySelector("#trusted-profile-error");
+    error.hidden = true;
+    try {
+      await invoke("forget_trusted_profile");
       await refreshTrustedProfileSelection(invoke);
       await loadStatus(invoke);
       await refreshEffectiveAuthority(invoke);

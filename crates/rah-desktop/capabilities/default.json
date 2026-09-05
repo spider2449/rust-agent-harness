@@ -9,6 +9,8 @@
     "allow-app-status",
     "allow-trusted-profile-selection",
     "allow-choose-trusted-profile",
+    "allow-restore-trusted-profile",
+    "allow-forget-trusted-profile",
     "allow-clear-trusted-profile",
     "allow-model-configuration",
     "allow-set-model-configuration",
