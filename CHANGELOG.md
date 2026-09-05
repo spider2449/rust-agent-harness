@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.17.0 - unreleased
+
+Prepared as `RAH v0.17.0` for the Desktop Host-Selected Trusted Profile
+External Provider Integration milestone. This entry describes the release
+candidate; v0.17.0 is **prepared, not yet released**.
+
+### Added
+
+- A Desktop host-selected, provider-only Trusted Profile overlay. Static
+  profile selection is inert and non-spawning; local MCP stdio and Process
+  Plugin providers activate only on explicit Connect or reconnect.
+- A shared `rah-profile-composition` path that performs exact Tool-set/schema
+  admission, preserves host-selected Trusted Profile permissions, merges
+  admitted external Tools with the first-party Desktop Tool registry, and
+  fails closed on duplicate public Tool names.
+- Provider-owned lifecycle cleanup and sanitized Effective Authority external
+  descriptors, with Configured, Effective, Advertised, and Current state kept
+  distinct.
+
+### Security / authority
+
+- External effects use conservative lifecycle handling: ToolStarted revokes
+  reviewed state, ToolFinished refreshes repository state, and uncertain
+  effects are never replayed or presented as rolled back.
+- The trusted host remains the authority boundary. Provider metadata,
+  PermissionLevel, Tool advertisement, `repositoryBound=false`, and frontend
+  presentation do not prove absence of ambient provider effects or grant
+  generic shell, process, filesystem, or Git authority.
+
+### Validation and limitation
+
+- Hardened live-certification infrastructure fails closed unless it observes
+  the complete hidden-nonce-backed Tool lifecycle and cleanup.
+- Task 207 remains **INCONCLUSIVE / externally blocked for the model-selected
+  external Tool execution sub-gate**. Windows provider selection, admission,
+  composition, effective inventory, dynamic Tool advertisement, lifecycle
+  ownership, and cleanup were verified, but actual model-selected MCP/Process
+  Plugin execution was not established with the tested current ChatGPT-auth
+  Codex model/runtime combinations. No RAH product defect was found and
+  baseline migration was not justified.
+- Real external-effect review invalidation and repository refresh remain
+  deterministically verified but not live-certified through a real external
+  provider model call. This is the accepted non-blocking Task 207C / Task 208
+  limitation.
+
+### Release limits
+
+- v0.17 does not add network or Streamable HTTP MCP, provider
+  download/install/update, PluginManager expansion, profile hot reload,
+  active-provider auto-restore/persistence, generic shell/process,
+  filesystem, or Git/branch/ref/history authority, OS sandboxing, network
+  isolation, rollback, or Linux external-provider live certification.
+
 ## v0.16.0 — 2026-09-04
 
 Released as `RAH v0.16.0` for the host-owned Effective Authority Review UX.

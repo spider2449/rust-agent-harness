@@ -1,4 +1,7 @@
-# RAH v0.16.0 Release-Preparation Architecture
+# RAH v0.17.0 Release-Candidate Architecture
+
+This document describes the current v0.17.0 release candidate. The candidate
+is prepared, not yet released. v0.16.0 remains the immutable prior release.
 
 ## Effective Authority observability path
 

@@ -5,6 +5,48 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.17.0 release candidate - prepared, not yet released
+
+RAH v0.17.0 prepares the Desktop Host-Selected Trusted Profile External
+Provider Integration milestone. Desktop can host-select a provider-only profile;
+selection and static validation are inert and non-spawning, while local stdio
+MCP and Process Plugin providers activate only on explicit Connect or reconnect.
+The shared `rah-profile-composition` path admits exact Tool sets and schemas,
+preserves host-selected permissions, merges admitted external Tools with the
+first-party Desktop registry, and fails closed on duplicate public names.
+
+Effective Authority exposes sanitized external descriptors and keeps
+Configured, Effective, Advertised, and Current state separate. Provider
+lifecycle ownership and cleanup are explicit. External-effect handling is
+conservative: uncertain effects are not replayed or represented as rolled back.
+
+Task 207 remains **INCONCLUSIVE / externally blocked for the model-selected
+external Tool execution sub-gate**. Windows provider selection, admission,
+composition, effective inventory, dynamic Tool advertisement, lifecycle
+ownership, and cleanup were verified. Actual model-selected MCP/Process Plugin
+Tool execution was not established with the tested current ChatGPT-auth
+Codex model/runtime combinations. The hardened gates failed closed at
+`ToolRequested=0`; no RAH product defect was found. Real external-effect
+review invalidation and repository refresh are deterministically verified but
+not live-certified through a real external provider model call. This is the
+accepted non-blocking Task 207C / Task 208 limitation.
+
+The certified Codex baseline remains exactly `codex-cli 0.149.0` with
+`codex.exe` SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+The current live-gate model is `gpt-5.6-terra`. `codex-cli 0.153.4` is
+research-only compatibility evidence, is not certified, and did not restore
+Tool selection.
+
+v0.17 does not add network or Streamable HTTP MCP, provider
+download/install/update, PluginManager expansion, profile hot reload,
+active-provider auto-restore/persistence, generic shell/process, filesystem,
+or Git/branch/ref/history authority, OS sandboxing, network isolation,
+rollback, absence of ambient external provider effects, or Linux
+external-provider live certification. `repositoryBound=false` and
+`PermissionLevel` do not prove that an external provider cannot affect
+repository or host state.
+
 ## RAH v0.16.0 released: Effective Authority Review
 
 RAH v0.16.0 is released. The Desktop Effective
