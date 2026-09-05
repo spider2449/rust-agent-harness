@@ -199,6 +199,7 @@ enum ConnectionState {
         source: CodexExecutableSource,
         repository_generation: u64,
         model_generation: u64,
+        profile_generation: u64,
         connection_generation: u64,
         repository_fingerprint: Option<String>,
         composition: Arc<DesktopToolComposition>,
@@ -897,7 +898,18 @@ impl DesktopAppState {
             repository_generation,
             model_generation,
         );
+        let current_profile_generation = *self
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         status.profile_status = match (&*connection, profile_selected, provider_active) {
+            (
+                ConnectionState::Connected {
+                    profile_generation, ..
+                },
+                _,
+                _,
+            ) if *profile_generation != current_profile_generation => "reconnect required",
             (ConnectionState::Connected { .. }, true, true) => "active",
             (ConnectionState::Connecting, true, _) => "activating",
             (_, true, _) => "configured; providers inactive",
@@ -1696,36 +1708,38 @@ fn repository_tool_authority(
 }
 
 #[cfg(target_os = "windows")]
-fn connection_context_is_current(
-    connection_repository_generation: u64,
-    connection_model_generation: u64,
-    current_repository_generation: u64,
-    current_model_generation: u64,
-) -> bool {
-    connection_repository_generation == current_repository_generation
-        && connection_model_generation == current_model_generation
-}
-
-#[cfg(target_os = "windows")]
-fn connection_publication_is_current(
-    captured_repository_generation: u64,
-    current_repository_generation: u64,
-    captured_connection_generation: u64,
-    current_connection_generation: u64,
-) -> bool {
-    captured_repository_generation == current_repository_generation
-        && captured_connection_generation == current_connection_generation
-}
-
-#[cfg(target_os = "windows")]
 fn connection_activation_publication_is_current(captured: [u64; 4], current: [u64; 4]) -> bool {
     captured == current
+}
+
+#[cfg(target_os = "windows")]
+fn current_host_generation_tuple(state: &DesktopAppState) -> [u64; 4] {
+    [
+        *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation,
+        *state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *state
+            .next_connection_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    ]
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderPublicationRejectionReason {
     Superseded,
+    Stale,
     DuplicateOwner,
 }
 
@@ -1736,6 +1750,7 @@ struct PendingConnectedPublication {
     source: CodexExecutableSource,
     repository_generation: u64,
     model_generation: u64,
+    profile_generation: u64,
     connection_generation: u64,
     repository_fingerprint: Option<String>,
     composition: Arc<DesktopToolComposition>,
@@ -1770,6 +1785,48 @@ fn publish_connected_provider_state(
         }));
     }
 
+    let current_repository_generation = state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_model = state
+        .model
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_profile_generation = state
+        .trusted_profile_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_connection_generation = state
+        .next_connection_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !connection_activation_publication_is_current(
+        [
+            pending.repository_generation,
+            pending.model_generation,
+            pending.profile_generation,
+            pending.connection_generation,
+        ],
+        [
+            *current_repository_generation,
+            current_model.generation,
+            *current_profile_generation,
+            *current_connection_generation,
+        ],
+    ) {
+        let PendingConnectedPublication {
+            runtime,
+            activation,
+            ..
+        } = pending;
+        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason: ProviderPublicationRejectionReason::Stale,
+        }));
+    }
+
     let mut published_provider = state
         .provider_activation
         .lock()
@@ -1793,6 +1850,7 @@ fn publish_connected_provider_state(
         source,
         repository_generation,
         model_generation,
+        profile_generation,
         connection_generation,
         repository_fingerprint,
         composition,
@@ -1803,6 +1861,7 @@ fn publish_connected_provider_state(
         source,
         repository_generation,
         model_generation,
+        profile_generation,
         connection_generation,
         repository_fingerprint,
         composition,
@@ -1857,24 +1916,41 @@ fn get_effective_authority_snapshot(
             source,
             repository_generation,
             model_generation,
+            profile_generation,
             connection_generation,
             composition,
             ..
         } => {
-            let context_current = connection_context_is_current(
+            let current_profile_generation = *state
+                .trusted_profile_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current_connection_generation = *state
+                .next_connection_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let context_current = [
                 *repository_generation,
                 *model_generation,
+                *profile_generation,
+            ] == [
                 current_repository_generation,
                 current_model_generation,
-            );
-            let publication_current = connection_publication_is_current(
-                *repository_generation,
-                current_repository_generation,
-                *connection_generation,
-                *state
-                    .next_connection_generation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                current_profile_generation,
+            ];
+            let publication_current = connection_activation_publication_is_current(
+                [
+                    *repository_generation,
+                    *model_generation,
+                    *profile_generation,
+                    *connection_generation,
+                ],
+                [
+                    current_repository_generation,
+                    current_model_generation,
+                    current_profile_generation,
+                    current_connection_generation,
+                ],
             );
             let repository_context_matches = selected || *repository_generation == 0;
             let current = context_current
@@ -1992,7 +2068,7 @@ fn get_effective_authority_snapshot(
         |profile| ConfiguredSummary {
             profile_source: Some(SourceKind::TrustedProfile),
             configured_provider_count: profile.presentation().configured_provider_count,
-            configured_capability_count: effective_tools.len() as u32,
+            configured_capability_count: profile.presentation().expected_tool_count,
         },
     );
     let repository_binding = RepositoryBinding {
@@ -3175,6 +3251,14 @@ async fn refresh_repository_workflow(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation;
+        let profile_generation = *state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let connection_generation = *state
+            .next_connection_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let connected_context_current = matches!(
             &*state
                 .connection
@@ -3183,9 +3267,18 @@ async fn refresh_repository_workflow(
             ConnectionState::Connected {
                 repository_generation,
                 model_generation: connected_model_generation,
+                profile_generation: connected_profile_generation,
+                connection_generation: connected_connection_generation,
                 ..
-            } if *repository_generation == generation
-                && *connected_model_generation == model_generation
+            } if connection_activation_publication_is_current(
+                [
+                    *repository_generation,
+                    *connected_model_generation,
+                    *connected_profile_generation,
+                    *connected_connection_generation,
+                ],
+                [generation, model_generation, profile_generation, connection_generation],
+            )
         );
         let identity_generation = *state
             .commit_identity_generation
@@ -4140,6 +4233,7 @@ async fn connect_codex(
                 source,
                 repository_generation,
                 model_generation,
+                profile_generation,
                 connection_generation,
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
@@ -4157,7 +4251,15 @@ async fn connect_codex(
                     activation.shutdown().await;
                 }
                 return match reason {
-                    ProviderPublicationRejectionReason::Superseded => {
+                    ProviderPublicationRejectionReason::Superseded
+                    | ProviderPublicationRejectionReason::Stale => {
+                        let mut connection = state
+                            .connection
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if matches!(*connection, ConnectionState::Connecting) {
+                            *connection = ConnectionState::NotConnected;
+                        }
                         Err(FrontendError::CodexReconnectRequired)
                     }
                     ProviderPublicationRejectionReason::DuplicateOwner => {
@@ -4617,10 +4719,12 @@ async fn run_chat(
     prompt: String,
     conversation_epoch: u64,
     chat_generation: u64,
+    captured_generations: [u64; 4],
 ) {
     let (
         repository_generation,
         model_generation,
+        profile_generation,
         connection_generation,
         repository_fingerprint,
         repository_selected,
@@ -4635,6 +4739,7 @@ async fn run_chat(
             ConnectionState::Connected {
                 repository_generation,
                 model_generation,
+                profile_generation,
                 connection_generation,
                 repository_fingerprint,
                 composition,
@@ -4642,6 +4747,7 @@ async fn run_chat(
             } => (
                 *repository_generation,
                 *model_generation,
+                *profile_generation,
                 *connection_generation,
                 repository_fingerprint.clone(),
                 repository_fingerprint.is_some(),
@@ -4650,6 +4756,45 @@ async fn run_chat(
             _ => return,
         }
     };
+    let current_generations = current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+    if !connection_activation_publication_is_current(
+        [
+            repository_generation,
+            model_generation,
+            profile_generation,
+            connection_generation,
+        ],
+        current_generations,
+    ) || [
+        repository_generation,
+        model_generation,
+        profile_generation,
+        connection_generation,
+    ] != captured_generations
+    {
+        append_live_evidence(serde_json::json!({
+            "event": "desktop_failure",
+            "failure_stage": "pre_turn_async_stale_generation_rejection",
+            "repository_generation": current_generations[0],
+            "model_generation": current_generations[1],
+            "profile_generation": current_generations[2],
+            "runtime_generation": captured_generations[3],
+            "connection_generation": captured_generations[3],
+            "session_generation": chat_generation,
+        }));
+        if app
+            .state::<DesktopAppState>()
+            .claim_start_failure(chat_generation)
+        {
+            emit_chat_event(
+                &app,
+                ChatEvent::Failed {
+                    code: FrontendError::CodexReconnectRequired,
+                },
+            );
+        }
+        return;
+    }
     let handle = match runtime.start(request).await {
         Ok(handle) => handle,
         Err(error) => {
@@ -4884,7 +5029,7 @@ async fn send_chat(
 ) -> Result<SendChatResult, FrontendError> {
     validate_prompt(&prompt)?;
     let chat_generation = state.start_chat()?;
-    let (runtime, identity) = {
+    let (runtime, identity, profile_generation, connection_generation) = {
         let connection = state
             .connection
             .lock()
@@ -4894,6 +5039,8 @@ async fn send_chat(
                 runtime,
                 repository_generation,
                 model_generation,
+                profile_generation,
+                connection_generation,
                 ..
             } => (
                 Arc::clone(runtime),
@@ -4901,6 +5048,8 @@ async fn send_chat(
                     repository_generation: *repository_generation,
                     model_generation: *model_generation,
                 },
+                *profile_generation,
+                *connection_generation,
             ),
             _ => {
                 state.finish_chat(chat_generation);
@@ -4908,26 +5057,22 @@ async fn send_chat(
             }
         }
     };
-    let current_repository_generation = *state
-        .repository_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let current_model_generation = state
-        .model
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .generation;
-    if !connection_context_is_current(
-        identity.repository_generation,
-        identity.model_generation,
-        current_repository_generation,
-        current_model_generation,
+    let current_generations = current_host_generation_tuple(state.inner());
+    if !connection_activation_publication_is_current(
+        [
+            identity.repository_generation,
+            identity.model_generation,
+            profile_generation,
+            connection_generation,
+        ],
+        current_generations,
     ) {
         append_live_evidence(serde_json::json!({
             "event": "desktop_failure",
             "failure_stage": "pre_turn_stale_generation_rejection",
-            "repository_generation": current_repository_generation,
-            "model_generation": current_model_generation,
+            "repository_generation": current_generations[0],
+            "model_generation": current_generations[1],
+            "profile_generation": current_generations[2],
             "runtime_generation": identity.repository_generation,
             "session_generation": chat_generation,
         }));
@@ -4978,6 +5123,12 @@ async fn send_chat(
         prompt,
         conversation_epoch,
         chat_generation,
+        [
+            identity.repository_generation,
+            identity.model_generation,
+            profile_generation,
+            connection_generation,
+        ],
     ));
     Ok(SendChatResult { context_change })
 }
@@ -5127,6 +5278,14 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .generation;
+    let profile_generation = *state
+        .trusted_profile_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let connection_generation = *state
+        .next_connection_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let identity = {
         let connection = state
             .connection
@@ -5136,9 +5295,23 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
             ConnectionState::Connected {
                 repository_generation: connected_repository_generation,
                 model_generation: connected_model_generation,
+                profile_generation: connected_profile_generation,
+                connection_generation: connected_connection_generation,
                 ..
-            } if *connected_repository_generation == repository_generation
-                && *connected_model_generation == model_generation =>
+            } if connection_activation_publication_is_current(
+                [
+                    *connected_repository_generation,
+                    *connected_model_generation,
+                    *connected_profile_generation,
+                    *connected_connection_generation,
+                ],
+                [
+                    repository_generation,
+                    model_generation,
+                    profile_generation,
+                    connection_generation,
+                ],
+            ) =>
             {
                 ConversationContextIdentity {
                     repository_generation,
@@ -5287,12 +5460,11 @@ mod tests {
         activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
         await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
         clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        connect_prepared_codex, connection_context_is_current, connection_publication_is_current,
-        current_app_status, desktop_repository_snapshot, desktop_repository_snapshot_with_review,
-        desktop_tool_registry, forget_trusted_profile_preference, frontend_error,
-        install_repository_workflow, invalidate_repository_commit_review,
-        model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        publish_trusted_profile_selection, refresh_repository_workflow,
+        connect_prepared_codex, current_app_status, desktop_repository_snapshot,
+        desktop_repository_snapshot_with_review, desktop_tool_registry,
+        forget_trusted_profile_preference, frontend_error, install_repository_workflow,
+        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
+        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_context_fingerprint, repository_index_action,
         repository_selection_allowed, repository_selection_allowed_for_connection,
         repository_tool_authority, request_connect, resolve_codex_executable,
@@ -7037,13 +7209,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_connection_publication_cannot_match_a_new_repository_generation() {
-        assert!(connection_publication_is_current(4, 4, 9, 9));
-        assert!(!connection_publication_is_current(4, 5, 9, 9));
-        assert!(!connection_publication_is_current(4, 4, 9, 10));
-    }
-
-    #[test]
     fn activation_publication_requires_repository_model_profile_and_connection_currentness() {
         assert!(super::connection_activation_publication_is_current(
             [4, 5, 6, 9],
@@ -7065,6 +7230,15 @@ mod tests {
             [4, 5, 6, 9],
             [4, 5, 6, 10],
         ));
+    }
+
+    #[test]
+    fn host_generation_tuple_retains_profile_generation_as_currentness_identity() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        assert_eq!(super::current_host_generation_tuple(&state), [0, 0, 0, 0]);
+        *state.trusted_profile_generation.lock().unwrap() = 7;
+        assert_eq!(super::current_host_generation_tuple(&state), [0, 0, 7, 0]);
     }
 
     #[test]
@@ -7838,11 +8012,27 @@ mod tests {
     }
 
     #[test]
-    fn stale_repository_or_model_connection_cannot_start_a_chat_turn() {
-        assert!(connection_context_is_current(4, 8, 4, 8));
-        assert!(!connection_context_is_current(4, 8, 5, 8));
-        assert!(!connection_context_is_current(4, 8, 4, 9));
-        assert!(!connection_context_is_current(4, 8, 5, 9));
+    fn stale_generation_tuple_cannot_start_a_chat_turn() {
+        assert!(super::connection_activation_publication_is_current(
+            [4, 8, 6, 10],
+            [4, 8, 6, 10],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 8, 6, 10],
+            [5, 8, 6, 10],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 8, 6, 10],
+            [4, 9, 6, 10],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 8, 6, 10],
+            [4, 8, 7, 10],
+        ));
+        assert!(!super::connection_activation_publication_is_current(
+            [4, 8, 6, 10],
+            [4, 8, 6, 11],
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

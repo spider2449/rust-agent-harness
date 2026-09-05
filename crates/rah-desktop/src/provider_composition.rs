@@ -405,4 +405,124 @@ mod tests {
                 .expect("provider executable should be unlocked after Desktop owner shutdown");
         }
     }
+
+    fn plugin_profile(executable: &Path, provider_id: &str) -> serde_json::Value {
+        json!({
+            "profile_version": 1,
+            "profile_id": format!("profile-{provider_id}"),
+            "resources": {
+                "executables": {
+                    "plugin": {"path": executable, "kind": "native"}
+                },
+                "repositories": {}
+            },
+            "capabilities": [],
+            "mcp_providers": [],
+            "process_plugins": [{
+                "id": provider_id,
+                "executable": "plugin",
+                "tools": [{
+                    "remote_name": "echo",
+                    "permission": "Execute",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"value": {}},
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }
+                }]
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn activation_rereads_current_source_and_keeps_admitted_snapshot_stable() {
+        let fixture = FixtureDirectory::new();
+        let plugin = copy_provider(&fixture.0, "rah-plugin-echo", "plugin-fresh");
+        let profile_path = fixture.0.join("trusted-profile.json");
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&plugin_profile(&plugin, "plugin-a")).unwrap(),
+        )
+        .unwrap();
+        let selection = load_provider_only_profile(profile_path.clone()).unwrap();
+
+        // Restore/Choose selected A, but Connect must admit the current B source.
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&plugin_profile(&plugin, "plugin-b")).unwrap(),
+        )
+        .unwrap();
+        let activation = DesktopProviderActivation::activate(&selection)
+            .await
+            .expect("Connect must load the current source");
+        assert_eq!(
+            activation.external_tools()[0].public_tool_name,
+            "plugin.plugin-b.echo"
+        );
+
+        // A post-Connect edit cannot hot reload the admitted composition.
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&plugin_profile(&plugin, "plugin-c")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            activation.external_tools()[0].public_tool_name,
+            "plugin.plugin-b.echo"
+        );
+        activation.shutdown().await;
+
+        // An explicit later activation fresh-loads C and owns a new provider.
+        let fresh = DesktopProviderActivation::activate(&selection)
+            .await
+            .expect("reconnect must load the changed source");
+        assert_eq!(
+            fresh.external_tools()[0].public_tool_name,
+            "plugin.plugin-c.echo"
+        );
+        fresh.shutdown().await;
+        let released = plugin.with_extension("released");
+        fs::rename(&plugin, &released)
+            .expect("provider executable should be unlocked after shutdown");
+    }
+
+    #[tokio::test]
+    async fn changed_source_invalid_or_missing_fails_before_provider_publication() {
+        let fixture = FixtureDirectory::new();
+        let plugin = copy_provider(&fixture.0, "rah-plugin-echo", "plugin-failure");
+        let profile_path = fixture.0.join("trusted-profile.json");
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&plugin_profile(&plugin, "plugin-failure")).unwrap(),
+        )
+        .unwrap();
+        let selection = load_provider_only_profile(profile_path.clone()).unwrap();
+
+        fs::write(&profile_path, b"{").unwrap();
+        assert!(matches!(
+            DesktopProviderActivation::activate(&selection).await,
+            Err(super::ProviderActivationError::Profile(_))
+        ));
+        let after_invalid = plugin.with_extension("after-invalid");
+        fs::rename(&plugin, &after_invalid)
+            .expect("invalid activation must not retain a provider child");
+
+        let plugin = copy_provider(&fixture.0, "rah-plugin-echo", "plugin-missing");
+        let missing_profile = fixture.0.join("missing-profile.json");
+        fs::write(
+            &missing_profile,
+            serde_json::to_vec(&plugin_profile(&plugin, "plugin-missing")).unwrap(),
+        )
+        .unwrap();
+        let missing_selection = load_provider_only_profile(missing_profile.clone()).unwrap();
+        fs::remove_file(&missing_profile).unwrap();
+        assert!(matches!(
+            DesktopProviderActivation::activate(&missing_selection).await,
+            Err(super::ProviderActivationError::Profile(_))
+        ));
+        let after_missing = plugin.with_extension("after-missing");
+        fs::rename(&plugin, &after_missing)
+            .expect("missing activation must not retain a provider child");
+    }
 }

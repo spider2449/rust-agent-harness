@@ -455,7 +455,8 @@ async function loadStatus(invoke) {
   button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
   const connected = status.codexStatus === "connected";
   const reconnectRequired = status.repositoryToolsStatus === "reconnect required"
-    || status.modelConfigurationStatus === "reconnect required";
+    || status.modelConfigurationStatus === "reconnect required"
+    || status.profileStatus === "reconnect required";
   const prompt = document.querySelector("#chat-prompt");
   const send = document.querySelector("#chat-send");
   document.querySelector("#chat-hint").textContent = connected
@@ -470,6 +471,7 @@ async function loadStatus(invoke) {
     || chatRunning
     || status.repositoryToolsStatus === "reconnect required"
     || status.modelConfigurationStatus === "reconnect required"
+    || status.profileStatus === "reconnect required"
     || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
   document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
