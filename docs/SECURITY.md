@@ -21,11 +21,13 @@ authority, or persistence side effects. The panel grants no authority, does
 not dynamically grant or revoke permissions, does not reload profiles or
 manage provider lifecycles, and persists/restores no authority.
 
-v0.16 adds no authority. It adds no generic shell, filesystem, Git, branch/ref,
-network, or provider lifecycle authority, and makes no OS-sandbox, network
-isolation, or rollback guarantee. MCP and Process Plugin remain existing
-host-controlled Tool providers; their Effective Authority presentation is not
-currently reachable through the Desktop composition path.
+v0.16 added no authority. The v0.17 provider-only overlay adds no generic
+shell, filesystem, Git, branch/ref, or network authority and makes no
+OS-sandbox, network-isolation, or rollback guarantee. MCP and Process Plugin
+remain existing host-controlled Tool providers; admitted local providers are
+now composed by Desktop at Connect and presented through the same sanitized
+Effective Authority path. Refresh remains observational and does not activate
+or reload them.
 
 ## ADR 0019 bounded repository directory creation authority
 

@@ -27,8 +27,10 @@ cannot become Current for a new repository or model context.
 
 Inspection and Refresh Authority do not compose, reload, spawn, reconnect,
 execute, persist, or mutate authority. MCP and Process Plugin adapters remain
-Tool providers under the existing architecture; their authority-review
-presentation is not currently reachable through the Desktop composition path.
+Tool providers under the existing architecture. The v0.16 release path did not
+compose their authority-review presentation through Desktop; the v0.17
+provider-only overlay now composes admitted local providers at Connect and
+publishes their host-derived descriptors through the same observation path.
 
 ## Ownership boundaries
 
