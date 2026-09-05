@@ -161,11 +161,10 @@ Evidence is **insufficient** for migration. The required positive condition was
 not observed: newer Codex plus the same model and hardened fixture did not
 produce a real Tool lifecycle where 0.149 did not.
 
-Do not migrate the certified baseline in Task 207B. A future
-`Task 207C — Codex Baseline Migration Research / Revalidation` is warranted only
-if a later newer version repeatedly produces the complete hidden-nonce-backed
-Tool lifecycle and protocol evidence explains the difference without an RAH
-defect.
+Do not migrate the certified baseline in Task 207B. A future, separately scoped
+Codex baseline migration research or revalidation task is warranted only if a
+later newer version repeatedly produces the complete hidden-nonce-backed Tool
+lifecycle and protocol evidence explains the difference without an RAH defect.
 
 ## Security and non-goals
 
