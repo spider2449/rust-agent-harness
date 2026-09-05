@@ -1,7 +1,7 @@
-# RAH v0.17.0 Release-Candidate Security Model
+# RAH v0.17.0 Security Model
 
-This document describes the current v0.17.0 release candidate. The candidate
-is prepared, not yet released. v0.16.0 remains the immutable prior release.
+This document describes the released v0.17.0 security model. The immutable
+v0.17.0 release is the current release and v0.16.0 remains the prior release.
 
 ## Effective Authority Review
 

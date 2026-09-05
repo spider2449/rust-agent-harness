@@ -5,9 +5,9 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.17.0 release candidate - prepared, not yet released
+## RAH v0.17.0 released
 
-RAH v0.17.0 prepares the Desktop Host-Selected Trusted Profile External
+RAH v0.17.0 delivers the Desktop Host-Selected Trusted Profile External
 Provider Integration milestone. Desktop can host-select a provider-only profile;
 selection and static validation are inert and non-spawning, while local stdio
 MCP and Process Plugin providers activate only on explicit Connect or reconnect.

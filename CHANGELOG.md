@@ -1,10 +1,9 @@
 # Changelog
 
-## v0.17.0 - unreleased
+## v0.17.0 — 2026-09-05
 
-Prepared as `RAH v0.17.0` for the Desktop Host-Selected Trusted Profile
-External Provider Integration milestone. This entry describes the release
-candidate; v0.17.0 is **prepared, not yet released**.
+Released as `RAH v0.17.0` for the Desktop Host-Selected Trusted Profile
+External Provider Integration milestone.
 
 ### Added
 
@@ -44,6 +43,14 @@ candidate; v0.17.0 is **prepared, not yet released**.
   deterministically verified but not live-certified through a real external
   provider model call. This is the accepted non-blocking Task 207C / Task 208
   limitation.
+
+### Release record
+
+- Release commit: `dc9ae03598f1ac48a571bb118ae9fd971250a2b7`.
+- Annotated tag: `v0.17.0`.
+- Tag object: `8bf0bbeb14f3d7e42f1f53f2ee5c6098d561a4aa`.
+- Tag-triggered CI run `33959105671`: PASS.
+- GitHub Release: published.
 
 ### Release limits
 
