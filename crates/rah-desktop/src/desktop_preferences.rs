@@ -1,4 +1,4 @@
-//! Private, closed v1 persistence for inactive Desktop model preferences.
+//! Private, closed persistence for inactive Desktop preferences.
 
 use crate::{
     DesktopCommitIdentity, DesktopModelProvider, DesktopModelSelection, ProviderEndpoint,
@@ -18,6 +18,7 @@ use std::sync::{Mutex, OnceLock};
 
 const FILE: &str = "desktop-preferences.json";
 const MAX_BYTES: usize = 4096;
+const MAX_TRUSTED_PROFILE_PATH_BYTES: usize = 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // This seam is deliberately test-only: production always uses the native file APIs.
@@ -159,11 +160,72 @@ pub(crate) enum Warning {
     SaveFailed,
 }
 
+/// A syntactically valid, inert remembered Trusted Profile source path.
+///
+/// This type deliberately carries no claim that the path exists, is readable,
+/// is regular, or is free of links/reparse points. Those properties belong to
+/// explicit profile restore/activation actions, which are allowed to perform
+/// source I/O.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RememberedTrustedProfilePath(PathBuf);
+
+impl RememberedTrustedProfilePath {
+    pub(crate) fn parse(path: PathBuf) -> Result<Self, ()> {
+        let raw = path.to_str().ok_or(())?;
+        if raw.is_empty()
+            || raw.len() > MAX_TRUSTED_PROFILE_PATH_BYTES
+            || !path.is_absolute()
+            || raw
+                .split(['\\', '/'])
+                .any(|component| matches!(component, "." | ".."))
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(());
+        }
+
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+
+            let mut components = path.components();
+            if !matches!(
+                components.next(),
+                Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+            ) {
+                return Err(());
+            }
+            if path
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(part) => Some(part),
+                    _ => None,
+                })
+                .any(|part| part.to_str().is_none_or(|part| part.contains(':')))
+            {
+                return Err(());
+            }
+        }
+
+        Ok(Self(path))
+    }
+
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Preferences {
     directory: PathBuf,
     warning: Option<Warning>,
     identity: Option<DesktopCommitIdentity>,
+    remembered_trusted_profile_path: Option<RememberedTrustedProfilePath>,
 }
 
 impl Preferences {
@@ -172,17 +234,21 @@ impl Preferences {
         let path = directory.join(FILE);
         let loaded = match bounded_read(&path) {
             Ok(Some(bytes)) => match parse(&bytes) {
-                Ok((selection, identity)) => (None, selection, identity),
+                Ok((selection, identity, remembered_path)) => {
+                    (None, selection, identity, remembered_path)
+                }
                 Err(()) => (
                     Some(Warning::RestoreFailed),
                     DesktopModelSelection::default(),
                     None,
+                    None,
                 ),
             },
-            Ok(None) => (None, DesktopModelSelection::default(), None),
+            Ok(None) => (None, DesktopModelSelection::default(), None, None),
             Err(()) => (
                 Some(Warning::RestoreFailed),
                 DesktopModelSelection::default(),
+                None,
                 None,
             ),
         };
@@ -191,6 +257,7 @@ impl Preferences {
                 directory,
                 warning: loaded.0,
                 identity: loaded.2,
+                remembered_trusted_profile_path: loaded.3,
             },
             loaded.1,
         )
@@ -201,8 +268,12 @@ impl Preferences {
     }
 
     pub(crate) fn save(&mut self, selection: &DesktopModelSelection) -> Result<(), Warning> {
-        let bytes =
-            canonical(selection, self.identity.as_ref()).map_err(|_| Warning::SaveFailed)?;
+        let bytes = canonical(
+            selection,
+            self.identity.as_ref(),
+            self.remembered_trusted_profile_path.as_ref(),
+        )
+        .map_err(|_| Warning::SaveFailed)?;
         let destination = self.directory.join(FILE);
         if matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
             return Ok(());
@@ -220,17 +291,60 @@ impl Preferences {
         self.identity.clone()
     }
 
+    /// Returns the inert remembered path without transferring ownership out of
+    /// the preferences writer.
+    #[allow(dead_code)] // consumed by the Task 215 Restore/Forget host actions
+    pub(crate) fn remembered_trusted_profile_path(&self) -> Option<RememberedTrustedProfilePath> {
+        self.remembered_trusted_profile_path.clone()
+    }
+
     pub(crate) fn save_identity(
         &mut self,
         selection: &DesktopModelSelection,
         identity: DesktopCommitIdentity,
     ) -> Result<(), Warning> {
-        let bytes = canonical(selection, Some(&identity)).map_err(|_| Warning::SaveFailed)?;
+        let bytes = canonical(
+            selection,
+            Some(&identity),
+            self.remembered_trusted_profile_path.as_ref(),
+        )
+        .map_err(|_| Warning::SaveFailed)?;
         let destination = self.directory.join(FILE);
         if !matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
             atomic(&self.directory, &bytes).map_err(|_| Warning::SaveFailed)?;
         }
         self.identity = Some(identity);
+        Ok(())
+    }
+
+    #[allow(dead_code)] // consumed by the Task 215 Restore/Forget host actions
+    pub(crate) fn save_trusted_profile_path(
+        &mut self,
+        selection: &DesktopModelSelection,
+        path: RememberedTrustedProfilePath,
+    ) -> Result<(), Warning> {
+        let bytes = canonical(selection, self.identity.as_ref(), Some(&path))
+            .map_err(|_| Warning::SaveFailed)?;
+        let destination = self.directory.join(FILE);
+        if !matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
+            atomic(&self.directory, &bytes).map_err(|_| Warning::SaveFailed)?;
+        }
+        self.remembered_trusted_profile_path = Some(path);
+        Ok(())
+    }
+
+    #[allow(dead_code)] // consumed by the Task 215 Restore/Forget host actions
+    pub(crate) fn forget_trusted_profile_path(
+        &mut self,
+        selection: &DesktopModelSelection,
+    ) -> Result<(), Warning> {
+        let bytes =
+            canonical(selection, self.identity.as_ref(), None).map_err(|_| Warning::SaveFailed)?;
+        let destination = self.directory.join(FILE);
+        if !matches!(bounded_read(&destination), Ok(Some(existing)) if existing == bytes) {
+            atomic(&self.directory, &bytes).map_err(|_| Warning::SaveFailed)?;
+        }
+        self.remembered_trusted_profile_path = None;
         Ok(())
     }
 }
@@ -254,18 +368,17 @@ fn bounded_read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
 fn canonical(
     selection: &DesktopModelSelection,
     identity: Option<&DesktopCommitIdentity>,
+    remembered_path: Option<&RememberedTrustedProfilePath>,
 ) -> Result<Vec<u8>, ()> {
     selection.validate().map_err(|_| ())?;
-    let json = match selection.provider {
-        DesktopModelProvider::Inherit => {
-            r#"{"version":2,"model":{"provider":"inherit"}}"#.to_owned()
-        }
+    let model = match selection.provider {
+        DesktopModelProvider::Inherit => r#"{"provider":"inherit"}"#.to_owned(),
         DesktopModelProvider::OpenAi
         | DesktopModelProvider::Ollama
         | DesktopModelProvider::LmStudio => {
             let provider = provider_name(selection.provider);
             format!(
-                r#"{{"version":2,"model":{{"provider":"{provider}","model":{}}}}}"#,
+                r#"{{"provider":"{provider}","model":{}}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?
             )
         }
@@ -278,21 +391,32 @@ fn canonical(
                 return Err(());
             }
             format!(
-                r#"{{"version":2,"model":{{"provider":"llama_cpp","model":{},"endpoint":{{"scheme":"http","host":{},"port":{}}}}}}}"#,
+                r#"{{"provider":"llama_cpp","model":{},"endpoint":{{"scheme":"http","host":{},"port":{}}}}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?,
                 serde_json::to_string(&ip.to_string()).map_err(|_| ())?,
                 endpoint.port
             )
         }
     };
-    let json = if let Some(identity) = identity {
+    let mut json = format!(r#"{{"version":3,"model":{model}"#);
+    if let Some(identity) = identity {
         identity.validate()?;
-        let model =
-            serde_json::from_str::<serde_json::Value>(&json).map_err(|_| ())?["model"].clone();
-        serde_json::to_string(&serde_json::json!({"version":2,"model":model,"commit_identity":{"name":identity.name,"email":identity.email}})).map_err(|_| ())?
-    } else {
-        json
-    };
+        json.push_str(",\"commit_identity\":{\"name\":");
+        json.push_str(&serde_json::to_string(&identity.name).map_err(|_| ())?);
+        json.push_str(",\"email\":");
+        json.push_str(&serde_json::to_string(&identity.email).map_err(|_| ())?);
+        json.push('}');
+    }
+    if let Some(path) = remembered_path {
+        let raw = path.path().to_str().ok_or(())?;
+        if raw.len() > MAX_TRUSTED_PROFILE_PATH_BYTES {
+            return Err(());
+        }
+        json.push_str(",\"trusted_profile\":{\"path\":");
+        json.push_str(&serde_json::to_string(raw).map_err(|_| ())?);
+        json.push('}');
+    }
+    json.push('}');
     let mut bytes = json.into_bytes();
     bytes.push(b'\n');
     if bytes.len() > MAX_BYTES {
@@ -303,7 +427,7 @@ fn canonical(
 }
 #[cfg(test)]
 pub(crate) fn test_canonical(selection: &DesktopModelSelection) -> Result<Vec<u8>, ()> {
-    canonical(selection, None)
+    canonical(selection, None, None)
 }
 
 fn provider_name(provider: DesktopModelProvider) -> &'static str {
@@ -320,6 +444,7 @@ struct Root {
     version: Option<u64>,
     model: Option<Model>,
     commit_identity: Option<CommitIdentity>,
+    trusted_profile: Option<TrustedProfilePreference>,
 }
 #[derive(Default)]
 struct Model {
@@ -339,13 +464,27 @@ struct CommitIdentity {
     email: Option<String>,
 }
 
-fn parse(bytes: &[u8]) -> Result<(DesktopModelSelection, Option<DesktopCommitIdentity>), ()> {
+#[derive(Default)]
+struct TrustedProfilePreference {
+    path: Option<String>,
+}
+
+fn parse(
+    bytes: &[u8],
+) -> Result<
+    (
+        DesktopModelSelection,
+        Option<DesktopCommitIdentity>,
+        Option<RememberedTrustedProfilePath>,
+    ),
+    (),
+> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         return Err(());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     let root: Root = serde_json::from_str(text).map_err(|_| ())?;
-    if !matches!(root.version, Some(1 | 2)) {
+    if !matches!(root.version, Some(1..=3)) {
         return Err(());
     }
     let model = root.model.ok_or(())?;
@@ -385,25 +524,35 @@ fn parse(bytes: &[u8]) -> Result<(DesktopModelSelection, Option<DesktopCommitIde
     let identity = match (root.version, root.commit_identity) {
         (Some(1), None) | (Some(2), None) => None,
         (Some(1), Some(_)) => return Err(()),
-        (Some(2), Some(value)) => Some(DesktopCommitIdentity {
+        (Some(2 | 3), Some(value)) => Some(DesktopCommitIdentity {
             name: value.name.ok_or(())?,
             email: value.email.ok_or(())?,
         }),
+        (Some(3), None) => None,
         _ => return Err(()),
     };
     if let Some(identity) = &identity {
         identity.validate()?;
     }
-    Ok((result, identity))
+    let remembered_path = match (root.version, root.trusted_profile) {
+        (Some(1 | 2), Some(_)) => return Err(()),
+        (Some(1..=3), None) => None,
+        (Some(3), Some(value)) => Some(RememberedTrustedProfilePath::parse(PathBuf::from(
+            value.path.ok_or(())?,
+        ))?),
+        _ => return Err(()),
+    };
+    Ok((result, identity, remembered_path))
 }
 
 macro_rules! closed_map { ($name:ident, $type:ty, { $($field:literal => $slot:ident : $value:ty),* $(,)? }) => {
 impl<'de> Deserialize<'de> for $type { fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { struct V; impl<'de> Visitor<'de> for V { type Value = $type; fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("closed preferences object") } fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<$type, A::Error> { let mut value: $type = Default::default(); while let Some(key) = map.next_key::<String>()? { match key.as_str() { $($field => { if value.$slot.is_some() { return Err(de::Error::duplicate_field($field)); } value.$slot = Some(map.next_value::<$value>()?); }),* _ => return Err(de::Error::unknown_field(&key, &[$($field),*])), } } Ok(value) } } d.deserialize_map(V) } }
 }; }
-closed_map!(RootMap, Root, { "version" => version: u64, "model" => model: Model, "commit_identity" => commit_identity: CommitIdentity });
+closed_map!(RootMap, Root, { "version" => version: u64, "model" => model: Model, "commit_identity" => commit_identity: CommitIdentity, "trusted_profile" => trusted_profile: TrustedProfilePreference });
 closed_map!(ModelMap, Model, { "provider" => provider: String, "model" => model: String, "endpoint" => endpoint: Endpoint });
 closed_map!(EndpointMap, Endpoint, { "scheme" => scheme: String, "host" => host: String, "port" => port: u16 });
 closed_map!(CommitIdentityMap, CommitIdentity, { "name" => name: String, "email" => email: String });
+closed_map!(TrustedProfilePreferenceMap, TrustedProfilePreference, { "path" => path: String });
 
 fn temp_name(n: u64) -> String {
     format!("{FILE}.preferences-tmp-{}-{n}", std::process::id())
@@ -611,34 +760,39 @@ mod tests {
         }
     }
 
+    fn remembered_path(raw: &str) -> RememberedTrustedProfilePath {
+        RememberedTrustedProfilePath::parse(PathBuf::from(raw))
+            .unwrap_or_else(|_| panic!("valid remembered path: {raw}"))
+    }
+
     #[test]
     fn canonical_provider_shapes_round_trip() {
         let mut all = vec![
             (
                 DesktopModelSelection::default(),
-                r#"{"version":2,"model":{"provider":"inherit"}}"#,
+                r#"{"version":3,"model":{"provider":"inherit"}}"#,
             ),
             (
                 explicit(DesktopModelProvider::OpenAi),
-                r#"{"version":2,"model":{"provider":"openai","model":"model"}}\n"#,
+                r#"{"version":3,"model":{"provider":"openai","model":"model"}}\n"#,
             ),
             (
                 explicit(DesktopModelProvider::Ollama),
-                r#"{"version":2,"model":{"provider":"ollama","model":"model"}}\n"#,
+                r#"{"version":3,"model":{"provider":"ollama","model":"model"}}\n"#,
             ),
             (
                 explicit(DesktopModelProvider::LmStudio),
-                r#"{"version":2,"model":{"provider":"lm_studio","model":"model"}}\n"#,
+                r#"{"version":3,"model":{"provider":"lm_studio","model":"model"}}\n"#,
             ),
         ];
         for (host, expected) in [
             (
                 "127.0.0.1",
-                r#"{"version":2,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
+                r#"{"version":3,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
             ),
             (
                 "::1",
-                r#"{"version":2,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
+                r#"{"version":3,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
             ),
         ] {
             all.push((
@@ -655,12 +809,12 @@ mod tests {
             ));
         }
         for (selection, expected) in all {
-            let bytes = canonical(&selection, None).unwrap();
+            let bytes = canonical(&selection, None, None).unwrap();
             assert_eq!(
                 bytes,
                 format!("{}\n", expected.trim_end_matches(r#"\n"#)).as_bytes()
             );
-            assert_eq!(parse(&bytes).unwrap(), (selection, None));
+            assert_eq!(parse(&bytes).unwrap(), (selection, None, None));
             assert!(bytes.ends_with(b"\n"));
             assert!(!std::str::from_utf8(&bytes).unwrap().contains("null"));
             assert!(!std::str::from_utf8(&bytes).unwrap().contains("/v1"));
@@ -671,20 +825,262 @@ mod tests {
     fn v1_migrates_model_only_and_v2_restores_closed_identity() {
         let selection = explicit(DesktopModelProvider::OpenAi);
         let v1 = br#"{"version":1,"model":{"provider":"openai","model":"model"}}"#;
-        assert_eq!(parse(v1).unwrap(), (selection.clone(), None));
+        assert_eq!(parse(v1).unwrap(), (selection.clone(), None, None));
 
         let identity = DesktopCommitIdentity {
             name: "RAH Host".into(),
             email: "rah-host@example.invalid".into(),
         };
-        let bytes = canonical(&selection, Some(&identity)).unwrap();
-        assert_eq!(parse(&bytes).unwrap(), (selection, Some(identity)));
+        let bytes = canonical(&selection, Some(&identity), None).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), (selection, Some(identity), None));
+    }
+
+    #[test]
+    fn v3_profile_schema_is_canonical_and_ordered() {
+        let selection = explicit(DesktopModelProvider::OpenAi);
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".into(),
+            email: "rah-host@example.invalid".into(),
+        };
+        let path = remembered_path(r"C:\profiles\provider.json");
+        let bytes = canonical(&selection, Some(&identity), Some(&path)).unwrap();
+        assert_eq!(
+            bytes,
+            br#"{"version":3,"model":{"provider":"openai","model":"model"},"commit_identity":{"name":"RAH Host","email":"rah-host@example.invalid"},"trusted_profile":{"path":"C:\\profiles\\provider.json"}}
+"#
+        );
+        assert_eq!(
+            parse(&bytes).unwrap(),
+            (
+                selection.clone(),
+                Some(identity.clone()),
+                Some(path.clone())
+            )
+        );
+
+        let without_profile = canonical(&selection, Some(&identity), None).unwrap();
+        assert!(
+            !String::from_utf8(without_profile.clone())
+                .unwrap()
+                .contains("trusted_profile")
+        );
+        assert_eq!(
+            parse(&without_profile).unwrap(),
+            (selection, Some(identity), None)
+        );
+    }
+
+    #[test]
+    fn v3_profile_field_is_strict_and_v1_v2_reject_it() {
+        let valid = r#"{"path":"C:\\profiles\\provider.json"}"#;
+        for bytes in [
+            format!(r#"{{"version":1,"model":{{"provider":"inherit"}},"trusted_profile":{valid}}}"#),
+            format!(r#"{{"version":2,"model":{{"provider":"inherit"}},"trusted_profile":{valid}}}"#),
+            r#"{"version":3,"model":{"provider":"inherit"},"unknown":true}"#.to_owned(),
+            format!(r#"{{"version":3,"model":{{"provider":"inherit"}},"trusted_profile":{valid},"trusted_profile":{valid}}}"#),
+            r#"{"version":3,"model":{"provider":"inherit"},"trusted_profile":{"path":"C:\\profiles\\provider.json","unknown":true}}"#.to_owned(),
+            r#"{"version":3,"model":{"provider":"inherit"},"trusted_profile":{"path":"C:\\profiles\\provider.json","path":"C:\\profiles\\other.json"}}"#.to_owned(),
+            r#"{"version":3,"model":{"provider":"inherit"},"trusted_profile":{}}"#.to_owned(),
+            r#"{"version":3,"model":{"provider":"inherit"},"trusted_profile":{"path":null}}"#.to_owned(),
+            r#"{"version":3,"model":{"provider":"inherit"},"trusted_profile":{"path":42}}"#.to_owned(),
+        ] {
+            assert!(parse(bytes.as_bytes()).is_err(), "{bytes}");
+        }
+    }
+
+    #[test]
+    fn remembered_path_validation_is_lexical_and_preserves_spelling() {
+        let original = r"C:\Profiles\Provider.JSON";
+        let path = remembered_path(original);
+        assert_eq!(path.path(), Path::new(original));
+
+        for invalid in [
+            "",
+            r"relative\provider.json",
+            r"C:relative\provider.json",
+            r"C:\profiles\.\provider.json",
+            r"C:\profiles\..\provider.json",
+            r"\\server\share\provider.json",
+            r"\\?\C:\profiles\provider.json",
+            r"\\.\C:\profiles\provider.json",
+            r"C:\profiles\provider:alternate.json",
+        ] {
+            assert!(
+                RememberedTrustedProfilePath::parse(PathBuf::from(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let oversized = format!(r"C:\{}", "x".repeat(MAX_TRUSTED_PROFILE_PATH_BYTES));
+        assert!(RememberedTrustedProfilePath::parse(PathBuf::from(oversized)).is_err());
+        let unicode = remembered_path(&format!("C:\\profiles\\{}{}.json", '\u{914d}', '\u{7f6e}'));
+        assert!(unicode.path().to_str().unwrap().len() <= MAX_TRUSTED_PROFILE_PATH_BYTES);
+        assert!(!unicode.path().to_str().unwrap().contains("\\..\\"));
+    }
+
+    #[test]
+    fn startup_remembers_missing_profile_path_without_source_io_or_selection() {
+        let directory = TestDirectory::new();
+        let path = remembered_path(r"C:\missing\profile-that-does-not-exist.json");
+        let bytes = canonical(&DesktopModelSelection::default(), None, Some(&path)).unwrap();
+        fs::write(directory.preference_path(), &bytes).unwrap();
+
+        let (mut preferences, selection) = Preferences::start(directory.0.clone());
+        assert_eq!(selection, DesktopModelSelection::default());
+        assert_eq!(preferences.take_warning(), None);
+        assert_eq!(preferences.remembered_trusted_profile_path(), Some(path));
+        assert_eq!(fs::read(directory.preference_path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn all_preference_planes_preserve_each_other_and_forget_is_not_global_reset() {
+        let directory = TestDirectory::new();
+        let first = explicit(DesktopModelProvider::OpenAi);
+        let later = explicit(DesktopModelProvider::Ollama);
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".into(),
+            email: "rah-host@example.invalid".into(),
+        };
+        let path = remembered_path(r"C:\profiles\provider.json");
+        let mut preferences = Preferences::start(directory.0.clone()).0;
+
+        preferences.save(&first).unwrap();
+        preferences.save_identity(&first, identity.clone()).unwrap();
+        preferences
+            .save_trusted_profile_path(&first, path.clone())
+            .unwrap();
+        assert_eq!(
+            preferences.remembered_trusted_profile_path(),
+            Some(path.clone())
+        );
+
+        preferences.save(&later).unwrap();
+        assert_eq!(preferences.identity(), Some(identity.clone()));
+        assert_eq!(
+            preferences.remembered_trusted_profile_path(),
+            Some(path.clone())
+        );
+
+        preferences.reset().unwrap();
+        let bytes = fs::read(directory.preference_path()).unwrap();
+        assert_eq!(
+            parse(&bytes).unwrap(),
+            (
+                DesktopModelSelection::default(),
+                Some(identity.clone()),
+                Some(path.clone())
+            )
+        );
+
+        preferences
+            .forget_trusted_profile_path(&DesktopModelSelection::default())
+            .unwrap();
+        assert_eq!(preferences.identity(), Some(identity));
+        assert_eq!(preferences.remembered_trusted_profile_path(), None);
+        assert_eq!(
+            parse(&fs::read(directory.preference_path()).unwrap()).unwrap(),
+            (
+                DesktopModelSelection::default(),
+                Some(DesktopCommitIdentity {
+                    name: "RAH Host".into(),
+                    email: "rah-host@example.invalid".into(),
+                }),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn successful_save_upgrades_v1_and_v2_to_v3_with_remembered_path() {
+        let path = remembered_path(r"C:\profiles\provider.json");
+        let selection = explicit(DesktopModelProvider::OpenAi);
+        let identity = DesktopCommitIdentity {
+            name: "RAH Host".into(),
+            email: "rah-host@example.invalid".into(),
+        };
+        for (version, identity) in [(1, None), (2, Some(identity.clone()))] {
+            let directory = TestDirectory::new();
+            let source = if version == 1 {
+                r#"{"version":1,"model":{"provider":"openai","model":"model"}}"#.to_owned()
+            } else {
+                r#"{"version":2,"model":{"provider":"openai","model":"model"},"commit_identity":{"name":"RAH Host","email":"rah-host@example.invalid"}}"#.to_owned()
+            };
+            fs::write(directory.preference_path(), source).unwrap();
+            let mut preferences = Preferences::start(directory.0.clone()).0;
+            assert_eq!(preferences.identity(), identity);
+            preferences
+                .save_trusted_profile_path(&selection, path.clone())
+                .unwrap();
+            let bytes = fs::read(directory.preference_path()).unwrap();
+            assert!(bytes.starts_with(br#"{"version":3,"model"#));
+            assert_eq!(
+                parse(&bytes).unwrap(),
+                (selection.clone(), identity, Some(path.clone()))
+            );
+        }
+    }
+
+    #[test]
+    fn profile_save_and_forget_failures_preserve_disk_and_memory() {
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = TestDirectory::new();
+        let selection = explicit(DesktopModelProvider::OpenAi);
+        let old_path = remembered_path(r"C:\profiles\old.json");
+        let new_path = remembered_path(r"C:\profiles\new.json");
+        let mut preferences = Preferences::start(directory.0.clone()).0;
+        preferences
+            .save_trusted_profile_path(&selection, old_path.clone())
+            .unwrap();
+        let durable = fs::read(directory.preference_path()).unwrap();
+
+        for fault in [
+            TestFault::Create,
+            TestFault::Write,
+            TestFault::Sync,
+            TestFault::ReplaceOther,
+        ] {
+            clear_test_state();
+            set_test_fault(directory.preference_path(), fault);
+            assert_eq!(
+                preferences.save_trusted_profile_path(&selection, new_path.clone()),
+                Err(Warning::SaveFailed),
+                "profile save {fault:?}"
+            );
+            assert_eq!(
+                preferences.remembered_trusted_profile_path(),
+                Some(old_path.clone())
+            );
+            assert_eq!(fs::read(directory.preference_path()).unwrap(), durable);
+        }
+
+        for fault in [
+            TestFault::Create,
+            TestFault::Write,
+            TestFault::Sync,
+            TestFault::ReplaceOther,
+        ] {
+            clear_test_state();
+            set_test_fault(directory.preference_path(), fault);
+            assert_eq!(
+                preferences.forget_trusted_profile_path(&selection),
+                Err(Warning::SaveFailed),
+                "profile forget {fault:?}"
+            );
+            assert_eq!(
+                preferences.remembered_trusted_profile_path(),
+                Some(old_path.clone())
+            );
+            assert_eq!(fs::read(directory.preference_path()).unwrap(), durable);
+        }
+        clear_test_state();
     }
 
     #[test]
     fn v2_identity_schema_and_values_fail_closed() {
         for bytes in [
-            br#"{"version":3,"model":{"provider":"inherit"}}"#.as_slice(),
+            br#"{"version":4,"model":{"provider":"inherit"}}"#.as_slice(),
             br#"{"version":"2","model":{"provider":"inherit"}}"#.as_slice(),
             br#"{"version":2,"model":{"provider":"inherit"},"unknown":true}"#.as_slice(),
             br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":"n","email":"e","unknown":true}}"#.as_slice(),
@@ -872,7 +1268,7 @@ mod tests {
         preferences.save(&selection).unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&selection, None).unwrap()
+            canonical(&selection, None, None).unwrap()
         );
         let retained = fs::read(directory.preference_path()).unwrap();
         let non_loopback = DesktopModelSelection {
@@ -889,7 +1285,7 @@ mod tests {
         preferences.reset().unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&DesktopModelSelection::default(), None).unwrap()
+            canonical(&DesktopModelSelection::default(), None, None).unwrap()
         );
     }
 
@@ -1005,7 +1401,7 @@ mod tests {
         preferences.save(&next).unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
-            canonical(&next, None).unwrap()
+            canonical(&next, None, None).unwrap()
         );
         assert_eq!(
             test_operations(&directory.preference_path()),

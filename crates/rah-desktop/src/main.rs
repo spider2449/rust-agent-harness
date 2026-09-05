@@ -9306,6 +9306,48 @@ mod tests {
     }
 
     #[test]
+    fn startup_remembers_profile_path_without_selecting_or_activating_it() {
+        use super::desktop_preferences::{
+            RememberedTrustedProfilePath, clear_test_state, test_lock,
+        };
+        let _guard = test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let storage = TestRepository::new();
+        let raw_path = r"C:\missing\profile-source.json";
+        let remembered = RememberedTrustedProfilePath::parse(PathBuf::from(raw_path))
+            .expect("fixture path is lexically valid");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "model": { "provider": "inherit" },
+            "trusted_profile": { "path": raw_path },
+        }))
+        .unwrap();
+        fs::write(storage.0.join("desktop-preferences.json"), bytes).unwrap();
+
+        clear_test_state();
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            state
+                .preferences
+                .lock()
+                .unwrap()
+                .remembered_trusted_profile_path(),
+            Some(remembered)
+        );
+        assert!(state.trusted_profile.lock().unwrap().is_none());
+        assert_eq!(*state.trusted_profile_generation.lock().unwrap(), 0);
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert_eq!(state.status().profile_status, "not loaded");
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            super::StartupActivationCounters::default()
+        );
+        clear_test_state();
+    }
+
+    #[test]
     fn preference_write_matrix_excludes_all_non_apply_reset_events() {
         use super::desktop_preferences::{
             clear_test_state, reset_test_accounting, test_lock, test_write_accounting,
