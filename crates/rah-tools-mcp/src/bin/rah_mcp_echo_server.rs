@@ -54,6 +54,13 @@ fn main() {
     let _lifecycle_audit = LifecycleAudit::start();
     let args = env::args().collect::<Vec<_>>();
     let mode = argument(&args, "--mode").unwrap_or("echo");
+    let certification_token = match certification_token(&args) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("RAH_MCP_CERTIFICATION_CONFIG_ERROR {error}");
+            std::process::exit(2);
+        }
+    };
     let expose_two_tools = args.iter().any(|arg| arg == "--two-tools") || mode == "extra-tool";
     if let Some(path) = argument(&args, "--observation-file") {
         let observation = json!({
@@ -155,6 +162,18 @@ fn main() {
                 }
                 let mut tools = if mode == "missing-tool" {
                     vec![]
+                } else if certification_token.is_some() {
+                    vec![json!({
+                    "name": "echo",
+                    "description": "Returns the per-run certification result.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"request": {"type": "string", "enum": ["certification-token"]}},
+                        "required": ["request"],
+                        "additionalProperties": false
+                    },
+                    "annotations": {"fixture": true}
+                    })]
                 } else {
                     vec![json!({
                     "name": "echo",
@@ -198,11 +217,37 @@ fn main() {
                 write_result(&mut stdout, id, json!({"tools": tools}));
             }
             "tools/call" => {
+                _lifecycle_audit.event("call");
                 let id = message["id"].clone();
                 if message["params"]["name"] != "echo"
                     && (!expose_two_tools || message["params"]["name"] != "write")
                 {
                     write_error(&mut stdout, id, -32602, "unknown tool");
+                    continue;
+                }
+                if let Some(token) = certification_token.as_deref() {
+                    if message["params"]["arguments"] != json!({"request": "certification-token"}) {
+                        write_error(
+                            &mut stdout,
+                            id,
+                            -32602,
+                            "certification request must be exact",
+                        );
+                        continue;
+                    }
+                    bridge_echo_calls += 1;
+                    write_result(
+                        &mut stdout,
+                        id,
+                        json!({
+                            "content": [{"type": "text", "text": token}],
+                            "structuredContent": {
+                                "bridgeCertificationCalls": bridge_echo_calls,
+                                "receivedArguments": message["params"]["arguments"]
+                            },
+                            "isError": false
+                        }),
+                    );
                     continue;
                 }
                 let Some(text) = message["params"]["arguments"]["text"].as_str() else {
@@ -311,6 +356,32 @@ fn argument<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.windows(2)
         .find(|pair| pair[0] == name)
         .map(|pair| pair[1].as_str())
+}
+
+fn certification_token(args: &[String]) -> Result<Option<String>, String> {
+    let live = args.iter().any(|arg| arg == "--live-certification");
+    let value = argument(args, "--certification-token");
+    if !live {
+        if value.is_some() {
+            return Err("--certification-token requires --live-certification".to_owned());
+        }
+        return Ok(None);
+    }
+    let Some(value) = value else {
+        return Err("--live-certification requires --certification-token".to_owned());
+    };
+    let Some(suffix) = value.strip_prefix("RAH_LIVE_TOOL_TOKEN_") else {
+        return Err("certification token has an invalid prefix".to_owned());
+    };
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "certification token must contain exactly 32 hexadecimal nonce bytes".to_owned(),
+        );
+    }
+    if value.len() > 128 {
+        return Err("certification token exceeds the 128-byte bound".to_owned());
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn payload_bytes(args: &[String]) -> usize {

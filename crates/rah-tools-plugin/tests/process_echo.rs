@@ -1,4 +1,11 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use rah_protocol::{
     PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName, ToolOutput,
@@ -97,6 +104,45 @@ async fn handshakes_discovers_names_permissions_and_registers() {
         .shutdown()
         .await
         .expect("shutdown should reap child");
+}
+
+#[test]
+fn live_certification_token_configuration_fails_closed() {
+    for token in [
+        "malformed-token".to_owned(),
+        format!("RAH_LIVE_TOOL_TOKEN_{}", "a".repeat(33)),
+    ] {
+        let status = std::process::Command::new(fixture())
+            .args(["--live-certification", "--certification-token", &token])
+            .status()
+            .expect("fixture should start");
+        assert!(!status.success(), "invalid token was accepted: {token}");
+    }
+}
+
+#[tokio::test]
+async fn copied_fixture_executable_is_renameable_after_shutdown() {
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+    let directory = std::env::temp_dir().join(format!(
+        "rah-plugin-unlock-after-shutdown-{}-{}",
+        std::process::id(),
+        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&directory).expect("fixture directory should be created");
+    let copied = directory.join(format!("copied{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fixture(), &copied).expect("fixture executable should be copied");
+    let adapter = PluginAdapter::connect(
+        PluginConfig::stdio("test", "0.1.0", &copied)
+            .expect("copied configuration")
+            .with_expected_tool("echo", echo_schema(), PermissionLevel::None)
+            .expect("expected tool"),
+    )
+    .await
+    .expect("copied fixture should connect");
+    adapter.shutdown().await.expect("child should be reaped");
+    let renamed = directory.join(format!("released{}", std::env::consts::EXE_SUFFIX));
+    std::fs::rename(&copied, &renamed).expect("shutdown should release the executable");
+    std::fs::remove_dir_all(directory).expect("fixture directory should be cleaned");
 }
 
 #[tokio::test]

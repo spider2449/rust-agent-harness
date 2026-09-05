@@ -25,7 +25,7 @@ try {
     $isolatedHome = $homeLine.Substring('RAH_CODEX_LIVE_GATE_TEST_HOME='.Length)
     if (-not (Test-Path -LiteralPath $isolatedHome -PathType Container)) { throw 'isolated home was not created' }
     $config = Get-Content -LiteralPath (Join-Path $isolatedHome 'config.toml') -Raw
-    foreach ($required in @('model = "gpt-5.4"', 'model_reasoning_effort = "medium"', 'code_mode = false', 'plugins = false')) {
+    foreach ($required in @('model = "gpt-5.6-terra"', 'model_reasoning_effort = "medium"', 'code_mode = false', 'plugins = false')) {
         if (-not $config.Contains($required)) { throw "isolated config omitted $required" }
     }
     if ($config.Contains($env:USERPROFILE) -or $config.Contains('test-secret-must-not-appear')) { throw 'isolated config leaked a host path or secret' }

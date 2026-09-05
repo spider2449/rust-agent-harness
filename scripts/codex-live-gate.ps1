@@ -7,7 +7,7 @@ param(
     [string]$ExpectedSha256 = '14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00',
 
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
-    [string]$Model = 'gpt-5.4',
+    [string]$Model = 'gpt-5.6-terra',
 
     [ValidateSet('minimal', 'low', 'medium', 'high', 'xhigh')]
     [string]$ReasoningEffort = 'medium',

@@ -136,6 +136,35 @@ async fn trusted_profile_composes_exact_mcp_tool_and_redacts_executable() {
     fs::remove_dir_all(directory).expect("profile directory should be removed");
 }
 
+#[test]
+fn live_certification_token_configuration_fails_closed() {
+    for token in [
+        "malformed-token".to_owned(),
+        format!("RAH_LIVE_TOOL_TOKEN_{}", "a".repeat(33)),
+    ] {
+        let status = std::process::Command::new(server_program())
+            .args(["--live-certification", "--certification-token", &token])
+            .status()
+            .expect("fixture should start");
+        assert!(!status.success(), "invalid token was accepted: {token}");
+    }
+}
+
+#[tokio::test]
+async fn copied_fixture_executable_is_renameable_after_shutdown() {
+    let directory = fixture_path("unlock-after-shutdown");
+    fs::create_dir(&directory).expect("fixture directory should be created");
+    let copied = directory.join(format!("copied{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(server_program(), &copied).expect("fixture executable should be copied");
+    let adapter = McpAdapter::connect(config(Duration::from_secs(1)))
+        .await
+        .expect("copied fixture should connect");
+    adapter.shutdown().await.expect("child should be reaped");
+    let renamed = directory.join(format!("released{}", std::env::consts::EXE_SUFFIX));
+    fs::rename(&copied, &renamed).expect("shutdown should release the executable");
+    fs::remove_dir_all(directory).expect("fixture directory should be cleaned");
+}
+
 #[tokio::test]
 async fn initializes_then_discovers_and_maps_echo_definition() {
     let adapter = adapter().await;

@@ -11,7 +11,7 @@ use std::{
 use futures::StreamExt;
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-    RequestId, ToolContent, ToolName,
+    RequestId, ToolName,
 };
 use rah_runtime::AgentRuntime;
 use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
@@ -19,11 +19,17 @@ use rah_tools::{ExternalToolIdentity, ExternalToolPermissionPolicy, ToolRegistry
 use rah_tools_plugin::{PLUGIN_PROTOCOL_VERSION, PluginAdapter, PluginConfig};
 use serde_json::{Value, json};
 
+#[path = "support/live_gate_contract.rs"]
+mod live_gate_contract;
+use live_gate_contract::{
+    CopiedFixture, ProofEvent, certification_token, require_token_hidden, verify_tool_proof,
+};
+
 const ADVERTISED_ALIAS: &str = "rah_tool_0";
 const EXPECTED_RAH_TOOL: &str = "plugin.test.echo";
 const EXTERNAL_IDENTITY: &str = "plugin:test:echo";
-const EXPECTED_TEXT: &str = "RAH_PLUGIN_BRIDGE_OK";
-const PROMPT: &str = "Use the available RAH tool exactly once to echo:\nRAH_PLUGIN_BRIDGE_OK\n\nAfter receiving the tool result, reply with exactly:\nRAH_PLUGIN_BRIDGE_OK\n\nDo not request any other tool.";
+const CERTIFICATION_REQUEST: &str = "certification-token";
+const PROMPT: &str = "Call the available RAH certification tool exactly once with exactly {\"request\":\"certification-token\"}. After receiving the tool result, continue with a brief confirmation. Do not request any other tool.";
 const TERMINAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn main() -> ExitCode {
@@ -64,6 +70,9 @@ async fn run() -> Result<(), String> {
     let plugin_executable = env::var_os("RAH_PLUGIN_ECHO_EXECUTABLE")
         .map(PathBuf::from)
         .unwrap_or_else(default_plugin_executable);
+    let token = certification_token();
+    let fixture = CopiedFixture::create(&plugin_executable, "plugin-certification")?;
+    let plugin_executable = fixture.executable().to_owned();
 
     let identity = ExternalToolIdentity::new(EXTERNAL_IDENTITY)
         .map_err(|error| format!("invalid external tool identity: {error}"))?;
@@ -99,8 +108,19 @@ async fn run() -> Result<(), String> {
     let adapter = PluginAdapter::connect(
         PluginConfig::stdio("test", "0.1.0", &plugin_executable)
             .map_err(|error| format!("invalid plugin configuration: {error}"))?
-            .with_arg("--live-text-audit")
-            .with_tool_permission("echo", PermissionLevel::None)
+            .with_arg("--live-certification")
+            .with_arg("--certification-token")
+            .with_arg(&token)
+            .with_expected_tool(
+                "echo",
+                json!({
+                    "type": "object",
+                    "properties": {"request": {"type": "string", "enum": [CERTIFICATION_REQUEST]}},
+                    "required": ["request"],
+                    "additionalProperties": false
+                }),
+                PermissionLevel::None,
+            )
             .map_err(|error| format!("invalid plugin tool permission configuration: {error}"))?,
     )
     .await
@@ -110,6 +130,13 @@ async fn run() -> Result<(), String> {
     verify_discovery(&tools)?;
 
     let definition = tools[0].definition();
+    require_token_hidden(
+        &token,
+        PROMPT,
+        &definition.description,
+        &definition.input_schema,
+        &json!({"fixture": true}),
+    )?;
     println!("DISCOVERED_PLUGIN_TOOLS {}", tools.len());
     println!("RESOLVED_RAH_TOOL_NAME {}", definition.name);
     println!("RAH_TOOL_PERMISSION {:?}", definition.permission);
@@ -139,7 +166,7 @@ async fn run() -> Result<(), String> {
     let live_result = match runtime_result {
         Ok(runtime) => {
             let runtime = Arc::new(runtime);
-            let turn_result = run_turn(Arc::clone(&runtime), &adapter).await;
+            let turn_result = run_turn(Arc::clone(&runtime), &adapter, &token).await;
             let shutdown_result = runtime.shutdown().await;
             match &shutdown_result {
                 Ok(()) => {
@@ -166,6 +193,9 @@ async fn run() -> Result<(), String> {
             isolated_cwd.display()
         ));
     }
+    let provider_lifecycle_calls = fixture.finish()?;
+    println!("PLUGIN_PROVIDER_LIFECYCLE_CALLS {provider_lifecycle_calls}");
+    println!("PLUGIN_CHILD_REAPED_AND_UNLOCKED true");
     println!("PLUGIN_TEMPORARY_DIRECTORY_CLEANUP removed");
     live_result
 }
@@ -193,8 +223,8 @@ fn verify_discovery(tools: &[Arc<dyn rah_tools::Tool>]) -> Result<(), String> {
     if definition.input_schema
         != json!({
             "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
+            "properties": {"request": {"type": "string", "enum": [CERTIFICATION_REQUEST]}},
+            "required": ["request"],
             "additionalProperties": false
         })
     {
@@ -206,7 +236,11 @@ fn verify_discovery(tools: &[Arc<dyn rah_tools::Tool>]) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result<(), String> {
+async fn run_turn(
+    runtime: Arc<CodexRuntime>,
+    adapter: &PluginAdapter,
+    token: &str,
+) -> Result<(), String> {
     let handle = runtime
         .start(AgentRequest {
             request_id: RequestId::new(),
@@ -226,9 +260,8 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
     let mut started = 0_usize;
     let mut finished = 0_usize;
     let mut final_text = None;
-    let mut finished_index = None;
-    let mut continuation_index = None;
     let mut tool_output = None;
+    let mut proof_events = Vec::new();
 
     tokio::time::timeout(TERMINAL_TIMEOUT, async {
         while let Some(event) = events.next().await {
@@ -236,42 +269,53 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
                 "RAH_EVENT {}",
                 serde_json::to_string(&event).map_err(|error| error.to_string())?
             );
-            let index = observed.len();
             observed.push(event_name(&event));
             match event {
                 AgentEvent::ToolRequested { tool_call, .. } => {
                     requested += 1;
+                    proof_events.push(ProofEvent::ToolRequested {
+                        name: tool_call.name.to_string(),
+                        arguments: tool_call.input.0.clone(),
+                    });
                     println!(
                         "RESOLVED_RAH_TOOL_CALL name={} input={}",
                         tool_call.name, tool_call.input.0
                     );
                     if tool_call.name.as_str() != EXPECTED_RAH_TOOL
-                        || tool_call.input.0 != json!({"text": EXPECTED_TEXT})
+                        || tool_call.input.0 != json!({"request": CERTIFICATION_REQUEST})
                     {
                         return Err(format!("unexpected RAH ToolCall: {tool_call:?}"));
                     }
                 }
-                AgentEvent::ToolStarted { .. } => started += 1,
+                AgentEvent::ToolStarted { .. } => {
+                    started += 1;
+                    proof_events.push(ProofEvent::ToolStarted);
+                }
                 AgentEvent::ToolFinished { output, .. } => {
                     finished += 1;
-                    finished_index = Some(index);
                     if output.is_error {
                         return Err("plugin echo returned an error output".to_owned());
                     }
-                    match output.content.as_slice() {
-                        [ToolContent::Text(text)] if text == EXPECTED_TEXT => {
-                            tool_output = Some(output);
-                        }
-                        content => {
-                            return Err(format!("unexpected plugin ToolOutput: {content:?}"));
-                        }
-                    }
+                    let output_text = output
+                        .content
+                        .iter()
+                        .find_map(|content| match content {
+                            rah_protocol::ToolContent::Text(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| "plugin ToolOutput did not contain text".to_owned())?;
+                    proof_events.push(ProofEvent::ToolFinished {
+                        is_error: output.is_error,
+                        output_text,
+                    });
+                    tool_output = Some(output);
                 }
-                AgentEvent::ModelDelta { .. } if finished_index.is_some() => {
-                    continuation_index.get_or_insert(index);
+                AgentEvent::ModelDelta { .. } => {
+                    proof_events.push(ProofEvent::ModelDelta);
                 }
                 AgentEvent::Completed { output, .. } => {
                     final_text = Some(output.message.content);
+                    proof_events.push(ProofEvent::Completed);
                 }
                 AgentEvent::ApprovalRequired { .. } => {
                     return Err("Codex requested an approval".to_owned());
@@ -280,9 +324,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
                     return Err(format!("runtime failed closed: {message}"));
                 }
                 AgentEvent::Cancelled { .. } => return Err("turn was cancelled".to_owned()),
-                AgentEvent::Started { .. }
-                | AgentEvent::ModelRequestStarted { .. }
-                | AgentEvent::ModelDelta { .. } => {}
+                AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } => {}
             }
         }
         Ok::<(), String>(())
@@ -290,28 +332,35 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
     .await
     .map_err(|_| "timed out waiting for terminal RAH event".to_owned())??;
 
-    if requested != 1 || started != 1 || finished != 1 {
-        return Err(format!(
-            "unexpected tool lifecycle counts: requested={requested}, started={started}, finished={finished}"
-        ));
-    }
     let audit = wait_for_plugin_audit(adapter).await?;
+    println!("TOOL_LIFECYCLE_COUNTS requested={requested} started={started} finished={finished}");
+    println!(
+        "PLUGIN_EXECUTION_COUNT {}",
+        audit
+            .as_ref()
+            .and_then(|audit| audit["execution_count"].as_u64())
+            .unwrap_or_default()
+    );
+    verify_tool_proof(
+        "Process Plugin",
+        EXPECTED_RAH_TOOL,
+        &json!({"request": CERTIFICATION_REQUEST}),
+        token,
+        &proof_events,
+        audit
+            .as_ref()
+            .and_then(|audit| audit["execution_count"].as_u64())
+            .unwrap_or_default(),
+    )?;
+    let audit = audit.ok_or_else(|| "missing plugin provider audit result".to_owned())?;
     verify_plugin_audit(&audit, adapter)?;
-    if continuation_index.is_none() {
-        return Err("no Codex model continuation followed ToolFinished".to_owned());
-    }
     let final_text = final_text.ok_or_else(|| "missing Completed output".to_owned())?;
-    if final_text != EXPECTED_TEXT {
-        return Err(format!("unexpected final assistant text: {final_text:?}"));
-    }
     if observed.last() != Some(&"Completed") {
         return Err(format!("Completed was not terminal: {observed:?}"));
     }
 
     println!("CODEX_ITEM_TOOL_CALL_COUNT {requested}");
     println!("RAH_EVENT_SEQUENCE {}", observed.join(" -> "));
-    println!("TOOL_LIFECYCLE_COUNTS requested={requested} started={started} finished={finished}");
-    println!("PLUGIN_EXECUTION_COUNT {}", audit["execution_count"]);
     println!("PLUGIN_TOOLS_CALL_PAYLOAD {}", audit["tools_call"]);
     println!("PLUGIN_RECEIVED_ARGUMENTS {}", audit["received_arguments"]);
     println!("PLUGIN_AUDIT_CWD {}", audit["cwd"]);
@@ -319,10 +368,8 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
         "PLUGIN_AUDIT_ENVIRONMENT_NAMES {}",
         environment_names(&audit["environment"])?
     );
-    println!(
-        "RAH_TOOL_OUTPUT {:?}",
-        tool_output.expect("validated ToolOutput")
-    );
+    let _ = tool_output.expect("validated ToolOutput");
+    println!("RAH_TOOL_OUTPUT hidden_token_verified=true is_error=false");
     println!("DYNAMIC_TOOL_CALL_RESPONSE success=true content_items=1 type=inputText");
     println!("CODEX_CONTINUED_AFTER_PLUGIN_RESULT true");
     println!("FINAL_ASSISTANT_TEXT {final_text:?}");
@@ -332,8 +379,8 @@ async fn run_turn(runtime: Arc<CodexRuntime>, adapter: &PluginAdapter) -> Result
     Ok(())
 }
 
-async fn wait_for_plugin_audit(adapter: &PluginAdapter) -> Result<Value, String> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+async fn wait_for_plugin_audit(adapter: &PluginAdapter) -> Result<Option<Value>, String> {
+    match tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let diagnostics = adapter.diagnostics();
             for line in diagnostics.stderr.lines() {
@@ -346,15 +393,18 @@ async fn wait_for_plugin_audit(adapter: &PluginAdapter) -> Result<Value, String>
         }
     })
     .await
-    .map_err(|_| "timed out waiting for host-only plugin audit data".to_owned())?
+    {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
 }
 
 fn verify_plugin_audit(audit: &Value, adapter: &PluginAdapter) -> Result<(), String> {
     if audit["execution_count"] != 1
-        || audit["received_arguments"] != json!([{"text": EXPECTED_TEXT}])
+        || audit["received_arguments"] != json!([{"request": CERTIFICATION_REQUEST}])
         || audit["tools_call"]["method"] != "tools/call"
         || audit["tools_call"]["params"]["name"] != "echo"
-        || audit["tools_call"]["params"]["arguments"] != json!({"text": EXPECTED_TEXT})
+        || audit["tools_call"]["params"]["arguments"] != json!({"request": CERTIFICATION_REQUEST})
     {
         return Err(format!("unexpected plugin audit result: {audit}"));
     }

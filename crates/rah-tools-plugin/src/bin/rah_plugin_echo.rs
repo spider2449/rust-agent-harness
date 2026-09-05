@@ -73,6 +73,13 @@ fn main() {
     let contradictory_metadata = arguments
         .iter()
         .any(|arg| arg == "--contradictory-metadata");
+    let certification_token = match certification_token(&arguments) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("RAH_PLUGIN_CERTIFICATION_CONFIG_ERROR {error}");
+            process::exit(2);
+        }
+    };
     let live_text_audit = arguments.iter().any(|arg| arg == "--live-text-audit");
     let discovery_mode = arguments
         .iter()
@@ -147,7 +154,17 @@ fn main() {
                 } else {
                     json!({"fixture": true})
                 };
-                let (description, input_schema) = if live_text_audit {
+                let (description, input_schema) = if certification_token.is_some() {
+                    (
+                        "Returns the per-run certification result.",
+                        json!({
+                            "type": "object",
+                            "properties": {"request": {"type": "string", "enum": ["certification-token"]}},
+                            "required": ["request"],
+                            "additionalProperties": false
+                        }),
+                    )
+                } else if live_text_audit {
                     (
                         "Returns the supplied text.",
                         json!({
@@ -216,6 +233,31 @@ fn main() {
                     continue;
                 }
                 let arguments = message["params"]["arguments"].clone();
+                if let Some(token) = certification_token.as_deref() {
+                    if arguments != json!({"request": "certification-token"}) {
+                        write_error(
+                            &stdout,
+                            json!(id),
+                            -32602,
+                            "certification request must be exact",
+                        );
+                        continue;
+                    }
+                    execution_count += 1;
+                    received_arguments.push(arguments.clone());
+                    eprintln!(
+                        "RAH_PLUGIN_AUDIT {}",
+                        json!({
+                            "execution_count": execution_count,
+                            "received_arguments": received_arguments,
+                            "tools_call": message,
+                            "cwd": env::current_dir().expect("fixture cwd").display().to_string(),
+                            "environment": environment_map()
+                        })
+                    );
+                    write_result(&stdout, json!(id), echo_result(json!(token), false));
+                    continue;
+                }
                 let input_name = if live_text_audit { "text" } else { "value" };
                 let Some(value) = arguments.get(input_name).cloned() else {
                     write_error(
@@ -390,4 +432,33 @@ fn environment_map() -> Value {
         .map(|(name, value)| (name, Value::String(value)))
         .collect::<Map<_, _>>();
     Value::Object(entries)
+}
+
+fn certification_token(args: &[String]) -> Result<Option<String>, String> {
+    let live = args.iter().any(|arg| arg == "--live-certification");
+    let value = args
+        .windows(2)
+        .find(|pair| pair[0] == "--certification-token")
+        .map(|pair| pair[1].as_str());
+    if !live {
+        if value.is_some() {
+            return Err("--certification-token requires --live-certification".to_owned());
+        }
+        return Ok(None);
+    }
+    let Some(value) = value else {
+        return Err("--live-certification requires --certification-token".to_owned());
+    };
+    let Some(suffix) = value.strip_prefix("RAH_LIVE_TOOL_TOKEN_") else {
+        return Err("certification token has an invalid prefix".to_owned());
+    };
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "certification token must contain exactly 32 hexadecimal nonce bytes".to_owned(),
+        );
+    }
+    if value.len() > 128 {
+        return Err("certification token exceeds the 128-byte bound".to_owned());
+    }
+    Ok(Some(value.to_owned()))
 }

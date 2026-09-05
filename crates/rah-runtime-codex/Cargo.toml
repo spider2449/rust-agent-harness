@@ -23,3 +23,4 @@ rah-tools-mcp = { path = "../rah-tools-mcp" }
 rah-tools-plugin = { path = "../rah-tools-plugin" }
 sha2.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true

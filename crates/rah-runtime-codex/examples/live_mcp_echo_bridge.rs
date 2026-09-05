@@ -9,7 +9,7 @@ use std::{env, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 use futures::StreamExt;
 use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
-    RequestId, ToolContent, ToolName,
+    RequestId, ToolName,
 };
 use rah_runtime::AgentRuntime;
 use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
@@ -17,10 +17,16 @@ use rah_tools::ToolRegistry;
 use rah_tools_mcp::{MCP_PROTOCOL_VERSION, McpAdapter, McpServerConfig};
 use serde_json::{Value, json};
 
+#[path = "support/live_gate_contract.rs"]
+mod live_gate_contract;
+use live_gate_contract::{
+    CopiedFixture, ProofEvent, certification_token, require_token_hidden, verify_tool_proof,
+};
+
 const ADVERTISED_ALIAS: &str = "rah_tool_0";
 const EXPECTED_RAH_TOOL: &str = "mcp.test.echo";
-const EXPECTED_TEXT: &str = "RAH_MCP_BRIDGE_OK";
-const PROMPT: &str = "Use the available RAH tool exactly once to echo:\nRAH_MCP_BRIDGE_OK\n\nAfter receiving the tool result, reply with exactly:\nRAH_MCP_BRIDGE_OK\n\nDo not request any other tool.";
+const CERTIFICATION_REQUEST: &str = "certification-token";
+const PROMPT: &str = "Call the available RAH certification tool exactly once with exactly {\"request\":\"certification-token\"}. After receiving the tool result, continue with a brief confirmation. Do not request any other tool.";
 const TERMINAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn main() -> ExitCode {
@@ -61,6 +67,9 @@ async fn run() -> Result<(), String> {
     let mcp_executable = env::var_os("RAH_MCP_ECHO_SERVER")
         .map(PathBuf::from)
         .unwrap_or_else(default_mcp_executable);
+    let token = certification_token();
+    let fixture = CopiedFixture::create(&mcp_executable, "mcp-certification")?;
+    let mcp_executable = fixture.executable().to_owned();
 
     println!("CODEX_EXECUTABLE {}", codex_executable.display());
     println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
@@ -80,7 +89,19 @@ async fn run() -> Result<(), String> {
     let adapter = McpAdapter::connect(
         McpServerConfig::stdio("test", &mcp_executable)
             .map_err(|error| format!("invalid MCP server configuration: {error}"))?
-            .with_tool_permission("echo", PermissionLevel::None)
+            .with_arg("--live-certification")
+            .with_arg("--certification-token")
+            .with_arg(&token)
+            .with_expected_tool(
+                "echo",
+                json!({
+                    "type": "object",
+                    "properties": {"request": {"type": "string", "enum": [CERTIFICATION_REQUEST]}},
+                    "required": ["request"],
+                    "additionalProperties": false
+                }),
+                PermissionLevel::None,
+            )
             .map_err(|error| format!("invalid MCP tool permission configuration: {error}"))?,
     )
     .await
@@ -89,6 +110,13 @@ async fn run() -> Result<(), String> {
     verify_discovery(&tools)?;
 
     let definition = tools[0].definition();
+    require_token_hidden(
+        &token,
+        PROMPT,
+        &definition.description,
+        &definition.input_schema,
+        &json!({"fixture": true}),
+    )?;
     println!("DISCOVERED_MCP_TOOLS {}", tools.len());
     println!("RESOLVED_RAH_TOOL_NAME {}", definition.name);
     println!("RAH_TOOL_PERMISSION {:?}", definition.permission);
@@ -117,7 +145,7 @@ async fn run() -> Result<(), String> {
     let live_result = match runtime_result {
         Ok(runtime) => {
             let runtime = Arc::new(runtime);
-            let turn_result = run_turn(Arc::clone(&runtime)).await;
+            let turn_result = run_turn(Arc::clone(&runtime), &token).await;
             let shutdown_result = runtime.shutdown().await;
             match &shutdown_result {
                 Ok(()) => println!("CODEX_PROCESS_CLEANUP app-server shutdown completed"),
@@ -136,6 +164,9 @@ async fn run() -> Result<(), String> {
         Err(error) => eprintln!("MCP_PROCESS_CLEANUP_FAIL {error}"),
     }
     mcp_shutdown.map_err(|error| format!("MCP server shutdown failed: {error}"))?;
+    let provider_lifecycle_calls = fixture.finish()?;
+    println!("MCP_PROVIDER_LIFECYCLE_CALLS {provider_lifecycle_calls}");
+    println!("MCP_CHILD_REAPED_AND_UNLOCKED true");
     live_result
 }
 
@@ -162,7 +193,7 @@ fn verify_discovery(tools: &[Arc<dyn rah_tools::Tool>]) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
+async fn run_turn(runtime: Arc<CodexRuntime>, token: &str) -> Result<(), String> {
     let handle = runtime
         .start(AgentRequest {
             request_id: RequestId::new(),
@@ -182,9 +213,8 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
     let mut started = 0_usize;
     let mut finished = 0_usize;
     let mut final_text = None;
-    let mut finished_index = None;
-    let mut continuation_index = None;
     let mut server_audit = None;
+    let mut proof_events = Vec::new();
 
     tokio::time::timeout(TERMINAL_TIMEOUT, async {
         while let Some(event) = events.next().await {
@@ -192,42 +222,56 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
                 "RAH_EVENT {}",
                 serde_json::to_string(&event).map_err(|error| error.to_string())?
             );
-            let index = observed.len();
             observed.push(event_name(&event));
             match event {
                 AgentEvent::ToolRequested { tool_call, .. } => {
                     requested += 1;
+                    proof_events.push(ProofEvent::ToolRequested {
+                        name: tool_call.name.to_string(),
+                        arguments: tool_call.input.0.clone(),
+                    });
                     println!(
                         "RESOLVED_RAH_TOOL_CALL name={} input={}",
                         tool_call.name, tool_call.input.0
                     );
                     if tool_call.name.as_str() != EXPECTED_RAH_TOOL
-                        || tool_call.input.0 != json!({"text": EXPECTED_TEXT})
+                        || tool_call.input.0 != json!({"request": CERTIFICATION_REQUEST})
                     {
                         return Err(format!("unexpected RAH ToolCall: {tool_call:?}"));
                     }
                 }
-                AgentEvent::ToolStarted { .. } => started += 1,
+                AgentEvent::ToolStarted { .. } => {
+                    started += 1;
+                    proof_events.push(ProofEvent::ToolStarted);
+                }
                 AgentEvent::ToolFinished { output, .. } => {
                     finished += 1;
-                    finished_index = Some(index);
                     if output.is_error {
                         return Err("MCP echo returned an error output".to_owned());
                     }
-                    match output.content.as_slice() {
-                        [ToolContent::Text(text), ToolContent::Json(audit)]
-                            if text == EXPECTED_TEXT =>
-                        {
-                            server_audit = Some(audit.clone());
-                        }
-                        content => return Err(format!("unexpected MCP ToolOutput: {content:?}")),
-                    }
+                    let output_text = output
+                        .content
+                        .iter()
+                        .find_map(|content| match content {
+                            rah_protocol::ToolContent::Text(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| "MCP ToolOutput did not contain text".to_owned())?;
+                    server_audit = output.content.iter().find_map(|content| match content {
+                        rah_protocol::ToolContent::Json(audit) => Some(audit.clone()),
+                        _ => None,
+                    });
+                    proof_events.push(ProofEvent::ToolFinished {
+                        is_error: output.is_error,
+                        output_text,
+                    });
                 }
-                AgentEvent::ModelDelta { .. } if finished_index.is_some() => {
-                    continuation_index.get_or_insert(index);
+                AgentEvent::ModelDelta { .. } => {
+                    proof_events.push(ProofEvent::ModelDelta);
                 }
                 AgentEvent::Completed { output, .. } => {
                     final_text = Some(output.message.content);
+                    proof_events.push(ProofEvent::Completed);
                 }
                 AgentEvent::ApprovalRequired { .. } => {
                     return Err("Codex requested an approval".to_owned());
@@ -238,9 +282,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
                 AgentEvent::Cancelled { .. } => {
                     return Err("turn was cancelled".to_owned());
                 }
-                AgentEvent::Started { .. }
-                | AgentEvent::ModelRequestStarted { .. }
-                | AgentEvent::ModelDelta { .. } => {}
+                AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } => {}
             }
         }
         Ok::<(), String>(())
@@ -248,32 +290,33 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
     .await
     .map_err(|_| "timed out waiting for terminal RAH event".to_owned())??;
 
-    if requested != 1 || started != 1 || finished != 1 {
-        return Err(format!(
-            "unexpected tool lifecycle counts: requested={requested}, started={started}, finished={finished}"
-        ));
-    }
+    let provider_execution_count = server_audit
+        .as_ref()
+        .and_then(|audit| audit["bridgeCertificationCalls"].as_u64())
+        .unwrap_or_default();
+    println!("TOOL_LIFECYCLE_COUNTS requested={requested} started={started} finished={finished}");
+    println!("MCP_EXECUTION_COUNT {provider_execution_count}");
+    verify_tool_proof(
+        "MCP",
+        EXPECTED_RAH_TOOL,
+        &json!({"request": CERTIFICATION_REQUEST}),
+        token,
+        &proof_events,
+        provider_execution_count,
+    )?;
     let audit = server_audit.ok_or_else(|| "missing MCP server audit result".to_owned())?;
     verify_server_audit(&audit)?;
-    if continuation_index.is_none() {
-        return Err("no Codex model continuation followed ToolFinished".to_owned());
-    }
     let final_text = final_text.ok_or_else(|| "missing Completed output".to_owned())?;
-    if final_text != EXPECTED_TEXT {
-        return Err(format!("unexpected final assistant text: {final_text:?}"));
-    }
     if observed.last() != Some(&"Completed") {
         return Err(format!("Completed was not terminal: {observed:?}"));
     }
 
     println!("RAH_EVENT_SEQUENCE {}", observed.join(" -> "));
-    println!("TOOL_LIFECYCLE_COUNTS requested={requested} started={started} finished={finished}");
-    println!("MCP_EXECUTION_COUNT {}", audit["bridgeEchoCalls"]);
     println!(
         "MCP_SERVER_RECEIVED_ARGUMENTS {}",
         audit["receivedArguments"]
     );
-    println!("RAH_TOOL_OUTPUT text={EXPECTED_TEXT:?} is_error=false structured_audit=true");
+    println!("RAH_TOOL_OUTPUT hidden_token_verified=true is_error=false structured_audit=true");
     println!("DYNAMIC_TOOL_CALL_RESPONSE success=true content_items=2 types=inputText,inputText");
     println!("CODEX_CONTINUED_AFTER_MCP_RESULT true");
     println!("FINAL_ASSISTANT_TEXT {final_text:?}");
@@ -283,7 +326,8 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
 }
 
 fn verify_server_audit(audit: &Value) -> Result<(), String> {
-    if audit["bridgeEchoCalls"] != 1 || audit["receivedArguments"] != json!({"text": EXPECTED_TEXT})
+    if audit["bridgeCertificationCalls"] != 1
+        || audit["receivedArguments"] != json!({"request": CERTIFICATION_REQUEST})
     {
         return Err(format!("unexpected MCP server audit result: {audit}"));
     }
