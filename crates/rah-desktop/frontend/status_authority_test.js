@@ -22,6 +22,8 @@ assert.match(source, /Object\.hasOwn\(authorityStatusLabels, snapshot\.status\)/
 assert.match(source, /snapshot\.status === "connected_current"/);
 assert.match(source, /renderEffectiveAuthority\(\{ schemaVersion: 0 \}\)/);
 assert.match(source, /invoke\("get_effective_authority_snapshot"\)/);
+assert.match(source, /function renderSourceLabel\(value\)/);
+assert.match(source, /renderSourceLabel\(tool\.sourceLabel\)/);
 
 for (const forbidden of [
   "innerHTML",

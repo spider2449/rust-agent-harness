@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use rah_tools::TrustedStaticProfile;
 use serde::Serialize;
 
+use crate::effective_authority::{ExternalToolDescriptor, external_tool_descriptors};
+
 /// Desktop-owned configured intent for one explicitly selected Trusted Profile.
 ///
 /// The source path remains Rust-only. Task 204 never turns this value into an
@@ -16,6 +18,7 @@ pub(crate) struct DesktopTrustedProfileSelection {
     mcp_provider_count: u32,
     process_plugin_count: u32,
     expected_tool_count: u32,
+    external_tools: Vec<ExternalToolDescriptor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +59,11 @@ impl DesktopTrustedProfileSelection {
         &self,
     ) -> Result<TrustedStaticProfile, ProfileSelectionError> {
         load_provider_only_static_profile(&self.source)
+    }
+
+    #[must_use]
+    pub(crate) fn external_tools(&self) -> &[ExternalToolDescriptor] {
+        &self.external_tools
     }
 
     #[must_use]
@@ -113,6 +121,8 @@ pub(crate) fn load_provider_only_profile(
         .try_fold(0usize, |total, count| total.checked_add(count))
         .and_then(|count| u32::try_from(count).ok())
         .ok_or(ProfileSelectionError::InvalidProfile)?;
+    let external_tools =
+        external_tool_descriptors(&profile).map_err(|_| ProfileSelectionError::InvalidProfile)?;
 
     Ok(DesktopTrustedProfileSelection {
         source,
@@ -120,6 +130,7 @@ pub(crate) fn load_provider_only_profile(
         mcp_provider_count,
         process_plugin_count,
         expected_tool_count,
+        external_tools,
     })
 }
 
@@ -134,6 +145,7 @@ mod tests {
     use serde_json::json;
 
     use super::{ProfileSelectionError, TrustedProfilePresentation, load_provider_only_profile};
+    use crate::effective_authority::SourceKind;
 
     static NEXT_PROFILE: AtomicU64 = AtomicU64::new(1);
 
@@ -233,11 +245,21 @@ mod tests {
             }]
         }]);
         let fixture = ProfileFile::write(value);
-        let presentation = load_provider_only_profile(fixture.path().to_path_buf())
-            .expect("static selection must not require provider startup")
-            .presentation();
+        let selection = load_provider_only_profile(fixture.path().to_path_buf())
+            .expect("static selection must not require provider startup");
+        let presentation = selection.presentation();
         assert_eq!(presentation.mcp_provider_count, 1);
         assert_eq!(presentation.expected_tool_count, 1);
+        assert_eq!(selection.external_tools().len(), 1);
+        assert_eq!(
+            selection.external_tools()[0].public_tool_name,
+            "mcp.fixture.echo"
+        );
+        assert_eq!(selection.external_tools()[0].source_kind, SourceKind::Mcp);
+        assert_eq!(
+            selection.external_tools()[0].permission,
+            rah_protocol::PermissionLevel::None
+        );
     }
 
     #[test]

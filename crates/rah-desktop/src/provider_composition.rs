@@ -6,6 +6,7 @@ use rah_profile_composition::EffectiveProfileComposition;
 use rah_protocol::PermissionLevel;
 use rah_tools::{ToolError, ToolRegistry, TrustedStaticProfile};
 
+use crate::effective_authority::{ExternalToolDescriptor, external_tool_descriptors};
 use crate::trusted_profile_selection::{DesktopTrustedProfileSelection, ProfileSelectionError};
 
 /// Desktop-owned activation wrapper around the shared effective-profile composer.
@@ -16,6 +17,7 @@ use crate::trusted_profile_selection::{DesktopTrustedProfileSelection, ProfileSe
 pub(crate) struct DesktopProviderActivation {
     composition: EffectiveProfileComposition,
     permissions: Vec<PermissionLevel>,
+    external_tools: Vec<ExternalToolDescriptor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,12 +37,15 @@ impl DesktopProviderActivation {
             .map_err(ProviderActivationError::Profile)?;
         let permissions =
             configured_external_permissions(&profile).map_err(ProviderActivationError::Profile)?;
+        let external_tools = external_tool_descriptors(&profile)
+            .map_err(|_| ProviderActivationError::Profile(ProfileSelectionError::InvalidProfile))?;
         let composition = rah_profile_composition::compose(profile)
             .await
             .map_err(|_| ProviderActivationError::ProviderUnavailable)?;
         Ok(Self {
             composition,
             permissions,
+            external_tools,
         })
     }
 
@@ -52,6 +57,11 @@ impl DesktopProviderActivation {
     #[must_use]
     pub(crate) fn permissions(&self) -> &[PermissionLevel] {
         &self.permissions
+    }
+
+    #[must_use]
+    pub(crate) fn external_tools(&self) -> &[ExternalToolDescriptor] {
+        &self.external_tools
     }
 
     pub(crate) async fn shutdown(self) {
@@ -132,7 +142,10 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use rah_protocol::{PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName};
@@ -303,6 +316,7 @@ mod tests {
             activation.permissions(),
             [PermissionLevel::Read, PermissionLevel::Execute]
         );
+        let external_descriptors = activation.external_tools().to_vec();
 
         let mut first_party = ToolRegistry::new();
         first_party
@@ -316,6 +330,53 @@ mod tests {
             .map(|definition| definition.name.to_string())
             .collect::<Vec<_>>();
         assert_eq!(names, ["echo", "mcp.mcp-a.echo", "plugin.plugin-b.echo"]);
+        let authority = crate::effective_authority::compose(
+            Arc::clone(&merged),
+            None,
+            false,
+            &external_descriptors,
+        )
+        .expect("all admitted external Tools must be classified");
+        let mcp_authority = authority
+            .tools
+            .iter()
+            .find(|tool| tool.public_tool_name == "mcp.mcp-a.echo")
+            .expect("MCP authority entry");
+        assert_eq!(
+            mcp_authority.source_kind,
+            crate::effective_authority::SourceKind::Mcp
+        );
+        assert_eq!(mcp_authority.source_label, "mcp-a");
+        assert_eq!(
+            mcp_authority.effect_class,
+            crate::effective_authority::EffectClass::External
+        );
+        assert_eq!(
+            mcp_authority.authority_category,
+            crate::effective_authority::AuthorityCategory::External
+        );
+        assert_eq!(mcp_authority.permission, PermissionLevel::Read);
+        assert!(!mcp_authority.repository_bound);
+        let plugin_authority = authority
+            .tools
+            .iter()
+            .find(|tool| tool.public_tool_name == "plugin.plugin-b.echo")
+            .expect("Process Plugin authority entry");
+        assert_eq!(
+            plugin_authority.source_kind,
+            crate::effective_authority::SourceKind::ProcessPlugin
+        );
+        assert_eq!(plugin_authority.source_label, "plugin-b");
+        assert_eq!(
+            plugin_authority.effect_class,
+            crate::effective_authority::EffectClass::External
+        );
+        assert_eq!(
+            plugin_authority.authority_category,
+            crate::effective_authority::AuthorityCategory::External
+        );
+        assert_eq!(plugin_authority.permission, PermissionLevel::Execute);
+        assert!(!plugin_authority.repository_bound);
         let mcp_output = merged
             .execute(
                 call("mcp.mcp-a.echo", json!({"text": "mcp-ok"})),

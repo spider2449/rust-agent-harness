@@ -1,7 +1,7 @@
 #![cfg(target_os = "windows")]
 
-use rah_protocol::{PermissionLevel, ToolDefinition};
-use rah_tools::ToolRegistry;
+use rah_protocol::PermissionLevel;
+use rah_tools::{ToolRegistry, TrustedStaticProfile};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -157,7 +157,7 @@ pub(crate) struct ConfiguredSummary {
 pub(crate) struct EffectiveToolEntry {
     pub public_tool_name: String,
     pub source_kind: SourceKind,
-    pub source_label: &'static str,
+    pub source_label: String,
     pub effect_class: EffectClass,
     pub authority_category: AuthorityCategory,
     pub permission: PermissionLevel,
@@ -168,7 +168,7 @@ pub(crate) struct EffectiveToolEntry {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UnavailableCapability {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_tool_name: Option<&'static str>,
+    pub public_tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_kind: Option<SourceKind>,
     pub state: UnavailableState,
@@ -187,11 +187,88 @@ pub(crate) struct EffectiveAuthoritySnapshot {
     pub reviewed_commit: ReviewedCommitState,
 }
 
+/// Host-owned classification for one external Tool admitted by the selected
+/// Trusted Profile. Provider descriptions and discovered metadata never enter
+/// this representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExternalToolDescriptor {
+    pub public_tool_name: String,
+    pub source_kind: SourceKind,
+    pub source_label: String,
+    pub permission: PermissionLevel,
+    pub effect_class: EffectClass,
+    pub authority_category: AuthorityCategory,
+    pub repository_bound: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompositionError {
+    UnclassifiedTool,
+    ExternalMetadataMismatch,
+    ExternalToolNotAdmitted,
+}
+
+const MAX_PROVIDER_LABEL_BYTES: usize = 64;
+const FALLBACK_PROVIDER_LABEL: &str = "external_provider";
+
 #[derive(Clone)]
 pub(crate) struct DesktopToolComposition {
     pub registry: Arc<ToolRegistry>,
     pub tools: Vec<EffectiveToolEntry>,
     pub unavailable: Vec<UnavailableCapability>,
+}
+
+/// Builds only bounded presentation metadata from the validated host profile.
+/// The naming convention is the adapter's public RAH name, not provider text.
+pub(crate) fn external_tool_descriptors(
+    profile: &TrustedStaticProfile,
+) -> Result<Vec<ExternalToolDescriptor>, rah_tools::ProfileError> {
+    let mut descriptors = Vec::new();
+    for provider in profile.mcp_providers() {
+        let source_label = sanitize_provider_label(provider.id());
+        for tool in provider.tools() {
+            descriptors.push(ExternalToolDescriptor {
+                public_tool_name: format!("mcp.{}.{}", provider.id(), tool.remote_name()),
+                source_kind: SourceKind::Mcp,
+                source_label: source_label.clone(),
+                permission: tool.permission()?,
+                effect_class: EffectClass::External,
+                authority_category: AuthorityCategory::External,
+                repository_bound: false,
+            });
+        }
+    }
+    for provider in profile.process_plugins() {
+        let source_label = sanitize_provider_label(provider.id());
+        for tool in provider.tools() {
+            descriptors.push(ExternalToolDescriptor {
+                public_tool_name: format!("plugin.{}.{}", provider.id(), tool.remote_name()),
+                source_kind: SourceKind::ProcessPlugin,
+                source_label: source_label.clone(),
+                permission: tool.permission()?,
+                effect_class: EffectClass::External,
+                authority_category: AuthorityCategory::External,
+                repository_bound: false,
+            });
+        }
+    }
+    descriptors.sort_by(|left, right| left.public_tool_name.cmp(&right.public_tool_name));
+    Ok(descriptors)
+}
+
+fn sanitize_provider_label(value: &str) -> String {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return FALLBACK_PROVIDER_LABEL.to_owned();
+    }
+    value
+        .bytes()
+        .take(MAX_PROVIDER_LABEL_BYTES)
+        .map(char::from)
+        .collect()
 }
 
 fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
@@ -237,9 +314,9 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
     })
 }
 
-fn make_unavailable(name: &'static str, reason: UnavailableReason) -> UnavailableCapability {
+fn make_unavailable(name: &str, reason: UnavailableReason) -> UnavailableCapability {
     UnavailableCapability {
-        public_tool_name: Some(name),
+        public_tool_name: Some(name.to_owned()),
         source_kind: Some(SourceKind::RepositoryHost),
         state: UnavailableState::ConfiguredUnavailable,
         reason,
@@ -250,14 +327,15 @@ pub(crate) fn compose(
     registry: Arc<ToolRegistry>,
     repository: Option<&DesktopRepository>,
     commit_tool_present: bool,
-) -> DesktopToolComposition {
-    let mut tools = registry
-        .definitions()
-        .into_iter()
-        .filter_map(|definition: ToolDefinition| {
-            let (effect_class, authority_category, repository_bound) =
-                metadata(definition.name.as_str())?;
-            Some(EffectiveToolEntry {
+    external_descriptors: &[ExternalToolDescriptor],
+) -> Result<DesktopToolComposition, CompositionError> {
+    let mut tools = Vec::new();
+    let mut matched_external = vec![false; external_descriptors.len()];
+    for definition in registry.definitions() {
+        let entry = if let Some((effect_class, authority_category, repository_bound)) =
+            metadata(definition.name.as_str())
+        {
+            EffectiveToolEntry {
                 public_tool_name: definition.name.to_string(),
                 source_kind: if repository_bound {
                     SourceKind::RepositoryHost
@@ -265,18 +343,51 @@ pub(crate) fn compose(
                     SourceKind::BuiltIn
                 },
                 source_label: if repository_bound {
-                    "desktop_repository"
+                    "desktop_repository".to_owned()
                 } else {
-                    "desktop_builtin"
+                    "desktop_builtin".to_owned()
                 },
                 effect_class,
                 authority_category,
                 permission: definition.permission,
                 repository_bound,
                 advertised: false,
-            })
-        })
-        .collect::<Vec<_>>();
+            }
+        } else if let Some((index, external)) = external_descriptors
+            .iter()
+            .enumerate()
+            .find(|(_, external)| external.public_tool_name == definition.name.as_str())
+        {
+            if external.permission != definition.permission
+                || !matches!(
+                    external.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+                || external.effect_class != EffectClass::External
+                || external.authority_category != AuthorityCategory::External
+                || external.repository_bound
+            {
+                return Err(CompositionError::ExternalMetadataMismatch);
+            }
+            matched_external[index] = true;
+            EffectiveToolEntry {
+                public_tool_name: definition.name.to_string(),
+                source_kind: external.source_kind,
+                source_label: sanitize_provider_label(&external.source_label),
+                effect_class: external.effect_class,
+                authority_category: external.authority_category,
+                permission: definition.permission,
+                repository_bound: external.repository_bound,
+                advertised: false,
+            }
+        } else {
+            return Err(CompositionError::UnclassifiedTool);
+        };
+        tools.push(entry);
+    }
+    if matched_external.iter().any(|matched| !matched) {
+        return Err(CompositionError::ExternalToolNotAdmitted);
+    }
     tools.sort_by(|left, right| left.public_tool_name.cmp(&right.public_tool_name));
     let mut unavailable = Vec::new();
     if repository.is_none() {
@@ -325,10 +436,22 @@ pub(crate) fn compose(
             ));
         }
     }
-    DesktopToolComposition {
+    Ok(DesktopToolComposition {
         registry,
         tools,
         unavailable,
+    })
+}
+
+pub(crate) fn external_unavailable(
+    descriptor: &ExternalToolDescriptor,
+    reason: UnavailableReason,
+) -> UnavailableCapability {
+    UnavailableCapability {
+        public_tool_name: Some(descriptor.public_tool_name.clone()),
+        source_kind: Some(descriptor.source_kind),
+        state: UnavailableState::NotEffective,
+        reason,
     }
 }
 
@@ -399,7 +522,7 @@ mod tests {
             effective_tools: vec![EffectiveToolEntry {
                 public_tool_name: "repo.status".to_owned(),
                 source_kind: SourceKind::RepositoryHost,
-                source_label: "desktop_repository",
+                source_label: "desktop_repository".to_owned(),
                 effect_class: EffectClass::ReadOnly,
                 authority_category: AuthorityCategory::RepositoryObservation,
                 permission: PermissionLevel::Read,
@@ -407,7 +530,7 @@ mod tests {
                 advertised: true,
             }],
             unavailable_capabilities: vec![UnavailableCapability {
-                public_tool_name: Some("repo.commit"),
+                public_tool_name: Some("repo.commit".to_owned()),
                 source_kind: Some(SourceKind::RepositoryHost),
                 state: UnavailableState::ConfiguredUnavailable,
                 reason: UnavailableReason::AuthorityNotGranted,
@@ -480,14 +603,48 @@ mod tests {
         registry
             .register(Arc::new(rah_tools::EchoTool::new()))
             .expect("echo registers");
-        let composition = compose(Arc::new(registry), None, false);
-        assert_eq!(composition.tools.len(), 1);
-        assert!(
-            composition
-                .tools
-                .iter()
-                .all(|tool| metadata(&tool.public_tool_name).is_some())
-        );
+        assert!(compose(Arc::new(registry), None, false, &[]).is_ok());
+    }
+
+    #[test]
+    fn known_tool_names_compose_with_explicit_host_classification() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(rah_tools::EchoTool::new()))
+            .expect("echo registers");
+        registry
+            .register(Arc::new(UnknownTool))
+            .expect("unknown test tool registers");
+        assert!(compose(Arc::new(registry), None, false, &[]).is_err());
+    }
+
+    #[test]
+    fn external_descriptors_use_host_permission_and_sanitized_labels() {
+        let descriptor = ExternalToolDescriptor {
+            public_tool_name: "mcp.provider.echo".to_owned(),
+            source_kind: SourceKind::Mcp,
+            source_label: "C:\\private\\provider".to_owned(),
+            permission: PermissionLevel::Write,
+            effect_class: EffectClass::External,
+            authority_category: AuthorityCategory::External,
+            repository_bound: false,
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(ExternalTestTool {
+                name: "mcp.provider.echo",
+                permission: PermissionLevel::Write,
+            }))
+            .expect("external test tool registers");
+        let composition = compose(Arc::new(registry), None, false, &[descriptor])
+            .expect("explicit external classification should compose");
+        let tool = &composition.tools[0];
+        assert_eq!(tool.source_kind, SourceKind::Mcp);
+        assert_eq!(tool.source_label, FALLBACK_PROVIDER_LABEL);
+        assert_eq!(tool.effect_class, EffectClass::External);
+        assert_eq!(tool.authority_category, AuthorityCategory::External);
+        assert_eq!(tool.permission, PermissionLevel::Write);
+        assert!(!tool.repository_bound);
     }
 
     #[test]
@@ -504,5 +661,58 @@ mod tests {
             source_label(CodexExecutableSource::Path),
             "resolved_host_binary"
         );
+    }
+
+    struct UnknownTool;
+
+    #[async_trait::async_trait]
+    impl rah_tools::Tool for UnknownTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            rah_protocol::ToolDefinition {
+                name: rah_protocol::ToolName::new("unknown.tool"),
+                description: "unknown".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                permission: PermissionLevel::None,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: rah_protocol::ToolInput,
+            _: rah_tools::ToolContext,
+        ) -> Result<rah_protocol::ToolOutput, rah_tools::ToolError> {
+            Ok(rah_protocol::ToolOutput {
+                content: vec![],
+                is_error: false,
+            })
+        }
+    }
+
+    struct ExternalTestTool {
+        name: &'static str,
+        permission: PermissionLevel,
+    }
+
+    #[async_trait::async_trait]
+    impl rah_tools::Tool for ExternalTestTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            rah_protocol::ToolDefinition {
+                name: rah_protocol::ToolName::new(self.name),
+                description: "provider-authored path text must be ignored".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                permission: self.permission,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: rah_protocol::ToolInput,
+            _: rah_tools::ToolContext,
+        ) -> Result<rah_protocol::ToolOutput, rah_tools::ToolError> {
+            Ok(rah_protocol::ToolOutput {
+                content: vec![],
+                is_error: false,
+            })
+        }
     }
 }

@@ -130,6 +130,16 @@ function authorityLabel(group, value) {
   return authorityLabels[group][value] ?? "Unknown / unavailable";
 }
 
+function renderSourceLabel(value) {
+  if (Object.hasOwn(authorityLabels.sourceLabel, value)) {
+    return authorityLabels.sourceLabel[value];
+  }
+  if (typeof value === "string" && value.length > 0 && value.length <= 64 && /^[A-Za-z0-9._-]+$/.test(value)) {
+    return value;
+  }
+  return "Unknown / unavailable";
+}
+
 function renderAuthorityValue(label, value) {
   const row = document.createElement("div");
   const term = document.createElement("dt");
@@ -203,7 +213,7 @@ function renderEffectiveTool(tool) {
   const title = document.createElement("strong");
   title.textContent = tool.publicToolName;
   const details = document.createElement("dl");
-  details.append(renderAuthorityValue("Source", `${authorityLabel("sourceKind", tool.sourceKind)} — ${authorityLabel("sourceLabel", tool.sourceLabel)}`), renderAuthorityValue("Effect", authorityLabel("effectClass", tool.effectClass)), renderAuthorityValue("Authority", authorityLabel("authorityCategory", tool.authorityCategory)), renderAuthorityValue("Dispatch permission", `${authorityLabel("permission", tool.permission)} classification`), renderAuthorityValue("Repository bound", tool.repositoryBound === true ? "Yes" : "No"), renderAuthorityValue("Runtime", tool.advertised === true ? "Advertised" : "Not advertised / host effective only"));
+  details.append(renderAuthorityValue("Source", `${authorityLabel("sourceKind", tool.sourceKind)} — ${renderSourceLabel(tool.sourceLabel)}`), renderAuthorityValue("Effect", authorityLabel("effectClass", tool.effectClass)), renderAuthorityValue("Authority", authorityLabel("authorityCategory", tool.authorityCategory)), renderAuthorityValue("Dispatch permission", `${authorityLabel("permission", tool.permission)} classification`), renderAuthorityValue("Repository bound", tool.repositoryBound === true ? "Yes" : "No"), renderAuthorityValue("Runtime", tool.advertised === true ? "Advertised" : "Not advertised / host effective only"));
   item.append(title, details);
   return item;
 }

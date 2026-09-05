@@ -27,8 +27,8 @@ use desktop_preferences::{Preferences, Warning as PreferencesWarning};
 #[cfg(target_os = "windows")]
 use effective_authority::{
     ConfiguredSummary, ConnectionBinding, ConnectionBindingState, DesktopToolComposition,
-    EffectiveAuthoritySnapshot, RepositoryBinding, RepositoryIdentity, RepositoryKind,
-    SnapshotStatus, SourceKind,
+    EffectiveAuthoritySnapshot, ExternalToolDescriptor, RepositoryBinding, RepositoryIdentity,
+    RepositoryKind, SnapshotStatus, SourceKind,
 };
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
@@ -1842,6 +1842,11 @@ fn get_effective_authority_snapshot(
         .repository_workflow
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let profile_selection = state
+        .trusted_profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let selected = repository.is_some();
     let (connection_binding, composition, status) = match &*connection {
         ConnectionState::Connected {
@@ -1956,9 +1961,36 @@ fn get_effective_authority_snapshot(
     for tool in &mut effective_tools {
         tool.advertised = connection_binding.advertised;
     }
-    let unavailable_capabilities = composition
+    let mut unavailable_capabilities = composition
         .as_ref()
         .map_or_else(Vec::new, |value| value.unavailable.clone());
+    if composition.is_none()
+        && let Some(profile) = profile_selection.as_ref()
+    {
+        let reason = if matches!(&*connection, ConnectionState::Error(_)) {
+            effective_authority::UnavailableReason::ProviderUnavailable
+        } else {
+            effective_authority::UnavailableReason::ProviderNotEffective
+        };
+        unavailable_capabilities.extend(
+            profile
+                .external_tools()
+                .iter()
+                .map(|tool| effective_authority::external_unavailable(tool, reason)),
+        );
+    }
+    let configured = profile_selection.as_ref().map_or(
+        ConfiguredSummary {
+            profile_source: Some(SourceKind::BuiltIn),
+            configured_provider_count: 0,
+            configured_capability_count: effective_tools.len() as u32,
+        },
+        |profile| ConfiguredSummary {
+            profile_source: Some(SourceKind::TrustedProfile),
+            configured_provider_count: profile.presentation().configured_provider_count,
+            configured_capability_count: effective_tools.len() as u32,
+        },
+    );
     let repository_binding = RepositoryBinding {
         selected,
         display_name: repository
@@ -1986,11 +2018,7 @@ fn get_effective_authority_snapshot(
         status,
         repository: repository_binding,
         connection: connection_binding,
-        configured: ConfiguredSummary {
-            profile_source: Some(SourceKind::BuiltIn),
-            configured_provider_count: 0,
-            configured_capability_count: effective_tools.len() as u32,
-        },
+        configured,
         effective_tools,
         unavailable_capabilities,
         reviewed_commit: effective_authority::reviewed_commit(workflow.authorization, selected),
@@ -3591,12 +3619,14 @@ fn desktop_tool_composition_from_registry(
     registry: Arc<ToolRegistry>,
     repository: Option<&DesktopRepository>,
     commit_tool_present: bool,
-) -> Arc<DesktopToolComposition> {
-    Arc::new(effective_authority::compose(
+    external_descriptors: &[ExternalToolDescriptor],
+) -> Result<Arc<DesktopToolComposition>, effective_authority::CompositionError> {
+    Ok(Arc::new(effective_authority::compose(
         registry,
         repository,
         commit_tool_present,
-    ))
+        external_descriptors,
+    )?))
 }
 
 /// Resolves host executable selection and combines it with the already chosen,
@@ -3818,11 +3848,30 @@ async fn connect_codex(
             .as_ref()
             .map_or(&[], DesktopProviderActivation::permissions),
     );
-    let composition = desktop_tool_composition_from_registry(
+    let external_descriptors = provider_activation
+        .as_ref()
+        .map_or_else(Vec::new, |activation| activation.external_tools().to_vec());
+    let composition = match desktop_tool_composition_from_registry(
         Arc::clone(&registry),
         repository.as_deref(),
         commit_tool.is_some(),
-    );
+        &external_descriptors,
+    ) {
+        Ok(composition) => composition,
+        Err(_) => {
+            tracing::warn!("Desktop authority classification failed closed");
+            if let Some(activation) = provider_activation.take() {
+                activation.shutdown().await;
+            }
+            let frontend_error = FrontendError::ToolRegistryFailed;
+            *state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                ConnectionState::Error(frontend_error);
+            return Err(frontend_error);
+        }
+    };
     let repository_fingerprint = repository
         .as_ref()
         .map(|value| repository_context_fingerprint(&value.root));
@@ -4121,30 +4170,93 @@ fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryRefreshReason {
+    FirstPartyMutation,
+    ExternalEffect,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug)]
+struct ToolCallActivity {
+    tool: String,
+    external: bool,
+    started: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityOutcome {
+    activity: ActivityEvent,
+    invalidate_review: bool,
+    refresh_reason: Option<RepositoryRefreshReason>,
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
 fn activity_event(
     event: &AgentEvent,
-    tool_calls: &mut HashMap<rah_protocol::ToolCallId, String>,
+    tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
 ) -> Option<(ActivityEvent, bool)> {
+    activity_event_with_composition(event, tool_calls, &empty_composition_metadata(), false)
+        .map(|outcome| (outcome.activity, outcome.refresh_reason.is_some()))
+}
+
+#[cfg(target_os = "windows")]
+fn activity_event_with_composition(
+    event: &AgentEvent,
+    tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+    composition: &DesktopToolComposition,
+    repository_selected: bool,
+) -> Option<ActivityOutcome> {
+    let is_external = |tool: &str| {
+        composition.tools.iter().any(|entry| {
+            entry.public_tool_name == tool
+                && matches!(
+                    entry.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+        })
+    };
     match event {
         AgentEvent::ToolRequested { tool_call, .. } => {
             if tool_calls.len() >= MAX_TURN_TOOL_CALLS {
                 return None;
             }
             let tool = tool_call.name.as_str().to_owned();
-            tool_calls.insert(tool_call.id.clone(), tool.clone());
-            Some((ActivityEvent::Requested { tool }, false))
+            let external = is_external(&tool);
+            tool_calls.insert(
+                tool_call.id.clone(),
+                ToolCallActivity {
+                    tool: tool.clone(),
+                    external,
+                    started: false,
+                },
+            );
+            Some(ActivityOutcome {
+                activity: ActivityEvent::Requested { tool },
+                invalidate_review: false,
+                refresh_reason: None,
+            })
         }
-        AgentEvent::ToolStarted { tool_call_id, .. } => tool_calls
-            .get(tool_call_id)
-            .cloned()
-            .map(|tool| (ActivityEvent::Started { tool }, false)),
+        AgentEvent::ToolStarted { tool_call_id, .. } => {
+            let activity = tool_calls.get_mut(tool_call_id)?;
+            activity.started = true;
+            Some(ActivityOutcome {
+                activity: ActivityEvent::Started {
+                    tool: activity.tool.clone(),
+                },
+                invalidate_review: activity.external && repository_selected,
+                refresh_reason: None,
+            })
+        }
         AgentEvent::ToolFinished {
             tool_call_id,
             output,
             ..
-        } => tool_calls.remove(tool_call_id).map(|tool| {
-            let refresh = matches!(
-                tool.as_str(),
+        } => tool_calls.remove(tool_call_id).map(|activity| {
+            let first_party_refresh = matches!(
+                activity.tool.as_str(),
                 "repo.patch"
                     | "repo.create-file"
                     | "repo.create-directory"
@@ -4153,12 +4265,19 @@ fn activity_event(
                     | "repo.rename-file"
                     | "repo.commit"
             );
-            let commit = (tool == "repo.commit")
+            let refresh_reason = if activity.external && activity.started && repository_selected {
+                Some(RepositoryRefreshReason::ExternalEffect)
+            } else if first_party_refresh {
+                Some(RepositoryRefreshReason::FirstPartyMutation)
+            } else {
+                None
+            };
+            let commit = (activity.tool == "repo.commit")
                 .then(|| commit_activity_presentation(output))
                 .flatten();
-            (
-                ActivityEvent::Finished {
-                    tool,
+            ActivityOutcome {
+                activity: ActivityEvent::Finished {
+                    tool: activity.tool,
                     result: if output.is_error {
                         ActivityResult::Failed
                     } else {
@@ -4166,10 +4285,48 @@ fn activity_event(
                     },
                     commit,
                 },
-                refresh,
-            )
+                invalidate_review: refresh_reason.is_some(),
+                refresh_reason,
+            }
         }),
         _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+fn empty_composition_metadata() -> DesktopToolComposition {
+    DesktopToolComposition {
+        registry: Arc::new(ToolRegistry::new()),
+        tools: Vec::new(),
+        unavailable: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn uncertain_external_effect_pending(
+    tool_calls: &HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+) -> bool {
+    tool_calls
+        .values()
+        .any(|activity| activity.external && activity.started)
+}
+
+#[cfg(target_os = "windows")]
+async fn handle_uncertain_external_effects(
+    app: &AppHandle,
+    tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+    repository_selected: bool,
+) {
+    let refresh = repository_selected && uncertain_external_effect_pending(tool_calls);
+    tool_calls.clear();
+    if refresh {
+        invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
+        append_live_evidence(serde_json::json!({
+            "event": "repository_refresh",
+            "reason": "uncertain_external_effect",
+        }));
+        emit_repository_refresh(app);
     }
 }
 
@@ -4308,7 +4465,14 @@ async fn run_chat(
     conversation_epoch: u64,
     chat_generation: u64,
 ) {
-    let (repository_generation, model_generation, connection_generation, repository_fingerprint) = {
+    let (
+        repository_generation,
+        model_generation,
+        connection_generation,
+        repository_fingerprint,
+        repository_selected,
+        composition,
+    ) = {
         let state = app.state::<DesktopAppState>();
         let connection = state
             .connection
@@ -4320,12 +4484,15 @@ async fn run_chat(
                 model_generation,
                 connection_generation,
                 repository_fingerprint,
+                composition,
                 ..
             } => (
                 *repository_generation,
                 *model_generation,
                 *connection_generation,
                 repository_fingerprint.clone(),
+                repository_fingerprint.is_some(),
+                Arc::clone(composition),
             ),
             _ => return,
         }
@@ -4383,8 +4550,13 @@ async fn run_chat(
     let mut tool_calls = HashMap::new();
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
-        if let Some((activity, refresh_repository)) = activity_event(&event, &mut tool_calls) {
-            let activity_name = match &activity {
+        if let Some(outcome) = activity_event_with_composition(
+            &event,
+            &mut tool_calls,
+            &composition,
+            repository_selected,
+        ) {
+            let activity_name = match &outcome.activity {
                 ActivityEvent::Requested { .. } => "tool_requested",
                 ActivityEvent::Started { .. } => "tool_started",
                 ActivityEvent::Finished { .. } => "tool_finished",
@@ -4397,14 +4569,17 @@ async fn run_chat(
                 chat_generation,
                 repository_fingerprint.as_deref(),
             );
-            if refresh_repository {
+            if outcome.invalidate_review {
                 invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
             }
-            emit_activity_event(&app, activity);
-            if refresh_repository {
+            emit_activity_event(&app, outcome.activity);
+            if let Some(reason) = outcome.refresh_reason {
                 append_live_evidence(serde_json::json!({
                     "event": "repository_refresh",
-                    "reason": "repository_mutation",
+                    "reason": match reason {
+                        RepositoryRefreshReason::FirstPartyMutation => "repository_mutation",
+                        RepositoryRefreshReason::ExternalEffect => "external_effect",
+                    },
                 }));
                 emit_repository_refresh(&app);
             }
@@ -4420,6 +4595,7 @@ async fn run_chat(
                 }
             }
             AgentEvent::Completed { output, .. } => {
+                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -4465,6 +4641,7 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Failed { code, message, .. } => {
+                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
                 // The frontend receives only a closed error code. Retain the
                 // adapter-provided stage privately for live diagnosis.
                 tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
@@ -4495,6 +4672,7 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Cancelled { .. } => {
+                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -4519,6 +4697,7 @@ async fn run_chat(
             | AgentEvent::ApprovalRequired { .. } => {}
         }
     }
+    handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
     if !terminal
         && app
             .state::<DesktopAppState>()
@@ -4935,30 +5114,33 @@ fn main() {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
+    use super::effective_authority::{EffectClass, EffectiveToolEntry};
     use super::{
         ActivityEvent, ActivityResult, CancelRecoveryOutcome, ChatEvent, ChatState,
         CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
         ConnectionState, ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME,
         DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
-        FrontendError, GracefulCancelOutcome, HardShutdownOutcome, LlamaCppReadinessProbe,
-        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
-        ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
+        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
+        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
+        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
         PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState,
         RepositoryIndexActionKind, RepositoryObservationStage, ResumePair, SendChatResult,
-        StagedReviewPresentation, TerminalOwnership, activity_event, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, clear_conversation_allowed, commit_activity_presentation,
-        connect_prepared_codex, connection_context_is_current, connection_publication_is_current,
-        current_app_status, desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
+        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        clear_conversation_allowed, commit_activity_presentation, connect_prepared_codex,
+        connection_context_is_current, connection_publication_is_current, current_app_status,
+        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_registry, frontend_error, install_repository_workflow,
         invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
         publish_readiness_result, refresh_repository_workflow, replace_selected_repository,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_tool_authority, request_connect,
         resolve_codex_executable, resolve_prepare_and_connect_codex,
-        revoke_repository_commit_context, same_arc, selected_git_executable, validate_prompt,
+        revoke_repository_commit_context, same_arc, selected_git_executable,
+        uncertain_external_effect_pending, validate_prompt,
     };
     use futures::StreamExt;
     use rah_protocol::{
@@ -7816,6 +7998,125 @@ mod tests {
             serialized,
             r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
         );
+    }
+
+    fn external_activity_composition(source_kind: SourceKind) -> DesktopToolComposition {
+        let public_tool_name = match source_kind {
+            SourceKind::Mcp => "mcp.host.echo",
+            SourceKind::ProcessPlugin => "plugin.host.echo",
+            _ => panic!("external activity fixture requires an external source"),
+        };
+        DesktopToolComposition {
+            registry: Arc::new(rah_tools::ToolRegistry::new()),
+            tools: vec![EffectiveToolEntry {
+                public_tool_name: public_tool_name.to_owned(),
+                source_kind,
+                source_label: "host".to_owned(),
+                effect_class: EffectClass::External,
+                authority_category: super::effective_authority::AuthorityCategory::External,
+                permission: PermissionLevel::Read,
+                repository_bound: false,
+                advertised: true,
+            }],
+            unavailable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn external_requested_without_start_has_no_repository_effect() {
+        let composition = external_activity_composition(SourceKind::Mcp);
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("mcp.host.echo"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        };
+        let mut calls = HashMap::new();
+        let outcome = activity_event_with_composition(&requested, &mut calls, &composition, true)
+            .expect("requested activity");
+        assert!(!outcome.invalidate_review);
+        assert_eq!(outcome.refresh_reason, None);
+    }
+
+    #[test]
+    fn external_start_invalidates_review_and_finish_refreshes_selected_repository() {
+        let composition = external_activity_composition(SourceKind::Mcp);
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("mcp.host.echo"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        };
+        let started = AgentEvent::ToolStarted {
+            session_id: SessionId::new(),
+            tool_call_id: id.clone(),
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output: ToolOutput {
+                content: vec![],
+                is_error: true,
+            },
+        };
+        let mut calls = HashMap::new();
+        activity_event_with_composition(&requested, &mut calls, &composition, true)
+            .expect("requested activity");
+        let started = activity_event_with_composition(&started, &mut calls, &composition, true)
+            .expect("started activity");
+        assert!(started.invalidate_review);
+        assert_eq!(started.refresh_reason, None);
+        assert!(uncertain_external_effect_pending(&calls));
+        let finished = activity_event_with_composition(&finished, &mut calls, &composition, true)
+            .expect("finished activity");
+        assert!(finished.invalidate_review);
+        assert_eq!(
+            finished.refresh_reason,
+            Some(super::RepositoryRefreshReason::ExternalEffect)
+        );
+        assert!(!uncertain_external_effect_pending(&calls));
+    }
+
+    #[test]
+    fn external_started_without_repository_does_not_manufacture_refresh_state() {
+        let composition = external_activity_composition(SourceKind::ProcessPlugin);
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("plugin.host.echo"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        };
+        let started = AgentEvent::ToolStarted {
+            session_id: SessionId::new(),
+            tool_call_id: id.clone(),
+        };
+        let finished = AgentEvent::ToolFinished {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+            output: ToolOutput {
+                content: vec![],
+                is_error: false,
+            },
+        };
+        let mut calls = HashMap::new();
+        activity_event_with_composition(&requested, &mut calls, &composition, false)
+            .expect("requested activity");
+        let started = activity_event_with_composition(&started, &mut calls, &composition, false)
+            .expect("started activity");
+        assert!(!started.invalidate_review);
+        let finished = activity_event_with_composition(&finished, &mut calls, &composition, false)
+            .expect("finished activity");
+        assert!(!finished.invalidate_review);
+        assert_eq!(finished.refresh_reason, None);
     }
 
     #[test]

@@ -2834,6 +2834,7 @@ version = "0.16.0"
 name = "rah-desktop"
 version = "0.16.0"
 dependencies = [
+ "async-trait",
  "futures",
  "rah-profile-composition",
  "rah-protocol",
