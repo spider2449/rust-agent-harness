@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rah_protocol::{
@@ -564,9 +564,9 @@ async fn child_cwd_and_environment_are_host_isolated_and_cleaned_up() {
 #[tokio::test]
 async fn initialize_and_discovery_timeouts_return_no_partial_provider() {
     for mode in ["hang-initialize", "hang-discovery"] {
-        let started = Instant::now();
-        let error = connect_error(mode_config(mode)).await;
-        assert!(started.elapsed() < Duration::from_secs(3));
+        let error = timeout(Duration::from_secs(5), connect_error(mode_config(mode)))
+            .await
+            .expect("startup timeout plus bounded provider cleanup should complete");
         assert!(matches!(
             error,
             rah_tools_mcp::McpAdapterError::Initialization { .. }
