@@ -5564,28 +5564,30 @@ mod tests {
     use super::effective_authority::{EffectClass, EffectiveToolEntry};
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
-        ActivityEvent, ActivityResult, CancelRecoveryOutcome, ChatEvent, ChatState,
-        CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
-        ConnectionState, ConversationContextChange, ConversationContextIdentity, DESKTOP_TOOL_NAME,
-        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
-        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
-        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
-        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
-        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
-        PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
-        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
-        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
-        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
-        SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
-        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        connect_prepared_codex, current_app_status, desktop_repository_snapshot,
+        ActivityEvent, ActivityResult, BranchActivityClassification, CancelRecoveryOutcome,
+        ChatEvent, ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
+        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
+        DESKTOP_TOOL_NAME, DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity,
+        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
+        DesktopRepository, DesktopToolComposition, FrontendError, GracefulCancelOutcome,
+        HardShutdownOutcome, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
+        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication, Preferences, PreferencesWarning,
+        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
+        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
+        TerminalOwnership, activity_event, activity_event_with_composition, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, branch_result_classification, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation, connect_prepared_codex,
+        connection_activation_publication_is_current, current_app_status,
+        current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, install_repository_workflow, invalidate_repository_commit_review,
-        model_configuration_status, prepare_codex_connection, publish_readiness_result,
-        publish_trusted_profile_selection, refresh_repository_workflow,
+        model_configuration_status, prepare_codex_connection, publish_connected_provider_state,
+        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_context_fingerprint, repository_index_action,
         repository_selection_allowed, repository_selection_allowed_for_connection,
         repository_tool_authority, request_connect, resolve_codex_executable,
@@ -7270,6 +7272,601 @@ mod tests {
         let first = handle.into_events().next().await;
         assert!(matches!(first, Some(AgentEvent::Started { .. })));
         runtime.shutdown().await.expect("host probe shutdown");
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct LiveGitState {
+        symbolic_head: String,
+        head_oid: String,
+        current_branch: String,
+        status: String,
+        index_semantics: String,
+        raw_worktree_diff: String,
+        raw_staged_diff: String,
+        tracking: String,
+        local_heads: String,
+        tags_and_remotes: String,
+    }
+
+    fn live_git_text(git: &Path, root: &Path, arguments: &[&str]) -> Result<String, String> {
+        let output = Command::new(git)
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("Git command failed to start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Git command failed with status {}", output.status));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("Git output was not UTF-8: {error}"))
+    }
+
+    fn live_git_state(
+        git: &Path,
+        root: &Path,
+        excluded_branch: &str,
+    ) -> Result<LiveGitState, String> {
+        let local_heads = live_git_text(
+            git,
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        )?
+        .lines()
+        .filter(|line| !line.starts_with(&format!("refs/heads/{excluded_branch} ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+        Ok(LiveGitState {
+            symbolic_head: live_git_text(git, root, &["symbolic-ref", "HEAD"])?
+                .trim()
+                .to_owned(),
+            head_oid: live_git_text(git, root, &["rev-parse", "HEAD"])?
+                .trim()
+                .to_owned(),
+            current_branch: live_git_text(git, root, &["branch", "--show-current"])?
+                .trim()
+                .to_owned(),
+            status: live_git_text(git, root, &["status", "--porcelain=v1"])?,
+            index_semantics: live_git_text(git, root, &["ls-files", "--stage"])?,
+            raw_worktree_diff: live_git_text(git, root, &["diff", "--raw"])?,
+            raw_staged_diff: live_git_text(git, root, &["diff", "--cached", "--raw"])?,
+            tracking: live_git_text(
+                git,
+                root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname:short) %(upstream:short)",
+                    "refs/heads",
+                ],
+            )?,
+            local_heads,
+            tags_and_remotes: live_git_text(
+                git,
+                root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/tags",
+                    "refs/remotes",
+                ],
+            )?,
+        })
+    }
+
+    fn live_target_exists(git: &Path, root: &Path, branch: &str) -> Result<bool, String> {
+        let reference = format!("refs/heads/{branch}");
+        let output = Command::new(git)
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("target-ref observation failed to start: {error}"))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            code => Err(format!("target-ref observation returned status {code:?}")),
+        }
+    }
+
+    async fn shutdown_live_state(state: &DesktopAppState) {
+        state.shutdown_for_exit().await;
+        *state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ConnectionState::NotConnected;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires certified Codex live gate and authentication"]
+    async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+
+        fs::write(fixture.0.join("nested/ordinary.txt"), "live unstaged\n")
+            .map_err(|error| format!("unstaged fixture modification failed: {error}"))?;
+        fs::write(fixture.0.join("tracked.txt"), "live staged\n")
+            .map_err(|error| format!("staged fixture modification failed: {error}"))?;
+        let stage = Command::new(&git)
+            .args(["add", "tracked.txt"])
+            .current_dir(&fixture.0)
+            .status()
+            .map_err(|error| format!("staged fixture command failed to start: {error}"))?;
+        if !stage.success() {
+            return Err("staged fixture command failed".to_owned());
+        }
+
+        let authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            None,
+            None,
+            Some(authority),
+        )
+        .map_err(|error| format!("Desktop repository construction failed: {error}"))?;
+        let state = DesktopAppState::new(storage.0.clone());
+        replace_selected_repository(&state, repository);
+        let branch_name = format!(
+            "rah-live-{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| format!("clock failed: {error}"))?
+                .as_nanos(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        );
+        let before = live_git_state(&git, &fixture.0, &branch_name)?;
+        if live_target_exists(&git, &fixture.0, &branch_name)? {
+            return Err("generated live target unexpectedly exists".to_owned());
+        }
+        let conversation_namespace_before = state.persistence_namespace();
+        let conversation_presentation_before = serde_json::to_value(
+            state
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("conversation presentation serialization failed: {error}"))?;
+        let generations_before = current_host_generation_tuple(&state);
+
+        let selected = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| "Desktop repository was not selected".to_owned())?;
+        if selected.branch_creation_authority.is_none() {
+            return Err("Desktop branch authority was not stored".to_owned());
+        }
+        let (commit_tool, commit_control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            "RAH Live Test".to_owned(),
+            "rah-live-test@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit composition failed: {error}"))
+        .map(|(tool, control)| (Arc::new(tool), Arc::new(control)))?;
+        let composed_registry =
+            desktop_tool_registry(Some(&selected), Some(Arc::clone(&commit_tool)))
+                .map_err(|error| format!("Desktop registry composition failed: {error}"))?;
+        if !composed_registry
+            .definitions()
+            .iter()
+            .any(|definition| definition.name.as_str() == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+        {
+            return Err("Desktop registry did not contain repo.create-branch".to_owned());
+        }
+
+        let repository_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model_generation = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
+        let profile_generation = *state
+            .trusted_profile_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let connection_generation = {
+            let mut generation = state
+                .next_connection_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *generation += 1;
+            *generation
+        };
+        {
+            let mut connection = state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *connection = ConnectionState::Connecting;
+        }
+        let prepared =
+            prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
+                .map_err(|error| format!("certified Codex preparation failed: {error:?}"))?;
+        let source = prepared.source;
+        let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
+            prepared.executable,
+            Arc::clone(&composed_registry),
+            vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            prepared.model_config,
+            &fixture.0,
+        )
+        .await
+        .map_err(|error| format!("Desktop Codex connection failed: {error}"))?;
+        let composition = desktop_tool_composition_from_registry(
+            Arc::clone(&composed_registry),
+            Some(&selected),
+            true,
+            &[],
+        )
+        .map_err(|error| format!("Desktop authority classification failed: {error:?}"))?;
+        let repository_fingerprint = Some(repository_context_fingerprint(&selected.root));
+        publish_connected_provider_state(
+            &state,
+            PendingConnectedPublication {
+                runtime: Arc::new(runtime),
+                activation: None,
+                source,
+                repository_generation,
+                model_generation,
+                profile_generation,
+                connection_generation,
+                repository_fingerprint,
+                composition: Arc::clone(&composition),
+            },
+        )
+        .map_err(|_| "Desktop connection publication was rejected".to_owned())?;
+        *state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation: *state
+                .commit_identity_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            _tool: commit_tool,
+            control: Arc::clone(&commit_control),
+        });
+        let connected_current = match &*state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            ConnectionState::Connected {
+                repository_generation: captured_repository_generation,
+                model_generation: captured_model_generation,
+                profile_generation: captured_profile_generation,
+                connection_generation: captured_connection_generation,
+                composition,
+                ..
+            } => {
+                connection_activation_publication_is_current(
+                    [
+                        *captured_repository_generation,
+                        *captured_model_generation,
+                        *captured_profile_generation,
+                        *captured_connection_generation,
+                    ],
+                    current_host_generation_tuple(&state),
+                ) && composition.registry.definitions().len() == composition.tools.len()
+            }
+            _ => false,
+        };
+        if !connected_current {
+            return Err("Desktop Effective Authority was not connected_current".to_owned());
+        }
+        let effective = composition
+            .tools
+            .iter()
+            .find(|tool| tool.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .ok_or_else(|| "repo.create-branch was not effectively composed".to_owned())?;
+        if effective.source_kind != SourceKind::RepositoryHost
+            || effective.source_label != "desktop_repository"
+            || effective.effect_class != EffectClass::RepositoryMutation
+            || effective.authority_category
+                != super::effective_authority::AuthorityCategory::RepositoryLocalBranchCreation
+            || effective.permission != PermissionLevel::Execute
+            || !effective.repository_bound
+        {
+            return Err(
+                "repo.create-branch Effective Authority classification was wrong".to_owned(),
+            );
+        }
+        println!("RAH_DESKTOP_BRANCH_AUTHORITY_PRESENT=1");
+        println!("RAH_DESKTOP_BRANCH_TOOL_REGISTERED=1");
+        println!("RAH_DESKTOP_BRANCH_TOOL_ADVERTISED=1");
+
+        let reviewed = refresh_repository_workflow(&state)
+            .await
+            .map_err(|error| format!("review snapshot failed: {error:?}"))?;
+        let review_id = match reviewed.review {
+            StagedReviewPresentation::ReviewAvailable {
+                review_id: Some(review_id),
+                can_authorize: true,
+                authorization_state: CommitAuthorizationPresentation::ReadyToAuthorize,
+            } => review_id,
+            other => {
+                return Err(format!(
+                    "fixture did not expose an authorizable review: {other:?}"
+                ));
+            }
+        };
+        let authorization = authorize_repository_commit_review(&state, &review_id)
+            .await
+            .map_err(|error| format!("review authorization failed: {error:?}"))?;
+        if authorization.authorization_state != CommitAuthorizationPresentation::AuthorizedPending {
+            return Err("review authorization was not pending".to_owned());
+        }
+        let commit_control = state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control))
+            .ok_or_else(|| "Desktop commit control was not composed".to_owned())?;
+        if !commit_control.has_pending_authorization().await {
+            return Err("underlying reviewed commit authorization was not pending".to_owned());
+        }
+
+        let (runtime, composition) = match &*state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            ConnectionState::Connected {
+                runtime,
+                composition,
+                ..
+            } => (Arc::clone(runtime), Arc::clone(composition)),
+            _ => return Err("Desktop connection was not current".to_owned()),
+        };
+        let handle = runtime
+            .start(AgentRequest {
+                request_id: RequestId::new(),
+                input: AgentInput {
+                    messages: vec![Message {
+                        role: MessageRole::User,
+                        content: format!(
+                            "Use the repo.create-branch tool exactly once to create the local branch named \"{branch_name}\". Do not switch branches and do not use another mutating tool. After the tool result, reply with RAH_BRANCH_LIVE_DONE."
+                        ),
+                    }],
+                },
+                options: AgentOptions::default(),
+            })
+            .await
+            .map_err(|error| format!("live model turn failed to start: {error}"))?;
+
+        let mut tool_calls = HashMap::new();
+        let mut call_names = HashMap::new();
+        let mut requested = HashMap::<String, usize>::new();
+        let mut started = HashMap::<String, usize>::new();
+        let mut finished = HashMap::<String, usize>::new();
+        let mut finished_output = None;
+        let mut other_effectful_started = 0_usize;
+        let mut final_text = None;
+        let mut terminal_failure = None;
+        let mut events = handle.into_events();
+        let event_result = tokio::time::timeout(Duration::from_secs(180), async {
+            while let Some(event) = events.next().await {
+                if let Some(activity) =
+                    activity_event_with_composition(&event, &mut tool_calls, &composition, true)
+                    && (activity.invalidate_review || activity.refresh_reason.is_some())
+                {
+                    return Err(
+                        "branch activity unexpectedly invalidated review or requested refresh"
+                            .to_owned(),
+                    );
+                }
+                match &event {
+                    AgentEvent::ToolRequested { tool_call, .. } => {
+                        let name = tool_call.name.as_str().to_owned();
+                        call_names.insert(tool_call.id.clone(), name.clone());
+                        *requested.entry(name).or_default() += 1;
+                    }
+                    AgentEvent::ToolStarted { tool_call_id, .. } => {
+                        let name = call_names
+                            .get(tool_call_id)
+                            .cloned()
+                            .ok_or_else(|| "ToolStarted lacked a requested call".to_owned())?;
+                        *started.entry(name.clone()).or_default() += 1;
+                        if name != REPOSITORY_CREATE_BRANCH_TOOL_NAME
+                            && !matches!(
+                                name.as_str(),
+                                "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.file-info"
+                            )
+                        {
+                            other_effectful_started += 1;
+                        }
+                    }
+                    AgentEvent::ToolFinished {
+                        tool_call_id,
+                        output,
+                        ..
+                    } => {
+                        let name = call_names
+                            .get(tool_call_id)
+                            .cloned()
+                            .ok_or_else(|| "ToolFinished lacked a requested call".to_owned())?;
+                        *finished.entry(name.clone()).or_default() += 1;
+                        if name == REPOSITORY_CREATE_BRANCH_TOOL_NAME {
+                            finished_output = Some(output.clone());
+                        }
+                    }
+                    AgentEvent::Completed { output, .. } => {
+                        final_text = Some(output.message.content.clone());
+                        break;
+                    }
+                    AgentEvent::Failed { message, .. } => {
+                        terminal_failure = Some(message.clone());
+                        break;
+                    }
+                    AgentEvent::Cancelled { .. } => {
+                        terminal_failure = Some("Codex turn was cancelled".to_owned());
+                        break;
+                    }
+                    AgentEvent::Started { .. }
+                    | AgentEvent::ModelRequestStarted { .. }
+                    | AgentEvent::ModelDelta { .. }
+                    | AgentEvent::ApprovalRequired { .. } => {}
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .await;
+        if !matches!(event_result, Ok(Ok(()))) {
+            terminal_failure = Some("live turn did not complete normally".to_owned());
+        }
+        if let Some(error) = terminal_failure {
+            shutdown_live_state(&state).await;
+            eprintln!("RAH_DESKTOP_BRANCH_LIVE_FIXTURE={}", fixture.0.display());
+            std::mem::forget(fixture);
+            return Err(format!("possible-effect live turn failure: {error}"));
+        }
+
+        let branch_requested = requested
+            .get(REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .copied()
+            .unwrap_or_default();
+        let branch_started = started
+            .get(REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .copied()
+            .unwrap_or_default();
+        let branch_finished = finished
+            .get(REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .copied()
+            .unwrap_or_default();
+        let after = live_git_state(&git, &fixture.0, &branch_name)?;
+        let target_exists = live_target_exists(&git, &fixture.0, &branch_name)?;
+        if branch_requested == 0 {
+            if branch_started != 0
+                || branch_finished != 0
+                || other_effectful_started != 0
+                || target_exists
+                || after != before
+            {
+                shutdown_live_state(&state).await;
+                eprintln!("RAH_DESKTOP_BRANCH_LIVE_FIXTURE={}", fixture.0.display());
+                std::mem::forget(fixture);
+                return Err("zero-request model result was not safely inconclusive".to_owned());
+            }
+            println!("RAH_DESKTOP_BRANCH_TOOL_REQUESTED=0");
+            println!("RAH_DESKTOP_BRANCH_TOOL_STARTED=0");
+            println!("RAH_DESKTOP_BRANCH_TOOL_FINISHED=0");
+            println!("RAH_DESKTOP_BRANCH_LIVE_RESULT=INCONCLUSIVE_MODEL_DISPATCH");
+            shutdown_live_state(&state).await;
+            return Ok(());
+        }
+        if branch_requested != 1 || branch_started != 1 || branch_finished != 1 {
+            shutdown_live_state(&state).await;
+            eprintln!("RAH_DESKTOP_BRANCH_LIVE_FIXTURE={}", fixture.0.display());
+            std::mem::forget(fixture);
+            return Err("branch lifecycle was incomplete after a possible effect".to_owned());
+        }
+        if other_effectful_started != 0 {
+            return Err(format!(
+                "unexpected effectful ToolStarted count: {other_effectful_started}"
+            ));
+        }
+        let output =
+            finished_output.ok_or_else(|| "branch ToolFinished output was missing".to_owned())?;
+        if !matches!(
+            branch_result_classification(&output),
+            BranchActivityClassification::ProvenSafe
+        ) || output.is_error
+        {
+            return Err("branch ToolFinished output was not proven safe".to_owned());
+        }
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            return Err("branch ToolFinished output was not JSON".to_owned());
+        };
+        if value["status"] != "branch_created_verified"
+            || value["uncertain"] != false
+            || value["name"] != branch_name
+            || value["oid"] != before.head_oid.trim()
+            || final_text
+                .as_deref()
+                .is_none_or(|text| !text.contains("RAH_BRANCH_LIVE_DONE"))
+        {
+            return Err("branch result or completion marker was wrong".to_owned());
+        }
+        let branch_oid = live_git_text(
+            &git,
+            &fixture.0,
+            &["rev-parse", &format!("refs/heads/{branch_name}")],
+        )?;
+        let reflog = live_git_text(
+            &git,
+            &fixture.0,
+            &[
+                "reflog",
+                "show",
+                "--format=%gs",
+                "-n",
+                "1",
+                &format!("refs/heads/{branch_name}"),
+            ],
+        )?;
+        if branch_oid.trim() != before.head_oid.trim()
+            || reflog.trim() != "RAH create local branch"
+            || after != before
+        {
+            return Err("verified branch effect changed protected Git state".to_owned());
+        }
+        if !commit_control.has_pending_authorization().await
+            || state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .authorization
+                != CommitAuthorizationPresentation::AuthorizedPending
+        {
+            return Err("verified branch effect consumed reviewed commit authorization".to_owned());
+        }
+        if current_host_generation_tuple(&state) != generations_before
+            || state.persistence_namespace() != conversation_namespace_before
+            || serde_json::to_value(
+                state
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .presentation(),
+            )
+            .map_err(|error| format!("conversation presentation serialization failed: {error}"))?
+                != conversation_presentation_before
+        {
+            return Err(
+                "branch effect changed Desktop currentness or conversation state".to_owned(),
+            );
+        }
+        println!("RAH_DESKTOP_BRANCH_TOOL_REQUESTED=1");
+        println!("RAH_DESKTOP_BRANCH_TOOL_STARTED=1");
+        println!("RAH_DESKTOP_BRANCH_TOOL_FINISHED=1");
+        println!("RAH_DESKTOP_BRANCH_CREATED_VERIFIED=1");
+        println!("RAH_DESKTOP_BRANCH_HEAD_UNCHANGED=1");
+        println!("RAH_DESKTOP_BRANCH_INDEX_UNCHANGED=1");
+        println!("RAH_DESKTOP_BRANCH_WORKTREE_STATUS_UNCHANGED=1");
+        println!("RAH_DESKTOP_BRANCH_REVIEW_PRESERVED=1");
+        println!("RAH_DESKTOP_BRANCH_GENERATIONS_UNCHANGED=1");
+        shutdown_live_state(&state).await;
+        println!("RAH_DESKTOP_BRANCH_LIVE_OK");
+        Ok(())
     }
 
     #[test]
