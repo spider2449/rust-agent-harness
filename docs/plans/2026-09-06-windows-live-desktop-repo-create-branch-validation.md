@@ -2,7 +2,7 @@
 
 ## Result
 
-Status: INCONCLUSIVE — MODEL-SELECTED TOOL DISPATCH NOT OBSERVED
+Status: INCONCLUSIVE — MODEL-SELECTED TOOL DISPATCH NOT OBSERVED AFTER TWO BOUNDED ATTEMPTS
 
 ## Starting checkpoint
 
@@ -84,6 +84,25 @@ assertion. That assertion was corrected in the ignored validation test without
 changing production Desktop behavior. The corrected prompt was not rerun
 automatically.
 
+## Checkpoint and authorized second attempt
+
+Attempt 1 was preserved at checkpoint commit
+`f12871a8a5e1b048e147df9c9b2e3d65a0e3bd43` with exact-head CI run
+`34034804437` completed successfully. The checkpoint preserved the corrected
+test and the INCONCLUSIVE result; it did not replay the prompt.
+
+One explicitly authorized second attempt was then run through the same
+certified gate, with Codex `0.149.0`, binary SHA
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, model
+`gpt-5.6-terra`, and medium reasoning effort. It again observed:
+
+- Attempt 1: `ToolRequested=0`, `ToolStarted=0`, `ToolFinished=0`; target absent.
+- Attempt 2: `ToolRequested=0`, `ToolStarted=0`, `ToolFinished=0`; target absent.
+
+Both attempts established no possible Tool effect. The second attempt also
+observed no other effectful `ToolStarted` event and no repository mutation. No
+further retry was performed.
+
 ## Exact branch effect
 
 Not established because no model-selected branch Tool request occurred. No
@@ -118,9 +137,12 @@ retained locally for diagnosis; no branch deletion or rollback was attempted.
 
 ## Live result classification
 
-INCONCLUSIVE - MODEL-SELECTED TOOL DISPATCH NOT OBSERVED. Deterministic Desktop
-composition/advertisement evidence is recorded separately. The live model did
-not request the first-party Tool, and the prompt was not replayed.
+INCONCLUSIVE — MODEL-SELECTED TOOL DISPATCH NOT OBSERVED AFTER TWO BOUNDED
+ATTEMPTS. Deterministic Desktop authority, registration, and advertisement
+evidence is established separately. There is no evidence of RAH mutation
+failure; full model-selected Windows live execution was not established. The
+live model did not request the first-party Tool on either attempt, and no
+further retry is authorized by this task.
 
 ## Deterministic regression validation
 
@@ -132,14 +154,17 @@ remains ignored in ordinary test runs.
 
 ## Commit
 
-The corrected INCONCLUSIVE checkpoint is intended to be preserved in the
-checkpoint commit `test: record inconclusive desktop branch live gate`. This
-checkpoint records attempt 1 as `0 / 0 / 0`, target absent, and no possible
-Tool effect. No automatic replay was performed.
+The corrected INCONCLUSIVE checkpoint was preserved in commit
+`f12871a8a5e1b048e147df9c9b2e3d65a0e3bd43` with message
+`test: record inconclusive desktop branch live gate`. This checkpoint records
+attempt 1 as `0 / 0 / 0`, target absent, and no possible Tool effect. No
+automatic replay was performed.
 
 ## Exact-head CI
 
-Not run because no live certification PASS was established.
+Checkpoint exact-head CI run `34034804437` completed successfully before the
+second attempt. No closure commit or closure CI was run because the second
+attempt was zero-dispatch.
 
 ## Limitations / nonclaims
 
@@ -150,4 +175,9 @@ branch authority.
 
 ## Next task
 
-Task 230 - RAH v0.19 Local Branch Creation Milestone Audit - not started.
+Task 229C — Host-Driven Windows Desktop repo.create-branch Live Effect
+Certification.
+
+Task 230 — RAH v0.19 Local Branch Creation Milestone Audit — not started.
+Task 229 remains INCONCLUSIVE until the milestone audit decides how the
+model-selected dispatch limitation is represented.
