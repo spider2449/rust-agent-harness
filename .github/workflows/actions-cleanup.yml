@@ -48,7 +48,7 @@ jobs:
             echo "Repository tag response was incomplete or malformed; refusing to delete workflow runs." >&2
             exit 1
           fi
-          jq -r '.[] | .[] | .commit.sha' "$tags_file" | sort -u >"$temporary_directory/tagged-shas"
+          jq -s -r '.[] | .[] | .commit.sha' "$tags_file" | sort -u >"$temporary_directory/tagged-shas"
 
           echo "Collecting workflows for ${REPOSITORY}."
           if ! gh api --paginate \
