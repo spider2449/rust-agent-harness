@@ -1,7 +1,7 @@
 # Task 227 — Local Branch Creation Hardening and Release-Gate Matrix
 
 Date: 2026-09-06
-Status: IMPLEMENTED — AWAITING EXACT-HEAD CI
+Status: COMPLETE
 
 ## Scope and checkpoint
 
@@ -12,7 +12,7 @@ production implementation file changed is
 
 The repository was resolved dynamically with `git rev-parse --show-toplevel`.
 The origin is `spider2449/rust-agent-harness`, and the starting checkpoint was
-`a8f42fcecb039c21e8bbb572fd2d11e0e60a62`, equal to `origin/master`, with a
+`a8f42fcecb039c21e8bbb572fd0d2d11e0e60a62`, equal to `origin/master`, with a
 clean worktree. No fixed checkout path, username, home directory, or temporary
 directory is part of the contract.
 
@@ -137,9 +137,18 @@ Observed results:
 - metadata: PASS, 13 packages, all `0.18.0`, edition 2024
 - `git diff -- Cargo.toml Cargo.lock`: empty
 
-Exact-head CI is intentionally not claimed in this pre-commit plan. The plan
-status remains `IMPLEMENTED — AWAITING EXACT-HEAD CI`; the final Task 227 chat
-report records CI only after the pushed Task 227 commit exists.
+## Final evidence
+
+- Implementation commit: `8f658224cc9ac4a8d39c9deaa56964e2fa4d7d02`
+- Exact-head CI: `34026986981` PASS
+- Focused branch tests: 29 PASS
+- `rah-tools`: 177 PASS
+- Workspace tests: PASS
+- Clippy: PASS
+- Formatting/check/diff-check: PASS
+- Metadata: 13 packages, all `0.18.0`, edition 2024
+- Cargo/dependency drift: none
+- Task 228: not started
 
 ## Task state
 
