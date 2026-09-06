@@ -2,16 +2,18 @@
 
 ## Result
 
-Status: IMPLEMENTED — AWAITING EXACT-HEAD CI (CORRECTIVE COMMIT)
+Status: COMPLETE
 
 The initial Task 228 implementation commit was
 `d19512f27b0aa00a5fbe5f2279033728dbad645e`; its exact-head CI run
-`34030144127` passed. An independent source audit found two semantic gaps in
-the initial implementation: branch output safety was classified from the
+`34030144127` passed. An independent source audit then found two semantic gaps
+in the initial implementation: branch output safety was classified from the
 status string alone, and cleanup did not treat a started first-party
-`repo.create-branch` call without `ToolFinished` as an unresolved effect.
-Task 228 therefore remains open while this bounded corrective commit closes
-those gaps.
+`repo.create-branch` call without `ToolFinished` as an unresolved effect. The
+bounded corrective implementation closed those gaps in commit
+`e9273d5737a81ded301545f850ba2d4d549a0cad`; its exact-head CI run
+`34031201618` passed. Task 228 became complete only after that corrective
+exact-head CI succeeded.
 
 Desktop now composes the existing ADR 0020 local branch creation authority only
 for a host-selected repository, conditionally publishes its first-party Tool,
@@ -152,13 +154,12 @@ authority.
 
 ## Validation
 
-Validation completed before CI:
+Final corrective-era validation:
 
 - `cargo fmt --check` — PASS
 - `cargo check --workspace` — PASS
-- `cargo check -p rah-desktop --tests --target x86_64-pc-windows-msvc` — PASS
+- `cargo test -p rah-desktop` — 180 passed, 2 ignored
 - `cargo test -p rah-tools --lib repository_branch_create -- --nocapture` — 29 PASS
-- `cargo test -p rah-desktop` — 177 PASS, 2 ignored
 - `cargo test --workspace` — PASS
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS
 - `git diff --check` — PASS
@@ -167,22 +168,25 @@ Validation completed before CI:
 - `node crates/rah-desktop/frontend/status_authority_test.js` — PASS
 - `cargo build -p rah-desktop --release` — PASS
 
-The exact requested broad `cargo test -p rah-tools repository_branch_create
--- --nocapture` command was also attempted, but its Windows MSVC linker failed
-while linking unrelated test binaries with `link.exe` `LNK1000`/`0xc0000005`.
-The branch module suite passed through the focused `--lib` fallback and the
-full workspace suite.
+The older initial-checkpoint desktop result was 177 passed, 2 ignored; it is
+historical and is superseded by the final corrective-era count above. An
+earlier broad `cargo test -p rah-tools repository_branch_create -- --nocapture`
+attempt also recorded a Windows MSVC linker failure while linking unrelated
+test binaries with `link.exe` `LNK1000`/`0xc0000005`; the final focused branch
+suite and full workspace suite passed.
 
 ## Commit
 
 Initial commit: `d19512f27b0aa00a5fbe5f2279033728dbad645e`.
-Corrective commit: pending.
+Corrective commit: `e9273d5737a81ded301545f850ba2d4d549a0cad`.
 
 ## Exact-head CI
 
-The initial commit's exact-head CI `34030144127` passed. The corrective commit
-must be pushed and verified with a new exact-head CI success before this plan
-can be marked complete.
+Initial exact-head CI: `34030144127` PASS.
+
+Corrective exact-head CI: `34031201618` PASS.
+
+Task 228 became complete only after the corrective exact-head CI succeeded.
 
 ## Deferred work
 
@@ -192,5 +196,4 @@ generic Git work is included.
 
 ## Next task
 
-Task 229 — Windows Live Desktop repo.create-branch Validation. It is not
-started automatically by Task 228.
+Task 229 — Windows Live Desktop repo.create-branch Validation — not started.
