@@ -1,7 +1,66 @@
-# RAH v0.18.0 Architecture
+# RAH v0.19.0 Architecture
 
-This document describes the released v0.18.0 architecture. v0.18.0 is the
-current immutable release; v0.17.0 is the prior release.
+This document describes the v0.19.0 release candidate architecture. v0.18.0
+remains the current immutable published release until v0.19.0 is separately
+tagged and published.
+
+## ADR 0020 bounded local branch creation
+
+The v0.19 first-party `repo.create-branch` capability adds one narrow,
+host-owned local branch creation plane:
+
+```text
+Model / Runtime
+        -> ToolRegistry
+        -> repo.create-branch
+        -> host-owned RepositoryBranchCreationAuthority
+        -> private RepositoryBranchCreationPolicy
+        -> fixed native Git create-only CAS
+```
+
+The model supplies only `{"name":"<validated-logical-branch-name>"}`. The
+host selects the repository and native Git executable, captures the attached
+committed `HEAD`, validates the closed ASCII branch-name language and all
+repository preconditions, then constructs the fixed `refs/heads/<name>` target
+and zero-old-OID expected-absence CAS. The one permitted secondary effect is
+the Git-owned reflog entry with the fixed host-controlled message.
+
+Branch creation authority != branch switching != index mutation != worktree
+mutation != commit/history authority != generic ref/Git authority. The
+capability does not checkout, switch, create-and-switch, delete, rename, force
+update, set tracking/upstream, address tags/remotes, or accept arbitrary refs,
+OIDs, revisions, argv, hooks, or environment. Dirty, staged, and mixed ordinary
+repository states remain admissible because the new ref targets committed
+`HEAD`, not index or worktree state.
+
+Desktop owns an optional `RepositoryBranchCreationAuthority` for the selected
+repository. `repo.create-branch` is registered only when both the selected
+repository and valid host branch authority are present. No repository, a
+repository without authority, Execute alone, startup, Trusted Profile state,
+provider metadata, or frontend presentation can manufacture it.
+
+The sanitized Effective Authority classification is `repository_mutation`,
+`repository_local_branch_creation`, `execute`, `repositoryBound: true`, with
+source `repository_host` / `desktop_repository` and frontend label `Local
+branch creation`. The frontend presents this backend classification; it does
+not authorize or infer authority from the Tool name.
+
+Verified create-only branch creation preserves reviewed commit authorization
+and the active branch, `HEAD`, index/tree plane, worktree, tracking state,
+conversation namespace, provider composition, and all repository/model/profile/
+connection generations. It does not require reconnect or repository refresh.
+Malformed, uncertain, or started-but-unfinished results use conservative
+currentness handling with bounded refresh and no replay or rollback. The
+public outcome taxonomy remains `invalid_input`, `precondition_failed`,
+`known_no_effect`, `branch_created_verified`,
+`desired_state_observed_after_uncertain_attempt`, and `uncertain`.
+
+The Windows host-driven authority/effect path is certified. Model-selected
+`repo.create-branch` dispatch was not observed in two bounded Codex live
+attempts and is not certified. The fresh successful branch name and OID were
+internally asserted but were not echoed on the successful output path; this is
+a documented evidence-capture limitation. Linux live branch certification is
+not established.
 
 ## Effective Authority observability path
 

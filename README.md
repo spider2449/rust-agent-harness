@@ -5,10 +5,34 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.19.0 release candidate
+
+RAH v0.19.0 is a release candidate for the Bounded Local Branch Creation at
+Captured Attached HEAD milestone. v0.18.0 remains the current immutable
+published release until v0.19.0 is separately tagged and published.
+
+The accepted ADR 0020 capability is `repo.create-branch`. It accepts only
+`{"name":"<validated-logical-branch-name>"}` and, when the host has composed
+the separate authority for the selected repository, creates one absent local
+`refs/heads/<name>` at the host-captured attached committed `HEAD`. The fixed
+expected-absence CAS and Git-owned reflog are host-controlled. It does not
+switch branches, change the index or worktree, set tracking, or provide
+generic Git/ref/history authority. Execute is only the outer dispatch gate;
+Trusted Profile/provider metadata and frontend presentation cannot create this
+authority.
+
+Windows host-driven Desktop repo.create-branch authority/effect path is certified. Model-selected repo.create-branch dispatch was not observed in two bounded Codex live attempts and is not certified.
+
+The fresh host-driven branch name and OID were internally asserted but not
+printed on the successful output path. Linux live branch certification was not
+established, and the accepted Task 207 external-provider limitation remains
+unchanged.
+
 ## RAH v0.18.0 released
 
 RAH v0.18.0 delivers Inert Trusted Profile Persistence and Explicit Restore.
-It is the current immutable published release.
+It remains the current immutable published release until v0.19.0 is separately
+tagged and published.
 Desktop can remember one host-selected Trusted Profile source path locally, but
 startup is remembered-not-restored: it does not select, validate, compose,
 spawn, advertise, or otherwise restore provider authority. Explicit Restore
@@ -43,12 +67,15 @@ Tool selection.
 
 v0.18 does not add active-provider auto-restore, profile hot reload, network or
 Streamable HTTP MCP, provider download/install/update, PluginManager expansion,
-generic shell/process, filesystem,
-or Git/branch/ref/history authority, OS sandboxing, network isolation,
+generic shell/process, filesystem, or generic Git/branch/ref/history authority,
+OS sandboxing, network isolation,
 rollback, absence of ambient external provider effects, or Linux
 Desktop persistence lifecycle certification. `repositoryBound=false` and
 `PermissionLevel` do not prove that an external provider cannot affect
 repository or host state.
+
+v0.19 adds only ADR 0020 bounded local branch creation; generic Git/ref/history
+authority remains absent.
 
 ## RAH v0.16.0 released: Effective Authority Review
 

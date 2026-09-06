@@ -1,7 +1,99 @@
-# RAH v0.18.0 Security Model
+# RAH v0.19.0 Security Model
 
-This document describes the released v0.18.0 security model. v0.18.0 is the
-current immutable release; v0.17.0 is the prior release.
+This document describes the v0.19.0 release candidate security model. v0.18.0
+remains the current immutable published release until v0.19.0 is separately
+tagged and published.
+
+## ADR 0020 bounded local branch creation authority
+
+`repo.create-branch` is a separate, private host-owned
+`RepositoryBranchCreationPolicy` exposed through an opaque
+`RepositoryBranchCreationAuthority` and a public Tool. It is composed only by
+the selected Desktop repository context. Execute is the outer dispatch gate,
+not branch authority; model output, provider metadata, Tool definitions,
+Trusted Profile composition, and frontend state cannot create or escalate the
+policy.
+
+The closed model input is name-only:
+`{"name":"<validated-logical-branch-name>"}`. The host supplies the selected
+repository, native Git executable, captured attached committed `HEAD`,
+validated `refs/heads/<name>` target, zero-old OID, hooks directory, identity,
+argv, environment, and configuration. One authorized call can create exactly
+one previously absent ordinary local branch at that captured OID using the
+fixed native Git shape:
+
+```text
+git update-ref --create-reflog -m "RAH create local branch"
+  refs/heads/<name> <captured-head-oid> <zero-old-oid>
+```
+
+The zero-old OID is an expected-absence CAS; existing refs are never
+overwritten. Only the Git-owned creation reflog for that branch is permitted.
+There is no branch switch, checkout, create-and-switch, deletion, rename,
+force-update, tracking/upstream setup, tag or remote operation, arbitrary
+revision/OID/ref input, generic update-ref, generic Git, or remote/network Git
+authority.
+
+The name language is closed ASCII with bounded length and components. Unicode,
+invalid names, exact collisions, ancestor/descendant prefix collisions, and
+ASCII case-fold collisions are rejected. Loose and packed local heads are
+covered; observation is byte-safe and restricted to `refs/heads/`, not
+unrelated ref namespaces. Count and output bounds fail closed. This is not
+arbitrary Git-ref-name support.
+
+Admission is limited to an ordinary non-bare repository with a real `.git`
+directory, conventional files-backed refs, and an existing attached committed
+`HEAD`. Dirty, staged, and mixed ordinary states are allowed. Detached or
+unborn `HEAD`, bare repositories, `.git` indirection, linked worktrees,
+unsupported ref backends, and required-rejected merge/rebase/sequencer or
+other special-operation states are not admitted.
+
+The selected repository and native Git executable are identity-revalidated,
+including rejection of same-path replacement. Git runs with a host-owned
+canonical empty hooks directory whose identity and emptiness are revalidated;
+hostile repository `core.hooksPath` cannot widen execution. Security-critical
+Git configuration and environment are minimized and pinned, with system/global
+configuration disabled where the policy requires it. No PATH-selected
+executable is used. These checks do not claim race-free TOCTOU exclusion.
+
+There is one possible-effect mutating attempt. The exact public outcomes are
+`invalid_input`, `precondition_failed`, `known_no_effect`,
+`branch_created_verified`, `desired_state_observed_after_uncertain_attempt`,
+and `uncertain`. `known_no_effect` requires both target-ref and target-reflog
+absence. Verified or desired-state evidence requires the accepted fixed
+reflog. Timeout, cancellation, disconnect, crash, or lost response does not
+imply rollback: uncertain effects are not replayed, retried, rolled back, or
+compensated by branch deletion.
+
+Verified create-only creation does not intentionally change symbolic `HEAD`,
+the checked-out branch, `HEAD` OID, index, staged or unstaged worktree state,
+tracking/upstream state, pre-existing refs, tags, remotes, repository/model/
+profile/connection generations, conversation namespace, or provider
+composition. It preserves a previously valid reviewed commit authorization;
+malformed, fully uncertain, and started-but-unfinished possible effects are
+handled conservatively with invalidation and bounded refresh.
+
+Process supervision is not OS sandboxing. This capability makes no claim of
+network isolation, rollback, or race-free exclusion from external Git,
+filesystem, editor, sync, antivirus, or privileged processes. It grants no
+Trusted Profile/provider branch authority; `repo.create-branch` is first-party
+host composition only.
+
+## Windows host-driven certification and model-selected limitation
+
+Task 229C certified the real Windows Desktop path from
+`DesktopRepository` through `RepositoryBranchCreationAuthority`,
+`RepositoryBranchCreationTool`, and `ToolRegistry` to one host-driven native
+Git effect, including the protected-state and currentness invariants. The
+fresh successful branch name and OID were asserted internally but not printed
+on the success path; this is a nonblocking evidence-capture limitation and the
+effectful gate was not rerun.
+
+Windows host-driven Desktop repo.create-branch authority/effect path is certified. Model-selected repo.create-branch dispatch was not observed in two bounded Codex live attempts and is not certified.
+
+Linux live branch certification is not established. Task 207's prior
+externally blocked model-selected MCP/Process Plugin execution limitation is
+unchanged.
 
 ## Effective Authority Review
 

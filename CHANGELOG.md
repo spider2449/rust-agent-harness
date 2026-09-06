@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.19.0 — 2026-09-06
+
+Release candidate for the Bounded Local Branch Creation milestone. This entry
+is preparation evidence only: no v0.19.0 tag or GitHub Release has been
+created.
+
+### Added
+
+- `repo.create-branch`, backed by private host-owned branch authority.
+- Exact captured-HEAD creation of one absent ordinary local branch ref.
+- Explicit Desktop composition and the Effective Authority local-branch
+  category.
+
+### Security / authority
+
+- `Execute` remains the outer gate only; the model supplies only a validated
+  logical name.
+- A fixed `update-ref` expected-absence CAS and Git-owned fixed reflog create
+  the local ref without switching, tracking, or generic Git authority.
+- Each call has one possible mutating attempt. Uncertain effects are not
+  replayed, retried, rolled back, or compensated.
+- Repository, executable, identity, hooks, configuration, and output bounds
+  remain host-controlled and hardened.
+
+### Validation and limitations
+
+Windows host-driven Desktop repo.create-branch authority/effect path is certified. Model-selected repo.create-branch dispatch was not observed in two bounded Codex live attempts and is not certified.
+
+- The fresh host-driven branch name and OID were internally asserted but were
+  not printed on the successful output path; this is a nonblocking evidence-
+  capture limitation and the effectful gate was not rerun.
+- Linux live branch certification was not established.
+- Task 207's prior external-provider model-selection limitation remains
+  unchanged.
+
 ## v0.18.0 — 2026-09-06
 
 RAH v0.18.0 released for the Inert Trusted Profile Persistence and Explicit
