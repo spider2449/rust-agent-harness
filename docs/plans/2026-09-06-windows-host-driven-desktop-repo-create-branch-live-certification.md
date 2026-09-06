@@ -2,7 +2,7 @@
 
 ## Result
 
-Status: LIVE PASS — AWAITING EXACT-HEAD CI
+Status: COMPLETE
 
 Attempt 1 reached the real registry effect and produced the expected
 branch/ref evidence, but exited 101 in the post-effect tracking assertion.
@@ -249,8 +249,26 @@ preserved fixture.
 
 ## Phase-2 pass commit
 
-The pass documentation is to be committed as:
-`docs: record host-driven branch live pass`.
+The pass documentation was committed as:
+`docs: record host-driven branch live pass` (`00716a0`). Its exact-head CI
+completed successfully as run `34037915906`.
+
+## Historical closure
+
+Windows host-driven Desktop `repo.create-branch` authority/effect
+certification is established. The certified Git version was
+`git version 2.55.0.windows.5`; the Codex baseline was `0.149.0` with the
+recorded certified SHA-256 above. The live attempt made no model request and
+does not establish model-selected Tool dispatch. The successful test proved
+one host dispatch and the required verified branch/ref/reflog and protected
+state invariants through the trusted host-composed Desktop ToolRegistry.
+
+The successful harness did not echo the fresh branch name or OID after its
+internal exact assertions; this evidence-capture limitation is preserved
+above and no values are inferred.
+
+The documentation-only closure is to be committed as:
+`docs: close host-driven branch live certification`.
 
 ## Next task
 

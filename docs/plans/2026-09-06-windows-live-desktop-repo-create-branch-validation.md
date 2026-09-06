@@ -4,6 +4,12 @@
 
 Status: INCONCLUSIVE — MODEL-SELECTED TOOL DISPATCH NOT OBSERVED AFTER TWO BOUNDED ATTEMPTS
 
+Task 229C separately established Windows host-driven Desktop
+`repo.create-branch` authority/effect certification. This is a separate
+host-driven claim and does not convert the Task 229 model-selected result into
+a pass. Task 229 remains INCONCLUSIVE after two bounded attempts, and Task 230
+has not started.
+
 ## Starting checkpoint
 
 - Origin: `spider2449/rust-agent-harness`
