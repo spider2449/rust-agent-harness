@@ -2,13 +2,17 @@
 
 ## Result
 
-Status: BLOCKED — TEST-ONLY POST-EFFECT TRACKING ASSERTION
+Status: LIVE PASS — AWAITING EXACT-HEAD CI
 
-The first host-driven live attempt reached the real registry effect and
-produced the expected branch/ref evidence, but exited 101 in the post-effect
-tracking assertion. The assertion incorrectly included the expected new local
-branch in the pre-existing-branch tracking comparison. No retry or rollback
-was performed.
+Attempt 1 reached the real registry effect and produced the expected
+branch/ref evidence, but exited 101 in the post-effect tracking assertion.
+The assertion incorrectly included the expected new local branch in the
+pre-existing-branch tracking comparison. No retry or rollback was performed;
+that fixture remains preserved.
+
+Attempt 2 used a fresh temporary repository, a fresh generated branch, fresh
+host authority, fresh Desktop repository/ToolRegistry, and fresh connected
+current state. The corrected harness completed the full host-driven live gate.
 
 ## Starting checkpoint
 
@@ -183,6 +187,30 @@ path after the failed assertion. The disposable fixture was preserved at
 `F:\Temp\rah-desktop-tool-registry-1788701595462217300-0`; it was not deleted
 and the created branch was not rolled back.
 
+## Fresh-fixture Attempt 2 — host-driven live PASS
+
+The certified gate completed with:
+
+- Codex `0.149.0`;
+- binary SHA-256
+  `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`;
+- model configuration `gpt-5.6-terra`, reasoning `medium`;
+- one host ToolRegistry dispatch;
+- no model request and `RAH_DESKTOP_BRANCH_MODEL_DISPATCH_ESTABLISHED=0`;
+- `branch_created_verified`, `uncertain = false`, `is_error = false`;
+- strict classifier `BranchActivityClassification::ProvenSafe`;
+- `invalidate_review = false`, `refresh_reason = None`;
+- all required authority, registration, advertisement, effect, ref, reflog,
+  HEAD, index, worktree, review, generation, connection-current, and
+  `RAH_DESKTOP_BRANCH_HOST_LIVE_OK` markers.
+
+The generated branch name and captured OID were asserted internally by the
+test's exact Tool output, target-ref, OID, reflog, and no-upstream checks, but
+the successful test path did not print those two values. The fresh fixture was
+dropped only after every assertion passed. No value is inferred here and the
+effectful test is not rerun; the missing success-path echo is an evidence
+capture limitation to retain in the historical record.
+
 ## Deterministic regression validation
 
 PASS: `cargo fmt --check`; `cargo check --workspace`; focused branch tests
@@ -208,16 +236,21 @@ construct a live `AgentRequest`, send a model prompt, or wait for model
 `ToolRequested` / `ToolStarted` / `ToolFinished` events. A successful result
 certifies only the Windows host-driven Desktop authority/effect path.
 
-## Checkpoint commit
+## Phase-1 checkpoint commit
 
-The corrected helper and blocked evidence are to be committed as:
-`test: checkpoint blocked host-driven branch live gate`.
+The corrected helper and blocked evidence were committed as:
+`test: checkpoint blocked host-driven branch live gate` (`56619f8`).
 
 ## Exact-head CI
 
-The checkpoint exact-head CI is required after the blocked-evidence commit and
-must pass before the separately authorized fresh-fixture experiment. The
-first live attempt does not authorize replay of its preserved fixture.
+Checkpoint exact-head CI passed as run `34037651448` for the exact pushed
+checkpoint head. The first live attempt did not authorize replay of its
+preserved fixture.
+
+## Phase-2 pass commit
+
+The pass documentation is to be committed as:
+`docs: record host-driven branch live pass`.
 
 ## Next task
 
