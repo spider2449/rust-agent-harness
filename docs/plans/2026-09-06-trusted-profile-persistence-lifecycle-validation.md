@@ -1,6 +1,6 @@
 # Task 217 — Trusted Profile Persistence Lifecycle Validation
 
-## Result
+## Initial validation result
 
 **INCONCLUSIVE.** The real Windows Desktop restart and inert persistence phases
 were observed. Choose, restart, missing-source startup, missing-source Restore,
@@ -258,7 +258,7 @@ matched the contract, but a required successful certified-Codex Connect and
 the connected-state phases were not observable in the supplied environment.
 The correct disposition is **INCONCLUSIVE**, not PASS and not FAIL.
 
-## Next task
+## Next task at the initial checkpoint
 
 Task 218 — RAH v0.18 Milestone Audit is **not started**. First restore a valid
 certified Codex 0.149.0 baseline bundle (including the current v2 manifest and
@@ -266,3 +266,163 @@ code-mode host), then rerun the missing connected-state phases under a fresh
 Task 217 fixture/evidence directory. Do not treat the current result as Task
 218 input sufficient for release readiness.
 
+## Task 217A prerequisite repair
+
+The initial result above remains **INCONCLUSIVE** and its evidence is not
+rewritten. Task 217A repaired the host baseline through the explicit host-only
+baseline repair workflow:
+
+- Task 217 initial evidence checkpoint: `2c8d347c44c98d5423a640b16e6a555552b4331a`.
+- Task 217A implementation/current exact head: `ea80aac6980335028418f66b958dc9b625c1cb3f`.
+- Task 217A exact-head CI: `34001135249 PASS`.
+- Certified baseline: `codex-cli 0.149.0`.
+- Baseline manifest: version 2, including the verified code-mode host contract.
+- `codex.exe` SHA-256: `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+- `codex-code-mode-host.exe` SHA-256: `3c6726ab12b8de7c0bccecf4551af686d9dbe1b9fcdaee90bd66f60837943ac2`.
+- `scripts/codex-baseline.ps1 verify 0.149.0`: PASS.
+- `scripts/codex-live-gate.ps1 -Version 0.149.0 -PrepareOnly`: PASS.
+
+The live gate selected an isolated temporary `CODEX_HOME`, disabled
+Codex-owned shell/file/MCP/apps/plugins/code-mode/browser/computer/image
+surfaces, and retained the accepted model `gpt-5.6-terra`. No PATH fallback or
+automatic repair was used.
+
+## Resumed connected-state validation
+
+The resumed run used a new private fixture represented publicly as
+`C:\Temp\rah-task217-resume-<nonce>`. The release Desktop binary was
+`target/release/rah-desktop.exe`. The actual app-owned preference location was
+`%LOCALAPPDATA%\org.rust-agent-harness.desktop\desktop-preferences.json`.
+It was absent before the run, so no backup was required. The preference path
+was absent again after cleanup; the post-Forget document was retained only in
+the private resume fixture as evidence.
+
+The fixture contained one provider-only profile, `task217-persistence-live`,
+with MCP Tool `mcp.task217-mcp.echo` at `Read` and Process Plugin Tool
+`plugin.task217-plugin.echo` at `Execute`, with `capabilities: []`. Fresh
+copied executables and lifecycle request markers were used. Both lifecycle
+files were absent before Connect.
+
+### Setup to restored state
+
+PASS. Choose Profile produced `remembered=true`, `selected=true`, and
+`Configured — providers inactive`; no provider lifecycle file existed. After a
+normal close and new process start, the app showed `Remembered — not restored`
+(`remembered=true`, `selected=false`) with no provider activation. Explicit
+Restore returned to `Configured — providers inactive`, with both lifecycle
+files still absent.
+
+### Successful Connect
+
+PASS. Connect succeeded with the repaired certified baseline. The Desktop
+reported `codex-cli 0.149.0`, active profile, and connected runtime. Each
+provider lifecycle file contained exactly `spawn` during the stable connected
+phase; neither contained shutdown or exit. No chat prompt was sent and no
+model-selected external Tool call was attempted.
+
+### Effective Authority
+
+PASS. The actual Desktop Effective Authority surface showed `Current` and the
+connected UI showed `Disconnect Codex`. The host snapshot was
+`connected_current` with captured repository/model/connection generations
+`0/0/1`, and advertised runtime state. The effective external entries were:
+
+- `mcp.task217-mcp.echo`: source `MCP`, permission `Read`, external provider;
+- `plugin.task217-plugin.echo`: source `Process Plugin`, permission `Execute`,
+  external provider.
+
+Provider labels were sanitized identifiers. No executable path, Trusted
+Profile source path, or private Codex alias appeared in the UI or authority
+snapshot.
+
+### Forget while connected
+
+PASS. Forget succeeded while chat was idle and the runtime was connected/current.
+Immediately afterward, `remembered=false` and `selected=true`; the profile and
+connection generations were unchanged; the connection remained
+`connected_current`; both external Tools and the Effective Authority snapshot
+were unchanged. Both lifecycle files remained exactly `spawn` with no
+shutdown/exit. The private preference document no longer contained
+`trusted_profile`; its existing model preference remained.
+
+### Normal Disconnect
+
+PASS. The normal connected Disconnect action returned the Desktop to
+`not connected` / configured providers inactive and withdrew the effective
+external inventory. Both providers produced exactly:
+
+```text
+spawn
+shutdown
+exit
+```
+
+No additional spawn sequence and no Tool call occurred.
+
+### Executable unlock
+
+PASS. After normal Disconnect, `task217-mcp.exe` and `task217-plugin.exe` were
+each renamed to `.released` successfully and then restored to their original
+fixture names. No global process-name termination was used as evidence.
+
+### Restart after Forget
+
+PASS. A brand-new Desktop process started after Forget and normal cleanup.
+It reported `remembered=false`, `selected=false`, `profileStatus=not loaded`,
+`profile_generation=0` equivalent through the unselected initial state, no
+provider activation, no external Tool inventory, no implicit Restore, and no
+implicit Connect. The lifecycle files remained at the single completed
+`spawn/shutdown/exit` sequence from the prior normal connection.
+
+## Final Task 217 result
+
+**Task 217: PASS.**
+
+The initial attempt was INCONCLUSIVE because the certified 0.149.0 baseline
+store was legacy v1 and lacked the current v2 companion code-mode-host
+contract. Task 217A repaired that environment through the explicit host-only
+baseline repair workflow. The resumed Task 217 run then established the
+missing connected lifecycle without changing product code or authority
+semantics.
+
+Exact claim:
+
+**Windows Trusted Profile persistence lifecycle: PASS.**
+
+Verified: persistence restores no provider authority; restart is
+remembered-only; Restore is non-spawning; Connect is the first effective
+activation boundary; successful Connect activates the admitted MCP + Process
+Plugin composition; Forget while connected changes only durable preference;
+normal Disconnect reaps providers; and restart after Forget restores no profile
+preference or runtime authority.
+
+Still not claimed: model-selected external Tool execution,
+`ToolRequested`/`ToolStarted`/`ToolFinished` external execution, external
+repository-effect live validation, OS sandboxing, network isolation, rollback,
+absence of provider ambient effects, or Linux Desktop live validation. Task 207
+remains historically unchanged. Task 218 is not started.
+
+## Deterministic validation for the resumed completion
+
+- `cargo fmt --check`: PASS.
+- `cargo check --workspace`: PASS.
+- `cargo test -p rah-profile-composition`: PASS, 4 tests.
+- `cargo test -p rah-tools-mcp`: PASS, 32 tests including 31 stdio tests.
+- `cargo test -p rah-tools-plugin`: PASS, 21 tests including 15 process tests.
+- `cargo test -p rah-runtime-codex`: PASS, 82 passed, 1 ignored.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: PASS.
+- `cargo metadata --no-deps --format-version 1`: PASS.
+- `cargo build -p rah-desktop --release`: PASS.
+- `node --check` for `status.js` and `status_authority_test.js`: PASS.
+- `node crates/rah-desktop/frontend/status_authority_test.js`: PASS.
+- `scripts/test-codex-baseline.ps1` with the installed native Codex: PASS.
+- `scripts/codex-baseline.ps1 verify 0.149.0`: PASS.
+- `git diff --check`: PASS.
+
+`cargo test -p rah-desktop` and `cargo test --workspace` each reproduced the
+same known Windows fixture debt:
+`tests::hardened_git_environment_requires_host_pinned_safe_directory_for_foreign_owner_diagnostic`
+failed because the local diagnostic did not reproduce Git's protected
+foreign-owner refusal. The focused Desktop result was 171 passed, 1 failed,
+2 ignored. This was not hidden, modified, or treated as a Task 217 lifecycle
+defect.
