@@ -5,20 +5,22 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.17.0 released
+## RAH v0.18.0 release candidate
 
-RAH v0.17.0 delivers the Desktop Host-Selected Trusted Profile External
-Provider Integration milestone. Desktop can host-select a provider-only profile;
-selection and static validation are inert and non-spawning, while local stdio
-MCP and Process Plugin providers activate only on explicit Connect or reconnect.
-The shared `rah-profile-composition` path admits exact Tool sets and schemas,
-preserves host-selected permissions, merges admitted external Tools with the
-first-party Desktop registry, and fails closed on duplicate public names.
+RAH v0.18.0 delivers Inert Trusted Profile Persistence and Explicit Restore.
+Desktop can remember one host-selected Trusted Profile source path locally, but
+startup is remembered-not-restored: it does not select, validate, compose,
+spawn, advertise, or otherwise restore provider authority. Explicit Restore
+freshly loads and statically validates the current source without spawning.
+Only explicit Connect or reconnect may activate admitted local stdio MCP and
+Process Plugin providers.
 
-Effective Authority exposes sanitized external descriptors and keeps
-Configured, Effective, Advertised, and Current state separate. Provider
-lifecycle ownership and cleanup are explicit. External-effect handling is
-conservative: uncertain effects are not replayed or represented as rolled back.
+Forget removes only the durable preference; it does not alter an already
+connected composition. Profile generation participates in currentness, and
+Connect fresh-loads current Trusted Profile bytes. Effective Authority remains
+sanitized and keeps Configured, Effective, Advertised, and Current state
+separate. Provider lifecycle ownership and conservative external-effect
+handling remain unchanged.
 
 Task 207 remains **INCONCLUSIVE / externally blocked for the model-selected
 external Tool execution sub-gate**. Windows provider selection, admission,
@@ -38,12 +40,12 @@ The current live-gate model is `gpt-5.6-terra`. `codex-cli 0.153.4` is
 research-only compatibility evidence, is not certified, and did not restore
 Tool selection.
 
-v0.17 does not add network or Streamable HTTP MCP, provider
-download/install/update, PluginManager expansion, profile hot reload,
-active-provider auto-restore/persistence, generic shell/process, filesystem,
+v0.18 does not add active-provider auto-restore, profile hot reload, network or
+Streamable HTTP MCP, provider download/install/update, PluginManager expansion,
+generic shell/process, filesystem,
 or Git/branch/ref/history authority, OS sandboxing, network isolation,
 rollback, absence of ambient external provider effects, or Linux
-external-provider live certification. `repositoryBound=false` and
+Desktop persistence lifecycle certification. `repositoryBound=false` and
 `PermissionLevel` do not prove that an external provider cannot affect
 repository or host state.
 

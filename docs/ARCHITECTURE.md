@@ -1,7 +1,8 @@
-# RAH v0.17.0 Architecture
+# RAH v0.18.0 Architecture
 
-This document describes the released v0.17.0 architecture. The immutable
-v0.17.0 release is the current release and v0.16.0 remains the prior release.
+This document describes the v0.18.0 release candidate architecture. v0.17.0
+remains the current immutable published release until v0.18.0 is separately
+tagged and published.
 
 ## Effective Authority observability path
 
@@ -16,7 +17,8 @@ Desktop host state
 ```
 
 The backend is the sanitization boundary. It derives currentness from the
-repository/runtime generation and publication checks, exposes public Tool
+repository, runtime, model, and Trusted Profile generation tuple plus
+publication checks, exposes public Tool
 names and closed host-derived classifications, and excludes private aliases
 and sensitive provider or repository details. The frontend only renders the
 sanitized DTO; it is not an authority or security source.
@@ -34,6 +36,23 @@ Tool providers under the existing architecture. The v0.16 release path did not
 compose their authority-review presentation through Desktop; the v0.17
 provider-only overlay now composes admitted local providers at Connect and
 publishes their host-derived descriptors through the same observation path.
+
+## Inert Trusted Profile persistence and explicit restore
+
+v0.18 persists one host-owned Trusted Profile source-path preference in the
+Desktop store. It is desired state, not effective composition or authority:
+startup is remembered-not-restored and does not load, validate, compose, spawn,
+advertise, or restore a provider. Explicit Restore fresh-loads and statically
+validates the current source without spawning. Explicit Connect or reconnect is
+the sole provider activation boundary and fresh-loads the source again before
+composition. Forget removes only the durable preference and does not alter an
+already connected provider composition.
+
+This preference is not model-facing configuration and does not change the
+Trusted Profile authority-composition boundary, ToolRegistry dispatch, host
+permission decisions, provider admission, or lifecycle ownership. v0.18 adds
+no active-provider auto-restore, hot reload, credential persistence, provider
+installation, network MCP, or new tool authority.
 
 ## Ownership boundaries
 

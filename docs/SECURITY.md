@@ -1,7 +1,8 @@
-# RAH v0.17.0 Security Model
+# RAH v0.18.0 Security Model
 
-This document describes the released v0.17.0 security model. The immutable
-v0.17.0 release is the current release and v0.16.0 remains the prior release.
+This document describes the v0.18.0 release candidate security model. v0.17.0
+remains the current immutable published release until v0.18.0 is separately
+tagged and published.
 
 ## Effective Authority Review
 
@@ -23,6 +24,25 @@ Inspection and Refresh Authority have zero lifecycle, Tool, repository, chat,
 authority, or persistence side effects. The panel grants no authority, does
 not dynamically grant or revoke permissions, does not reload profiles or
 manage provider lifecycles, and persists/restores no authority.
+
+## Inert Trusted Profile preference persistence
+
+v0.18 may persist one host-selected Trusted Profile source path as inert local
+preference. On startup this is remembered-not-restored: it cannot select,
+validate, compose, spawn, advertise, or restore provider authority. Explicit
+Restore fresh-loads and statically validates the source without spawning;
+explicit Connect or reconnect alone can activate providers, and it fresh-loads
+the source before composition. Forget removes only the durable preference and
+does not affect an already active composition.
+
+The persisted path, its presentation, model output, provider metadata, and
+frontend controls are not authority. Profile generation is included in
+currentness so stale state cannot be labelled Current. This release adds no
+active-provider auto-restore, automatic baseline repair/download/migration,
+profile hot reload, credential persistence, network MCP, generic shell,
+filesystem, Git, or provider authority. Process supervision remains not an OS
+sandbox; network isolation, rollback, and absence of ambient provider effects
+are not claimed.
 
 v0.16 added no authority. The v0.17 provider-only overlay adds no generic
 shell, filesystem, Git, branch/ref, or network authority and makes no

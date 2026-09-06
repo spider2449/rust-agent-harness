@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.18.0 — 2026-09-06
+
+Release candidate for the Inert Trusted Profile Persistence and Explicit Restore
+milestone. This entry is preparation evidence only: no `v0.18.0` tag or GitHub
+Release has been created.
+
+### Added
+
+- Desktop persists one host-selected Trusted Profile source path as inert local
+  preference. Restart is remembered-not-restored: no selection, validation,
+  composition, provider spawn, Tool advertisement, or authority restoration
+  occurs implicitly.
+- Explicit Restore fresh-loads and statically validates the current source
+  without spawning. Connect/reconnect fresh-loads it again and remains the only
+  provider activation boundary. Forget removes only the durable preference.
+- Profile generation participates in currentness. The certified Codex 0.149.0
+  baseline store has an explicit host-only repair workflow for legacy/invalid
+  stores; it is not automatic repair, download, or migration.
+
+### Validation and limitations
+
+- Task 217 initially remained **INCONCLUSIVE** because the local baseline store
+  was legacy v1. Task 217A repaired that host prerequisite; the resumed Task
+  217 Windows lifecycle result is **PASS**. This is supporting baseline
+  maintenance, not v0.18 product authority.
+- Task 207 remains **INCONCLUSIVE / externally blocked for the model-selected
+  external Tool execution sub-gate**. v0.18 makes no model-selected external
+  Tool, Linux Desktop lifecycle, ambient-effect absence, OS-sandbox, network
+  isolation, or rollback claim.
+
 ## v0.17.0 — 2026-09-05
 
 Released as `RAH v0.17.0` for the Desktop Host-Selected Trusted Profile
