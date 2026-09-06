@@ -2,7 +2,16 @@
 
 ## Result
 
-Status: IMPLEMENTED — AWAITING EXACT-HEAD CI
+Status: IMPLEMENTED — AWAITING EXACT-HEAD CI (CORRECTIVE COMMIT)
+
+The initial Task 228 implementation commit was
+`d19512f27b0aa00a5fbe5f2279033728dbad645e`; its exact-head CI run
+`34030144127` passed. An independent source audit found two semantic gaps in
+the initial implementation: branch output safety was classified from the
+status string alone, and cleanup did not treat a started first-party
+`repo.create-branch` call without `ToolFinished` as an unresolved effect.
+Task 228 therefore remains open while this bounded corrective commit closes
+those gaps.
 
 Desktop now composes the existing ADR 0020 local branch creation authority only
 for a host-selected repository, conditionally publishes its first-party Tool,
@@ -10,10 +19,10 @@ and presents it as a separate sanitized Effective Authority category.
 
 ## Starting checkpoint
 
-The verified starting checkpoint was `856c6110cb78c52b7fcb99628f6cfe46ad9dcc0b`,
-with `HEAD == origin/master`, a clean worktree, and origin
-`spider2449/rust-agent-harness`. The repository remains on the existing
-0.18.0 / edition 2024 / 13-package baseline.
+The corrective work starts from
+`d19512f27b0aa00a5fbe5f2279033728dbad645e`, with `HEAD == origin/master`, a
+clean worktree, and the dynamically resolved origin remote. The repository
+remains on the existing 0.18.0 / edition 2024 / 13-package baseline.
 
 ## ADR 0020 authority chain
 
@@ -83,6 +92,21 @@ Exact `uncertain` and malformed/unrecognized branch output are handled
 conservatively: selected repositories invalidate review and request the
 existing bounded first-party refresh. No replay, rollback, or delete is added.
 
+The corrective implementation makes this classification a closed parser. It
+requires exactly one JSON object with the exact status-specific key set,
+consistent `is_error` and `uncertain` values, non-empty branch names, and
+full 40- or 64-character hexadecimal OIDs. The exact `uncertain` result is
+not proven safe. Malformed recognized results, extra fields, non-JSON content,
+and multiple content values are all uncertain.
+
+Turn cleanup now treats a started `repo.create-branch` call as an unresolved
+repository effect even when it is first-party and has no `ToolFinished` event.
+Requested-but-not-started branch calls remain non-effectful. With a selected
+repository cleanup invalidates review and requests the bounded refresh, then
+clears activity; without one it clears activity without manufacturing refresh
+state. The correction does not change repository, model, profile, connection,
+or conversation generations and does not replay, reconnect, or roll back.
+
 ## Repository generation
 
 Branch Tool completion does not increment `repository_generation`, regardless of
@@ -151,11 +175,14 @@ full workspace suite.
 
 ## Commit
 
-Commit: `feat: integrate local branch creation in desktop` (pending).
+Initial commit: `d19512f27b0aa00a5fbe5f2279033728dbad645e`.
+Corrective commit: pending.
 
 ## Exact-head CI
 
-Pending push and exact-head CI success for this Task 228 commit.
+The initial commit's exact-head CI `34030144127` passed. The corrective commit
+must be pushed and verified with a new exact-head CI success before this plan
+can be marked complete.
 
 ## Deferred work
 

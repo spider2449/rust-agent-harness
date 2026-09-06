@@ -4461,7 +4461,7 @@ fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RepositoryRefreshReason {
     FirstPartyMutation,
-    ExternalEffect,
+    UncertainRepositoryEffect,
 }
 
 #[cfg(target_os = "windows")]
@@ -4545,7 +4545,10 @@ fn activity_event_with_composition(
         } => tool_calls.remove(tool_call_id).map(|activity| {
             let branch_requires_refresh = activity.tool == REPOSITORY_CREATE_BRANCH_TOOL_NAME
                 && repository_selected
-                && !branch_result_is_safe(output);
+                && matches!(
+                    branch_result_classification(output),
+                    BranchActivityClassification::Uncertain
+                );
             let first_party_refresh = matches!(
                 activity.tool.as_str(),
                 "repo.patch"
@@ -4557,7 +4560,7 @@ fn activity_event_with_composition(
                     | "repo.commit"
             );
             let refresh_reason = if activity.external && activity.started && repository_selected {
-                Some(RepositoryRefreshReason::ExternalEffect)
+                Some(RepositoryRefreshReason::UncertainRepositoryEffect)
             } else if branch_requires_refresh || first_party_refresh {
                 Some(RepositoryRefreshReason::FirstPartyMutation)
             } else {
@@ -4585,20 +4588,69 @@ fn activity_event_with_composition(
 }
 
 #[cfg(target_os = "windows")]
-fn branch_result_is_safe(output: &rah_protocol::ToolOutput) -> bool {
+enum BranchActivityClassification {
+    ProvenSafe,
+    Uncertain,
+}
+
+#[cfg(target_os = "windows")]
+fn branch_result_classification(output: &rah_protocol::ToolOutput) -> BranchActivityClassification {
     let [ToolContent::Json(value)] = output.content.as_slice() else {
-        return false;
+        return BranchActivityClassification::Uncertain;
     };
-    matches!(
-        value.get("status").and_then(serde_json::Value::as_str),
-        Some(
-            "invalid_input"
-                | "precondition_failed"
-                | "known_no_effect"
-                | "branch_created_verified"
-                | "desired_state_observed_after_uncertain_attempt"
-        )
-    )
+    let Some(object) = value.as_object() else {
+        return BranchActivityClassification::Uncertain;
+    };
+    let Some(status) = object.get("status").and_then(serde_json::Value::as_str) else {
+        return BranchActivityClassification::Uncertain;
+    };
+    let has_exact_keys = |expected: &[&str]| {
+        object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+    };
+    let boolean_field_is = |key: &str, expected: bool| matches!(object.get(key), Some(serde_json::Value::Bool(value)) if *value == expected);
+    let non_empty_string_field = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let full_oid_field = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|oid| {
+                matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    };
+
+    let proven_safe = match status {
+        "invalid_input" | "precondition_failed" | "known_no_effect" => {
+            has_exact_keys(&["status", "uncertain"])
+                && boolean_field_is("uncertain", false)
+                && output.is_error
+        }
+        "branch_created_verified" => {
+            has_exact_keys(&["status", "uncertain", "name", "oid"])
+                && boolean_field_is("uncertain", false)
+                && non_empty_string_field("name")
+                && full_oid_field("oid")
+                && !output.is_error
+        }
+        "desired_state_observed_after_uncertain_attempt" => {
+            has_exact_keys(&["status", "uncertain", "name", "oid"])
+                && boolean_field_is("uncertain", true)
+                && non_empty_string_field("name")
+                && full_oid_field("oid")
+                && output.is_error
+        }
+        "uncertain" => false,
+        _ => false,
+    };
+    if proven_safe {
+        BranchActivityClassification::ProvenSafe
+    } else {
+        BranchActivityClassification::Uncertain
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -4612,27 +4664,36 @@ fn empty_composition_metadata() -> DesktopToolComposition {
 }
 
 #[cfg(target_os = "windows")]
-fn uncertain_external_effect_pending(
+fn uncertain_repository_effect_pending(
     tool_calls: &HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
 ) -> bool {
-    tool_calls
-        .values()
-        .any(|activity| activity.external && activity.started)
+    tool_calls.values().any(|activity| {
+        activity.started
+            && (activity.external || activity.tool == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+    })
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_uncertain_external_effects(
+fn uncertain_repository_effect_requires_refresh(
+    repository_selected: bool,
+    tool_calls: &HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+) -> bool {
+    repository_selected && uncertain_repository_effect_pending(tool_calls)
+}
+
+#[cfg(target_os = "windows")]
+async fn handle_uncertain_repository_effects(
     app: &AppHandle,
     tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
     repository_selected: bool,
 ) {
-    let refresh = repository_selected && uncertain_external_effect_pending(tool_calls);
+    let refresh = uncertain_repository_effect_requires_refresh(repository_selected, tool_calls);
     tool_calls.clear();
     if refresh {
         invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
         append_live_evidence(serde_json::json!({
             "event": "repository_refresh",
-            "reason": "uncertain_external_effect",
+            "reason": "uncertain_repository_effect",
         }));
         emit_repository_refresh(app);
     }
@@ -4929,7 +4990,9 @@ async fn run_chat(
                     "event": "repository_refresh",
                     "reason": match reason {
                         RepositoryRefreshReason::FirstPartyMutation => "repository_mutation",
-                        RepositoryRefreshReason::ExternalEffect => "external_effect",
+                        RepositoryRefreshReason::UncertainRepositoryEffect => {
+                            "uncertain_repository_effect"
+                        }
                     },
                 }));
                 emit_repository_refresh(&app);
@@ -4946,7 +5009,8 @@ async fn run_chat(
                 }
             }
             AgentEvent::Completed { output, .. } => {
-                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
+                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                    .await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -4992,7 +5056,8 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Failed { code, message, .. } => {
-                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
+                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                    .await;
                 // The frontend receives only a closed error code. Retain the
                 // adapter-provided stage privately for live diagnosis.
                 tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
@@ -5023,7 +5088,8 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Cancelled { .. } => {
-                handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
+                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                    .await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
@@ -5048,7 +5114,7 @@ async fn run_chat(
             | AgentEvent::ApprovalRequired { .. } => {}
         }
     }
-    handle_uncertain_external_effects(&app, &mut tool_calls, repository_selected).await;
+    handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected).await;
     if !terminal
         && app
             .state::<DesktopAppState>()
@@ -5525,7 +5591,8 @@ mod tests {
         repository_tool_authority, request_connect, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
         revoke_repository_commit_context, same_arc, save_trusted_profile_preference,
-        selected_git_executable, uncertain_external_effect_pending, validate_prompt,
+        selected_git_executable, uncertain_repository_effect_pending,
+        uncertain_repository_effect_requires_refresh, validate_prompt,
     };
     use futures::StreamExt;
     use rah_protocol::{
@@ -8644,14 +8711,45 @@ mod tests {
 
     #[test]
     fn branch_activity_preserves_review_for_safe_results_and_refreshes_uncertain_results() {
-        let safe_statuses = [
-            "invalid_input",
-            "precondition_failed",
-            "known_no_effect",
-            "branch_created_verified",
-            "desired_state_observed_after_uncertain_attempt",
+        let safe_outputs = [
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "invalid_input", "uncertain": false}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "precondition_failed", "uncertain": false}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "known_no_effect", "uncertain": false}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": false,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "desired_state_observed_after_uncertain_attempt",
+                    "uncertain": true,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: true,
+            },
         ];
-        for status in safe_statuses {
+        for output in safe_outputs {
             let id = ToolCallId::new();
             let requested = AgentEvent::ToolRequested {
                 session_id: SessionId::new(),
@@ -8664,10 +8762,7 @@ mod tests {
             let finished = AgentEvent::ToolFinished {
                 session_id: SessionId::new(),
                 tool_call_id: id,
-                output: ToolOutput {
-                    content: vec![ToolContent::Json(serde_json::json!({"status": status}))],
-                    is_error: status != "branch_created_verified",
-                },
+                output,
             };
             let mut calls = HashMap::new();
             activity_event_with_composition(
@@ -8684,22 +8779,11 @@ mod tests {
                 true,
             )
             .expect("branch completion activity");
-            assert!(!outcome.invalidate_review, "safe status: {status}");
-            assert_eq!(outcome.refresh_reason, None, "safe status: {status}");
+            assert!(!outcome.invalidate_review);
+            assert_eq!(outcome.refresh_reason, None);
         }
 
-        for output in [
-            ToolOutput {
-                content: vec![ToolContent::Json(
-                    serde_json::json!({"status": "uncertain"}),
-                )],
-                is_error: true,
-            },
-            ToolOutput {
-                content: vec![ToolContent::Text("not branch JSON".to_owned())],
-                is_error: true,
-            },
-        ] {
+        let assert_uncertain = |output: ToolOutput| {
             let id = ToolCallId::new();
             let requested = AgentEvent::ToolRequested {
                 session_id: SessionId::new(),
@@ -8734,6 +8818,127 @@ mod tests {
                 outcome.refresh_reason,
                 Some(RepositoryRefreshReason::FirstPartyMutation)
             );
+        };
+
+        for output in [
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": false,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": true,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": false,
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": false,
+                    "name": "branch",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "branch_created_verified",
+                    "uncertain": false,
+                    "name": "branch",
+                    "oid": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "desired_state_observed_after_uncertain_attempt",
+                    "uncertain": false,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "desired_state_observed_after_uncertain_attempt",
+                    "uncertain": true,
+                    "name": "branch",
+                    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }))],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "invalid_input", "uncertain": true}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "known_no_effect", "uncertain": false}),
+                )],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "invalid_input",
+                    "uncertain": false,
+                    "extra": true,
+                }))],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(serde_json::json!({
+                    "status": "known_no_effect",
+                }))],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "future_status", "uncertain": false}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "uncertain"}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Text("not branch JSON".to_owned())],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![
+                    ToolContent::Json(serde_json::json!({
+                        "status": "invalid_input",
+                        "uncertain": false,
+                    })),
+                    ToolContent::Json(serde_json::json!({
+                        "status": "invalid_input",
+                        "uncertain": false,
+                    })),
+                ],
+                is_error: true,
+            },
+        ] {
+            assert_uncertain(output);
         }
     }
 
@@ -8779,6 +8984,111 @@ mod tests {
     }
 
     #[test]
+    fn branch_requested_without_start_has_no_repository_effect() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                input: ToolInput(serde_json::json!({"name": "branch"})),
+            },
+        };
+        let mut calls = HashMap::new();
+        let outcome = activity_event_with_composition(
+            &requested,
+            &mut calls,
+            &empty_composition_metadata(),
+            true,
+        )
+        .expect("requested activity");
+        assert!(!outcome.invalidate_review);
+        assert_eq!(outcome.refresh_reason, None);
+        assert!(!uncertain_repository_effect_pending(&calls));
+    }
+
+    #[test]
+    fn started_branch_without_finish_is_an_uncertain_repository_effect() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                input: ToolInput(serde_json::json!({"name": "branch"})),
+            },
+        };
+        let started = AgentEvent::ToolStarted {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+        };
+        let mut calls = HashMap::new();
+        activity_event_with_composition(
+            &requested,
+            &mut calls,
+            &empty_composition_metadata(),
+            true,
+        )
+        .expect("requested activity");
+        let started = activity_event_with_composition(
+            &started,
+            &mut calls,
+            &empty_composition_metadata(),
+            true,
+        )
+        .expect("started activity");
+        assert!(!started.invalidate_review);
+        assert_eq!(started.refresh_reason, None);
+        assert!(uncertain_repository_effect_pending(&calls));
+
+        let repository_selected = true;
+        assert!(uncertain_repository_effect_requires_refresh(
+            repository_selected,
+            &calls
+        ));
+        calls.clear();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn started_branch_without_repository_does_not_manufacture_refresh_state() {
+        let id = ToolCallId::new();
+        let requested = AgentEvent::ToolRequested {
+            session_id: SessionId::new(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                input: ToolInput(serde_json::json!({"name": "branch"})),
+            },
+        };
+        let started = AgentEvent::ToolStarted {
+            session_id: SessionId::new(),
+            tool_call_id: id,
+        };
+        let mut calls = HashMap::new();
+        activity_event_with_composition(
+            &requested,
+            &mut calls,
+            &empty_composition_metadata(),
+            false,
+        )
+        .expect("requested activity");
+        let started = activity_event_with_composition(
+            &started,
+            &mut calls,
+            &empty_composition_metadata(),
+            false,
+        )
+        .expect("started activity");
+        assert!(!started.invalidate_review);
+        assert_eq!(started.refresh_reason, None);
+        assert!(uncertain_repository_effect_pending(&calls));
+        assert!(!uncertain_repository_effect_requires_refresh(false, &calls));
+        calls.clear();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
     fn external_start_invalidates_review_and_finish_refreshes_selected_repository() {
         let composition = external_activity_composition(SourceKind::Mcp);
         let id = ToolCallId::new();
@@ -8809,15 +9119,15 @@ mod tests {
             .expect("started activity");
         assert!(started.invalidate_review);
         assert_eq!(started.refresh_reason, None);
-        assert!(uncertain_external_effect_pending(&calls));
+        assert!(uncertain_repository_effect_pending(&calls));
         let finished = activity_event_with_composition(&finished, &mut calls, &composition, true)
             .expect("finished activity");
         assert!(finished.invalidate_review);
         assert_eq!(
             finished.refresh_reason,
-            Some(super::RepositoryRefreshReason::ExternalEffect)
+            Some(super::RepositoryRefreshReason::UncertainRepositoryEffect)
         );
-        assert!(!uncertain_external_effect_pending(&calls));
+        assert!(!uncertain_repository_effect_pending(&calls));
     }
 
     #[test]
