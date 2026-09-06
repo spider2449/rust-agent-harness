@@ -219,7 +219,7 @@ struct RepositoryBranchCreationPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RepositorySnapshot {
-    branch: String,
+    branch: Vec<u8>,
     oid: String,
     branch_oid: String,
     local_heads: Vec<LocalHeadEntry>,
@@ -227,8 +227,16 @@ struct RepositorySnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LocalHeadEntry {
-    name: String,
+    name: Vec<u8>,
     oid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReflogEntry {
+    oid: String,
+    message: String,
+    author: String,
+    email: String,
 }
 
 impl RepositoryBranchCreationPolicy {
@@ -242,7 +250,7 @@ impl RepositoryBranchCreationPolicy {
                 "branch creation requires a normal repository with a real .git directory",
             ));
         }
-        let hooks = unique_empty_hooks_directory()?;
+        let hooks = unique_empty_hooks_directory(repository.root())?;
         let hooks_identity = FileIdentity::capture(&hooks)?;
         let git = fs::canonicalize(git).map_err(io_error)?;
         let git_binding = HostExecutionPolicy::new(
@@ -268,6 +276,9 @@ impl RepositoryBranchCreationPolicy {
     }
 
     fn matches_resources(&self, git: &Path, root: &Path) -> bool {
+        if self.repository.revalidate().is_err() || self.git_binding.revalidate().is_err() {
+            return false;
+        }
         fs::canonicalize(git)
             .ok()
             .is_some_and(|candidate| paths_equivalent(&candidate, &self.git))
@@ -315,7 +326,7 @@ impl RepositoryBranchCreationPolicy {
             }
         };
         #[cfg(test)]
-        let process_is_uncertain = test_phase::after_spawn(self);
+        let process_is_uncertain = test_phase::after_spawn(self, &ref_name, &before.oid);
         #[cfg(not(test))]
         let process_is_uncertain = false;
         #[cfg(test)]
@@ -340,13 +351,13 @@ impl RepositoryBranchCreationPolicy {
                     oid: before.oid,
                 }
             }
-            Ok(post) if self.desired_state(&before, &post, &name) => {
+            Ok(post) if self.desired_state(&before, &post, &name).await => {
                 BranchCreationDisposition::DesiredStateObservedAfterUncertainAttempt {
                     name,
                     oid: before.oid,
                 }
             }
-            Ok(post) if self.no_effect(&before, &post, &name) => {
+            Ok(post) if self.no_effect(&before, &post, &name).await => {
                 BranchCreationDisposition::KnownNoEffect
             }
             Err(_) => match self.observe_desired(&before, &name).await {
@@ -364,20 +375,17 @@ impl RepositoryBranchCreationPolicy {
         self.revalidate_static().await?;
         validate_branch_name(name)?;
         self.check_ref_format(name).await?;
-        let branch = self.output(&["symbolic-ref", "--quiet", "HEAD"]).await?;
-        if !branch.starts_with("refs/heads/") || branch == "refs/heads/" {
+        let branch = self
+            .output_bytes(&["symbolic-ref", "--quiet", "HEAD"])
+            .await?;
+        if !branch.starts_with(b"refs/heads/") || branch == b"refs/heads/" {
             return Err(git_error("HEAD is not an attached local branch"));
         }
         let oid = self
             .output(&["rev-parse", "--verify", "--quiet", "HEAD"])
             .await?;
         validate_oid(&oid)?;
-        let branch_oid = self
-            .output(&["rev-parse", "--verify", "--quiet", &branch])
-            .await?;
-        if branch_oid != oid {
-            return Err(git_error("attached branch does not equal HEAD"));
-        }
+        let branch_oid = oid.clone();
         if self.output(&["cat-file", "-t", &oid]).await? != "commit" {
             return Err(git_error("HEAD is not a commit object"));
         }
@@ -394,17 +402,17 @@ impl RepositoryBranchCreationPolicy {
 
     async fn capture_post_state(&self, _name: &str) -> Result<RepositorySnapshot, ToolError> {
         self.revalidate_static().await?;
-        let branch = self.output(&["symbolic-ref", "--quiet", "HEAD"]).await?;
+        let branch = self
+            .output_bytes(&["symbolic-ref", "--quiet", "HEAD"])
+            .await?;
+        if !branch.starts_with(b"refs/heads/") || branch == b"refs/heads/" {
+            return Err(git_error("HEAD is not an attached local branch"));
+        }
         let oid = self
             .output(&["rev-parse", "--verify", "--quiet", "HEAD"])
             .await?;
         validate_oid(&oid)?;
-        let branch_oid = self
-            .output(&["rev-parse", "--verify", "--quiet", &branch])
-            .await?;
-        if branch_oid != oid {
-            return Err(git_error("attached branch changed after mutation"));
-        }
+        let branch_oid = oid.clone();
         Ok(RepositorySnapshot {
             branch,
             oid,
@@ -419,7 +427,7 @@ impl RepositoryBranchCreationPolicy {
         post: &RepositorySnapshot,
         name: &str,
     ) -> bool {
-        if !self.desired_state(before, post, name)
+        if !self.desired_state(before, post, name).await
             || before.branch != post.branch
             || before.oid != post.oid
             || before.branch_oid != post.branch_oid
@@ -428,18 +436,13 @@ impl RepositoryBranchCreationPolicy {
             return false;
         }
         let target = format!("refs/heads/{name}");
-        if heads_without(&post.local_heads, &target) != before.local_heads {
+        if heads_without(&post.local_heads, target.as_bytes()) != before.local_heads {
             return false;
         }
-        let reflog = self.target_reflog(name).await;
-        matches!(reflog, Ok(Some((oid, message, author, email)))
-            if oid == before.oid
-                && message == REFLOG_MESSAGE
-                && author == HOST_COMMITTER_NAME
-                && email == HOST_COMMITTER_EMAIL)
+        self.acceptable_target_reflog(name, &before.oid).await
     }
 
-    fn desired_state(
+    async fn desired_state(
         &self,
         before: &RepositorySnapshot,
         post: &RepositorySnapshot,
@@ -453,10 +456,11 @@ impl RepositoryBranchCreationPolicy {
             && post
                 .local_heads
                 .iter()
-                .any(|entry| entry.name == target && entry.oid == before.oid)
+                .any(|entry| entry.name == target.as_bytes() && entry.oid == before.oid)
+            && self.acceptable_target_reflog(name, &before.oid).await
     }
 
-    fn no_effect(
+    async fn no_effect(
         &self,
         before: &RepositorySnapshot,
         post: &RepositorySnapshot,
@@ -467,8 +471,12 @@ impl RepositoryBranchCreationPolicy {
             && post.oid == before.oid
             && post.branch_oid == before.branch_oid
             && post.branch_oid == post.oid
-            && heads_without(&post.local_heads, &target) == before.local_heads
-            && !post.local_heads.iter().any(|entry| entry.name == target)
+            && heads_without(&post.local_heads, target.as_bytes()) == before.local_heads
+            && !post
+                .local_heads
+                .iter()
+                .any(|entry| entry.name == target.as_bytes())
+            && matches!(self.target_reflog(name).await, Ok(None))
     }
 
     async fn observe_desired(
@@ -481,7 +489,7 @@ impl RepositoryBranchCreationPolicy {
             return Err(git_error("test-only post-observation failure"));
         }
         let post = self.capture_post_state(name).await?;
-        Ok(self.desired_state(before, &post, name))
+        Ok(self.desired_state(before, &post, name).await)
     }
 
     async fn run_update_ref(
@@ -489,6 +497,7 @@ impl RepositoryBranchCreationPolicy {
         ref_name: &str,
         oid: &str,
     ) -> Result<HostProcessOutput, ToolError> {
+        self.revalidate_static().await?;
         let zero = zero_oid(oid)?;
         let arguments = vec![
             "update-ref".into(),
@@ -532,34 +541,38 @@ impl RepositoryBranchCreationPolicy {
         }
     }
 
-    async fn target_reflog(
-        &self,
-        name: &str,
-    ) -> Result<Option<(String, String, String, String)>, ToolError> {
+    async fn target_reflog(&self, name: &str) -> Result<Option<ReflogEntry>, ToolError> {
         let reference = format!("refs/heads/{name}");
+        let exists = self
+            .run(vec!["reflog".into(), "exists".into(), reference.clone()])
+            .await?;
+        if exists.timed_out || exists.overflow.is_some() {
+            return Err(git_error(
+                "target reflog existence observation was incomplete",
+            ));
+        }
+        match exists.exit_code {
+            Some(1) => return Ok(None),
+            Some(0) => {}
+            _ => return Err(git_error("target reflog existence observation failed")),
+        }
         let output = self
             .run(vec![
                 "reflog".into(),
                 "show".into(),
-                "--max-count=1".into(),
-                "--format=%H%x00%gs%x00%gN%x00%gE".into(),
+                "--format=%H%x00%gs%x00%gN%x00%gE%x00".into(),
                 reference,
             ])
             .await?;
-        if output.exit_code == Some(1) && output.stdout.is_empty() {
-            return Ok(None);
-        }
-        let text = successful_utf8(output)?;
-        let fields = text.split('\0').collect::<Vec<_>>();
-        if fields.len() != 4 || fields.iter().any(|field| field.is_empty()) {
-            return Err(git_error("target reflog observation was malformed"));
-        }
-        Ok(Some((
-            fields[0].into(),
-            fields[1].into(),
-            fields[2].into(),
-            fields[3].into(),
-        )))
+        parse_target_reflog(&successful_utf8(output)?)
+    }
+
+    async fn acceptable_target_reflog(&self, name: &str, oid: &str) -> bool {
+        matches!(self.target_reflog(name).await, Ok(Some(entry))
+            if entry.oid == oid
+                && entry.message == REFLOG_MESSAGE
+                && entry.author == HOST_COMMITTER_NAME
+                && entry.email == HOST_COMMITTER_EMAIL)
     }
 
     async fn local_heads(&self) -> Result<Vec<LocalHeadEntry>, ToolError> {
@@ -590,16 +603,15 @@ impl RepositoryBranchCreationPolicy {
         pairs
             .iter()
             .map(|pair| {
-                let name = std::str::from_utf8(trim_line_end(pair[0]))
-                    .map_err(|_| git_error("local-head name was not UTF-8"))?;
-                if !name.starts_with("refs/heads/") || name == "refs/heads/" {
+                let name = trim_line_end(pair[0]);
+                if !name.starts_with(b"refs/heads/") || name == b"refs/heads/" {
                     return Err(git_error("Git returned a malformed local-head ref"));
                 }
                 let oid = std::str::from_utf8(trim_line_end(pair[1]))
                     .map_err(|_| git_error("local-head OID was not UTF-8"))?;
                 validate_oid(oid)?;
                 Ok(LocalHeadEntry {
-                    name: name.into(),
+                    name: name.to_vec(),
                     oid: oid.into(),
                 })
             })
@@ -623,7 +635,7 @@ impl RepositoryBranchCreationPolicy {
         if self
             .optional_output(&["config", "--get", "extensions.refStorage"])
             .await?
-            .is_some_and(|storage| !storage.is_empty())
+            .is_some_and(|storage| storage != "files")
         {
             return Err(git_error(
                 "reftable and unknown ref backends are unsupported",
@@ -677,6 +689,14 @@ impl RepositoryBranchCreationPolicy {
     async fn output(&self, arguments: &[&str]) -> Result<String, ToolError> {
         self.output_owned(arguments.iter().map(|value| (*value).into()).collect())
             .await
+    }
+
+    async fn output_bytes(&self, arguments: &[&str]) -> Result<Vec<u8>, ToolError> {
+        successful(
+            self.run(arguments.iter().map(|value| (*value).into()).collect())
+                .await?,
+        )
+        .map(|output| trim_line_end(&output.stdout).to_vec())
     }
 
     async fn optional_output(&self, arguments: &[&str]) -> Result<Option<String>, ToolError> {
@@ -793,12 +813,12 @@ fn windows_reserved_alias(component: &str) -> bool {
 
 fn reject_collisions(name: &str, heads: &[LocalHeadEntry]) -> Result<(), ToolError> {
     let target = format!("refs/heads/{name}");
-    let folded = ascii_fold(&target);
+    let folded = ascii_fold(target.as_bytes());
     for reference in heads {
         let other = ascii_fold(&reference.name);
         if other == folded
-            || other.starts_with(&(folded.clone() + "/"))
-            || folded.starts_with(&(other + "/"))
+            || other.starts_with(&with_slash(&folded))
+            || folded.starts_with(&with_slash(&other))
         {
             return Err(git_error(
                 "branch name collides with an existing local head",
@@ -808,7 +828,7 @@ fn reject_collisions(name: &str, heads: &[LocalHeadEntry]) -> Result<(), ToolErr
     Ok(())
 }
 
-fn heads_without(heads: &[LocalHeadEntry], excluded: &str) -> Vec<LocalHeadEntry> {
+fn heads_without(heads: &[LocalHeadEntry], excluded: &[u8]) -> Vec<LocalHeadEntry> {
     heads
         .iter()
         .filter(|entry| entry.name != excluded)
@@ -816,11 +836,40 @@ fn heads_without(heads: &[LocalHeadEntry], excluded: &str) -> Vec<LocalHeadEntry
         .collect()
 }
 
-fn ascii_fold(value: &str) -> String {
+fn ascii_fold(value: &[u8]) -> Vec<u8> {
     value
-        .bytes()
-        .map(|byte| byte.to_ascii_lowercase() as char)
+        .iter()
+        .copied()
+        .map(|byte| byte.to_ascii_lowercase())
         .collect()
+}
+
+fn with_slash(value: &[u8]) -> Vec<u8> {
+    let mut value = value.to_vec();
+    value.push(b'/');
+    value
+}
+
+fn parse_target_reflog(text: &str) -> Result<Option<ReflogEntry>, ToolError> {
+    let fields = text.split('\0').collect::<Vec<_>>();
+    if fields.last().is_some_and(|field| field.is_empty()) {
+        // The format has a trailing NUL field, which is not an entry field.
+        // It is removed only after confirming that the separator is present.
+    } else {
+        return Err(git_error("target reflog observation was malformed"));
+    }
+    let fields = &fields[..fields.len() - 1];
+    if fields.len() != 4 || fields.iter().any(|field| field.is_empty()) {
+        return Err(git_error(
+            "target reflog observation was missing or ambiguous",
+        ));
+    }
+    Ok(Some(ReflogEntry {
+        oid: fields[0].into(),
+        message: fields[1].into(),
+        author: fields[2].into(),
+        email: fields[3].into(),
+    }))
 }
 
 fn validate_oid(oid: &str) -> Result<(), ToolError> {
@@ -885,8 +934,14 @@ fn io_error(error: std::io::Error) -> ToolError {
     git_error(error.to_string())
 }
 
-fn unique_empty_hooks_directory() -> Result<PathBuf, ToolError> {
-    let path = std::env::temp_dir().join(format!(
+fn unique_empty_hooks_directory(repository_root: &Path) -> Result<PathBuf, ToolError> {
+    let temp_root = fs::canonicalize(std::env::temp_dir()).map_err(io_error)?;
+    if crate::host_execute::is_beneath(&temp_root, repository_root) {
+        return Err(git_error(
+            "host hooks directory must be outside the selected repository",
+        ));
+    }
+    let path = temp_root.join(format!(
         "rah-branch-hooks-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
@@ -897,7 +952,7 @@ fn unique_empty_hooks_directory() -> Result<PathBuf, ToolError> {
 
 #[cfg(test)]
 mod test_phase {
-    use super::{RepositoryBranchCreationPolicy, git_error};
+    use super::{REFLOG_MESSAGE, RepositoryBranchCreationPolicy, git_error};
     use std::sync::{Mutex, OnceLock};
 
     #[derive(Clone, Copy)]
@@ -906,6 +961,11 @@ mod test_phase {
         LostResult,
         UnknownPostState,
         SpawnFailure,
+        TargetDeletedReflog,
+        DesiredMissingReflog,
+        DesiredWrongMessage,
+        DesiredWrongIdentity,
+        AmbiguousReflog,
     }
     static FAULT: OnceLock<Mutex<Vec<(uuid::Uuid, Fault)>>> = OnceLock::new();
     pub(super) struct Guard(uuid::Uuid);
@@ -924,6 +984,11 @@ mod test_phase {
             "lost_result" => Fault::LostResult,
             "unknown_post_state" => Fault::UnknownPostState,
             "spawn_failure" => Fault::SpawnFailure,
+            "target_deleted_reflog" => Fault::TargetDeletedReflog,
+            "desired_missing_reflog" => Fault::DesiredMissingReflog,
+            "desired_wrong_message" => Fault::DesiredWrongMessage,
+            "desired_wrong_identity" => Fault::DesiredWrongIdentity,
+            "ambiguous_reflog" => Fault::AmbiguousReflog,
             _ => panic!("unknown branch test fault"),
         };
         FAULT
@@ -958,15 +1023,181 @@ mod test_phase {
         }
         Ok(())
     }
-    pub(super) fn after_spawn(policy: &RepositoryBranchCreationPolicy) -> bool {
-        FAULT
+    pub(super) fn after_spawn(
+        policy: &RepositoryBranchCreationPolicy,
+        reference: &str,
+        oid: &str,
+    ) -> bool {
+        let fault = FAULT
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
             .unwrap()
             .iter()
-            .any(|(generation, fault)| {
-                *generation == policy.generation && matches!(fault, Fault::LostResult)
-            })
+            .find(|(generation, _)| *generation == policy.generation)
+            .map(|(_, fault)| *fault);
+        match fault {
+            Some(Fault::LostResult) => true,
+            Some(Fault::TargetDeletedReflog) => {
+                run_git(policy, &["update-ref", "-d", reference], None);
+                let zero = "0".repeat(oid.len());
+                run_git_with_env(
+                    policy,
+                    &[
+                        "reflog",
+                        "write",
+                        reference,
+                        &zero,
+                        oid,
+                        "lingering test entry",
+                    ],
+                    None,
+                );
+                false
+            }
+            Some(Fault::DesiredMissingReflog) => {
+                replace_target(policy, reference, oid, None, None, false);
+                true
+            }
+            Some(Fault::DesiredWrongMessage) => {
+                replace_target(policy, reference, oid, Some("wrong message"), None, true);
+                true
+            }
+            Some(Fault::DesiredWrongIdentity) => {
+                replace_target(
+                    policy,
+                    reference,
+                    oid,
+                    Some(REFLOG_MESSAGE),
+                    Some(("Wrong Host", "wrong@example.invalid")),
+                    true,
+                );
+                true
+            }
+            Some(Fault::AmbiguousReflog) => {
+                let tree = git_output(policy, &["rev-parse", "HEAD^{tree}"]);
+                let second = git_output_with_env(
+                    policy,
+                    &[
+                        "commit-tree",
+                        &tree,
+                        "-p",
+                        oid,
+                        "-m",
+                        "ambiguous test commit",
+                    ],
+                    None,
+                );
+                run_git_with_env(
+                    policy,
+                    &[
+                        "update-ref",
+                        "--create-reflog",
+                        "-m",
+                        "ambiguous entry",
+                        reference,
+                        &second,
+                        oid,
+                    ],
+                    None,
+                );
+                run_git_with_env(
+                    policy,
+                    &[
+                        "update-ref",
+                        "--create-reflog",
+                        "-m",
+                        "restore entry",
+                        reference,
+                        oid,
+                        &second,
+                    ],
+                    None,
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn replace_target(
+        policy: &RepositoryBranchCreationPolicy,
+        reference: &str,
+        oid: &str,
+        message: Option<&str>,
+        identity: Option<(&str, &str)>,
+        create_reflog: bool,
+    ) {
+        run_git(policy, &["update-ref", "-d", reference], None);
+        run_git(policy, &["reflog", "expire", "--expire=now", "--all"], None);
+        let zero = "0".repeat(oid.len());
+        let mut arguments = Vec::new();
+        if create_reflog {
+            arguments.push("update-ref".to_owned());
+            arguments.push("--create-reflog".to_owned());
+        } else {
+            arguments.push("-c".to_owned());
+            arguments.push("core.logAllRefUpdates=false".to_owned());
+            arguments.push("update-ref".to_owned());
+        }
+        if let Some(message) = message {
+            arguments.push("-m".to_owned());
+            arguments.push(message.to_owned());
+        }
+        arguments.extend([reference.to_owned(), oid.to_owned(), zero]);
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        run_git_with_env(policy, &argument_refs, identity);
+    }
+
+    fn git_output(policy: &RepositoryBranchCreationPolicy, arguments: &[&str]) -> String {
+        git_output_with_env(policy, arguments, None)
+    }
+
+    fn git_output_with_env(
+        policy: &RepositoryBranchCreationPolicy,
+        arguments: &[&str],
+        identity: Option<(&str, &str)>,
+    ) -> String {
+        let mut command = std::process::Command::new(&policy.git);
+        command
+            .args(arguments)
+            .current_dir(policy.repository.root());
+        if let Some((name, email)) = identity {
+            command.env("GIT_COMMITTER_NAME", name);
+            command.env("GIT_COMMITTER_EMAIL", email);
+        }
+        let output = command.output().expect("test Git command should spawn");
+        assert!(output.status.success(), "{arguments:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn run_git(
+        policy: &RepositoryBranchCreationPolicy,
+        arguments: &[&str],
+        identity: Option<(&str, &str)>,
+    ) {
+        run_git_with_env(policy, arguments, identity);
+    }
+
+    fn run_git_with_env(
+        policy: &RepositoryBranchCreationPolicy,
+        arguments: &[&str],
+        identity: Option<(&str, &str)>,
+    ) {
+        let mut command = std::process::Command::new(&policy.git);
+        command
+            .args(arguments)
+            .current_dir(policy.repository.root());
+        if let Some((name, email)) = identity {
+            command.env("GIT_COMMITTER_NAME", name);
+            command.env("GIT_COMMITTER_EMAIL", email);
+        }
+        assert!(
+            command
+                .status()
+                .expect("test Git command should spawn")
+                .success(),
+            "{arguments:?}"
+        );
     }
     pub(super) fn spawn_failure(policy: &RepositoryBranchCreationPolicy) -> bool {
         FAULT
@@ -1046,6 +1277,41 @@ mod tests {
         }
         (git, fs::canonicalize(root).unwrap())
     }
+    fn sha256_fixture() -> Option<(PathBuf, PathBuf)> {
+        let root = std::env::temp_dir().join(format!(
+            "rah-branch-sha256-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let git = git();
+        let initialized = Command::new(&git)
+            .args(["init", "--quiet", "--object-format=sha256"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success();
+        if !initialized {
+            cleanup(root);
+            return None;
+        }
+        for args in [
+            ["config", "user.name", "ambient"].as_slice(),
+            ["config", "user.email", "ambient@example.invalid"].as_slice(),
+            ["commit", "--allow-empty", "--quiet", "-m", "base"].as_slice(),
+        ] {
+            assert!(
+                Command::new(&git)
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        Some((git, fs::canonicalize(root).unwrap()))
+    }
     fn policy(git: &Path, root: &Path) -> RepositoryBranchCreationPolicy {
         RepositoryBranchCreationPolicy::new(git, root).unwrap()
     }
@@ -1072,6 +1338,17 @@ mod tests {
         .unwrap()
         .trim()
         .into()
+    }
+    fn git_path(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        #[cfg(windows)]
+        {
+            value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            value.into_owned()
+        }
     }
     fn git_stdin(git: &Path, root: &Path, args: &[&str], input: &str) {
         let mut child = Command::new(git)
@@ -1150,6 +1427,34 @@ mod tests {
 
         cleanup(root_a);
         cleanup(root_b);
+    }
+
+    #[test]
+    fn authority_resource_matching_rejects_same_path_replacement() {
+        let (git, root) = fixture();
+        let git_copy = root.join(if cfg!(windows) {
+            "git-copy.exe"
+        } else {
+            "git-copy"
+        });
+        fs::copy(&git, &git_copy).unwrap();
+        let authority = RepositoryBranchCreationAuthority::new(&git_copy, &root).unwrap();
+        let replacement = fs::read(&git_copy).unwrap();
+        let mut changed = replacement.clone();
+        changed.push(0);
+        fs::write(&git_copy, changed).unwrap();
+        assert!(!authority.matches_resources(&git_copy, &root));
+
+        let (replacement_git, replacement_root) = fixture();
+        let replacement_path = root.with_file_name(format!(
+            "{}-replacement",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        fs::rename(&root, &replacement_path).unwrap();
+        fs::rename(&replacement_root, &root).unwrap();
+        assert!(!authority.matches_resources(&replacement_git, &root));
+        cleanup(replacement_path);
+        cleanup(root);
     }
 
     #[test]
@@ -1344,6 +1649,28 @@ mod tests {
         assert_eq!(zero_oid(&"b".repeat(64)).unwrap(), "0".repeat(64));
         assert!(zero_oid("abc").is_err());
         assert!(zero_oid(&"z".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn local_head_collision_observation_is_byte_safe_and_ascii_only() {
+        let oid = "a".repeat(40);
+        let unrelated = LocalHeadEntry {
+            name: b"refs/heads/other/\xff".to_vec(),
+            oid: oid.clone(),
+        };
+        assert!(reject_collisions("foo", &[unrelated]).is_ok());
+
+        let descendant = LocalHeadEntry {
+            name: b"refs/heads/foo/\xff".to_vec(),
+            oid: oid.clone(),
+        };
+        assert!(reject_collisions("foo", &[descendant]).is_err());
+
+        let folded_descendant = LocalHeadEntry {
+            name: b"refs/heads/feature/\xff".to_vec(),
+            oid,
+        };
+        assert!(reject_collisions("Feature", &[folded_descendant]).is_err());
     }
 
     #[tokio::test]
@@ -1614,6 +1941,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn files_ref_storage_is_admitted_and_reftable_is_rejected() {
+        let (git, root) = fixture();
+        let result = policy(&git, &root)
+            .create("ordinary-files".to_owned())
+            .await;
+        assert!(
+            matches!(
+                result,
+                BranchCreationDisposition::BranchCreatedVerified { .. }
+            ),
+            "{result:?}"
+        );
+        cleanup(root);
+
+        let (git, root) = fixture();
+        git_ok(
+            &git,
+            &root,
+            &["config", "extensions.refStorage", "reftable"],
+        );
+        assert!(matches!(
+            policy(&git, &root).create("reftable".to_owned()).await,
+            BranchCreationDisposition::PreconditionFailed
+        ));
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn sha256_fixture_uses_a_64_digit_zero_old_cas() {
+        let Some((git, root)) = sha256_fixture() else {
+            return;
+        };
+        let oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        assert_eq!(oid.len(), 64);
+        let result = policy(&git, &root).create("sha256".to_owned()).await;
+        assert!(
+            matches!(
+                result,
+                BranchCreationDisposition::BranchCreatedVerified { .. }
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            stdout(&git, &root, &["rev-parse", "refs/heads/sha256"]),
+            oid
+        );
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn shallow_sparse_and_alternate_object_repositories_are_admitted() {
+        let (git, source) = fixture();
+        let source_oid = stdout(&git, &source, &["rev-parse", "HEAD"]);
+
+        let shallow = std::env::temp_dir().join(format!(
+            "rah-branch-shallow-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source_arg = git_path(&source);
+        let shallow_arg = git_path(&shallow);
+        git_ok(
+            &git,
+            Path::new("."),
+            &[
+                "clone",
+                "--quiet",
+                "--no-local",
+                "--depth",
+                "1",
+                source_arg.as_str(),
+                shallow_arg.as_str(),
+            ],
+        );
+        assert_eq!(stdout(&git, &shallow, &["rev-parse", "HEAD"]), source_oid);
+        assert!(
+            policy(&git, &shallow)
+                .create("shallow".to_owned())
+                .await
+                .eq(&BranchCreationDisposition::BranchCreatedVerified {
+                    name: "shallow".to_owned(),
+                    oid: source_oid.clone(),
+                })
+        );
+        cleanup(shallow);
+
+        fs::write(source.join("included.txt"), b"included\n").unwrap();
+        fs::write(source.join("excluded.txt"), b"excluded\n").unwrap();
+        git_ok(&git, &source, &["add", "."]);
+        git_ok(&git, &source, &["commit", "--quiet", "-m", "sparse"]);
+        git_ok(&git, &source, &["sparse-checkout", "init", "--no-cone"]);
+        git_ok(&git, &source, &["sparse-checkout", "set", "included.txt"]);
+        assert!(matches!(
+            policy(&git, &source).create("sparse".to_owned()).await,
+            BranchCreationDisposition::BranchCreatedVerified { .. }
+        ));
+
+        let alternate = std::env::temp_dir().join(format!(
+            "rah-branch-alternate-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let alternate_arg = git_path(&alternate);
+        git_ok(
+            &git,
+            Path::new("."),
+            &[
+                "clone",
+                "--quiet",
+                "--shared",
+                source_arg.as_str(),
+                alternate_arg.as_str(),
+            ],
+        );
+        assert!(alternate.join(".git/objects/info/alternates").exists());
+        assert!(matches!(
+            policy(&git, &alternate)
+                .create("alternate".to_owned())
+                .await,
+            BranchCreationDisposition::BranchCreatedVerified { .. }
+        ));
+        cleanup(alternate);
+        cleanup(source);
+    }
+
+    #[tokio::test]
     async fn hooks_are_confined_and_tampering_fails_closed() {
         let (git, root) = fixture();
         let marker = root.join("marker");
@@ -1643,6 +2094,34 @@ mod tests {
             p.create("tampered".into()).await,
             BranchCreationDisposition::PreconditionFailed
         ));
+        let hooks = p.hooks.clone();
+        let attacker_file = hooks.join("unexpected");
+        drop(p);
+        assert!(hooks.exists() && attacker_file.exists());
+        fs::remove_file(attacker_file).unwrap();
+        fs::remove_dir(hooks).unwrap();
+        cleanup(root);
+
+        let (git, root) = fixture();
+        let p = policy(&git, &root);
+        let hooks = p.hooks.clone();
+        let backup = hooks.with_file_name(format!(
+            "{}-backup",
+            hooks.file_name().unwrap().to_string_lossy()
+        ));
+        fs::rename(&hooks, &backup).unwrap();
+        fs::create_dir(&hooks).unwrap();
+        let marker = hooks.join("attacker");
+        fs::write(&marker, b"attacker").unwrap();
+        assert!(matches!(
+            p.create("replaced-hooks".into()).await,
+            BranchCreationDisposition::PreconditionFailed
+        ));
+        drop(p);
+        assert!(marker.exists());
+        fs::remove_file(marker).unwrap();
+        fs::remove_dir(hooks).unwrap();
+        fs::remove_dir(backup).unwrap();
         cleanup(root);
     }
 
@@ -1742,6 +2221,67 @@ mod tests {
         );
         assert_eq!(p.attempts.load(Ordering::Relaxed), 1);
         drop(guard);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn target_reflog_is_required_for_conservative_outcomes() {
+        let cases = [
+            ("desired_missing_reflog", "missing-reflog"),
+            ("desired_wrong_message", "wrong-message"),
+            ("desired_wrong_identity", "wrong-identity"),
+            ("ambiguous_reflog", "ambiguous-reflog"),
+        ];
+        for (fault, name) in cases {
+            let (git, root) = fixture();
+            let p = policy(&git, &root);
+            let guard = test_phase::install(&p, fault);
+            let result = p.create(name.to_owned()).await;
+            assert!(
+                matches!(result, BranchCreationDisposition::Uncertain),
+                "{fault}: {result:?}"
+            );
+            assert_eq!(p.attempts.load(Ordering::Relaxed), 1);
+            drop(guard);
+            cleanup(root);
+        }
+
+        let (git, root) = fixture();
+        let p = policy(&git, &root);
+        let guard = test_phase::install(&p, "target_deleted_reflog");
+        let result = p.create("deleted-with-reflog".to_owned()).await;
+        assert!(
+            matches!(result, BranchCreationDisposition::Uncertain),
+            "{result:?}"
+        );
+        assert_eq!(p.attempts.load(Ordering::Relaxed), 1);
+        drop(guard);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn preexisting_target_reflog_fails_admission_without_mutation() {
+        let (git, root) = fixture();
+        let oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        let zero = "0".repeat(oid.len());
+        git_ok(
+            &git,
+            &root,
+            &[
+                "reflog",
+                "write",
+                "refs/heads/preexisting-log",
+                &zero,
+                &oid,
+                "preexisting",
+            ],
+        );
+        let p = policy(&git, &root);
+        assert!(matches!(
+            p.create("preexisting-log".to_owned()).await,
+            BranchCreationDisposition::PreconditionFailed
+        ));
+        assert_eq!(p.attempts.load(Ordering::Relaxed), 0);
         cleanup(root);
     }
 
