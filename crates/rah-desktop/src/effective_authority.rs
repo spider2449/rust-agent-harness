@@ -73,6 +73,7 @@ pub(crate) enum AuthorityCategory {
     RepositoryFileDeletion,
     RepositoryFileRename,
     RepositoryDirectoryCreation,
+    RepositoryLocalBranchCreation,
     RepositoryIndexMutation,
     RepositoryCommit,
     Read,
@@ -295,6 +296,11 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
             AuthorityCategory::RepositoryDirectoryCreation,
             true,
         ),
+        "repo.create-branch" => (
+            EffectClass::RepositoryMutation,
+            AuthorityCategory::RepositoryLocalBranchCreation,
+            true,
+        ),
         "repo.delete-file" => (
             EffectClass::RepositoryMutation,
             AuthorityCategory::RepositoryFileDeletion,
@@ -401,6 +407,7 @@ pub(crate) fn compose(
             "repo.edit-files",
             "repo.create-file",
             "repo.create-directory",
+            "repo.create-branch",
             "repo.delete-file",
             "repo.rename-file",
             "repo.commit",
@@ -411,6 +418,12 @@ pub(crate) fn compose(
             ));
         }
     } else {
+        if repository.is_some_and(|value| value.branch_creation_authority.is_none()) {
+            unavailable.push(make_unavailable(
+                "repo.create-branch",
+                UnavailableReason::AuthorityNotGranted,
+            ));
+        }
         if repository.is_some_and(|value| value.directory_creation_authority.is_none()) {
             unavailable.push(make_unavailable(
                 "repo.create-directory",
@@ -585,6 +598,7 @@ mod tests {
             "repo.edit-files",
             "repo.create-file",
             "repo.create-directory",
+            "repo.create-branch",
             "repo.delete-file",
             "repo.rename-file",
             "repo.commit",
@@ -595,6 +609,23 @@ mod tests {
                 "missing host classification: {name}"
             );
         }
+    }
+
+    #[test]
+    fn branch_creation_has_a_separate_repository_bound_classification() {
+        assert_eq!(
+            metadata("repo.create-branch"),
+            Some((
+                EffectClass::RepositoryMutation,
+                AuthorityCategory::RepositoryLocalBranchCreation,
+                true,
+            ))
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthorityCategory::RepositoryLocalBranchCreation)
+                .expect("category serializes"),
+            "\"repository_local_branch_creation\""
+        );
     }
 
     #[test]

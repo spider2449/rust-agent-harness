@@ -24,6 +24,8 @@ assert.match(source, /renderEffectiveAuthority\(\{ schemaVersion: 0 \}\)/);
 assert.match(source, /invoke\("get_effective_authority_snapshot"\)/);
 assert.match(source, /function renderSourceLabel\(value\)/);
 assert.match(source, /renderSourceLabel\(tool\.sourceLabel\)/);
+assert.match(source, /repository_local_branch_creation: "Local branch creation"/);
+assert.match(source, /authorityLabel\("authorityCategory", tool\.authorityCategory\)/);
 assert.match(source, /Remembered — not restored/);
 assert.match(source, /No profile remembered/);
 assert.match(source, /Configured — providers inactive/);

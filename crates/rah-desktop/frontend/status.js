@@ -39,7 +39,7 @@ const authorityLabels = {
   repositoryIdentity: { current: "Current", not_selected: "Not selected", stale: "Stale", unknown: "Unknown / unavailable" },
   connectionState: { not_connected: "Runtime disconnected", connecting: "Connecting", connected: "Connected", disconnecting: "Disconnecting", error: "Unavailable" },
   effectClass: { read_only: "Read-only", repository_mutation: "Repository mutation", index_mutation: "Index mutation", commit: "Commit", execute: "Execute", external: "External" },
-  authorityCategory: { repository_observation: "Repository observation", repository_content_mutation: "Content mutation", repository_file_creation: "File creation", repository_file_deletion: "File deletion", repository_file_rename: "File rename / move", repository_directory_creation: "Directory creation", repository_index_mutation: "Index mutation", repository_commit: "Reviewed commit", read: "Read", execute: "Execute", external: "External provider" },
+  authorityCategory: { repository_observation: "Repository observation", repository_content_mutation: "Content mutation", repository_file_creation: "File creation", repository_file_deletion: "File deletion", repository_file_rename: "File rename / move", repository_directory_creation: "Directory creation", repository_local_branch_creation: "Local branch creation", repository_index_mutation: "Index mutation", repository_commit: "Reviewed commit", read: "Read", execute: "Execute", external: "External provider" },
   permission: { none: "None", read: "Read", write: "Write", execute: "Execute" },
   sourceLabel: { desktop_builtin: "Desktop built-in", desktop_repository: "Desktop repository" },
   unavailableState: { configured_unavailable: "Configured unavailable", not_effective: "Not effective" },

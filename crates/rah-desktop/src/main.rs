@@ -53,7 +53,8 @@ use rah_runtime_codex::{
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
-    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, RepositoryCommitControl,
+    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+    RepositoryBranchCreationAuthority, RepositoryBranchCreationTool, RepositoryCommitControl,
     RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
@@ -995,6 +996,7 @@ struct DesktopRepository {
     directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
     deletion_authority: Option<RepositoryFileDeletionAuthority>,
     rename_authority: Option<RepositoryFileRenameAuthority>,
+    branch_creation_authority: Option<RepositoryBranchCreationAuthority>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1004,7 +1006,7 @@ impl DesktopRepository {
         git_executable: &std::path::Path,
         repository_root: &std::path::Path,
     ) -> Result<Self, ToolError> {
-        Self::new_with_authorities(git_executable, repository_root, None, None, None)
+        Self::new_with_authorities(git_executable, repository_root, None, None, None, None)
     }
 
     fn new_with_authorities(
@@ -1013,6 +1015,7 @@ impl DesktopRepository {
         directory_creation_authority: Option<RepositoryDirectoryCreationAuthority>,
         deletion_authority: Option<RepositoryFileDeletionAuthority>,
         rename_authority: Option<RepositoryFileRenameAuthority>,
+        branch_creation_authority: Option<RepositoryBranchCreationAuthority>,
     ) -> Result<Self, ToolError> {
         #[cfg(test)]
         if startup_counter_tracking() {
@@ -1052,6 +1055,13 @@ impl DesktopRepository {
                 message: "rename authority does not match selected repository".to_owned(),
             });
         }
+        if let Some(authority) = &branch_creation_authority
+            && !authority.matches_resources(git_executable, &repository_root)
+        {
+            return Err(ToolError::Execution {
+                message: "branch creation authority does not match selected repository".to_owned(),
+            });
+        }
         Ok(Self {
             display_path: repository_root.display().to_string(),
             git_executable: git_executable.to_path_buf(),
@@ -1062,6 +1072,7 @@ impl DesktopRepository {
             directory_creation_authority,
             deletion_authority,
             rename_authority,
+            branch_creation_authority,
         })
     }
 }
@@ -3462,12 +3473,20 @@ fn choose_repository(
             tracing::warn!(error = %error, "selected repository cannot receive directory creation authority");
             FrontendError::RepositoryInvalid
         })?;
+    let branch_creation_authority = match RepositoryBranchCreationAuthority::new(&git, &path) {
+        Ok(authority) => Some(authority),
+        Err(_) => {
+            tracing::warn!("selected repository cannot receive branch creation authority");
+            None
+        }
+    };
     let repository = DesktopRepository::new_with_authorities(
         &git,
         &path,
         Some(directory_creation_authority),
         Some(deletion_authority),
         rename_authority,
+        branch_creation_authority,
     )
     .map_err(|error| {
         tracing::warn!(error = %error, "selected repository is invalid");
@@ -3822,6 +3841,11 @@ fn desktop_tool_registry(
                 authority.clone(),
             )))?;
         }
+        if let Some(authority) = &repository.branch_creation_authority {
+            registry.register(Arc::new(RepositoryBranchCreationTool::from_authority(
+                authority.clone(),
+            )))?;
+        }
         registry.register(Arc::new(edit_files))?;
         if let Some(authority) = &repository.deletion_authority {
             registry.register(Arc::new(RepositoryFileDeletionTool::from_authority(
@@ -3846,10 +3870,16 @@ fn desktop_tool_registry(
             .is_some_and(|value| value.rename_authority.is_some()),
         "directory_creation_authority_present": repository
             .is_some_and(|value| value.directory_creation_authority.is_some()),
+        "branch_creation_authority_present": repository
+            .is_some_and(|value| value.branch_creation_authority.is_some()),
         "registry_contains_repo_delete_file": registry
             .definitions()
             .iter()
             .any(|definition| definition.name.as_str() == "repo.delete-file"),
+        "registry_contains_repo_create_branch": registry
+            .definitions()
+            .iter()
+            .any(|definition| definition.name.as_str() == REPOSITORY_CREATE_BRANCH_TOOL_NAME),
         "relevant_tool_names": registry
             .definitions()
             .into_iter()
@@ -4142,6 +4172,9 @@ async fn connect_codex(
                 "rename_authority_present": repository
                     .as_ref()
                     .is_some_and(|value| value.rename_authority.is_some()),
+                "branch_creation_authority_present": repository
+                    .as_ref()
+                    .is_some_and(|value| value.branch_creation_authority.is_some()),
                 "bridge_enabled": true,
             }));
             CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
@@ -4510,6 +4543,9 @@ fn activity_event_with_composition(
             output,
             ..
         } => tool_calls.remove(tool_call_id).map(|activity| {
+            let branch_requires_refresh = activity.tool == REPOSITORY_CREATE_BRANCH_TOOL_NAME
+                && repository_selected
+                && !branch_result_is_safe(output);
             let first_party_refresh = matches!(
                 activity.tool.as_str(),
                 "repo.patch"
@@ -4522,7 +4558,7 @@ fn activity_event_with_composition(
             );
             let refresh_reason = if activity.external && activity.started && repository_selected {
                 Some(RepositoryRefreshReason::ExternalEffect)
-            } else if first_party_refresh {
+            } else if branch_requires_refresh || first_party_refresh {
                 Some(RepositoryRefreshReason::FirstPartyMutation)
             } else {
                 None
@@ -4546,6 +4582,23 @@ fn activity_event_with_composition(
         }),
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn branch_result_is_safe(output: &rah_protocol::ToolOutput) -> bool {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return false;
+    };
+    matches!(
+        value.get("status").and_then(serde_json::Value::as_str),
+        Some(
+            "invalid_input"
+                | "precondition_failed"
+                | "known_no_effect"
+                | "branch_created_verified"
+                | "desired_state_observed_after_uncertain_attempt"
+        )
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -5454,17 +5507,19 @@ mod tests {
         LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
         MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, Preferences,
         PreferencesWarning, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
-        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, ReadinessState,
-        RepositoryIndexActionKind, RepositoryObservationStage, ResumePair, SendChatResult,
+        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
+        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
+        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
         SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
         activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
         await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
         clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
         connect_prepared_codex, current_app_status, desktop_repository_snapshot,
-        desktop_repository_snapshot_with_review, desktop_tool_registry,
-        forget_trusted_profile_preference, frontend_error, install_repository_workflow,
-        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
-        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
+        desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
+        desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
+        frontend_error, install_repository_workflow, invalidate_repository_commit_review,
+        model_configuration_status, prepare_codex_connection, publish_readiness_result,
+        publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_context_fingerprint, repository_index_action,
         repository_selection_allowed, repository_selection_allowed_for_connection,
         repository_tool_authority, request_connect, resolve_codex_executable,
@@ -5483,8 +5538,9 @@ mod tests {
         CodexRuntime,
     };
     use rah_tools::{
-        RepositoryCommitTool, RepositoryDirectoryCreationAuthority,
-        RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority, ToolContext,
+        RepositoryBranchCreationAuthority, RepositoryCommitTool,
+        RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
+        RepositoryFileRenameAuthority, ToolContext,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -5722,24 +5778,60 @@ mod tests {
             let git = Self::native_git();
             let authority = RepositoryFileDeletionAuthority::new(&git, &self.0)
                 .expect("host deletion authority should construct");
-            DesktopRepository::new_with_authorities(&git, &self.0, None, Some(authority), None)
-                .expect("selected deletion repository should construct")
+            DesktopRepository::new_with_authorities(
+                &git,
+                &self.0,
+                None,
+                Some(authority),
+                None,
+                None,
+            )
+            .expect("selected deletion repository should construct")
         }
 
         fn directory_repository(&self) -> DesktopRepository {
             let git = Self::native_git();
             let authority = RepositoryDirectoryCreationAuthority::new(&self.0)
                 .expect("host directory creation authority should construct");
-            DesktopRepository::new_with_authorities(&git, &self.0, Some(authority), None, None)
-                .expect("selected directory repository should construct")
+            DesktopRepository::new_with_authorities(
+                &git,
+                &self.0,
+                Some(authority),
+                None,
+                None,
+                None,
+            )
+            .expect("selected directory repository should construct")
         }
 
         fn rename_repository(&self) -> DesktopRepository {
             let git = Self::native_git();
             let authority = RepositoryFileRenameAuthority::new(&git, &self.0)
                 .expect("host rename authority should construct");
-            DesktopRepository::new_with_authorities(&git, &self.0, None, None, Some(authority))
-                .expect("selected rename repository should construct")
+            DesktopRepository::new_with_authorities(
+                &git,
+                &self.0,
+                None,
+                None,
+                Some(authority),
+                None,
+            )
+            .expect("selected rename repository should construct")
+        }
+
+        fn branch_repository(&self) -> DesktopRepository {
+            let git = Self::native_git();
+            let authority = RepositoryBranchCreationAuthority::new(&git, &self.0)
+                .expect("host branch creation authority should construct");
+            DesktopRepository::new_with_authorities(
+                &git,
+                &self.0,
+                None,
+                None,
+                None,
+                Some(authority),
+            )
+            .expect("selected branch repository should construct")
         }
 
         fn native_git() -> PathBuf {
@@ -7291,6 +7383,208 @@ mod tests {
     }
 
     #[test]
+    fn branch_authority_is_stored_only_when_resources_match() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .expect("branch authority should construct for selected repository");
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            None,
+            None,
+            Some(authority.clone()),
+        )
+        .expect("matching authority should be stored");
+        assert!(
+            repository.branch_creation_authority.as_ref().is_some_and(
+                |value| value.matches_resources(&repository.git_executable, &repository.root)
+            )
+        );
+
+        let other = TestRepository::git_repository(GitRepositoryState::Clean);
+        assert!(
+            DesktopRepository::new_with_authorities(
+                &git,
+                &other.0,
+                None,
+                None,
+                None,
+                Some(authority),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch_registry_requires_host_authority_and_dispatches_without_switching() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Modified);
+        let without_authority = fixture.desktop_repository();
+        let registry = desktop_tool_registry(Some(&without_authority), None)
+            .expect("registry without branch authority should build");
+        assert!(
+            !registry.definitions().iter().any(|definition| {
+                definition.name.as_str() == REPOSITORY_CREATE_BRANCH_TOOL_NAME
+            })
+        );
+
+        let repository = fixture.branch_repository();
+        let registry = desktop_tool_registry(Some(&repository), None)
+            .expect("registry with branch authority should build");
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .expect("branch Tool should be registered");
+        assert_eq!(definition.permission, PermissionLevel::Execute);
+
+        let before_head = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .expect("HEAD should be readable")
+                .stdout,
+        )
+        .expect("HEAD is UTF-8")
+        .trim()
+        .to_owned();
+        let before_branch = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["symbolic-ref", "--short", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .expect("symbolic HEAD should be readable")
+                .stdout,
+        )
+        .expect("branch is UTF-8")
+        .trim()
+        .to_owned();
+
+        let output = registry
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                    input: ToolInput(serde_json::json!({"name": "task-228-local"})),
+                },
+                ToolContext::default(),
+            )
+            .await
+            .expect("branch dispatch should return a bounded result");
+        assert!(!output.is_error);
+        assert!(matches!(
+            &output.content[0],
+            ToolContent::Json(value) if value["status"] == "branch_created_verified"
+        ));
+
+        let after_head = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .expect("HEAD should remain readable")
+                .stdout,
+        )
+        .expect("HEAD is UTF-8")
+        .trim()
+        .to_owned();
+        let after_branch = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["symbolic-ref", "--short", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .expect("symbolic HEAD should remain readable")
+                .stdout,
+        )
+        .expect("branch is UTF-8")
+        .trim()
+        .to_owned();
+        let branch_head = String::from_utf8(
+            Command::new(TestRepository::native_git())
+                .args(["rev-parse", "refs/heads/task-228-local"])
+                .current_dir(&fixture.0)
+                .output()
+                .expect("created branch should be readable")
+                .stdout,
+        )
+        .expect("branch HEAD is UTF-8")
+        .trim()
+        .to_owned();
+        assert_eq!(after_head, before_head);
+        assert_eq!(after_branch, before_branch);
+        assert_eq!(branch_head, before_head);
+    }
+
+    #[test]
+    fn branch_effective_authority_is_host_classified_and_unavailable_paths_are_closed() {
+        let no_repository = desktop_tool_composition_from_registry(
+            desktop_tool_registry(None, None).expect("neutral registry should build"),
+            None,
+            false,
+            &[],
+        )
+        .expect("neutral authority composition should build");
+        let unavailable = no_repository
+            .unavailable
+            .iter()
+            .find(|entry| {
+                entry.public_tool_name.as_deref() == Some(REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            })
+            .expect("branch should be known unavailable without repository");
+        assert_eq!(
+            unavailable.reason,
+            super::effective_authority::UnavailableReason::RepositoryRequired
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let without_authority = fixture.desktop_repository();
+        let unavailable_repository = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&without_authority), None).expect("registry should build"),
+            Some(&without_authority),
+            false,
+            &[],
+        )
+        .expect("authority composition should build");
+        let unavailable = unavailable_repository
+            .unavailable
+            .iter()
+            .find(|entry| {
+                entry.public_tool_name.as_deref() == Some(REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            })
+            .expect("branch should be unavailable without authority");
+        assert_eq!(
+            unavailable.reason,
+            super::effective_authority::UnavailableReason::AuthorityNotGranted
+        );
+
+        let selected = fixture.branch_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&selected), None).expect("branch registry should build"),
+            Some(&selected),
+            false,
+            &[],
+        )
+        .expect("branch authority composition should build");
+        let tool = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .expect("branch should be effective");
+        assert_eq!(tool.source_kind, SourceKind::RepositoryHost);
+        assert_eq!(tool.source_label, "desktop_repository");
+        assert_eq!(tool.effect_class, EffectClass::RepositoryMutation);
+        assert_eq!(
+            tool.authority_category,
+            super::effective_authority::AuthorityCategory::RepositoryLocalBranchCreation
+        );
+        assert_eq!(tool.permission, PermissionLevel::Execute);
+        assert!(tool.repository_bound);
+        assert!(!tool.advertised);
+    }
+
+    #[test]
     fn host_composed_commit_tool_is_registered_with_execute_permission() {
         let fixture = TestRepository::new();
         let repository = fixture.desktop_repository();
@@ -8346,6 +8640,101 @@ mod tests {
             serialized,
             r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
         );
+    }
+
+    #[test]
+    fn branch_activity_preserves_review_for_safe_results_and_refreshes_uncertain_results() {
+        let safe_statuses = [
+            "invalid_input",
+            "precondition_failed",
+            "known_no_effect",
+            "branch_created_verified",
+            "desired_state_observed_after_uncertain_attempt",
+        ];
+        for status in safe_statuses {
+            let id = ToolCallId::new();
+            let requested = AgentEvent::ToolRequested {
+                session_id: SessionId::new(),
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                    input: ToolInput(serde_json::json!({"name": "branch"})),
+                },
+            };
+            let finished = AgentEvent::ToolFinished {
+                session_id: SessionId::new(),
+                tool_call_id: id,
+                output: ToolOutput {
+                    content: vec![ToolContent::Json(serde_json::json!({"status": status}))],
+                    is_error: status != "branch_created_verified",
+                },
+            };
+            let mut calls = HashMap::new();
+            activity_event_with_composition(
+                &requested,
+                &mut calls,
+                &empty_composition_metadata(),
+                true,
+            )
+            .expect("branch request activity");
+            let outcome = activity_event_with_composition(
+                &finished,
+                &mut calls,
+                &empty_composition_metadata(),
+                true,
+            )
+            .expect("branch completion activity");
+            assert!(!outcome.invalidate_review, "safe status: {status}");
+            assert_eq!(outcome.refresh_reason, None, "safe status: {status}");
+        }
+
+        for output in [
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status": "uncertain"}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Text("not branch JSON".to_owned())],
+                is_error: true,
+            },
+        ] {
+            let id = ToolCallId::new();
+            let requested = AgentEvent::ToolRequested {
+                session_id: SessionId::new(),
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+                    input: ToolInput(serde_json::json!({"name": "branch"})),
+                },
+            };
+            let finished = AgentEvent::ToolFinished {
+                session_id: SessionId::new(),
+                tool_call_id: id,
+                output,
+            };
+            let mut calls = HashMap::new();
+            activity_event_with_composition(
+                &requested,
+                &mut calls,
+                &empty_composition_metadata(),
+                true,
+            )
+            .expect("branch request activity");
+            let outcome = activity_event_with_composition(
+                &finished,
+                &mut calls,
+                &empty_composition_metadata(),
+                true,
+            )
+            .expect("branch completion activity");
+            assert!(outcome.invalidate_review);
+            assert_eq!(
+                outcome.refresh_reason,
+                Some(RepositoryRefreshReason::FirstPartyMutation)
+            );
+        }
     }
 
     fn external_activity_composition(source_kind: SourceKind) -> DesktopToolComposition {
