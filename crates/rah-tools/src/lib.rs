@@ -45,6 +45,10 @@ pub use git_stage::{GIT_STAGE_TOOL_NAME, GitStageTool};
 pub use git_status::{GIT_STATUS_TOOL_NAME, GitStatusTool};
 pub use git_unstage::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool};
 pub use host_execute::{HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool};
+pub use repository_branch_create::{
+    REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryBranchCreationAuthority,
+    RepositoryBranchCreationTool,
+};
 pub use repository_commit::{
     RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
 };

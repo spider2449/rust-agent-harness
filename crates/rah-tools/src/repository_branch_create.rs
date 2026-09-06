@@ -1,11 +1,9 @@
-//! Private, host-owned foundation for one local branch creation.
+//! Host-owned bounded creation of one local branch.
 //!
-//! This module deliberately has no public constructor, Tool implementation,
-//! or registry integration.  Task 226 owns the future host composition.  The
+//! The mutation policy remains private.  The public surface is an opaque
+//! host-created authority and a first-party Tool that delegates to it.  The
 //! only mutation permitted here is one fixed, expected-absence `update-ref`
 //! invocation for one host-validated local branch.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -19,15 +17,166 @@ use std::{
 };
 
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
+use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use rah_sandbox::{HostProcessOutput, OutputLimits};
+use serde_json::{Value, json};
 
 use crate::{
-    HostArgumentPolicy, HostExecutionPolicy, ToolError,
+    HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_stage::repository_lease,
     git_support::{git_environment, git_error},
     host_execute::paths_equivalent,
     repository_observer::{FileIdentity, RepositoryIdentity, reject_link_or_reparse},
 };
+
+/// Stable name for the bounded repository local-branch creation capability.
+pub const REPOSITORY_CREATE_BRANCH_TOOL_NAME: &str = "repo.create-branch";
+
+/// Opaque host-created authority for one selected repository and Git executable.
+#[derive(Clone)]
+pub struct RepositoryBranchCreationAuthority {
+    policy: Arc<RepositoryBranchCreationPolicy>,
+}
+
+impl RepositoryBranchCreationAuthority {
+    /// Binds branch-creation authority to host-selected resources.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            policy: Arc::new(RepositoryBranchCreationPolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+            )?),
+        })
+    }
+
+    /// Confirms that the authority is bound to the selected resources.
+    #[must_use]
+    pub fn matches_resources(&self, git_executable: &Path, repository_root: &Path) -> bool {
+        self.policy
+            .matches_resources(git_executable, repository_root)
+    }
+}
+
+/// First-party Tool for creating one local branch without switching branches.
+pub struct RepositoryBranchCreationTool {
+    authority: RepositoryBranchCreationAuthority,
+}
+
+impl RepositoryBranchCreationTool {
+    /// Constructs a Tool from host-selected resources through the same opaque
+    /// authority boundary as [`Self::from_authority`].
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self::from_authority(
+            RepositoryBranchCreationAuthority::new(git_executable, repository_root)?,
+        ))
+    }
+
+    /// Constructs a Tool from an authority explicitly composed by the host.
+    #[must_use]
+    pub fn from_authority(authority: RepositoryBranchCreationAuthority) -> Self {
+        Self { authority }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for RepositoryBranchCreationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+            description: "Creates one new local branch at the repository's current committed HEAD without switching branches.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+            permission: PermissionLevel::Execute,
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = match BranchCreationRequest::parse(&input) {
+            Ok(request) => request,
+            Err(()) => return Ok(tool_result("invalid_input", false, None, None)),
+        };
+        Ok(tool_result_from_disposition(
+            self.authority.policy.create(request.name).await,
+        ))
+    }
+}
+
+struct BranchCreationRequest {
+    name: String,
+}
+
+impl BranchCreationRequest {
+    fn parse(input: &ToolInput) -> Result<Self, ()> {
+        let Value::Object(object) = &input.0 else {
+            return Err(());
+        };
+        if object.len() != 1 {
+            return Err(());
+        }
+        let Some(Value::String(name)) = object.get("name") else {
+            return Err(());
+        };
+        Ok(Self { name: name.clone() })
+    }
+}
+
+fn tool_result_from_disposition(disposition: BranchCreationDisposition) -> ToolOutput {
+    match disposition {
+        BranchCreationDisposition::InvalidInput => tool_result("invalid_input", false, None, None),
+        BranchCreationDisposition::PreconditionFailed => {
+            tool_result("precondition_failed", false, None, None)
+        }
+        BranchCreationDisposition::KnownNoEffect => {
+            tool_result("known_no_effect", false, None, None)
+        }
+        BranchCreationDisposition::BranchCreatedVerified { name, oid } => {
+            tool_result("branch_created_verified", false, Some(&name), Some(&oid))
+        }
+        BranchCreationDisposition::DesiredStateObservedAfterUncertainAttempt { name, oid } => {
+            tool_result(
+                "desired_state_observed_after_uncertain_attempt",
+                true,
+                Some(&name),
+                Some(&oid),
+            )
+        }
+        BranchCreationDisposition::Uncertain => tool_result("uncertain", true, None, None),
+    }
+}
+
+fn tool_result(status: &str, uncertain: bool, name: Option<&str>, oid: Option<&str>) -> ToolOutput {
+    let mut value = json!({"status": status, "uncertain": uncertain});
+    if let Some(name) = name {
+        value["name"] = Value::String(name.to_owned());
+    }
+    if let Some(oid) = oid {
+        value["oid"] = Value::String(oid.to_owned());
+    }
+    ToolOutput {
+        content: vec![ToolContent::Json(value)],
+        is_error: status != "branch_created_verified",
+    }
+}
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum number of local heads admitted by one bounded observation.
@@ -62,6 +211,7 @@ struct RepositoryBranchCreationPolicy {
     hooks: PathBuf,
     hooks_identity: FileIdentity,
     lease: Arc<AsyncMutex<()>>,
+    #[cfg(test)]
     generation: uuid::Uuid,
     #[cfg(test)]
     attempts: AtomicUsize,
@@ -110,10 +260,20 @@ impl RepositoryBranchCreationPolicy {
             hooks,
             hooks_identity,
             lease,
+            #[cfg(test)]
             generation: uuid::Uuid::new_v4(),
             #[cfg(test)]
             attempts: AtomicUsize::new(0),
         })
+    }
+
+    fn matches_resources(&self, git: &Path, root: &Path) -> bool {
+        fs::canonicalize(git)
+            .ok()
+            .is_some_and(|candidate| paths_equivalent(&candidate, &self.git))
+            && fs::canonicalize(root)
+                .ok()
+                .is_some_and(|candidate| paths_equivalent(&candidate, self.repository.root()))
     }
 
     async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
@@ -834,6 +994,9 @@ mod test_phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Tool, ToolContext, ToolRegistry};
+    use rah_protocol::{PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolOutput};
+    use serde_json::json;
     use std::{
         fs,
         io::Write,
@@ -924,6 +1087,226 @@ mod tests {
     }
     fn cleanup(root: PathBuf) {
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn json_result(output: &ToolOutput) -> Value {
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("branch creation must return one JSON result")
+        };
+        value.clone()
+    }
+
+    async fn execute_tool_output(tool: &RepositoryBranchCreationTool, value: Value) -> ToolOutput {
+        tool.execute(ToolInput(value), ToolContext::default())
+            .await
+            .unwrap()
+    }
+
+    async fn execute_tool(tool: &RepositoryBranchCreationTool, value: Value) -> Value {
+        json_result(&execute_tool_output(tool, value).await)
+    }
+
+    fn registry_call(value: Value) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME),
+            input: ToolInput(value),
+        }
+    }
+
+    #[test]
+    fn public_definition_is_closed_and_execute_gated() {
+        let (git, root) = fixture();
+        let tool = RepositoryBranchCreationTool::new(&git, &root).unwrap();
+        assert_eq!(tool.definition().name.as_str(), "repo.create-branch");
+        assert_eq!(
+            tool.definition().description,
+            "Creates one new local branch at the repository's current committed HEAD without switching branches."
+        );
+        assert_eq!(tool.definition().permission, PermissionLevel::Execute);
+        assert_eq!(
+            tool.definition().input_schema,
+            json!({
+                "type":"object",
+                "properties":{"name":{"type":"string","minLength":1,"maxLength":128}},
+                "required":["name"],
+                "additionalProperties":false
+            })
+        );
+        cleanup(root);
+    }
+
+    #[test]
+    fn authority_resource_matching_is_bound_without_spawning_git() {
+        let (git_a, root_a) = fixture();
+        let (_git_b, root_b) = fixture();
+        let authority = RepositoryBranchCreationAuthority::new(&git_a, &root_a).unwrap();
+        let different_git = root_a.join("different-git");
+        fs::copy(&git_a, &different_git).unwrap();
+
+        assert!(authority.matches_resources(&git_a, &root_a));
+        assert!(!authority.matches_resources(&different_git, &root_a));
+        assert!(!authority.matches_resources(&git_a, &root_b));
+
+        cleanup(root_a);
+        cleanup(root_b);
+    }
+
+    #[test]
+    fn registry_has_no_implicit_branch_authority() {
+        let registry = ToolRegistry::new();
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .all(|definition| definition.name.as_str() != REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_authority_tool_registry_composition_creates_exact_branch_without_switching() {
+        let (git, root) = fixture();
+        let authority = RepositoryBranchCreationAuthority::new(&git, &root).unwrap();
+        let tool = RepositoryBranchCreationTool::from_authority(authority);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(tool)).unwrap();
+
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .unwrap();
+        assert_eq!(definition.permission, PermissionLevel::Execute);
+        let before_head = stdout(&git, &root, &["symbolic-ref", "--quiet", "HEAD"]);
+        let before_oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        let output = registry
+            .execute(
+                registry_call(json!({"name":"feature/test"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("branch creation must return one JSON result")
+        };
+        assert_eq!(
+            value,
+            &json!({
+                "status":"branch_created_verified",
+                "uncertain":false,
+                "name":"feature/test",
+                "oid":before_oid
+            })
+        );
+        assert!(!output.is_error);
+        assert_eq!(
+            stdout(&git, &root, &["symbolic-ref", "--quiet", "HEAD"]),
+            before_head
+        );
+        assert_eq!(
+            stdout(&git, &root, &["rev-parse", "refs/heads/feature/test"]),
+            before_oid
+        );
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn authority_tool_is_reusable_and_duplicate_target_is_not_overwritten() {
+        let (git, root) = fixture();
+        let authority = RepositoryBranchCreationAuthority::new(&git, &root).unwrap();
+        let tool = RepositoryBranchCreationTool::from_authority(authority);
+        let first = execute_tool(&tool, json!({"name":"feature/one"})).await;
+        let second = execute_tool(&tool, json!({"name":"feature/two"})).await;
+        assert_eq!(first["status"], "branch_created_verified");
+        assert_eq!(second["status"], "branch_created_verified");
+        assert_eq!(first["oid"], second["oid"]);
+        assert_eq!(
+            stdout(&git, &root, &["rev-parse", "refs/heads/feature/one"]),
+            first["oid"]
+        );
+        assert_eq!(
+            stdout(&git, &root, &["rev-parse", "refs/heads/feature/two"]),
+            second["oid"]
+        );
+
+        let duplicate = execute_tool(&tool, json!({"name":"feature/one"})).await;
+        assert_eq!(duplicate["status"], "precondition_failed");
+        assert_eq!(duplicate["uncertain"], false);
+        assert!(duplicate.get("name").is_none());
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn tool_rejects_closed_input_without_echoing_invalid_name() {
+        let (git, root) = fixture();
+        let tool = RepositoryBranchCreationTool::new(&git, &root).unwrap();
+        for input in [
+            json!({}),
+            json!({"name":"valid","extra":true}),
+            json!({"name":17}),
+            json!("name"),
+            json!(null),
+            json!({"name":""}),
+            json!({"name":"feature?bad"}),
+            json!({"name":"é"}),
+            json!({"name":"refs/heads/foo"}),
+        ] {
+            let output = execute_tool(&tool, input).await;
+            assert_eq!(output["status"], "invalid_input");
+            assert_eq!(output["uncertain"], false);
+            assert!(output.get("name").is_none());
+            assert!(output.get("oid").is_none());
+        }
+        let serialized = serde_json::to_string(
+            &execute_tool(&tool, json!({"name":"secret-invalid-value?"})).await,
+        )
+        .unwrap();
+        assert!(!serialized.contains("secret-invalid-value?"));
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn tool_maps_closed_uncertain_and_no_effect_dispositions() {
+        let (git, root) = fixture();
+        let tool = RepositoryBranchCreationTool::new(&git, &root).unwrap();
+        let guard = test_phase::install(tool.authority.policy.as_ref(), "spawn_failure");
+        let known_no_effect = execute_tool_output(&tool, json!({"name":"known-no-effect"})).await;
+        assert!(known_no_effect.is_error);
+        let known_no_effect_value = json_result(&known_no_effect);
+        assert_eq!(known_no_effect_value["status"], "known_no_effect");
+        assert_eq!(known_no_effect_value["uncertain"], false);
+        drop(guard);
+        cleanup(root);
+
+        let (git, root) = fixture();
+        let tool = RepositoryBranchCreationTool::new(&git, &root).unwrap();
+        let guard = test_phase::install(tool.authority.policy.as_ref(), "lost_result");
+        let desired_after_uncertain =
+            execute_tool_output(&tool, json!({"name":"lost-result"})).await;
+        assert!(desired_after_uncertain.is_error);
+        let desired_after_uncertain = json_result(&desired_after_uncertain);
+        assert_eq!(
+            desired_after_uncertain["status"],
+            "desired_state_observed_after_uncertain_attempt"
+        );
+        assert_eq!(desired_after_uncertain["uncertain"], true);
+        assert_eq!(desired_after_uncertain["name"], "lost-result");
+        assert!(desired_after_uncertain.get("oid").is_some());
+        drop(guard);
+        cleanup(root);
+
+        let (git, root) = fixture();
+        let tool = RepositoryBranchCreationTool::new(&git, &root).unwrap();
+        let guard = test_phase::install(tool.authority.policy.as_ref(), "unknown_post_state");
+        let uncertain = execute_tool_output(&tool, json!({"name":"uncertain"})).await;
+        assert!(uncertain.is_error);
+        let uncertain = json_result(&uncertain);
+        assert_eq!(uncertain["status"], "uncertain");
+        assert_eq!(uncertain["uncertain"], true);
+        assert!(uncertain.get("name").is_none());
+        assert!(uncertain.get("oid").is_none());
+        drop(guard);
+        cleanup(root);
     }
 
     #[test]
