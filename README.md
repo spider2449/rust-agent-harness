@@ -5,9 +5,10 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.18.0 release candidate
+## RAH v0.18.0 released
 
 RAH v0.18.0 delivers Inert Trusted Profile Persistence and Explicit Restore.
+It is the current immutable published release.
 Desktop can remember one host-selected Trusted Profile source path locally, but
 startup is remembered-not-restored: it does not select, validate, compose,
 spawn, advertise, or otherwise restore provider authority. Explicit Restore

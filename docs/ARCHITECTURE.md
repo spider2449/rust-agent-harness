@@ -1,8 +1,7 @@
 # RAH v0.18.0 Architecture
 
-This document describes the v0.18.0 release candidate architecture. v0.17.0
-remains the current immutable published release until v0.18.0 is separately
-tagged and published.
+This document describes the released v0.18.0 architecture. v0.18.0 is the
+current immutable release; v0.17.0 is the prior release.
 
 ## Effective Authority observability path
 

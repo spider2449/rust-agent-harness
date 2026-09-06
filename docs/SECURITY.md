@@ -1,8 +1,7 @@
 # RAH v0.18.0 Security Model
 
-This document describes the v0.18.0 release candidate security model. v0.17.0
-remains the current immutable published release until v0.18.0 is separately
-tagged and published.
+This document describes the released v0.18.0 security model. v0.18.0 is the
+current immutable release; v0.17.0 is the prior release.
 
 ## Effective Authority Review
 

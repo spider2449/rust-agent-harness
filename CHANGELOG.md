@@ -2,9 +2,16 @@
 
 ## v0.18.0 — 2026-09-06
 
-Release candidate for the Inert Trusted Profile Persistence and Explicit Restore
-milestone. This entry is preparation evidence only: no `v0.18.0` tag or GitHub
-Release has been created.
+RAH v0.18.0 released for the Inert Trusted Profile Persistence and Explicit
+Restore milestone.
+
+- Release commit: `bd0d237b8cda8f4cebdf56d2e3a792b5dd79ba2e`.
+- Annotated tag: `v0.18.0` (tag object
+  `e2ac5affc58984dd8ffad5a4d0b9f0de4780d8f0`).
+- GitHub Release: [RAH v0.18.0](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.18.0)
+  (numeric ID `383437699`).
+- Task 219 exact-head CI: `34006233351` PASS.
+- Tag-triggered CI: `34006623521` PASS.
 
 ### Added
 

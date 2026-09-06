@@ -1,6 +1,6 @@
 # RAH v0.18.0 Release Gate
 
-**RELEASE PREPARATION — NOT TAGGED OR PUBLISHED**
+**RELEASED — HISTORICAL RECORD**
 
 ## Release identity
 
@@ -14,8 +14,17 @@
   tags`). It is a one-commit-later Actions Cleanup-only maintenance change, not
   v0.18 product capability evidence.
 - Actions Cleanup run `34005428084`: completed/success on `c42fd36`.
-- Tag: no `v0.18.0` tag exists.
-- GitHub Release: no v0.18.0 GitHub Release exists.
+- Release commit: `bd0d237b8cda8f4cebdf56d2e3a792b5dd79ba2e`.
+- Annotated tag: `v0.18.0`.
+- Tag object SHA: `e2ac5affc58984dd8ffad5a4d0b9f0de4780d8f0`.
+- Peeled target: `bd0d237b8cda8f4cebdf56d2e3a792b5dd79ba2e`.
+- GitHub Release numeric ID: `383437699`.
+- GitHub Release node ID: `RE_kwDOT-U4RM4W2suD`.
+- Release URL: https://github.com/spider2449/rust-agent-harness/releases/tag/v0.18.0
+- `draft`: `false`; `prerelease`: `false`.
+- Task 219 exact-head CI: `34006233351` PASS.
+- Tag-triggered CI: `34006623521` PASS.
+- Publication date: `2026-09-06`.
 
 ## Product and authority contract
 
@@ -79,8 +88,16 @@ activation. Task 207 remains non-blocking only within that exact limitation.
 - [x] `cargo metadata --no-deps --format-version 1`: 13 packages, all `0.18.0`,
   edition `2024`.
 - [x] `git diff --check`: PASS.
-- [ ] Preparation commit exact-head CI PASS recorded.
-- [ ] `HEAD == origin/master` and clean worktree confirmed.
-- [x] No v0.18.0 tag exists during preparation.
-- [x] No v0.18.0 GitHub Release exists during preparation.
-- [ ] Publication is separately authorized; Task 220 remains not started.
+- [x] milestone audit PASS.
+- [x] package versions prepared.
+- [x] release docs prepared.
+- [x] release-preparation exact-head CI PASS.
+- [x] annotated `v0.18.0` tag created.
+- [x] tag object recorded.
+- [x] tag pushed.
+- [x] GitHub Release published.
+- [x] `draft=false`.
+- [x] `prerelease=false`.
+- [x] tag-triggered CI PASS.
+- [x] immutable release commit verified.
+- [ ] Post-release cleanup exact-head CI PASS.
