@@ -35,13 +35,17 @@ is required.
 codex-baselines/
   0.149.0/
     codex.exe
+    codex-code-mode-host.exe
     manifest.json
 ```
 
-`manifest.json` has a closed schema: `manifest_version`, `version`,
-`reported_version`, `sha256`, `platform`, `architecture`, `binary`, `source`,
-`source_package`, and `archived_at_utc`. The binary must be a regular PE
-`codex.exe`, not a PowerShell/CMD/npm launcher.
+The current manifest contract is v2. It has a closed schema:
+`manifest_version`, `version`, `reported_version`, `sha256`, `platform`,
+`architecture`, `binary`, `code_mode_host`, `code_mode_host_sha256`, `source`,
+`source_package`, and `archived_at_utc`. Both payloads must be regular native
+Windows x64 PE files, not PowerShell/CMD/npm launchers, and must remain inside
+the canonical baseline directory. The native `codex.exe` must report exactly
+the requested `codex-cli <version>`.
 
 If a version directory exists with the same SHA-256, `save` is idempotent. A
 different SHA-256 fails closed: it is never overwritten, renamed, or promoted.
@@ -51,6 +55,7 @@ different SHA-256 fails closed: it is never overwritten, renamed, or promoted.
 ```powershell
 .\scripts\codex-baseline.ps1 save 0.149.0
 .\scripts\codex-baseline.ps1 verify 0.149.0
+.\scripts\codex-baseline.ps1 repair 0.149.0
 $baseline = & .\scripts\codex-baseline.ps1 path 0.149.0
 .\scripts\codex-baseline.ps1 list
 .\scripts\codex-baseline.ps1 verify-all
@@ -61,8 +66,27 @@ output. Diagnostics use standard error. `save` prefers an isolated exact Windows
 platform artifact (`npm install @openai/codex@<version>-win32-x64`) in a temporary
 directory, validates its package and native binary, and removes that directory
 afterwards. If isolated acquisition is unavailable, it may save only an exact
-matching global npm package; it never copies an npm shim. `-SourcePath` is a
-host-only recovery/test input for an already acquired native executable.
+matching global npm package; it never copies an npm shim. `-SourcePath` and
+`-SourceCodeModeHostPath` are host-only recovery/test inputs for one already
+acquired complete bundle.
+
+`repair` is an explicit host/operator maintenance action for an absent, legacy,
+incomplete, or invalid destination. It independently validates both source
+executables, the exact requested version, and both SHA-256 values before
+creating a fresh v2 staging directory. The staged directory is verified with
+the current contract, then an invalid existing destination is moved to a
+same-volume sibling backup before the staged directory is moved into place.
+The backup is removed only after final verification; if replacement fails,
+bounded restoration is attempted and filesystem recovery remains best-effort.
+Locked files are not force-terminated. A valid current destination is
+idempotent when both source hashes match and refuses replacement when they do
+not. `repair` never edits a v1 manifest in place, reconstructs a missing code-
+mode host, or accepts only `codex.exe`.
+
+Repair acquisition is explicit host-only activity. It may use the same isolated
+exact npm acquisition and exact global-package fallback as `save`, but Desktop
+startup and Connect never invoke it, download automatically, accept manifest v1,
+or fall back from an invalid present certified baseline to PATH.
 
 Before a global upgrade, archive and verify the certified source. Then a daily
 upgrade is independent:
