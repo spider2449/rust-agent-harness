@@ -30,6 +30,9 @@ use crate::{
 };
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum number of local heads admitted by one bounded observation.
+const MAX_LOCAL_HEADS: usize = 4096;
+/// Fixed Git stdout bound, including local-head snapshots.
 const OUTPUT_LIMITS: OutputLimits = OutputLimits {
     stdout_bytes: 512 * 1024,
     stderr_bytes: 32 * 1024,
@@ -69,11 +72,11 @@ struct RepositorySnapshot {
     branch: String,
     oid: String,
     branch_oid: String,
-    refs: Vec<RefEntry>,
+    local_heads: Vec<LocalHeadEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RefEntry {
+struct LocalHeadEntry {
     name: String,
     oid: String,
 }
@@ -218,14 +221,14 @@ impl RepositoryBranchCreationPolicy {
         if self.output(&["cat-file", "-t", &oid]).await? != "commit" {
             return Err(git_error("HEAD is not a commit object"));
         }
-        let refs = self.all_refs().await?;
-        reject_collisions(name, &refs)?;
+        let local_heads = self.local_heads().await?;
+        reject_collisions(name, &local_heads)?;
         self.require_absent_reflog(name).await?;
         Ok(RepositorySnapshot {
             branch,
             oid,
             branch_oid,
-            refs,
+            local_heads,
         })
     }
 
@@ -246,7 +249,7 @@ impl RepositoryBranchCreationPolicy {
             branch,
             oid,
             branch_oid,
-            refs: self.all_refs().await?,
+            local_heads: self.local_heads().await?,
         })
     }
 
@@ -265,8 +268,7 @@ impl RepositoryBranchCreationPolicy {
             return false;
         }
         let target = format!("refs/heads/{name}");
-        let refs_same = refs_without(&post.refs, &target) == before.refs;
-        if !refs_same {
+        if heads_without(&post.local_heads, &target) != before.local_heads {
             return false;
         }
         let reflog = self.target_reflog(name).await;
@@ -289,7 +291,7 @@ impl RepositoryBranchCreationPolicy {
             && post.branch_oid == before.branch_oid
             && post.branch_oid == post.oid
             && post
-                .refs
+                .local_heads
                 .iter()
                 .any(|entry| entry.name == target && entry.oid == before.oid)
     }
@@ -305,8 +307,8 @@ impl RepositoryBranchCreationPolicy {
             && post.oid == before.oid
             && post.branch_oid == before.branch_oid
             && post.branch_oid == post.oid
-            && refs_without(&post.refs, &target) == before.refs
-            && !post.refs.iter().any(|entry| entry.name == target)
+            && heads_without(&post.local_heads, &target) == before.local_heads
+            && !post.local_heads.iter().any(|entry| entry.name == target)
     }
 
     async fn observe_desired(
@@ -400,34 +402,43 @@ impl RepositoryBranchCreationPolicy {
         )))
     }
 
-    async fn all_refs(&self) -> Result<Vec<RefEntry>, ToolError> {
+    async fn local_heads(&self) -> Result<Vec<LocalHeadEntry>, ToolError> {
         let output = self
             .run(vec![
                 "for-each-ref".into(),
                 "--format=%(refname)%00%(objectname)%00".into(),
+                "refs/heads/".into(),
             ])
             .await?;
         let output = successful(output)?;
-        let fields = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .map(trim_line_end)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
+        let mut fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+        if let Some(last) = fields.last_mut() {
+            *last = trim_line_end(last);
+        }
+        if fields.last().is_some_and(|field| field.is_empty()) {
+            fields.pop();
+        }
         if fields.len() % 2 != 0 {
-            return Err(git_error("Git ref observation was malformed"));
+            return Err(git_error("local-head observation was malformed"));
+        }
+        let count = fields.len() / 2;
+        if count > MAX_LOCAL_HEADS {
+            return Err(git_error("local-head observation exceeded its bound"));
         }
         let (pairs, remainder) = fields.as_slice().as_chunks::<2>();
         debug_assert!(remainder.is_empty());
         pairs
             .iter()
             .map(|pair| {
-                let name = std::str::from_utf8(pair[0])
-                    .map_err(|_| git_error("Git ref name was not UTF-8"))?;
-                let oid = std::str::from_utf8(pair[1])
-                    .map_err(|_| git_error("Git ref OID was not UTF-8"))?;
+                let name = std::str::from_utf8(trim_line_end(pair[0]))
+                    .map_err(|_| git_error("local-head name was not UTF-8"))?;
+                if !name.starts_with("refs/heads/") || name == "refs/heads/" {
+                    return Err(git_error("Git returned a malformed local-head ref"));
+                }
+                let oid = std::str::from_utf8(trim_line_end(pair[1]))
+                    .map_err(|_| git_error("local-head OID was not UTF-8"))?;
                 validate_oid(oid)?;
-                Ok(RefEntry {
+                Ok(LocalHeadEntry {
                     name: name.into(),
                     oid: oid.into(),
                 })
@@ -620,13 +631,10 @@ fn windows_reserved_alias(component: &str) -> bool {
             && upper.as_bytes()[3] != b'0')
 }
 
-fn reject_collisions(name: &str, refs: &[RefEntry]) -> Result<(), ToolError> {
+fn reject_collisions(name: &str, heads: &[LocalHeadEntry]) -> Result<(), ToolError> {
     let target = format!("refs/heads/{name}");
     let folded = ascii_fold(&target);
-    for reference in refs
-        .iter()
-        .filter(|entry| entry.name.starts_with("refs/heads/"))
-    {
+    for reference in heads {
         let other = ascii_fold(&reference.name);
         if other == folded
             || other.starts_with(&(folded.clone() + "/"))
@@ -640,8 +648,9 @@ fn reject_collisions(name: &str, refs: &[RefEntry]) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn refs_without(refs: &[RefEntry], excluded: &str) -> Vec<RefEntry> {
-    refs.iter()
+fn heads_without(heads: &[LocalHeadEntry], excluded: &str) -> Vec<LocalHeadEntry> {
+    heads
+        .iter()
         .filter(|entry| entry.name != excluded)
         .cloned()
         .collect()
@@ -827,8 +836,9 @@ mod tests {
     use super::*;
     use std::{
         fs,
+        io::Write,
         path::PathBuf,
-        process::Command,
+        process::{Command, Stdio},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -899,6 +909,18 @@ mod tests {
         .unwrap()
         .trim()
         .into()
+    }
+    fn git_stdin(git: &Path, root: &Path, args: &[&str], input: &str) {
+        let mut child = Command::new(git)
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+        drop(stdin);
+        assert!(child.wait().unwrap().success(), "{args:?}");
     }
     fn cleanup(root: PathBuf) {
         let _ = fs::remove_dir_all(root);
@@ -1066,6 +1088,85 @@ mod tests {
             policy(&git, &root).create("packed".into()).await,
             BranchCreationDisposition::PreconditionFailed
         ));
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn tags_and_remote_tracking_heads_do_not_collide_or_change() {
+        let (git, root) = fixture();
+        let oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        git_ok(&git, &root, &["tag", "feature", "HEAD"]);
+        git_ok(
+            &git,
+            &root,
+            &["update-ref", "refs/remotes/origin/feature", &oid],
+        );
+        let before_refs = stdout(&git, &root, &["show-ref"]);
+        let p = policy(&git, &root);
+        assert!(matches!(
+            p.create("feature".into()).await,
+            BranchCreationDisposition::BranchCreatedVerified { .. }
+        ));
+        assert_eq!(p.attempts.load(Ordering::Relaxed), 1);
+        let after_refs = stdout(&git, &root, &["show-ref"]);
+        let existing_after = after_refs
+            .lines()
+            .filter(|line| !line.ends_with(" refs/heads/feature"))
+            .collect::<Vec<_>>();
+        assert_eq!(existing_after, before_refs.lines().collect::<Vec<_>>());
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn local_head_count_overflow_fails_before_mutation() {
+        let (git, root) = fixture();
+        let oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        let mut input = String::new();
+        for index in 0..=MAX_LOCAL_HEADS {
+            input.push_str(&format!("create refs/heads/overflow/{index:04} {oid}\n"));
+        }
+        git_stdin(&git, &root, &["update-ref", "--stdin"], &input);
+        let p = policy(&git, &root);
+        assert!(matches!(
+            p.create("count-overflow".into()).await,
+            BranchCreationDisposition::PreconditionFailed
+        ));
+        assert_eq!(p.attempts.load(Ordering::Relaxed), 0);
+        assert!(
+            stdout(
+                &git,
+                &root,
+                &["show-ref", "--verify", "refs/heads/count-overflow"]
+            )
+            .is_empty()
+        );
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn local_head_output_overflow_fails_before_mutation() {
+        let (git, root) = fixture();
+        let oid = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        let mut input = String::new();
+        for index in 0..(MAX_LOCAL_HEADS - 1) {
+            let name = format!("wide/{index:04}-{}", "a".repeat(110));
+            input.push_str(&format!("create refs/heads/{name} {oid}\n"));
+        }
+        git_stdin(&git, &root, &["update-ref", "--stdin"], &input);
+        let p = policy(&git, &root);
+        assert!(matches!(
+            p.create("output-overflow".into()).await,
+            BranchCreationDisposition::PreconditionFailed
+        ));
+        assert_eq!(p.attempts.load(Ordering::Relaxed), 0);
+        assert!(
+            stdout(
+                &git,
+                &root,
+                &["show-ref", "--verify", "refs/heads/output-overflow"]
+            )
+            .is_empty()
+        );
         cleanup(root);
     }
 

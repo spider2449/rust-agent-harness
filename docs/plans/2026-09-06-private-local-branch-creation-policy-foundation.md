@@ -31,8 +31,10 @@ with `ToolRegistry`. `repo.create-branch` remains deferred to Task 226.
   commit `HEAD`, ordinary files ref storage, and loose or packed refs.
 - Rejection of detached, unborn, bare, linked-worktree/`.git`-indirection, and
   supported special-operation states.
-- Git-owned all-ref observation for exact, ancestor/descendant prefix, and
-  uniform ASCII-case local-head collisions.
+- Bounded Git-owned local-head observation for exact, ancestor/descendant
+  prefix, and uniform ASCII-case local-head collisions.
+- Local-head observation is bounded by `MAX_LOCAL_HEADS = 4096` and the fixed
+  `HostExecutionPolicy` stdout limit of 512 KiB; overflow fails closed.
 - Host-pinned Git environment, safe.directory, hooks path, reflog identity,
   and bounded supervised native process execution.
 - Hooks identity and emptiness revalidation with cleanup only for the captured
@@ -98,3 +100,15 @@ version changes. Task 225A was committed and its exact-head CI passed before
 this Task 225 restoration and finalization.
 
 Task 226 - `repo.create-branch` Tool and Host Composition: not started.
+
+## Task 225B post-Task-225 conformance correction
+
+Task 225 was committed and exact-head CI-passed at `ae06ad9` before an
+independent ADR 0020 audit identified that the initial implementation observed
+all Git namespaces before filtering to local heads. Task 225B corrects only
+that observation scope and records the correction separately. The production
+snapshot now observes `refs/heads/` only, with an explicit bounded local-head
+count in addition to the existing finite Git process-output bound. Branch-name
+rules, the fixed expected-absence `update-ref` primitive, CAS, hooks, reflog,
+authority boundaries, and the deferred Task 226 Tool exposure remain
+unchanged.
