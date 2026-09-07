@@ -2,7 +2,7 @@
 
 ## Status
 
-IMPLEMENTED — AWAITING EXACT-HEAD CI
+COMPLETE — IMPLEMENTATION EXACT-HEAD CI PASS
 
 ## Starting checkpoint
 
@@ -168,15 +168,20 @@ IMPLEMENTED — AWAITING EXACT-HEAD CI
 
 ## Exact-head CI
 
-To be recorded after the implementation commit and exact-head CI.
+- Implementation commit: `f6ec50caa9c757131daab93e81e752079c11a129`.
+- Exact-head push CI: `34080134367`, completed successfully.
+- Local deterministic validation: 15 `rah-tools` authorized-dispatch tests,
+  84 `rah-runtime-codex` tests with 1 ignored, 189 Desktop tests with 1
+  ignored, and the full workspace test suite passed.
+- No corrective implementation commit was required.
 
 ## Closure commit
 
-To be recorded after implementation exact-head CI passes.
+Documentation-only closure commit: `docs: close Task 239 host invocation workflow`.
 
 ## Final CI
 
-To be recorded after the documentation closure commit.
+To be recorded after the documentation closure commit reaches exact-head CI.
 
 ## Next task
 
