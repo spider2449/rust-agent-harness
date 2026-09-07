@@ -1,8 +1,10 @@
 # RAH v0.19.0 Architecture
 
-This document describes the v0.19.0 release candidate architecture. v0.18.0
-remains the current immutable published release until v0.19.0 is separately
-tagged and published.
+This document describes the released v0.19.0 architecture.
+
+v0.19.0 is the current immutable published release.
+
+v0.18.0 is the prior release.
 
 ## ADR 0020 bounded local branch creation
 

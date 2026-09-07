@@ -5,11 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.19.0 release candidate
+## RAH v0.19.0 released
 
-RAH v0.19.0 is a release candidate for the Bounded Local Branch Creation at
-Captured Attached HEAD milestone. v0.18.0 remains the current immutable
-published release until v0.19.0 is separately tagged and published.
+RAH v0.19.0 is the current immutable published release for the Bounded Local
+Branch Creation at Captured Attached HEAD milestone. v0.18.0 is the prior
+release.
 
 The accepted ADR 0020 capability is `repo.create-branch`. It accepts only
 `{"name":"<validated-logical-branch-name>"}` and, when the host has composed
@@ -31,8 +31,6 @@ unchanged.
 ## RAH v0.18.0 released
 
 RAH v0.18.0 delivers Inert Trusted Profile Persistence and Explicit Restore.
-It remains the current immutable published release until v0.19.0 is separately
-tagged and published.
 Desktop can remember one host-selected Trusted Profile source path locally, but
 startup is remembered-not-restored: it does not select, validate, compose,
 spawn, advertise, or otherwise restore provider authority. Explicit Restore

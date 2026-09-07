@@ -1,6 +1,6 @@
 # RAH v0.19.0 Release Gate
 
-**RELEASE PREPARATION — NOT TAGGED OR PUBLISHED**
+**RELEASED — HISTORICAL RECORD**
 
 ## Release identity
 
@@ -12,14 +12,35 @@ Milestone audit: `757340061084b8fd6f591b9d985ada2c59b9113c`
 
 Task 230 exact-head CI: `34038812072` PASS
 
-Verdict: **MILESTONE COMPLETE WITH DOCUMENTED LIMITATION — RELEASE
-PREPARATION MAY BEGIN**
+Release commit: `88463787d14e32a3f6692385161b59474bff1dea`
 
-Tag: no v0.19.0 tag exists during preparation.
+Annotated tag: `v0.19.0`
 
-GitHub Release: no v0.19.0 GitHub Release exists during preparation.
+Tag object: `24fff2dbae77d6fbd281bf9f4ac34b855c116e3a`
 
-No future release commit, tag object, or release identifier is claimed here.
+Peeled target: `88463787d14e32a3f6692385161b59474bff1dea`
+
+Task 231 exact-head CI: `34040345951` PASS
+
+Tag-triggered CI: `34071020347` PASS
+
+GitHub Release numeric ID: `383770772`
+
+GitHub Release node ID: `RE_kwDOT-U4RM4W3-CU`
+
+GitHub Release URL:
+https://github.com/spider2449/rust-agent-harness/releases/tag/v0.19.0
+
+draft: `false`
+
+prerelease: `false`
+
+publication date: `2026-09-07`
+
+Verdict: **RELEASED WITH DOCUMENTED LIMITATION**
+
+The immutable release source is the release commit above. Later documentation
+cleanup commits on `master` are not part of the v0.19.0 source identity.
 
 ## Product and authority contract
 
@@ -171,13 +192,13 @@ The following local checks are recorded from the Task 231 run:
 - [x] exact-head pre-commit scope audit — PASS; only the eight expected files
   are staged, with no `crates`, `.github`, or `docs/adr` diff
 
-Publication remains outside this task:
-
-- [ ] preparation exact-head CI recorded
-- [ ] v0.19.0 annotated tag created
-- [ ] tag pushed
-- [ ] GitHub Release published
-- [ ] tag-triggered CI
-- [ ] immutable release commit verified
-
-Publication belongs to Task 232.
+- [x] preparation exact-head CI PASS (`34040345951`)
+- [x] annotated v0.19.0 tag created
+- [x] tag object recorded (`24fff2dbae77d6fbd281bf9f4ac34b855c116e3a`)
+- [x] tag pushed
+- [x] GitHub Release published (`383770772`)
+- [x] draft=false
+- [x] prerelease=false
+- [x] tag-triggered CI PASS (`34071020347`)
+- [x] immutable release commit verified
+- [ ] post-release-cleanup exact-head CI (Task 233; pending after push)

@@ -1,10 +1,18 @@
 # Changelog
 
-## v0.19.0 — 2026-09-06
+## v0.19.0 — 2026-09-07
 
-Release candidate for the Bounded Local Branch Creation milestone. This entry
-is preparation evidence only: no v0.19.0 tag or GitHub Release has been
-created.
+RAH v0.19.0 released for the Bounded Local Branch Creation at Captured
+Attached HEAD milestone.
+
+### Release record
+
+- Release commit: `88463787d14e32a3f6692385161b59474bff1dea`.
+- Annotated tag: `v0.19.0`.
+- Tag object: `24fff2dbae77d6fbd281bf9f4ac34b855c116e3a`.
+- GitHub Release: `RAH v0.19.0` (numeric ID `383770772`).
+- Task 231 exact-head CI: `34040345951` PASS.
+- Tag-triggered CI: `34071020347` PASS.
 
 ### Added
 
