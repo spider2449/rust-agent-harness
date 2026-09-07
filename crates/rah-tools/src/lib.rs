@@ -77,7 +77,10 @@ pub use repository_rename_file::{
 };
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{
-    REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryWorktreePatchTool,
+    REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryPatchBomState, RepositoryPatchChangedRange,
+    RepositoryPatchEofState, RepositoryPatchPreparation, RepositoryPatchPreparationError,
+    RepositoryPatchPreparationRequest, RepositoryPatchPreparer, RepositoryPatchReview,
+    RepositoryWorktreePatchTool,
 };
 #[cfg(feature = "live-test-support")]
 pub use repository_worktree_patch::{

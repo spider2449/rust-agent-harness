@@ -13,8 +13,10 @@ use async_trait::async_trait;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use rah_sandbox::HostProcessOutput;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -32,6 +34,9 @@ const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_REPLACEMENTS: usize = 16;
 const BOM: &[u8] = b"\xef\xbb\xbf";
+const MAX_ESCAPED_CHANGED_MATERIAL_BYTES: usize = 192 * 1024;
+const MAX_SERIALIZED_REVIEW_BYTES: usize = 256 * 1024;
+const MAX_PREPARED_REPRESENTATION_BYTES: usize = 512 * 1024;
 
 #[cfg(feature = "live-test-support")]
 static LIVE_REPLACEMENT_ATTEMPTS: std::sync::atomic::AtomicUsize =
@@ -78,6 +83,364 @@ impl RepositoryWorktreePatchTool {
                 PatchLimits::default(),
             )?,
         })
+    }
+}
+
+/// Typed human input for a non-effectful H1 `repo.patch` preparation.
+///
+/// The host derives the file digest and byte length after capturing the exact
+/// raw preimage. This type deliberately contains no tool or repository
+/// authority fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryPatchPreparationRequest {
+    /// Repository-relative logical path using `/` separators.
+    pub path: String,
+    /// One complete, nonempty literal fragment to replace.
+    pub expected_old_text: String,
+    /// Literal replacement text, which may be empty.
+    pub replacement_text: String,
+}
+
+/// Sanitized bounded error returned by non-effectful patch preparation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RepositoryPatchPreparationError {
+    /// The typed H1 request violated its input bounds or content rules.
+    #[error("invalid repository patch preparation input: {reason}")]
+    InvalidInput { reason: &'static str },
+    /// The selected path or repository is outside the supported preparation
+    /// subset.
+    #[error("repository patch preparation is unsupported: {reason}")]
+    Unsupported { reason: &'static str },
+    /// The repository or target did not satisfy a patch precondition.
+    #[error("repository patch preparation precondition failed: {reason}")]
+    PreconditionFailed { reason: &'static str },
+    /// The request would make no content change.
+    #[error("repository patch preparation has no effect")]
+    NoEffect,
+    /// The complete exact review could not be represented within the bound.
+    #[error("repository patch review is too large")]
+    ReviewTooLarge,
+}
+
+/// Half-open raw-file UTF-8 byte range for the one reviewed replacement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryPatchChangedRange {
+    start: usize,
+    end: usize,
+    length: usize,
+}
+
+impl RepositoryPatchChangedRange {
+    /// Returns the raw-file start offset, including any leading BOM bytes.
+    #[must_use]
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    /// Returns the exclusive raw-file end offset, including any leading BOM
+    /// bytes in the offset accounting.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.end
+    }
+
+    /// Returns the number of bytes in the matched old text.
+    #[must_use]
+    pub fn length(&self) -> usize {
+        self.length
+    }
+}
+
+/// Whether the captured preimage contained one leading UTF-8 BOM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryPatchBomState {
+    /// The leading BOM is preserved and excluded from matching.
+    Preserved,
+    /// The captured file has no leading BOM.
+    Absent,
+}
+
+/// Explicit end-of-file state for a reviewed image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryPatchEofState {
+    /// The image ends with a literal CR, LF, or CRLF line ending.
+    FinalNewline,
+    /// EOF follows content without a final line-ending byte.
+    NoFinalNewline,
+}
+
+/// Complete bounded R4 review for one H1 literal replacement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryPatchReview {
+    operation: &'static str,
+    path: String,
+    replacement_count: usize,
+    changed_range: RepositoryPatchChangedRange,
+    old_text_escaped: String,
+    replacement_text_escaped: String,
+    bom: RepositoryPatchBomState,
+    preimage_eof: RepositoryPatchEofState,
+    postimage_eof: RepositoryPatchEofState,
+    preimage_eof_marker: &'static str,
+    postimage_eof_marker: &'static str,
+    intended_effect: &'static str,
+    non_effects: Vec<&'static str>,
+    unchanged_context: &'static str,
+    preimage_sha256: String,
+    preimage_byte_length: usize,
+    postimage_sha256: String,
+    postimage_byte_length: usize,
+}
+
+impl RepositoryPatchReview {
+    /// Returns the reviewed operation name.
+    #[must_use]
+    pub fn operation(&self) -> &str {
+        self.operation
+    }
+
+    /// Returns the validated repository-relative path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the number of replacements represented by this review.
+    #[must_use]
+    pub fn replacement_count(&self) -> usize {
+        self.replacement_count
+    }
+
+    /// Returns the one exact changed range.
+    #[must_use]
+    pub fn changed_range(&self) -> &RepositoryPatchChangedRange {
+        &self.changed_range
+    }
+
+    /// Returns the complete display-escaped old text.
+    #[must_use]
+    pub fn old_text_escaped(&self) -> &str {
+        &self.old_text_escaped
+    }
+
+    /// Returns the complete display-escaped replacement text.
+    #[must_use]
+    pub fn replacement_text_escaped(&self) -> &str {
+        &self.replacement_text_escaped
+    }
+
+    /// Returns the leading-BOM state.
+    #[must_use]
+    pub fn bom(&self) -> RepositoryPatchBomState {
+        self.bom
+    }
+
+    /// Returns the preimage EOF state.
+    #[must_use]
+    pub fn preimage_eof(&self) -> RepositoryPatchEofState {
+        self.preimage_eof
+    }
+
+    /// Returns the postimage EOF state.
+    #[must_use]
+    pub fn postimage_eof(&self) -> RepositoryPatchEofState {
+        self.postimage_eof
+    }
+
+    /// Returns the host-owned intended effect description.
+    #[must_use]
+    pub fn intended_effect(&self) -> &str {
+        self.intended_effect
+    }
+
+    /// Returns the fixed list of explicitly excluded effects.
+    #[must_use]
+    pub fn non_effects(&self) -> &[&'static str] {
+        &self.non_effects
+    }
+
+    /// Returns whether unchanged surrounding context was omitted.
+    #[must_use]
+    pub fn unchanged_context(&self) -> &str {
+        self.unchanged_context
+    }
+
+    /// Returns the captured raw preimage SHA-256.
+    #[must_use]
+    pub fn preimage_sha256(&self) -> &str {
+        &self.preimage_sha256
+    }
+
+    /// Returns the captured raw preimage byte length.
+    #[must_use]
+    pub fn preimage_byte_length(&self) -> usize {
+        self.preimage_byte_length
+    }
+
+    /// Returns the complete in-memory postimage SHA-256.
+    #[must_use]
+    pub fn postimage_sha256(&self) -> &str {
+        &self.postimage_sha256
+    }
+
+    /// Returns the complete in-memory postimage byte length.
+    #[must_use]
+    pub fn postimage_byte_length(&self) -> usize {
+        self.postimage_byte_length
+    }
+}
+
+/// Opaque bounded preparation suitable for a later host-owned ticket.
+///
+/// The private identity evidence is retained for same-crate future
+/// revalidation but is not serializable or exposed through public getters.
+#[allow(dead_code)]
+pub struct RepositoryPatchPreparation {
+    tool_input: ToolInput,
+    review: RepositoryPatchReview,
+    review_identity: String,
+    preimage_sha256: String,
+    preimage_byte_length: usize,
+    postimage_sha256: String,
+    postimage_byte_length: usize,
+    root_identity: FileIdentity,
+    dot_git_identity: FileIdentity,
+    git_identity: FileIdentity,
+    target_identity: FileIdentity,
+    parent_identity: FileIdentity,
+    git_state: GitState,
+}
+
+impl RepositoryPatchPreparation {
+    /// Returns the exact canonical legacy `repo.patch` input.
+    #[must_use]
+    pub fn tool_input(&self) -> &ToolInput {
+        &self.tool_input
+    }
+
+    /// Returns the complete bounded R4 review.
+    #[must_use]
+    pub fn review(&self) -> &RepositoryPatchReview {
+        &self.review
+    }
+
+    /// Returns the deterministic identity of the complete prepared state.
+    #[must_use]
+    pub fn review_identity(&self) -> &str {
+        &self.review_identity
+    }
+
+    /// Returns the captured raw preimage SHA-256.
+    #[must_use]
+    pub fn preimage_sha256(&self) -> &str {
+        &self.preimage_sha256
+    }
+
+    /// Returns the captured raw preimage byte length.
+    #[must_use]
+    pub fn preimage_byte_length(&self) -> usize {
+        self.preimage_byte_length
+    }
+
+    /// Returns the complete in-memory postimage SHA-256.
+    #[must_use]
+    pub fn postimage_sha256(&self) -> &str {
+        &self.postimage_sha256
+    }
+
+    /// Returns the complete in-memory postimage byte length.
+    #[must_use]
+    pub fn postimage_byte_length(&self) -> usize {
+        self.postimage_byte_length
+    }
+}
+
+impl std::fmt::Debug for RepositoryPatchPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryPatchPreparation")
+            .field("review_identity", &self.review_identity)
+            .field("preimage_sha256", &self.preimage_sha256)
+            .field("preimage_byte_length", &self.preimage_byte_length)
+            .field("postimage_sha256", &self.postimage_sha256)
+            .field("postimage_byte_length", &self.postimage_byte_length)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-bound non-effectful preparation for one H1 `repo.patch` request.
+///
+/// This type is not a `Tool`; it has no public method that writes a temporary
+/// file, replaces a target, or executes a tool.
+pub struct RepositoryPatchPreparer {
+    policy: RepositoryWorktreeMutationPolicy,
+}
+
+impl RepositoryPatchPreparer {
+    /// Creates a preparer for one trusted non-bare repository root using the
+    /// same fixed Git executable and patch limits as `repo.patch`.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            policy: RepositoryWorktreeMutationPolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+                PatchLimits::default(),
+            )?,
+        })
+    }
+
+    /// Captures and reviews one exact replacement without any user-visible
+    /// filesystem mutation or `repo.patch` execution.
+    pub async fn prepare(
+        &self,
+        request: RepositoryPatchPreparationRequest,
+    ) -> Result<RepositoryPatchPreparation, RepositoryPatchPreparationError> {
+        let request = PreparationRequest::validate(request, self.policy.limits)?;
+        if request.old == request.new {
+            return Err(RepositoryPatchPreparationError::NoEffect);
+        }
+        let _lease = self.policy.acquire_lease().await;
+        let candidate = self
+            .policy
+            .capture_candidate(&request.path)
+            .await
+            .map_err(preparation_error)?;
+        let patch_request = request.into_patch_request(&candidate.bytes);
+        validate_preconditions(&candidate.bytes, &patch_request, self.policy.limits).map_err(
+            |reason| RepositoryPatchPreparationError::PreconditionFailed {
+                reason: redacted_preparation_precondition_reason(reason),
+            },
+        )?;
+        let postimage = build_postimage(&candidate, &patch_request, self.policy.limits)
+            .map_err(preparation_error)?;
+        let review = build_review(&candidate, &postimage, &patch_request)?;
+        let tool_input = canonical_tool_input(&patch_request);
+        let review_identity =
+            compute_review_identity(&self.policy, &candidate, &postimage, &tool_input, &review);
+        let preparation = RepositoryPatchPreparation {
+            tool_input,
+            preimage_sha256: sha256_hex(&candidate.bytes),
+            preimage_byte_length: candidate.bytes.len(),
+            postimage_sha256: sha256_hex(&postimage.bytes),
+            postimage_byte_length: postimage.bytes.len(),
+            root_identity: self.policy.root_identity.clone(),
+            dot_git_identity: self.policy.dot_git_identity.clone(),
+            git_identity: self.policy.git_identity.clone(),
+            target_identity: candidate.target.identity.clone(),
+            parent_identity: candidate.target.parent_identity.clone(),
+            git_state: candidate.git.clone(),
+            review,
+            review_identity,
+        };
+        if serialized_preparation_size(&preparation) > MAX_PREPARED_REPRESENTATION_BYTES {
+            return Err(RepositoryPatchPreparationError::ReviewTooLarge);
+        }
+        Ok(preparation)
     }
 }
 
@@ -333,9 +696,19 @@ impl RepositoryWorktreeMutationPolicy {
     }
 
     async fn capture_preimage(&self, request: &PatchRequest) -> Result<Preimage, RefusalReason> {
+        let pre = self.capture_candidate(&request.path).await?;
+        validate_preconditions(&pre.bytes, request, self.limits)
+            .map_err(RefusalReason::Precondition)?;
+        #[cfg(test)]
+        self.test_hook
+            .run(TestPhase::AfterPreimageValidation, &pre.target.path, None);
+        Ok(pre)
+    }
+
+    async fn capture_candidate(&self, path: &Path) -> Result<Preimage, RefusalReason> {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
-        let target = Target::capture(&self.root, &request.path).map_err(RefusalReason::Path)?;
+        let target = Target::capture(&self.root, path).map_err(RefusalReason::Path)?;
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterInitialPathValidation, &target.path, None);
@@ -351,11 +724,6 @@ impl RepositoryWorktreeMutationPolicy {
             .run(TestPhase::AfterGitValidation, &target.path, None);
         let bytes = read_bounded(&target.path, self.limits.max_file_bytes)
             .map_err(|_| RefusalReason::Precondition("could not read bounded target preimage"))?;
-        validate_preconditions(&bytes, request, self.limits)
-            .map_err(RefusalReason::Precondition)?;
-        #[cfg(test)]
-        self.test_hook
-            .run(TestPhase::AfterPreimageValidation, &target.path, None);
         Ok(Preimage { target, git, bytes })
     }
 
@@ -688,6 +1056,7 @@ impl Default for PatchLimits {
 }
 
 struct PatchRequest {
+    logical_path: String,
     path: PathBuf,
     expected_sha256: String,
     expected_length: usize,
@@ -724,7 +1093,7 @@ impl PatchRequest {
                 "replacements",
             ],
         )?;
-        let path = required_string(object, "path")?;
+        let path_value = required_string(object, "path")?;
         let expected_sha256 = required_string(object, "expected_file_sha256")?;
         let expected_length = object
             .get("expected_file_byte_length")
@@ -738,7 +1107,7 @@ impl PatchRequest {
                 message: "`expected_file_byte_length` exceeds the file size limit".to_owned(),
             });
         }
-        let path = parse_logical_path(path, limits.max_path_bytes)?;
+        let path = parse_logical_path(path_value, limits.max_path_bytes)?;
         if !is_lower_sha256(expected_sha256) {
             return Err(ToolError::InvalidInput {
                 message: "`expected_file_sha256` must be 64 lowercase hexadecimal characters"
@@ -767,11 +1136,68 @@ impl PatchRequest {
         };
         validate_replacements(&replacements, limits)?;
         Ok(Self {
+            logical_path: path_value.to_owned(),
             path,
             expected_sha256: expected_sha256.to_owned(),
             expected_length,
             replacements,
         })
+    }
+}
+
+struct PreparationRequest {
+    logical_path: String,
+    path: PathBuf,
+    old: String,
+    new: String,
+}
+
+impl PreparationRequest {
+    fn validate(
+        request: RepositoryPatchPreparationRequest,
+        limits: PatchLimits,
+    ) -> Result<Self, RepositoryPatchPreparationError> {
+        let path = parse_logical_path(&request.path, limits.max_path_bytes)
+            .map_err(|_| RepositoryPatchPreparationError::InvalidInput { reason: "path" })?;
+        if request.expected_old_text.is_empty()
+            || request.expected_old_text.len() > limits.max_text_bytes
+            || request.replacement_text.len() > limits.max_text_bytes
+            || request.expected_old_text.contains('\0')
+            || request.replacement_text.contains('\0')
+            || request.expected_old_text.contains('\u{feff}')
+            || request.replacement_text.contains('\u{feff}')
+        {
+            return Err(RepositoryPatchPreparationError::InvalidInput { reason: "text" });
+        }
+        if request
+            .expected_old_text
+            .len()
+            .checked_add(request.replacement_text.len())
+            .is_none_or(|length| length > limits.max_text_bytes)
+        {
+            return Err(RepositoryPatchPreparationError::InvalidInput {
+                reason: "text_aggregate",
+            });
+        }
+        Ok(Self {
+            logical_path: request.path,
+            path,
+            old: request.expected_old_text,
+            new: request.replacement_text,
+        })
+    }
+
+    fn into_patch_request(self, bytes: &[u8]) -> PatchRequest {
+        PatchRequest {
+            logical_path: self.logical_path,
+            path: self.path,
+            expected_sha256: sha256_hex(bytes),
+            expected_length: bytes.len(),
+            replacements: vec![Replacement {
+                old: self.old,
+                new: self.new,
+            }],
+        }
     }
 }
 
@@ -834,6 +1260,7 @@ fn validate_replacements(
     Ok(())
 }
 
+#[derive(Clone)]
 struct Target {
     path: PathBuf,
     parent: PathBuf,
@@ -956,14 +1383,17 @@ impl Temporary {
     }
 }
 
+#[derive(Clone)]
 struct Preimage {
     target: Target,
     git: GitState,
     bytes: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct Postimage {
     bytes: Vec<u8>,
+    ranges: Vec<ResolvedReplacement>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1135,7 +1565,7 @@ fn build_postimage(
         ranges.push(ResolvedReplacement {
             start,
             end: start + matched.len(),
-            new: replacement.new.as_str(),
+            new: replacement.new.clone(),
         });
     }
     ranges.sort_by_key(|range| range.start);
@@ -1153,7 +1583,7 @@ fn build_postimage(
     });
     let mut body_postimage = Vec::with_capacity(estimated_body_length);
     let mut cursor = 0;
-    for range in ranges {
+    for range in &ranges {
         body_postimage.extend_from_slice(&body.as_bytes()[cursor..range.start]);
         body_postimage.extend_from_slice(range.new.as_bytes());
         cursor = range.end;
@@ -1168,13 +1598,243 @@ fn build_postimage(
     let mut bytes = Vec::with_capacity(length);
     bytes.extend_from_slice(bom);
     bytes.extend_from_slice(&body_postimage);
-    Ok(Postimage { bytes })
+    Ok(Postimage { bytes, ranges })
 }
 
-struct ResolvedReplacement<'a> {
+#[derive(Clone)]
+struct ResolvedReplacement {
     start: usize,
     end: usize,
-    new: &'a str,
+    new: String,
+}
+
+fn canonical_tool_input(request: &PatchRequest) -> ToolInput {
+    let replacement = &request.replacements[0];
+    ToolInput(json!({
+        "path": request.logical_path,
+        "expected_file_sha256": request.expected_sha256,
+        "expected_file_byte_length": request.expected_length,
+        "expected_old_text": replacement.old,
+        "replacement_text": replacement.new,
+    }))
+}
+
+fn build_review(
+    pre: &Preimage,
+    postimage: &Postimage,
+    request: &PatchRequest,
+) -> Result<RepositoryPatchReview, RepositoryPatchPreparationError> {
+    let [range] = postimage.ranges.as_slice() else {
+        return Err(RepositoryPatchPreparationError::PreconditionFailed {
+            reason: "replacement_count",
+        });
+    };
+    let replacement = &request.replacements[0];
+    let old_text_escaped = escape_review_text(&replacement.old);
+    let replacement_text_escaped = escape_review_text(&replacement.new);
+    if old_text_escaped
+        .len()
+        .saturating_add(replacement_text_escaped.len())
+        > MAX_ESCAPED_CHANGED_MATERIAL_BYTES
+    {
+        return Err(RepositoryPatchPreparationError::ReviewTooLarge);
+    }
+    let bom = if pre.bytes.starts_with(BOM) {
+        RepositoryPatchBomState::Preserved
+    } else {
+        RepositoryPatchBomState::Absent
+    };
+    let changed_range = RepositoryPatchChangedRange {
+        start: range.start
+            + if bom == RepositoryPatchBomState::Preserved {
+                BOM.len()
+            } else {
+                0
+            },
+        end: range.end
+            + if bom == RepositoryPatchBomState::Preserved {
+                BOM.len()
+            } else {
+                0
+            },
+        length: range.end - range.start,
+    };
+    let preimage_eof = eof_state(&pre.bytes);
+    let postimage_eof = eof_state(&postimage.bytes);
+    let review = RepositoryPatchReview {
+        operation: REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
+        path: request.logical_path.clone(),
+        replacement_count: 1,
+        changed_range,
+        old_text_escaped,
+        replacement_text_escaped,
+        bom,
+        preimage_eof,
+        postimage_eof,
+        preimage_eof_marker: eof_marker(preimage_eof),
+        postimage_eof_marker: eof_marker(postimage_eof),
+        intended_effect: "replace exactly one literal match in the selected tracked worktree file",
+        non_effects: vec![
+            "preparation performs no target replacement",
+            "preparation performs no temporary-file write",
+            "the Git index, HEAD, refs, and history remain unchanged",
+            "other paths remain unchanged",
+            "no shell, process, network, or provider action occurs",
+        ],
+        unchanged_context: "unchanged surrounding context omitted",
+        preimage_sha256: sha256_hex(&pre.bytes),
+        preimage_byte_length: pre.bytes.len(),
+        postimage_sha256: sha256_hex(&postimage.bytes),
+        postimage_byte_length: postimage.bytes.len(),
+    };
+    if serde_json::to_vec(&review)
+        .map(|serialized| serialized.len() > MAX_SERIALIZED_REVIEW_BYTES)
+        .unwrap_or(true)
+    {
+        return Err(RepositoryPatchPreparationError::ReviewTooLarge);
+    }
+    Ok(review)
+}
+
+fn eof_state(bytes: &[u8]) -> RepositoryPatchEofState {
+    match bytes.last() {
+        Some(b'\r' | b'\n') => RepositoryPatchEofState::FinalNewline,
+        _ => RepositoryPatchEofState::NoFinalNewline,
+    }
+}
+
+fn eof_marker(state: RepositoryPatchEofState) -> &'static str {
+    match state {
+        RepositoryPatchEofState::FinalNewline => "EOF after final newline",
+        RepositoryPatchEofState::NoFinalNewline => "EOF with no final newline",
+    }
+}
+
+fn escape_review_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == ' '
+            && characters
+                .peek()
+                .is_none_or(|next| matches!(next, '\r' | '\n'))
+        {
+            escaped.push_str("\\u{20}");
+            continue;
+        }
+        match character {
+            '\r' => escaped.push_str("\\r"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() || is_format_character(character) => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn is_format_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x00ad
+            | 0x0600..=0x0605
+            | 0x061c
+            | 0x06dd
+            | 0x070f
+            | 0x0890..=0x0891
+            | 0x08e2
+            | 0x180e
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfeff
+            | 0xfff9..=0xfffb
+            | 0x110bd
+            | 0x110cd
+            | 0x13430..=0x1343f
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0001
+            | 0xe0020..=0xe007f
+    )
+}
+
+fn compute_review_identity(
+    policy: &RepositoryWorktreeMutationPolicy,
+    pre: &Preimage,
+    postimage: &Postimage,
+    tool_input: &ToolInput,
+    review: &RepositoryPatchReview,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"rah-repository-patch-preparation-v1\0");
+    update_serialized(&mut digest, tool_input);
+    digest.update(sha256_hex(&pre.bytes).as_bytes());
+    digest.update(pre.bytes.len().to_le_bytes());
+    digest.update(sha256_hex(&postimage.bytes).as_bytes());
+    digest.update(postimage.bytes.len().to_le_bytes());
+    update_serialized(&mut digest, review);
+    policy.root_identity.update_digest(&mut digest);
+    policy.dot_git_identity.update_digest(&mut digest);
+    policy.git_identity.update_digest(&mut digest);
+    pre.target.identity.update_digest(&mut digest);
+    pre.target.parent_identity.update_digest(&mut digest);
+    digest.update(&pre.git.head);
+    digest.update(&pre.git.head_entry.mode);
+    digest.update(&pre.git.head_entry.object);
+    digest.update(&pre.git.refs);
+    let bytes = digest.finalize();
+    let mut identity = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(identity, "{byte:02x}");
+    }
+    identity
+}
+
+fn update_serialized<T: Serialize>(digest: &mut Sha256, value: &T) {
+    if let Ok(serialized) = serde_json::to_vec(value) {
+        digest.update(serialized);
+    }
+}
+
+fn serialized_preparation_size(preparation: &RepositoryPatchPreparation) -> usize {
+    serde_json::to_vec(&json!({
+        "tool_input": &preparation.tool_input,
+        "review": &preparation.review,
+        "review_identity": &preparation.review_identity,
+        "preimage_sha256": &preparation.preimage_sha256,
+        "preimage_byte_length": preparation.preimage_byte_length,
+        "postimage_sha256": &preparation.postimage_sha256,
+        "postimage_byte_length": preparation.postimage_byte_length,
+    }))
+    .map(|serialized| serialized.len())
+    .unwrap_or(usize::MAX)
+}
+
+fn preparation_error(reason: RefusalReason) -> RepositoryPatchPreparationError {
+    match reason {
+        RefusalReason::Path(_) => RepositoryPatchPreparationError::Unsupported {
+            reason: "path_or_filesystem",
+        },
+        RefusalReason::Repository(_) => RepositoryPatchPreparationError::Unsupported {
+            reason: "repository_state",
+        },
+        RefusalReason::Precondition(message) => {
+            RepositoryPatchPreparationError::PreconditionFailed {
+                reason: redacted_preparation_precondition_reason(message),
+            }
+        }
+        RefusalReason::Temporary(_)
+        | RefusalReason::TemporaryCleanup(_)
+        | RefusalReason::PostObservation(_) => RepositoryPatchPreparationError::Unsupported {
+            reason: "preparation_state",
+        },
+    }
 }
 
 fn validate_preconditions(
@@ -1604,6 +2264,14 @@ fn redacted_precondition_reason(reason: &str) -> &'static str {
     }
 }
 
+fn redacted_preparation_precondition_reason(reason: &str) -> &'static str {
+    if reason.contains("postimage") {
+        "precondition"
+    } else {
+        redacted_precondition_reason(reason)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FileIdentity {
     #[cfg(unix)]
@@ -1618,6 +2286,20 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    fn update_digest(&self, digest: &mut Sha256) {
+        #[cfg(unix)]
+        {
+            digest.update(self.device.to_le_bytes());
+            digest.update(self.inode.to_le_bytes());
+        }
+        #[cfg(windows)]
+        {
+            digest.update(self.volume_serial.to_le_bytes());
+            digest.update(self.file_index.to_le_bytes());
+        }
+        digest.update(self.link_count.to_le_bytes());
+    }
+
     pub(crate) fn same_object(&self, other: &Self) -> bool {
         #[cfg(unix)]
         {
@@ -1832,6 +2514,8 @@ mod tests {
 
     use super::{
         MAX_FILE_BYTES, PatchLimits, PatchRequest, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
+        RepositoryPatchBomState, RepositoryPatchEofState, RepositoryPatchPreparationError,
+        RepositoryPatchPreparationRequest, RepositoryPatchPreparer,
         RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, TestPhase, sha256_hex,
     };
     use crate::{Tool, ToolContext};
@@ -1873,6 +2557,362 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepares_exact_h1_input_and_r4_review_without_effect() {
+        let base = TestDirectory::new("prepare-valid");
+        let root = base.repository();
+        let original = b"alpha\nold\nomega\n";
+        let before_index = git_output(&root, &["ls-files", "-s", "-z"]);
+        let before_head = git_output(&root, &["rev-parse", "--verify", "HEAD"]);
+        let before_refs = git_output(
+            &root,
+            &["for-each-ref", "--format=%(refname)%00%(objectname)%00"],
+        );
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+
+        let preparation = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            preparation.tool_input(),
+            &ToolInput(request_value("target.txt", original, "old", "new"))
+        );
+        assert_eq!(preparation.review().operation(), "repo.patch");
+        assert_eq!(preparation.review().path(), "target.txt");
+        assert_eq!(preparation.review().replacement_count(), 1);
+        assert_eq!(preparation.review().changed_range().start(), 6);
+        assert_eq!(preparation.review().changed_range().end(), 9);
+        assert_eq!(preparation.review().changed_range().length(), 3);
+        assert_eq!(preparation.review().old_text_escaped(), "old");
+        assert_eq!(preparation.review().replacement_text_escaped(), "new");
+        assert_eq!(preparation.review().bom(), RepositoryPatchBomState::Absent);
+        assert_eq!(
+            preparation.review().preimage_eof(),
+            RepositoryPatchEofState::FinalNewline
+        );
+        assert_eq!(
+            preparation.review().postimage_eof(),
+            RepositoryPatchEofState::FinalNewline
+        );
+        assert_eq!(preparation.preimage_sha256(), sha256_hex(original));
+        assert_eq!(preparation.preimage_byte_length(), original.len());
+        let postimage = b"alpha\nnew\nomega\n";
+        assert_eq!(preparation.postimage_sha256(), sha256_hex(postimage));
+        assert_eq!(preparation.postimage_byte_length(), postimage.len());
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), original);
+        assert_eq!(git_output(&root, &["ls-files", "-s", "-z"]), before_index);
+        assert_eq!(
+            git_output(&root, &["rev-parse", "--verify", "HEAD"]),
+            before_head
+        );
+        assert_eq!(
+            git_output(
+                &root,
+                &["for-each-ref", "--format=%(refname)%00%(objectname)%00"]
+            ),
+            before_refs
+        );
+        assert_eq!(
+            preparer
+                .policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_input_executes_with_existing_tool_semantics_once() {
+        let base = TestDirectory::new("prepare-equivalence");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap();
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+
+        let output = run(&tool, preparation.tool_input().0.clone()).await;
+
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            b"alpha\nnew\nomega\n"
+        );
+        assert_eq!(
+            tool.policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_rejects_no_effect_missing_and_multiple_matches() {
+        let base = TestDirectory::new("prepare-rejections");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+
+        let no_effect = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "old".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(no_effect, RepositoryPatchPreparationError::NoEffect);
+
+        let missing = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "missing".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            missing,
+            RepositoryPatchPreparationError::PreconditionFailed {
+                reason: "precondition"
+            }
+        );
+
+        replace_and_commit(&root, "target.txt", b"old\nold\n");
+        let multiple = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            multiple,
+            RepositoryPatchPreparationError::PreconditionFailed {
+                reason: "precondition"
+            }
+        );
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), b"old\nold\n");
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_rejects_dirty_staged_and_untracked_targets() {
+        let base = TestDirectory::new("prepare-git-state");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+
+        fs::write(root.join("target.txt"), b"alpha\nexternal\nomega\n").unwrap();
+        let dirty = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "external".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            dirty,
+            RepositoryPatchPreparationError::Unsupported {
+                reason: "repository_state"
+            }
+        );
+
+        fs::write(root.join("target.txt"), b"alpha\nstaged\nomega\n").unwrap();
+        git(&root, &["add", "--", "target.txt"]);
+        let staged = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "staged".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            staged,
+            RepositoryPatchPreparationError::Unsupported {
+                reason: "repository_state"
+            }
+        );
+
+        git(&root, &["reset", "--quiet", "HEAD", "--", "target.txt"]);
+        fs::write(root.join("untracked.txt"), b"old\n").unwrap();
+        let untracked = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "untracked.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            untracked,
+            RepositoryPatchPreparationError::Unsupported {
+                reason: "repository_state"
+            }
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn review_escapes_controls_invisibles_and_accounts_for_bom_bytes() {
+        let base = TestDirectory::new("prepare-review");
+        let root = base.repository();
+        let original = "\u{feff}one\r\nold \r\nend".as_bytes();
+        replace_and_commit(&root, "target.txt", original);
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+
+        let preparation = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old \r\nend".to_owned(),
+                replacement_text: "new\t\u{1}\u{200b}\u{202e}\r\nend\r\n".to_owned(),
+            })
+            .await
+            .unwrap();
+        let review = preparation.review();
+
+        assert_eq!(review.bom(), RepositoryPatchBomState::Preserved);
+        assert_eq!(review.changed_range().start(), 8);
+        assert_eq!(review.changed_range().end(), 17);
+        assert_eq!(review.old_text_escaped(), "old\\u{20}\\r\\nend");
+        assert_eq!(
+            review.replacement_text_escaped(),
+            "new\\t\\u{1}\\u{200b}\\u{202e}\\r\\nend\\r\\n"
+        );
+        assert_eq!(
+            review.preimage_eof(),
+            RepositoryPatchEofState::NoFinalNewline
+        );
+        assert_eq!(
+            review.postimage_eof(),
+            RepositoryPatchEofState::FinalNewline
+        );
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), original);
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_rejects_malformed_utf8_without_writing() {
+        let base = TestDirectory::new("prepare-utf8");
+        let root = base.repository();
+        let invalid = b"old\xff";
+        replace_and_commit(&root, "target.txt", invalid);
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+
+        let error = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RepositoryPatchPreparationError::PreconditionFailed {
+                reason: "precondition"
+            }
+        );
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), invalid);
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_rejects_oversized_postimage_and_review_without_truncation() {
+        let base = TestDirectory::new("prepare-size");
+        let root = base.repository();
+        let mut oversized = vec![b'x'; MAX_FILE_BYTES - 1];
+        oversized[..3].copy_from_slice(b"old");
+        replace_and_commit(&root, "target.txt", &oversized);
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let oversized_postimage = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "n".repeat(65_533),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            oversized_postimage,
+            RepositoryPatchPreparationError::PreconditionFailed {
+                reason: "precondition"
+            }
+        );
+
+        let control_text = "\u{7f}".repeat(32_000);
+        replace_and_commit(&root, "target.txt", control_text.as_bytes());
+        let review_too_large = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: control_text.clone(),
+                replacement_text: "\u{1}".repeat(32_000),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            review_too_large,
+            RepositoryPatchPreparationError::ReviewTooLarge
+        );
+        assert_eq!(
+            fs::read(root.join("target.txt")).unwrap(),
+            control_text.as_bytes()
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparer_rejects_typed_input_bounds() {
+        let base = TestDirectory::new("prepare-input-bounds");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        for request in [
+            RepositoryPatchPreparationRequest {
+                path: "../target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            },
+            RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: String::new(),
+                replacement_text: "new".to_owned(),
+            },
+            RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old\u{feff}".to_owned(),
+                replacement_text: "new".to_owned(),
+            },
+            RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "a".repeat(64 * 1024),
+                replacement_text: "b".to_owned(),
+            },
+        ] {
+            assert!(matches!(
+                preparer.prepare(request).await,
+                Err(RepositoryPatchPreparationError::InvalidInput { .. })
+            ));
+        }
+        assert_no_patch_temporary(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
