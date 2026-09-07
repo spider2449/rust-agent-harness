@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use rah_protocol::{ToolCall, ToolDefinition, ToolInput, ToolName, ToolOutput};
 use thiserror::Error;
 
+mod authorized_dispatch;
 mod cargo_version;
 mod echo;
 mod external_permissions;
@@ -35,6 +36,9 @@ mod shell_exec;
 mod trusted_profile;
 mod trusted_profile_source;
 
+pub use authorized_dispatch::{
+    AuthorizedDispatchError, AuthorizedDispatchRejection, authorized_tool_dispatch,
+};
 pub use cargo_version::{CARGO_VERSION_TOOL_NAME, CargoVersionTool};
 pub use echo::EchoTool;
 pub use external_permissions::{
