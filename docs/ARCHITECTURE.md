@@ -1,10 +1,105 @@
-# RAH v0.19.0 Architecture
+# RAH v0.20.0 Architecture
 
-This document describes the released v0.19.0 architecture.
+This document describes the v0.20.0 release candidate architecture.
 
-v0.19.0 is the current immutable published release.
+v0.19.0 remains the current immutable published release until v0.20.0 is
+actually tagged and published.
 
 v0.18.0 is the prior release.
+
+## ADR 0021 explicit Host Tool invocation path
+
+RAH v0.20 adds an explicit Desktop Host Tool invocation workflow for a closed
+first-party Tool set. The authority invariant is:
+
+```text
+host explicit dispatch != runtime/model dynamic dispatch != capability authorization
+```
+
+The HostExplicit route is:
+
+```text
+Human Desktop action
+ -> backend typed operation
+ -> connected-current Host composition
+ -> backend eligibility
+ -> authorize_tool_dispatch
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> ToolRegistry
+ -> existing capability Tool/policy
+```
+
+The runtime/model route remains:
+
+```text
+Model/Runtime
+ -> Codex route ownership
+ -> shared D2
+ -> ToolRegistry
+ -> Tool
+```
+
+Both routes share D2, but route-specific checks and provenance remain separate.
+HostExplicit creates no repository, filesystem, branch/ref, commit, provider,
+process, network, or other capability authority. `PermissionLevel` is only a
+dispatch category; `Execute` is not generic repository authority. Frontend
+state, Tool visibility, Effective Authority, and human confirmation are
+observational or workflow inputs, not authorization.
+
+D2 binds the call name to the expected Tool, re-resolves the current Tool from
+the current registry, requires exact complete `ToolDefinition` equality
+(name, description, input schema, and permission), and requires the current
+permission to be explicitly present in the host allowed policy. There is no
+permission hierarchy. Rejection executes zero Tools; admission executes
+exactly one Tool with no retry. D2 does not own eligibility, authority,
+lifecycle/provenance, result interpretation, replay, or rollback.
+
+The Codex bridge preserves thread and active-turn ownership, its private alias,
+replay/deduplication, cancellation, response translation, and real
+`AgentEvent` lifecycle. It authorizes before `ToolStarted` and revalidates at
+execution. A captured permission change is a stale definition even when the
+replacement permission would otherwise be allowed. This hardens dispatch
+admission; it does not claim to make model Tool selection more reliable.
+
+HostExplicit is connected-current only. The current registry, expected
+definitions, shared allowed permission policy, repository/model/profile/
+connection generations, and selected repository/context remain bound. Stale
+or disconnected state fails closed; there is no silent reconnect, recompose,
+provider activation, Trusted Profile restore, or disconnected execution route.
+
+The first-release eligibility is exactly:
+
+- `fs.read`
+- `repo.file-info`
+- `repo.status`
+- `repo.diff`
+- `repo.diff-staged`
+- `repo.create-branch`
+
+The typed forms are `path` for `fs.read` and `repo.file-info`, `{}` for the
+two diff/status observers, `name` for branch Prepare, and ticket ID only for
+branch Confirm. There is no generic ToolName/arbitrary JSON route. Branch
+Prepare has no Tool execution or Git effect; after sanitized review, Confirm
+consumes an opaque process-local in-memory single-use Tool/input/composition-
+bound ticket with a five-minute TTL, revalidates currentness, then enters D2
+and existing ADR 0020 authority. It does not auto-reprepare or retry.
+
+The coordinator permits at most one HostExplicit invocation, excludes host work
+during a model turn and model work during `HostPrepared` or `HostRunning`, and
+has no wait queue or automatic retry. Read-only host actions participate. The
+conceptual states are `Idle`, `ModelTurn`, `HostPrepared`, and `HostRunning`.
+HostExplicit provenance is Desktop-private `host_explicit`, not model
+`ToolRequested`, `ToolStarted`, or `ToolFinished`; no `AgentEvent` schema
+change or forged model lifecycle was introduced.
+
+Before start, prepared branch work may be cancelled with known no Tool effect.
+After start, there is no active HostExplicit abort operation; execution is
+owned to terminal handling where possible. UI dismissal is not abort. There is
+no retry, replay, compensation, rollback, ticket persistence, capability
+persistence, automatic resume, conversation continuation, chat message, or
+ToolOutput injection into model context. External provider Tools,
+`repo.commit`, and worktree-authoring Tools are deferred from HostExplicit.
 
 ## ADR 0020 bounded local branch creation
 

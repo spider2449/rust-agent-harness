@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.20.0 — 2026-09-07
+
+RAH v0.20.0 is a release candidate prepared for publication. It is not
+released yet; v0.19.0 remains the current immutable published release.
+
+### Added
+
+- Explicit Desktop Host Tool invocation for a closed first-party Tool set.
+- Exact six-Tool first-release HostExplicit eligibility:
+  `fs.read`, `repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`,
+  and `repo.create-branch`.
+- Typed Host actions, branch Prepare/review/Confirm, and private
+  `host_explicit` activity/provenance.
+
+### Security
+
+- ADR 0021 keeps host explicit dispatch, runtime/model dynamic dispatch, and
+  capability authorization separate.
+- HostExplicit reuses the shared D2 current-definition/permission gate and
+  the Codex bridge now applies equivalent admission hardening.
+- Connected-current composition, backend-owned eligibility, typed input,
+  single-use branch tickets, and no generic ToolName/JSON route are retained.
+- No replay, rollback, or authority amplification is introduced.
+
+### Validation
+
+- Task 239 deterministic evidence covers the six-Tool route and security
+  boundaries.
+- Task 240 certified Windows connected-current `repo.status` and
+  `repo.create-branch` through the production HostExplicit backend path.
+- The live branch effect was verified as `rah-host-explicit-live-18d2efa09d330900-2`
+  at OID `e6b376c26b0d97e12c1be2c7981aecc32974e29c`.
+- The live run recorded model lifecycle `runtime.start = 0`, `AgentRequest = 0`,
+  `prompt = 0`, `ToolRequested = 0`, `ToolStarted = 0`, and `ToolFinished = 0`.
+
+### Limitations
+
+- `fs.read`, `repo.file-info`, `repo.diff`, and `repo.diff-staged` are
+  deterministic-only HostExplicit release claims; they were not separately
+  live certified.
+- Real GUI mouse-click automation and Linux/macOS HostExplicit live behavior
+  were not certified.
+- Model-selected `repo.create-branch` remains not certified under Task 229;
+  Task 207 remains unchanged.
+- External provider Tools, `repo.commit`, and worktree-authoring HostExplicit
+  routes remain deferred. Post-start HostExplicit cancellation is not offered.
+
 ## v0.19.0 — 2026-09-07
 
 RAH v0.19.0 released for the Bounded Local Branch Creation at Captured

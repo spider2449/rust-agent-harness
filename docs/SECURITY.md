@@ -1,10 +1,99 @@
-# RAH v0.19.0 Security Model
+# RAH v0.20.0 Security Model
 
-This document describes the released v0.19.0 security model.
+This document describes the v0.20.0 release candidate security model.
 
-v0.19.0 is the current immutable published release.
+v0.19.0 remains the current immutable published release until v0.20.0 is
+actually tagged and published.
 
 v0.18.0 is the prior release.
+
+## ADR 0021 explicit host invocation dispatch boundary
+
+Host explicit dispatch is not capability authority and is not runtime/model
+dynamic dispatch. Model text, provider metadata, frontend state, Tool
+visibility, Effective Authority, `PermissionLevel`, `Execute`, and human
+confirmation cannot create or amplify authority. There is no model-text trigger
+for HostExplicit invocation.
+
+HostExplicit is connected-current only. The backend retains the current Tool
+registry, expected definitions, shared allowed permission policy, selected
+repository/context, and repository/model/profile/connection generations. Every
+action requires current connected state and fails closed on stale or
+disconnected state. It cannot silently reconnect, recompose, activate a
+provider, restore a Trusted Profile, or execute while disconnected.
+
+Eligibility is backend-owned and exactly limited to `fs.read`,
+`repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`, and
+`repo.create-branch`. MCP Tools, Process Plugin Tools, `echo`, fixtures,
+generic diagnostic Tools, `repo.commit`, and worktree-authoring Tools are not
+HostExplicit eligible in the first release. The frontend consumes a backend
+descriptor; it does not infer eligibility from a Tool name, permission, effect
+class, authority category, or advertised state.
+
+HostExplicit accepts typed operations only. There is no generic
+`ToolName + arbitrary JSON` route or production JSON console. The underlying
+Tool parser and policy remain authoritative. Read operations use a path where
+required; observer operations use `{}`; branch Prepare uses a validated name;
+branch Confirm accepts only an opaque ticket ID.
+
+The only added Tauri permission names are `host_invoke_read`,
+`host_prepare_repo_create_branch`, `host_confirm_tool_invocation`, and
+`host_cancel_tool_invocation`. There is no wildcard, generic D2 endpoint, or
+invoke-any-tool permission. Effective Authority may expose only backend-owned
+eligibility, kind, and bounded unavailable reason; that information is
+observational and the frontend is not an authorization boundary. Tool text is
+text-safe, JSON is escaped/preformatted, and raw HTML ToolOutput rendering is
+not used.
+
+## D2 shared authorization
+
+The neutral D2 boundary binds the call name to the expected Tool definition,
+re-resolves the current Tool from the current `ToolRegistry`, and requires
+exact complete `ToolDefinition` equality: name, description, input schema, and
+permission. The current `PermissionLevel` must be explicitly present in the
+host allowed policy. Permission levels are not hierarchical. Admission
+rejection executes zero Tools; successful admission executes exactly one Tool
+and never retries.
+
+D2 is a dispatch admission and execution boundary. It does not own HostExplicit
+eligibility, capability authority, lifecycle/provenance, repository outcome
+interpretation, replay, or rollback. HostExplicit does not create repository,
+filesystem, branch/ref, commit, provider, process, or network authority.
+
+## Codex bridge hardening
+
+The Codex route retains thread ownership, active-turn ownership, private alias
+mapping, replay/deduplication, cancellation, response translation, and the real
+AgentEvent lifecycle. It calls `authorize_tool_dispatch` before `ToolStarted`
+and `authorized_tool_dispatch` revalidates before execution. A captured
+permission change is a stale ToolDefinition even when the replacement
+permission would otherwise be allowed. This aligns dispatch admission; it does
+not make model Tool selection more reliable.
+
+## Desktop lifecycle, branch tickets, and concurrency
+
+The typed Tauri surface has only narrow HostExplicit commands. Branch Prepare
+does not execute a Tool and has no Git effect. Review Confirm consumes a
+process-local, in-memory, non-persistent, single-use, Tool-bound, input-bound,
+composition/currentness-bound ticket with a five-minute TTL. Confirm
+revalidates currentness, does not auto-reprepare, and does not retry before D2
+and existing ADR 0020 branch authority.
+
+One HostExplicit action maximum is allowed. Host work is rejected during a
+model turn; model work is rejected during `HostPrepared` or `HostRunning`;
+read-only host actions participate; there is no wait queue. Host activity is
+Desktop-private `host_explicit`, never forged `ToolRequested`, `ToolStarted`,
+or `ToolFinished` activity, and no AgentEvent schema change exists.
+
+Before start, prepared work can be cancelled with known no Tool effect. After
+start, there is no active HostExplicit abort operation. A crash or lost result
+does not imply no effect. There is no retry, replay, compensation, rollback,
+ticket persistence, capability persistence, automatic resume, conversation
+continuation, user/assistant chat message, or ToolOutput injection into model
+context.
+
+Process supervision is not OS sandboxing. RAH does not claim network isolation,
+race-free TOCTOU behavior, rollback, or absence of ambient external effects.
 
 ## ADR 0020 bounded local branch creation authority
 

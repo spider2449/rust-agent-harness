@@ -5,11 +5,41 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.20.0 release candidate
+
+RAH v0.20.0 is prepared for publication but is not tagged or published.
+v0.19.0 remains the current immutable published release until v0.20.0 is
+actually tagged and published.
+
+RAH v0.20 adds an explicit Desktop Host Tool invocation workflow for a closed
+first-party Tool set. The exact first-release HostExplicit eligibility is:
+`fs.read`, `repo.file-info`, `repo.status`, `repo.diff`,
+`repo.diff-staged`, and `repo.create-branch`.
+
+HostExplicit is a connected-current backend Host action — not Model activity.
+The backend chooses typed operations, retains the current registry, expected
+definitions, permission policy, selected repository/context, and bound
+generations, then revalidates through the shared D2 current-definition and
+permission gate. `repo.create-branch` uses Prepare, sanitized review, and
+explicit Confirm with a single-use opaque ticket. There is no generic
+`ToolName + arbitrary JSON` console and no authority amplification.
+
+Windows Desktop connected-current explicit Host Tool invocation is certified
+for `repo.status` and `repo.create-branch` using the production HostExplicit
+backend path. No model request or model Tool lifecycle was used. The other
+four eligible Tools are deterministically verified but were not separately
+live certified. Real GUI mouse-click automation and Linux/macOS HostExplicit
+live behavior were not certified.
+
+Model-selected `repo.create-branch` dispatch remains not certified from the
+historical Task 229 evidence. Task 207 remains unchanged; MCP and Process
+Plugin Tools are not HostExplicit eligible in v0.20.
+
 ## RAH v0.19.0 released
 
-RAH v0.19.0 is the current immutable published release for the Bounded Local
-Branch Creation at Captured Attached HEAD milestone. v0.18.0 is the prior
-release.
+RAH v0.19.0 remains the current immutable published release for the Bounded
+Local Branch Creation at Captured Attached HEAD milestone until v0.20.0 is
+published. v0.18.0 is the prior release.
 
 The accepted ADR 0020 capability is `repo.create-branch`. It accepts only
 `{"name":"<validated-logical-branch-name>"}` and, when the host has composed
