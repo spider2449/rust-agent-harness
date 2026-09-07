@@ -8447,7 +8447,7 @@ mod tests {
             .effective_tools
             .iter()
             .find(|tool| tool.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
-            .is_none_or(|tool| tool.host_invocation.eligible)
+            .is_none_or(|tool| !tool.host_invocation.eligible)
         {
             return Err("branch was not eligible immediately before prepare".to_owned());
         }

@@ -190,6 +190,14 @@ eligibility, HostExplicit action, model request, or branch effect occurred.
 The assertion is corrected without production changes and requires another
 exact-head CI before the next fresh live attempt.
 
+The following fresh attempt proved connection-current composition, both
+eligible Tools, deferred Tool unavailability, the complete `repo.status`
+HostExplicit lifecycle, and zero-effect branch Prepare. It stopped before
+branch confirmation because the harness inverted the pre-prepare eligibility
+assertion. No branch Started event or branch Tool effect occurred. The
+test-only assertion is corrected and requires another exact-head CI before a
+fresh effectful attempt.
+
 ## Live evidence
 
 The test emits bounded connection, eligibility, read, prepare, branch,
