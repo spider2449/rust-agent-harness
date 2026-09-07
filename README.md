@@ -5,11 +5,10 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.20.0 release candidate
+## RAH v0.20.0 released
 
-RAH v0.20.0 is prepared for publication but is not tagged or published.
-v0.19.0 remains the current immutable published release until v0.20.0 is
-actually tagged and published.
+v0.20.0 is now the current immutable published release. v0.19.0 is the prior
+release.
 
 RAH v0.20 adds an explicit Desktop Host Tool invocation workflow for a closed
 first-party Tool set. The exact first-release HostExplicit eligibility is:
@@ -37,9 +36,8 @@ Plugin Tools are not HostExplicit eligible in v0.20.
 
 ## RAH v0.19.0 released
 
-RAH v0.19.0 remains the current immutable published release for the Bounded
-Local Branch Creation at Captured Attached HEAD milestone until v0.20.0 is
-published. v0.18.0 is the prior release.
+RAH v0.19.0 is the prior immutable published release for the Bounded Local
+Branch Creation at Captured Attached HEAD milestone. v0.18.0 preceded it.
 
 The accepted ADR 0020 capability is `repo.create-branch`. It accepts only
 `{"name":"<validated-logical-branch-name>"}` and, when the host has composed

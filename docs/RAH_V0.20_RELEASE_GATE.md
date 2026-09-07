@@ -2,26 +2,47 @@
 
 ## Status
 
-**RELEASE PREPARATION — NOT TAGGED OR PUBLISHED**
+**RELEASED — HISTORICAL RECORD**
 
-v0.20.0 is a prepared release candidate. v0.19.0 remains the current
-immutable published release until Task 243 performs publication.
+v0.20.0 is the current immutable published release. v0.19.0 is the prior
+release.
 
 ## Release identity
 
-Before Task 243, the release identity is:
+The immutable v0.20.0 publication identity is:
 
 - Task 241 audit commit: `619bc3c0d8923a5306e3f0fd4cbccc3203a1ef0f`.
 - Task 241 audit CI: `34088511150` PASS.
 - Task 241 closure: `91b676bdd408235af0612749e1b98d9f1ac1688d`.
 - Task 241 closure CI: `34088699720` PASS.
-- v0.20.0 tag: absent.
-- GitHub Release: absent.
-- Publication: Task 243.
+- Release commit: `0d2b4c46be5d879b70c660501f9b7236040a7a61`.
+- Release-preparation CI: `34090581488` PASS.
+- Annotated tag: `v0.20.0`.
+- Tag object: `bc3addb4f41914a97a91521eb01c4726ae3c2c73`.
+- Peeled target: `0d2b4c46be5d879b70c660501f9b7236040a7a61`.
+- Tag CI: `34091553715` PASS.
+- GitHub Release numeric ID: `383875194`.
+- GitHub Release node ID: `RE_kwDOT-U4RM4W4Xh6`.
+- Release URL: https://github.com/spider2449/rust-agent-harness/releases/tag/v0.20.0
+- Published: `2026-09-07T06:39:07Z`.
 
-The Task 242 preparation commit is deliberately recorded only after it exists
-and its exact-head CI passes. No tag object, GitHub Release ID, or tag CI run
-is invented here.
+The Task 242 preparation chronology is preserved below and in the Task 242
+plan. The release source remains the Task 242 commit; the later Task 244
+documentation cleanup is not the release source.
+
+## Publication checklist
+
+- [x] Task 242 release candidate.
+- [x] Exact-head release CI.
+- [x] Annotated tag creation.
+- [x] Tag object verification.
+- [x] Peeled target verification.
+- [x] Tag push.
+- [x] Tag-triggered CI.
+- [x] GitHub Release creation.
+- [x] `draft=false`.
+- [x] `prerelease=false`.
+- [x] Release body limitation wording.
 
 ## Task 241 verdict
 

@@ -1,11 +1,12 @@
 # RAH v0.20.0 Architecture
 
-This document describes the v0.20.0 release candidate architecture.
+This document describes the released v0.20.0 architecture.
 
-v0.19.0 remains the current immutable published release until v0.20.0 is
-actually tagged and published.
+v0.20.0 is the current immutable published release.
 
-v0.18.0 is the prior release.
+v0.19.0 is the prior release.
+
+v0.18.0 preceded v0.19.0.
 
 ## ADR 0021 explicit Host Tool invocation path
 
