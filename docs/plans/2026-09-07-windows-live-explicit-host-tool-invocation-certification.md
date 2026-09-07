@@ -2,7 +2,7 @@
 
 ## Status
 
-LIVE PASS — AWAITING EXACT-HEAD CI
+COMPLETE — WINDOWS LIVE CERTIFIED
 
 ## Starting checkpoint
 
@@ -267,9 +267,20 @@ executed exactly once.
 
 ## Closure
 
-Live-pass documentation commit pending: `docs: record Windows host invocation
-live pass`. Final closure must state that model-selected Tool dispatch was not
-exercised and that Task 229 and Task 207 limitations remain unchanged.
+Live-pass documentation commit: `8f0efce5d37f7e133ea7386b81d960f7d9a7ec83`,
+exact-head CI `34083496689` passed. Final closure commit:
+`docs: close Task 240 Windows host invocation certification`.
+
+The allowed certification claim is: Windows Desktop connected-current explicit
+Host Tool invocation is certified for `repo.status` and `repo.create-branch`
+using the production HostExplicit backend path. No model request or model Tool
+lifecycle was used.
+
+Explicit nonclaims remain: model-selected Tool dispatch was not exercised by
+Task 240; real GUI mouse-click automation was not certified; arbitrary eligible
+Tool, external provider, `repo.commit`, and Linux/macOS live behavior were not
+certified. Task 229's model-selected `repo.create-branch` limitation remains
+historically unchanged, as does Task 207. Task 241 has not started.
 
 ## Next task
 
