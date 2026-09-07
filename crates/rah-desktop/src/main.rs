@@ -8175,7 +8175,7 @@ mod tests {
         let status = app.state::<DesktopAppState>().status();
         if status.runtime_status != "connected"
             || status.codex_status != "connected"
-            || status.codex_version != Some("0.149.0")
+            || status.codex_version != Some("codex-cli 0.149.0")
         {
             return Err("connected Desktop did not report the certified Codex baseline".to_owned());
         }

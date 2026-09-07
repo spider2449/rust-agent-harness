@@ -183,6 +183,13 @@ was corrected to enable Tauri's explicit any-thread test construction. This
 requires a correction commit and exact-head CI before a fresh live attempt;
 there is no automatic retry.
 
+The next fresh attempt reached the real connected Desktop path but stopped at a
+test-only baseline presentation assertion. The production status contract
+reports `codex-cli 0.149.0` while the harness compared only `0.149.0`; no
+eligibility, HostExplicit action, model request, or branch effect occurred.
+The assertion is corrected without production changes and requires another
+exact-head CI before the next fresh live attempt.
+
 ## Live evidence
 
 The test emits bounded connection, eligibility, read, prepare, branch,
