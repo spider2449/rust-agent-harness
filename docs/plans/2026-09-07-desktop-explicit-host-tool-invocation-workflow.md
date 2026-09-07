@@ -181,7 +181,8 @@ Documentation-only closure commit: `docs: close Task 239 host invocation workflo
 
 ## Final CI
 
-To be recorded after the documentation closure commit reaches exact-head CI.
+The documentation closure commit `50f6b4c58520649de3e60dd1f98af501d668b3c9`
+passed exact-head push CI as run `34080292847`.
 
 ## Next task
 
