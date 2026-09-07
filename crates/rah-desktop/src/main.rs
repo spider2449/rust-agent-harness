@@ -11,6 +11,8 @@ mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
 #[cfg(target_os = "windows")]
+mod host_invocation;
+#[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
 mod trusted_profile_selection;
@@ -35,6 +37,14 @@ use effective_authority::{
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
+use host_invocation::{
+    BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
+    HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
+    HostInvocationResponse, HostInvocationUnavailableReason, HostPrepareBranchRequest,
+    HostReadRequest, PreparedBranchResponse, PreparedHostInvocation, host_descriptor, host_kind,
+    read_request, validate_bounded_string,
+};
+#[cfg(target_os = "windows")]
 use provider_composition::{
     DesktopProviderActivation, ProviderActivationError, desktop_allowed_permissions,
     merge_tool_registries,
@@ -42,7 +52,8 @@ use provider_composition::{
 #[cfg(target_os = "windows")]
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole,
-    RequestId, SessionId, ToolContent, ToolInput,
+    PermissionLevel, RequestId, SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition,
+    ToolInput, ToolName, ToolOutput,
 };
 #[cfg(target_os = "windows")]
 use rah_runtime::AgentRuntime;
@@ -53,14 +64,15 @@ use rah_runtime_codex::{
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
-    EchoTool, FsReadTool, GitStageTool, GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-    RepositoryBranchCreationAuthority, RepositoryBranchCreationTool, RepositoryCommitControl,
-    RepositoryCommitReview, RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
+    AuthorizedDispatchError, AuthorizedDispatchRejection, EchoTool, FsReadTool, GitStageTool,
+    GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryBranchCreationAuthority,
+    RepositoryBranchCreationTool, RepositoryCommitControl, RepositoryCommitReview,
+    RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
     RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry,
+    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -204,6 +216,7 @@ enum ConnectionState {
         connection_generation: u64,
         repository_fingerprint: Option<String>,
         composition: Arc<DesktopToolComposition>,
+        allowed_permissions: Vec<PermissionLevel>,
     },
     Disconnecting,
     Error(FrontendError),
@@ -357,6 +370,8 @@ struct DesktopAppState {
     /// Explicit host-selected Trusted Profile intent. Static selection never activates providers.
     trusted_profile: Mutex<Option<DesktopTrustedProfileSelection>>,
     trusted_profile_generation: Mutex<u64>,
+    /// One atomic exclusion coordinator for model turns and explicit host work.
+    host_invocation: Mutex<HostInvocationCoordinator>,
     /// One effective provider composition owned by the currently published connection.
     /// Kept outside `ConnectionState` so hard recovery can asynchronously reap providers
     /// after synchronously withdrawing the usable runtime state.
@@ -437,6 +452,7 @@ impl DesktopAppState {
             commit_capability: Mutex::new(None),
             trusted_profile: Mutex::new(None),
             trusted_profile_generation: Mutex::new(0),
+            host_invocation: Mutex::new(HostInvocationCoordinator::default()),
             provider_activation: Mutex::new(None),
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
@@ -662,11 +678,27 @@ impl DesktopConversationState {
 impl DesktopAppState {
     fn start_chat(&self) -> Result<u64, FrontendError> {
         {
+            let mut coordinator = self
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            coordinator.reap_expired(std::time::Instant::now());
+            coordinator
+                .begin_model()
+                .map_err(|_| FrontendError::HostInvocationBusy)?;
+        }
+        {
             let mut chat = self
                 .chat
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            begin_chat(&mut chat)?;
+            if let Err(error) = begin_chat(&mut chat) {
+                self.host_invocation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .release_model();
+                return Err(error);
+            }
         }
         let mut next_generation = self
             .next_chat_generation
@@ -786,6 +818,10 @@ impl DesktopAppState {
             .chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
+        self.host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_model();
         claimed
     }
 
@@ -826,6 +862,10 @@ impl DesktopAppState {
             .chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
+        self.host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_model();
         true
     }
 
@@ -846,6 +886,10 @@ impl DesktopAppState {
             .chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ChatState::Idle;
+        self.host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_model();
     }
 }
 
@@ -926,6 +970,10 @@ impl DesktopAppState {
     }
 
     async fn shutdown_for_exit(&self) {
+        self.host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_prepared();
         let runtime = {
             let mut connection = self
                 .connection
@@ -1233,6 +1281,13 @@ pub(crate) enum FrontendError {
     CommitAuthorizationUnavailable,
     CommitAuthorizationStale,
     CommitAuthorizationFailed,
+    HostInvocationBusy,
+    HostInvocationNotConnected,
+    HostInvocationNotEligible,
+    HostInvocationPermissionDenied,
+    HostInvocationStale,
+    HostInvocationInvalidInput,
+    HostInvocationTicketInvalid,
 }
 
 #[cfg(target_os = "windows")]
@@ -1604,6 +1659,38 @@ enum ActivityResult {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum HostActivityState {
+    Prepared,
+    Started,
+    ToolCompleted,
+    ToolError,
+    RejectedNotEligible,
+    RejectedPermission,
+    RejectedStale,
+    RejectedBusy,
+    InvalidInput,
+    CancelledBeforeStart,
+    PossibleEffectUnknown,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct HostActivityEvent {
+    source: &'static str,
+    invocation_id: String,
+    tool: String,
+    state: HostActivityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<ToolOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<BranchReview>,
+}
+
+#[cfg(target_os = "windows")]
 fn frontend_error(error: &CodexAdapterError) -> FrontendError {
     match error {
         CodexAdapterError::WorkspaceContext { .. }
@@ -1765,6 +1852,7 @@ struct PendingConnectedPublication {
     connection_generation: u64,
     repository_fingerprint: Option<String>,
     composition: Arc<DesktopToolComposition>,
+    allowed_permissions: Vec<PermissionLevel>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1865,6 +1953,7 @@ fn publish_connected_provider_state(
         connection_generation,
         repository_fingerprint,
         composition,
+        allowed_permissions,
     } = pending;
     *published_provider = activation;
     *connection = ConnectionState::Connected {
@@ -1876,6 +1965,7 @@ fn publish_connected_provider_state(
         connection_generation,
         repository_fingerprint,
         composition,
+        allowed_permissions,
     };
     Ok(())
 }
@@ -2046,11 +2136,39 @@ fn get_effective_authority_snapshot(
             },
         ),
     };
+    let allowed_permissions = match &*connection {
+        ConnectionState::Connected {
+            allowed_permissions,
+            ..
+        } => allowed_permissions.clone(),
+        _ => Vec::new(),
+    };
+    let connection_is_error = matches!(&*connection, ConnectionState::Error(_));
+    drop(connection);
     let mut effective_tools = composition
         .as_ref()
         .map_or_else(Vec::new, |value| value.tools.clone());
+    let coordinator_state = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator.state()
+    };
+    let branch_authority_present = repository
+        .as_ref()
+        .is_some_and(|value| value.branch_creation_authority.is_some());
     for tool in &mut effective_tools {
         tool.advertised = connection_binding.advertised;
+        tool.host_invocation = host_descriptor(
+            tool,
+            status == SnapshotStatus::ConnectedCurrent,
+            selected,
+            allowed_permissions.contains(&tool.permission),
+            branch_authority_present,
+            coordinator_state,
+        );
     }
     let mut unavailable_capabilities = composition
         .as_ref()
@@ -2058,7 +2176,7 @@ fn get_effective_authority_snapshot(
     if composition.is_none()
         && let Some(profile) = profile_selection.as_ref()
     {
-        let reason = if matches!(&*connection, ConnectionState::Error(_)) {
+        let reason = if connection_is_error {
             effective_authority::UnavailableReason::ProviderUnavailable
         } else {
             effective_authority::UnavailableReason::ProviderNotEffective
@@ -2114,6 +2232,503 @@ fn get_effective_authority_snapshot(
         unavailable_capabilities,
         reviewed_commit: effective_authority::reviewed_commit(workflow.authorization, selected),
     }
+}
+
+#[cfg(target_os = "windows")]
+struct CurrentHostComposition {
+    registry: Arc<ToolRegistry>,
+    expected_definitions: Vec<ToolDefinition>,
+    composition_identity: usize,
+    allowed_permissions: Vec<PermissionLevel>,
+    generations: [u64; 4],
+    repository_identity: Option<String>,
+    repository: Option<Arc<DesktopRepository>>,
+}
+
+#[cfg(target_os = "windows")]
+fn current_host_composition(
+    state: &DesktopAppState,
+) -> Result<CurrentHostComposition, FrontendError> {
+    let current_generations = current_host_generation_tuple(state);
+    let repository = state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let repository_identity = repository
+        .as_ref()
+        .map(|value| repository_context_fingerprint(&value.root));
+    let connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ConnectionState::Connected {
+        runtime: _,
+        repository_generation,
+        model_generation,
+        profile_generation,
+        connection_generation,
+        repository_fingerprint,
+        composition,
+        allowed_permissions,
+        ..
+    } = &*connection
+    else {
+        return Err(FrontendError::HostInvocationNotConnected);
+    };
+    let generations = [
+        *repository_generation,
+        *model_generation,
+        *profile_generation,
+        *connection_generation,
+    ];
+    if generations != current_generations
+        || repository_identity != *repository_fingerprint
+        || composition.registry.definitions().len() != composition.tools.len()
+        || composition.expected_definitions.len() != composition.tools.len()
+    {
+        return Err(FrontendError::HostInvocationStale);
+    }
+    Ok(CurrentHostComposition {
+        registry: Arc::clone(&composition.registry),
+        expected_definitions: composition.expected_definitions.clone(),
+        composition_identity: Arc::as_ptr(&composition.registry) as usize,
+        allowed_permissions: allowed_permissions.clone(),
+        generations,
+        repository_identity,
+        repository,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn host_tool_definition(
+    current: &CurrentHostComposition,
+    name: &ToolName,
+    coordinator_state: CoordinatorState,
+) -> Result<ToolDefinition, FrontendError> {
+    let entry = current
+        .expected_definitions
+        .iter()
+        .find(|definition| definition.name == *name)
+        .cloned()
+        .ok_or(FrontendError::HostInvocationNotEligible)?;
+    let effective = {
+        let kind = host_kind(name.as_str());
+        if kind.is_none() {
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+        effective_authority::EffectiveToolEntry {
+            public_tool_name: name.to_string(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: effective_authority::EffectClass::ReadOnly,
+            authority_category: effective_authority::AuthorityCategory::RepositoryObservation,
+            permission: entry.permission,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        }
+    };
+    let descriptor = host_descriptor(
+        &effective,
+        true,
+        current.repository.is_some(),
+        true,
+        current
+            .repository
+            .as_ref()
+            .is_some_and(|value| value.branch_creation_authority.is_some()),
+        coordinator_state,
+    );
+    if !descriptor.eligible {
+        return Err(match descriptor.unavailable_reason {
+            Some(HostInvocationUnavailableReason::PermissionDenied) => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            Some(HostInvocationUnavailableReason::ModelTurnActive)
+            | Some(HostInvocationUnavailableReason::HostInvocationBusy) => {
+                FrontendError::HostInvocationBusy
+            }
+            Some(HostInvocationUnavailableReason::RepositoryRequired)
+            | Some(HostInvocationUnavailableReason::AuthorityNotGranted)
+            | Some(HostInvocationUnavailableReason::NotSupported)
+            | Some(HostInvocationUnavailableReason::ProviderNotSupported)
+            | None => FrontendError::HostInvocationNotEligible,
+            Some(
+                HostInvocationUnavailableReason::NotConnectedCurrent
+                | HostInvocationUnavailableReason::Stale,
+            ) => FrontendError::HostInvocationStale,
+        });
+    }
+    Ok(entry)
+}
+
+#[cfg(target_os = "windows")]
+fn emit_host_activity(app: &AppHandle, event: HostActivityEvent) {
+    if let Err(error) = app.emit("host_activity_event", event) {
+        tracing::warn!(error = %error, "failed to emit explicit host activity");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn host_call(name: ToolName, input: ToolInput) -> ToolCall {
+    ToolCall {
+        id: ToolCallId::new(),
+        name,
+        input,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+async fn run_host_tool(
+    app: AppHandle,
+    registry: Arc<ToolRegistry>,
+    expected_definition: ToolDefinition,
+    allowed_permissions: Vec<PermissionLevel>,
+    call: ToolCall,
+    kind: HostInvocationKind,
+    invocation_id: String,
+    repository_identity: Option<String>,
+) {
+    let tool_name = call.name.to_string();
+    let result = authorized_tool_dispatch(
+        &registry,
+        &expected_definition,
+        &allowed_permissions,
+        call,
+        ToolContext::default(),
+    )
+    .await;
+    let state = app.state::<DesktopAppState>();
+    let (activity_state, output) = match result {
+        Ok(output) => {
+            if kind == HostInvocationKind::RepoCreateBranch
+                && matches!(
+                    branch_result_classification(&output),
+                    BranchActivityClassification::Uncertain
+                )
+            {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(state.inner(), repository_identity.as_deref())
+                {
+                    emit_repository_refresh(&app);
+                }
+            }
+            (
+                if output.is_error {
+                    HostActivityState::ToolError
+                } else {
+                    HostActivityState::ToolCompleted
+                },
+                Some(output),
+            )
+        }
+        Err(AuthorizedDispatchError::Rejected(_)) => (HostActivityState::RejectedStale, None),
+        Err(AuthorizedDispatchError::Tool(_)) => {
+            if kind == HostInvocationKind::RepoCreateBranch {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(state.inner(), repository_identity.as_deref())
+                {
+                    emit_repository_refresh(&app);
+                }
+            }
+            (HostActivityState::PossibleEffectUnknown, None)
+        }
+    };
+    state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish_host();
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id,
+            tool: tool_name,
+            state: activity_state,
+            result: output,
+            review: None,
+        },
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn host_repository_context_is_current(state: &DesktopAppState, captured: Option<&str>) -> bool {
+    let current = state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|value| repository_context_fingerprint(&value.root));
+    current.as_deref() == captured
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn host_invoke_read(
+    request: HostReadRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<HostInvocationResponse, FrontendError> {
+    let (kind, name, input) =
+        read_request(request).map_err(|_| FrontendError::HostInvocationInvalidInput)?;
+    let mut coordinator = state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    coordinator.reap_expired(std::time::Instant::now());
+    if coordinator.state() != CoordinatorState::Idle {
+        return Err(FrontendError::HostInvocationBusy);
+    }
+    let current = current_host_composition(state.inner())?;
+    let expected_definition = host_tool_definition(&current, &name, CoordinatorState::Idle)?;
+    let call = host_call(name, input);
+    authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &call,
+    )
+    .map_err(|rejection| match rejection {
+        AuthorizedDispatchRejection::PermissionDenied { .. } => {
+            FrontendError::HostInvocationPermissionDenied
+        }
+        AuthorizedDispatchRejection::UnknownTool { .. }
+        | AuthorizedDispatchRejection::NameMismatch { .. }
+        | AuthorizedDispatchRejection::DefinitionMismatch { .. } => {
+            FrontendError::HostInvocationStale
+        }
+    })?;
+    let invocation_id = coordinator
+        .begin_read()
+        .map_err(|_| FrontendError::HostInvocationBusy)?;
+    drop(coordinator);
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: invocation_id.clone(),
+            tool: expected_definition.name.to_string(),
+            state: HostActivityState::Started,
+            result: None,
+            review: None,
+        },
+    );
+    tauri::async_runtime::spawn(run_host_tool(
+        app,
+        current.registry,
+        expected_definition,
+        current.allowed_permissions,
+        call,
+        kind,
+        invocation_id.clone(),
+        current.repository_identity,
+    ));
+    Ok(HostInvocationResponse { invocation_id })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn host_prepare_repo_create_branch(
+    request: HostPrepareBranchRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedBranchResponse, FrontendError> {
+    if !validate_bounded_string(&request.name, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES) {
+        return Err(FrontendError::HostInvocationInvalidInput);
+    }
+    let mut coordinator = state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    coordinator.reap_expired(std::time::Instant::now());
+    if coordinator.state() != CoordinatorState::Idle {
+        return Err(FrontendError::HostInvocationBusy);
+    }
+    let current = current_host_composition(state.inner())?;
+    let name = ToolName::new(REPOSITORY_CREATE_BRANCH_TOOL_NAME);
+    let expected_definition = host_tool_definition(&current, &name, CoordinatorState::Idle)?;
+    let call = host_call(
+        name.clone(),
+        ToolInput(serde_json::json!({"name": request.name.clone()})),
+    );
+    authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &call,
+    )
+    .map_err(|rejection| match rejection {
+        AuthorizedDispatchRejection::PermissionDenied { .. } => {
+            FrontendError::HostInvocationPermissionDenied
+        }
+        _ => FrontendError::HostInvocationStale,
+    })?;
+    if current.repository.is_none()
+        || current
+            .repository
+            .as_ref()
+            .is_none_or(|value| value.branch_creation_authority.is_none())
+    {
+        return Err(FrontendError::HostInvocationNotEligible);
+    }
+    let ticket_id = coordinator.next_ticket_id();
+    let review = BranchReview {
+        operation: "Create local branch",
+        branch: request.name,
+        target: "Current committed HEAD",
+        effect: "Creates one new local branch reference.",
+        non_effect: "Does not switch branches or modify HEAD/index/worktree.",
+        permission_category: "execute",
+        authority_category: "repository_local_branch_creation",
+    };
+    let ticket = PreparedHostInvocation::new(
+        ticket_id.clone(),
+        HostInvocationKind::RepoCreateBranch,
+        name,
+        expected_definition,
+        call,
+        current.registry,
+        current.allowed_permissions,
+        current.generations,
+        current.repository_identity,
+        current.composition_identity,
+        review.clone(),
+    );
+    coordinator
+        .prepare(ticket)
+        .map_err(|_| FrontendError::HostInvocationBusy)?;
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: ticket_id.clone(),
+            tool: REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
+            state: HostActivityState::Prepared,
+            result: None,
+            review: Some(review.clone()),
+        },
+    );
+    Ok(PreparedBranchResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn host_confirm_tool_invocation(
+    request: HostConfirmRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<HostInvocationResponse, FrontendError> {
+    let mut coordinator = state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    coordinator.reap_expired(std::time::Instant::now());
+    let ticket = coordinator
+        .take_prepared(&request.ticket_id, std::time::Instant::now())
+        .map_err(|_| FrontendError::HostInvocationTicketInvalid)?;
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            coordinator.finish_host();
+            return Err(error);
+        }
+    };
+    if ticket.generations != current.generations
+        || ticket.composition_identity != current.composition_identity
+        || ticket.repository_identity != current.repository_identity
+    {
+        coordinator.finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
+    let current_definition =
+        match host_tool_definition(&current, &ticket.tool_name, CoordinatorState::Idle) {
+            Ok(definition) => definition,
+            Err(error) => {
+                coordinator.finish_host();
+                return Err(error);
+            }
+        };
+    if current_definition != ticket.expected_definition
+        || current.allowed_permissions != ticket.allowed_permissions
+    {
+        coordinator.finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
+    authorize_tool_dispatch(
+        &current.registry,
+        &ticket.expected_definition,
+        &current.allowed_permissions,
+        &ticket.call,
+    )
+    .map_err(|rejection| {
+        coordinator.finish_host();
+        match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        }
+    })?;
+    let invocation_id = coordinator.next_invocation_id();
+    drop(coordinator);
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: invocation_id.clone(),
+            tool: ticket.tool_name.to_string(),
+            state: HostActivityState::Started,
+            result: None,
+            review: Some(ticket.review.clone()),
+        },
+    );
+    tauri::async_runtime::spawn(run_host_tool(
+        app,
+        ticket.registry,
+        ticket.expected_definition,
+        ticket.allowed_permissions,
+        ticket.call,
+        ticket.kind,
+        invocation_id.clone(),
+        ticket.repository_identity,
+    ));
+    Ok(HostInvocationResponse { invocation_id })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn host_cancel_tool_invocation(
+    request: HostConfirmRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
+    let mut coordinator = state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    coordinator.reap_expired(std::time::Instant::now());
+    coordinator
+        .cancel(&request.ticket_id)
+        .map_err(|_| FrontendError::HostInvocationTicketInvalid)?;
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: request.ticket_id,
+            tool: REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
+            state: HostActivityState::CancelledBeforeStart,
+            result: None,
+            review: None,
+        },
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -3978,6 +4593,15 @@ where
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
+    if state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        != CoordinatorState::Idle
+    {
+        return Err(FrontendError::HostInvocationBusy);
+    }
     {
         let mut connection = state
             .connection
@@ -4124,6 +4748,7 @@ async fn connect_codex(
             .as_ref()
             .map_or(&[], DesktopProviderActivation::permissions),
     );
+    let retained_allowed_permissions = allowed_permissions.clone();
     let external_descriptors = provider_activation
         .as_ref()
         .map_or_else(Vec::new, |activation| activation.external_tools().to_vec());
@@ -4270,6 +4895,7 @@ async fn connect_codex(
                 connection_generation,
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
+                allowed_permissions: retained_allowed_permissions,
             };
             if let Err(rejected) = publish_connected_provider_state(state.inner(), pending) {
                 let RejectedProviderPublication {
@@ -4359,6 +4985,16 @@ async fn disconnect_codex(
         != ChatState::Idle
     {
         return Err(FrontendError::ChatAlreadyRunning);
+    }
+    if matches!(
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state(),
+        CoordinatorState::ModelTurn | CoordinatorState::HostPrepared
+    ) {
+        return Err(FrontendError::HostInvocationBusy);
     }
     let runtime = {
         revoke_repository_commit_context(state.inner()).await;
@@ -4658,6 +5294,7 @@ fn branch_result_classification(output: &rah_protocol::ToolOutput) -> BranchActi
 fn empty_composition_metadata() -> DesktopToolComposition {
     DesktopToolComposition {
         registry: Arc::new(ToolRegistry::new()),
+        expected_definitions: Vec::new(),
         tools: Vec::new(),
         unavailable: Vec::new(),
     }
@@ -4953,6 +5590,7 @@ async fn run_chat(
         handle.session_id().clone(),
     ) {
         tracing::warn!("desktop chat session was no longer current before streaming began");
+        app.state::<DesktopAppState>().finish_chat(chat_generation);
         return;
     }
 
@@ -5526,7 +6164,11 @@ fn main() -> ExitCode {
             clear_conversation_history,
             resume_previous_conversation,
             conversation_transcript,
-            get_effective_authority_snapshot
+            get_effective_authority_snapshot,
+            host_invoke_read,
+            host_prepare_repo_create_branch,
+            host_confirm_tool_invocation,
+            host_cancel_tool_invocation
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -5570,17 +6212,18 @@ mod tests {
         DESKTOP_TOOL_NAME, DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity,
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, DesktopToolComposition, FrontendError, GracefulCancelOutcome,
-        HardShutdownOutcome, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
-        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication, Preferences, PreferencesWarning,
-        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
-        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
-        TerminalOwnership, activity_event, activity_event_with_composition, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, branch_result_classification, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation, connect_prepared_codex,
+        HardShutdownOutcome, HostInvocationDescriptor, HostInvocationUnavailableReason,
+        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
+        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY,
+        PendingConnectedPublication, Preferences, PreferencesWarning, ProviderEndpoint,
+        ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme, READINESS_BODY_LIMIT,
+        READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState,
+        RepositoryIndexActionKind, RepositoryObservationStage, RepositoryRefreshReason, ResumePair,
+        SendChatResult, SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
+        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        branch_result_classification, clear_conversation_allowed, clear_trusted_profile_selection,
+        commit_activity_presentation, connect_prepared_codex,
         connection_activation_publication_is_current, current_app_status,
         current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
@@ -7532,6 +8175,11 @@ mod tests {
                 connection_generation,
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
+                allowed_permissions: vec![
+                    PermissionLevel::None,
+                    PermissionLevel::Read,
+                    PermissionLevel::Execute,
+                ],
             },
         )
         .map_err(|_| "Desktop connection publication was rejected".to_owned())?;
@@ -8015,6 +8663,11 @@ mod tests {
                 connection_generation,
                 repository_fingerprint: Some(repository_context_fingerprint(&selected.root)),
                 composition: Arc::clone(&composition),
+                allowed_permissions: vec![
+                    PermissionLevel::None,
+                    PermissionLevel::Read,
+                    PermissionLevel::Execute,
+                ],
             },
         )
         .map_err(|_| "Desktop connection publication was rejected".to_owned())?;
@@ -9998,6 +10651,7 @@ mod tests {
         };
         DesktopToolComposition {
             registry: Arc::new(rah_tools::ToolRegistry::new()),
+            expected_definitions: Vec::new(),
             tools: vec![EffectiveToolEntry {
                 public_tool_name: public_tool_name.to_owned(),
                 source_kind,
@@ -10007,6 +10661,11 @@ mod tests {
                 permission: PermissionLevel::Read,
                 repository_bound: false,
                 advertised: true,
+                host_invocation: HostInvocationDescriptor {
+                    eligible: false,
+                    kind: None,
+                    unavailable_reason: Some(HostInvocationUnavailableReason::ProviderNotSupported),
+                },
             }],
             unavailable: Vec::new(),
         }

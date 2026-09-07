@@ -5,6 +5,7 @@ use rah_tools::{ToolRegistry, TrustedStaticProfile};
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::host_invocation::{CoordinatorState, HostInvocationDescriptor, host_descriptor};
 use crate::{CodexExecutableSource, CommitAuthorizationPresentation, DesktopRepository};
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -164,6 +165,7 @@ pub(crate) struct EffectiveToolEntry {
     pub permission: PermissionLevel,
     pub repository_bound: bool,
     pub advertised: bool,
+    pub host_invocation: HostInvocationDescriptor,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +217,7 @@ const FALLBACK_PROVIDER_LABEL: &str = "external_provider";
 #[derive(Clone)]
 pub(crate) struct DesktopToolComposition {
     pub registry: Arc<ToolRegistry>,
+    pub expected_definitions: Vec<rah_protocol::ToolDefinition>,
     pub tools: Vec<EffectiveToolEntry>,
     pub unavailable: Vec<UnavailableCapability>,
 }
@@ -358,6 +361,36 @@ pub(crate) fn compose(
                 permission: definition.permission,
                 repository_bound,
                 advertised: false,
+                host_invocation: host_descriptor(
+                    &EffectiveToolEntry {
+                        public_tool_name: definition.name.to_string(),
+                        source_kind: if repository_bound {
+                            SourceKind::RepositoryHost
+                        } else {
+                            SourceKind::BuiltIn
+                        },
+                        source_label: if repository_bound {
+                            "desktop_repository".to_owned()
+                        } else {
+                            "desktop_builtin".to_owned()
+                        },
+                        effect_class,
+                        authority_category,
+                        permission: definition.permission,
+                        repository_bound,
+                        advertised: false,
+                        host_invocation: HostInvocationDescriptor {
+                            eligible: false,
+                            kind: None,
+                            unavailable_reason: None,
+                        },
+                    },
+                    false,
+                    repository.is_some(),
+                    false,
+                    repository.is_some_and(|value| value.branch_creation_authority.is_some()),
+                    CoordinatorState::Idle,
+                ),
             }
         } else if let Some((index, external)) = external_descriptors
             .iter()
@@ -385,6 +418,13 @@ pub(crate) fn compose(
                 permission: definition.permission,
                 repository_bound: external.repository_bound,
                 advertised: false,
+                host_invocation: HostInvocationDescriptor {
+                    eligible: false,
+                    kind: None,
+                    unavailable_reason: Some(
+                        crate::host_invocation::HostInvocationUnavailableReason::ProviderNotSupported,
+                    ),
+                },
             }
         } else {
             return Err(CompositionError::UnclassifiedTool);
@@ -450,6 +490,7 @@ pub(crate) fn compose(
         }
     }
     Ok(DesktopToolComposition {
+        expected_definitions: registry.definitions(),
         registry,
         tools,
         unavailable,
@@ -541,6 +582,11 @@ mod tests {
                 permission: PermissionLevel::Read,
                 repository_bound: true,
                 advertised: true,
+                host_invocation: HostInvocationDescriptor {
+                    eligible: true,
+                    kind: Some(crate::host_invocation::HostInvocationKind::RepoStatus {}),
+                    unavailable_reason: None,
+                },
             }],
             unavailable_capabilities: vec![UnavailableCapability {
                 public_tool_name: Some("repo.commit".to_owned()),

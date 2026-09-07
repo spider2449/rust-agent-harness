@@ -32,6 +32,10 @@
     "allow-clear-conversation-history",
     "allow-resume-previous-conversation",
     "allow-conversation-transcript",
-    "allow-get-effective-authority-snapshot"
+    "allow-get-effective-authority-snapshot",
+    "allow-host-invoke-read",
+    "allow-host-prepare-repo-create-branch",
+    "allow-host-confirm-tool-invocation",
+    "allow-host-cancel-tool-invocation"
   ]
 }

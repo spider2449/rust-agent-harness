@@ -30,6 +30,10 @@ fn main() {
             "resume_previous_conversation",
             "conversation_transcript",
             "get_effective_authority_snapshot",
+            "host_invoke_read",
+            "host_prepare_repo_create_branch",
+            "host_confirm_tool_invocation",
+            "host_cancel_tool_invocation",
         ]),
     ))
     .expect("failed to build Tauri desktop command permissions");

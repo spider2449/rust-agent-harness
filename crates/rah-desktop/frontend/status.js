@@ -22,6 +22,7 @@ let resumeUsed = false;
 let renderedModelConfiguration = null;
 let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
+let preparedHostBranch = null;
 const maxActivityEntries = 100;
 
 const authorityStatusLabels = {
@@ -123,6 +124,13 @@ function errorMessage(error) {
     commit_authorization_unavailable: "Commit authorization is unavailable. Refresh and reconnect if needed.",
     commit_authorization_stale: "The staged review is stale. Refresh and review again.",
     commit_authorization_failed: "Commit authorization failed. Refresh and review again.",
+    host_invocation_busy: "Host action is busy; wait for the current activity to finish.",
+    host_invocation_not_connected: "Connect the current Desktop composition before using a Host action.",
+    host_invocation_not_eligible: "This Tool is unavailable for Host action.",
+    host_invocation_permission_denied: "The current host permission policy does not admit this action.",
+    host_invocation_stale: "Host action is stale. Refresh Effective Authority and prepare again.",
+    host_invocation_invalid_input: "The Host action input is invalid or too large.",
+    host_invocation_ticket_invalid: "This branch review is no longer valid. Prepare again.",
     preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
@@ -216,8 +224,135 @@ function renderEffectiveTool(tool) {
   title.textContent = tool.publicToolName;
   const details = document.createElement("dl");
   details.append(renderAuthorityValue("Source", `${authorityLabel("sourceKind", tool.sourceKind)} — ${renderSourceLabel(tool.sourceLabel)}`), renderAuthorityValue("Effect", authorityLabel("effectClass", tool.effectClass)), renderAuthorityValue("Authority", authorityLabel("authorityCategory", tool.authorityCategory)), renderAuthorityValue("Dispatch permission", `${authorityLabel("permission", tool.permission)} classification`), renderAuthorityValue("Repository bound", tool.repositoryBound === true ? "Yes" : "No"), renderAuthorityValue("Runtime", tool.advertised === true ? "Advertised" : "Not advertised / host effective only"));
-  item.append(title, details);
+  const host = tool.hostInvocation ?? { eligible: false, unavailableReason: "not_supported" };
+  const hostBox = document.createElement("div");
+  hostBox.className = "host-invocation";
+  const hostLabel = document.createElement("span");
+  hostLabel.textContent = host.eligible === true ? "Host action — not Model" : `Host action unavailable: ${host.unavailableReason ?? "not_supported"}`;
+  hostBox.append(hostLabel);
+  if (host.eligible === true && host.kind) {
+    const form = document.createElement("form");
+    form.dataset.hostKind = host.kind;
+    const needsPath = ["fs_read", "repo_file_info"].includes(host.kind);
+    const isBranch = host.kind === "repo_create_branch";
+    if (needsPath || isBranch) {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.required = true;
+      input.maxLength = isBranch ? 128 : 1024;
+      input.placeholder = isBranch ? "Branch name" : "Relative path";
+      input.dataset.hostInput = "value";
+      form.append(input);
+    }
+    const button = document.createElement("button");
+    button.type = "submit";
+    button.textContent = isBranch ? "Prepare" : "Invoke";
+    form.append(button);
+    hostBox.append(form);
+  }
+  item.append(hostBox);
   return item;
+}
+
+function renderHostOutput(output) {
+  const box = document.createElement("pre");
+  box.className = "host-output";
+  box.textContent = output.content.map((content) => content.type === "text"
+    ? content.value
+    : JSON.stringify(content.value, null, 2)).join("\n");
+  return box;
+}
+
+function appendHostActivity(payload) {
+  const entries = document.querySelector("#activity-entries");
+  const entry = document.createElement("article");
+  const title = document.createElement("strong");
+  const state = document.createElement("span");
+  const labels = {
+    prepared: "Host action prepared",
+    started: "Host action started",
+    tool_completed: "Host action completed",
+    tool_error: "Host action failed",
+    rejected_not_eligible: "Host action unavailable",
+    rejected_permission: "Host action denied",
+    rejected_stale: "Host action stale",
+    rejected_busy: "Host action busy",
+    invalid_input: "Host input invalid",
+    cancelled_before_start: "Host action cancelled before start",
+    possible_effect_unknown: "Host effect outcome unknown — inspect manually; do not retry",
+  };
+  entry.className = "activity-entry host-activity";
+  entry.dataset.state = payload.state;
+  title.textContent = "Host action — not Model";
+  state.textContent = `${payload.tool}: ${labels[payload.state] ?? "Host action state unavailable"}`;
+  entry.append(title, state);
+  if (payload.result) entry.append(renderHostOutput(payload.result));
+  entries.append(entry);
+  while (entries.children.length > maxActivityEntries) entries.firstElementChild.remove();
+  entries.scrollTop = entries.scrollHeight;
+}
+
+async function submitHostForm(invoke, form) {
+  const kind = form.dataset.hostKind;
+  const value = form.querySelector("[data-host-input]")?.value;
+  if (kind === "repo_create_branch") {
+    const prepared = await invoke("host_prepare_repo_create_branch", { request: { name: value } });
+    preparedHostBranch = prepared;
+    const confirmation = document.createElement("dialog");
+    const text = document.createElement("p");
+    text.textContent = `Create branch only: ${prepared.review.branch}. Does not switch branch.`;
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.textContent = "Confirm Host action";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    confirmation.append(text, confirm, cancel);
+    document.body.append(confirmation);
+    confirm.addEventListener("click", async () => {
+      confirmation.close();
+      try {
+        await invoke("host_confirm_tool_invocation", { request: { ticketId: prepared.ticketId } });
+      } catch (error) {
+        showChatError(error);
+      } finally {
+        preparedHostBranch = null;
+        confirmation.remove();
+      }
+    }, { once: true });
+    cancel.addEventListener("click", async () => {
+      confirmation.close();
+      try {
+        await invoke("host_cancel_tool_invocation", { request: { ticketId: prepared.ticketId } });
+      } catch (error) {
+        showChatError(error);
+      } finally {
+        preparedHostBranch = null;
+        confirmation.remove();
+      }
+    }, { once: true });
+    confirmation.showModal();
+    return;
+  }
+  const request = { kind };
+  if (value !== undefined) request.path = value;
+  await invoke("host_invoke_read", { request });
+}
+
+function installHostFormHandlers(invoke) {
+  document.querySelector("#effective-tools").addEventListener("submit", async (event) => {
+    const form = event.target.closest("form[data-host-kind]");
+    if (!form) return;
+    event.preventDefault();
+    const button = form.querySelector("button");
+    button.disabled = true;
+    try {
+      await submitHostForm(invoke, form);
+    } catch (error) {
+      showChatError(error);
+      button.disabled = false;
+    }
+  });
 }
 
 function renderUnavailableCapability(capability) {
@@ -623,6 +758,7 @@ async function initializeDesktop() {
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));
+  await listen("host_activity_event", (event) => appendHostActivity(event.payload));
   await listen("conversation_persistence_warning", (event) => showPersistenceWarning(event.payload));
   await listen("desktop_preferences_warning", (event) => {
     const error = document.querySelector("#model-error");
@@ -636,6 +772,7 @@ async function initializeDesktop() {
   document.querySelector("#refresh-effective-authority").addEventListener("click", () => {
     void refreshEffectiveAuthority(invoke);
   });
+  installHostFormHandlers(invoke);
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });

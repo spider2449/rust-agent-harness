@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-host-invoke-read"
+description = "Enables the host_invoke_read command without any pre-configured scope."
+commands.allow = ["host_invoke_read"]
+
+[[permission]]
+identifier = "deny-host-invoke-read"
+description = "Denies the host_invoke_read command without any pre-configured scope."
+commands.deny = ["host_invoke_read"]
