@@ -51,6 +51,49 @@ pub enum AuthorizedDispatchError {
     Tool(#[source] ToolError),
 }
 
+/// Checks whether one call currently satisfies authorized dispatch admission.
+///
+/// This operation does not reserve the tool or execute it. Callers that need
+/// execution must revalidate through [`authorized_tool_dispatch`] immediately
+/// before invoking the tool.
+pub fn authorize_tool_dispatch(
+    registry: &ToolRegistry,
+    expected_definition: &ToolDefinition,
+    allowed_permissions: &[PermissionLevel],
+    call: &ToolCall,
+) -> Result<(), AuthorizedDispatchRejection> {
+    if call.name != expected_definition.name {
+        return Err(AuthorizedDispatchRejection::NameMismatch {
+            call_name: call.name.clone(),
+            expected_name: expected_definition.name.clone(),
+        });
+    }
+
+    let current =
+        registry
+            .get(&call.name)
+            .ok_or_else(|| AuthorizedDispatchRejection::UnknownTool {
+                name: call.name.clone(),
+            })?;
+    let current_definition = current.definition();
+
+    if current_definition != *expected_definition {
+        return Err(AuthorizedDispatchRejection::DefinitionMismatch {
+            expected: Box::new(expected_definition.clone()),
+            current: Box::new(current_definition),
+        });
+    }
+
+    if !allowed_permissions.contains(&current_definition.permission) {
+        return Err(AuthorizedDispatchRejection::PermissionDenied {
+            name: current_definition.name,
+            permission: current_definition.permission,
+        });
+    }
+
+    Ok(())
+}
+
 /// Dispatches one call only after current definition and permission admission.
 ///
 /// This is a neutral dispatch primitive. It does not compose capability
@@ -63,39 +106,8 @@ pub async fn authorized_tool_dispatch(
     call: ToolCall,
     context: ToolContext,
 ) -> Result<ToolOutput, AuthorizedDispatchError> {
-    if call.name != expected_definition.name {
-        return Err(AuthorizedDispatchError::Rejected(
-            AuthorizedDispatchRejection::NameMismatch {
-                call_name: call.name,
-                expected_name: expected_definition.name.clone(),
-            },
-        ));
-    }
-
-    let current = registry.get(&call.name).ok_or_else(|| {
-        AuthorizedDispatchError::Rejected(AuthorizedDispatchRejection::UnknownTool {
-            name: call.name.clone(),
-        })
-    })?;
-    let current_definition = current.definition();
-
-    if current_definition != *expected_definition {
-        return Err(AuthorizedDispatchError::Rejected(
-            AuthorizedDispatchRejection::DefinitionMismatch {
-                expected: Box::new(expected_definition.clone()),
-                current: Box::new(current_definition),
-            },
-        ));
-    }
-
-    if !allowed_permissions.contains(&current_definition.permission) {
-        return Err(AuthorizedDispatchError::Rejected(
-            AuthorizedDispatchRejection::PermissionDenied {
-                name: current_definition.name,
-                permission: current_definition.permission,
-            },
-        ));
-    }
+    authorize_tool_dispatch(registry, expected_definition, allowed_permissions, &call)
+        .map_err(AuthorizedDispatchError::Rejected)?;
 
     registry
         .execute(call, context)
@@ -118,7 +130,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AuthorizedDispatchError, AuthorizedDispatchRejection, authorized_tool_dispatch};
+    use super::{
+        AuthorizedDispatchError, AuthorizedDispatchRejection, authorize_tool_dispatch,
+        authorized_tool_dispatch,
+    };
     use crate::{Tool, ToolContext, ToolError, ToolRegistry};
 
     struct TestTool {
@@ -210,6 +225,15 @@ mod tests {
             let (registry, executions) =
                 registry_with(expected.clone(), Ok(expected_output.clone()));
 
+            authorize_tool_dispatch(
+                &registry,
+                &expected,
+                &[PermissionLevel::Read],
+                &call("test.tool"),
+            )
+            .expect("matching current definition and permission should be admitted");
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+
             let actual = authorized_tool_dispatch(
                 &registry,
                 &expected,
@@ -223,6 +247,59 @@ mod tests {
             assert_eq!(actual, expected_output);
             assert_eq!(executions.load(Ordering::SeqCst), 1);
         });
+    }
+
+    #[test]
+    fn authorize_dispatch_rejects_permission_change_even_when_new_permission_is_allowed() {
+        let expected = definition("test.tool", PermissionLevel::Read);
+        let current = definition("test.tool", PermissionLevel::Execute);
+        let (registry, executions) = registry_with(current, Ok(output(false)));
+
+        let error = authorize_tool_dispatch(
+            &registry,
+            &expected,
+            &[PermissionLevel::Execute],
+            &call("test.tool"),
+        )
+        .expect_err("permission change must be a stale definition mismatch");
+
+        assert!(matches!(
+            error,
+            AuthorizedDispatchRejection::DefinitionMismatch { .. }
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn authorize_dispatch_denial_and_definition_mismatch_never_execute() {
+        let expected = definition("test.tool", PermissionLevel::Read);
+        let (registry, executions) = registry_with(expected.clone(), Ok(output(false)));
+        let permission_error =
+            authorize_tool_dispatch(&registry, &expected, &[], &call("test.tool"))
+                .expect_err("absent permission should reject");
+        assert!(matches!(
+            permission_error,
+            AuthorizedDispatchRejection::PermissionDenied { .. }
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        let changed = ToolDefinition {
+            description: "changed".to_owned(),
+            ..expected.clone()
+        };
+        let (registry, executions) = registry_with(changed, Ok(output(false)));
+        let mismatch_error = authorize_tool_dispatch(
+            &registry,
+            &expected,
+            &[PermissionLevel::Read],
+            &call("test.tool"),
+        )
+        .expect_err("changed definition should reject");
+        assert!(matches!(
+            mismatch_error,
+            AuthorizedDispatchRejection::DefinitionMismatch { .. }
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     #[test]

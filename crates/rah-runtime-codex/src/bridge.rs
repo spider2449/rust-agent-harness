@@ -7,7 +7,10 @@ use rah_protocol::{
     AgentErrorCode, AgentEvent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent,
     ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
-use rah_tools::{ToolContext, ToolError, ToolRegistry};
+use rah_tools::{
+    AuthorizedDispatchError, ToolContext, ToolRegistry, authorize_tool_dispatch,
+    authorized_tool_dispatch,
+};
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -69,7 +72,7 @@ struct ExecutionResult {
     key: CallKey,
     session_id: SessionId,
     call: ToolCall,
-    result: Result<ToolOutput, ToolError>,
+    result: Result<ToolOutput, AuthorizedDispatchError>,
 }
 
 struct DynamicCallParams {
@@ -344,19 +347,17 @@ async fn handle_request(
         "request": live_request_fields(&call.input.0),
     }));
 
-    let current = config
-        .registry
-        .get(&call.name)
-        .map(|tool| tool.definition());
-    let definition_matches_snapshot = current.as_ref().is_some_and(|definition| {
-        definition.name == snapshot.definition.name
-            && definition.description == snapshot.definition.description
-            && definition.input_schema == snapshot.definition.input_schema
-    });
-    let permission_allowed = current
-        .as_ref()
-        .is_some_and(|definition| config.allowed_permissions.contains(&definition.permission));
-    if !definition_matches_snapshot || !permission_allowed {
+    if let Err(rejection) = authorize_tool_dispatch(
+        &config.registry,
+        &snapshot.definition,
+        &config.allowed_permissions,
+        &call,
+    ) {
+        tracing::debug!(
+            target: "rah",
+            ?rejection,
+            "Codex dynamic tool call failed pre-start authorized dispatch admission"
+        );
         let response = failure_response("RAH permission policy denied the dynamic tool call");
         connection.respond_result(request.id.clone(), response.clone());
         calls.insert(
@@ -397,14 +398,21 @@ async fn handle_request(
         },
     );
     let registry = Arc::clone(&config.registry);
+    let allowed_permissions = Arc::clone(&config.allowed_permissions);
+    let expected_definition = snapshot.definition.clone();
     let completed = completed.clone();
     let task_session_id = session_id.clone();
     let task_key = key.clone();
     let task_call = call.clone();
     let task = tokio::spawn(async move {
-        let result = registry
-            .execute(task_call.clone(), ToolContext::default())
-            .await;
+        let result = authorized_tool_dispatch(
+            &registry,
+            &expected_definition,
+            &allowed_permissions,
+            task_call.clone(),
+            ToolContext::default(),
+        )
+        .await;
         let _ = completed.send(ExecutionResult {
             key: task_key,
             session_id: task_session_id,
@@ -448,7 +456,25 @@ fn finish_execution(
             }));
             response
         }
-        Err(_) => {
+        Err(AuthorizedDispatchError::Rejected(rejection)) => {
+            tracing::debug!(
+                target: "rah",
+                ?rejection,
+                "Codex dynamic tool call failed late authorized dispatch revalidation"
+            );
+            connection.publish_rah_event(
+                completion.key.thread_id.clone(),
+                completion.key.turn_id.clone(),
+                AgentEvent::Failed {
+                    session_id: completion.session_id,
+                    code: AgentErrorCode::PermissionDenied,
+                    message: "RAH dynamic tool dispatch was rejected during execution revalidation"
+                        .to_owned(),
+                },
+            );
+            failure_response("RAH permission policy denied the dynamic tool call")
+        }
+        Err(AuthorizedDispatchError::Tool(_)) => {
             connection.publish_rah_event(
                 completion.key.thread_id.clone(),
                 completion.key.turn_id.clone(),

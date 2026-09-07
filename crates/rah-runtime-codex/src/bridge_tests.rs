@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -68,6 +68,11 @@ struct LookupTool {
 
 struct MutablePermissionTool {
     permission: Arc<AtomicU8>,
+    executions: Arc<AtomicUsize>,
+}
+
+struct MutableDefinitionTool {
+    definition: Arc<Mutex<ToolDefinition>>,
     executions: Arc<AtomicUsize>,
 }
 
@@ -880,8 +885,8 @@ impl Tool for MutablePermissionTool {
             description: "Tests execution-time permission lookup.".to_owned(),
             input_schema: json!({"type": "object"}),
             permission: match self.permission.load(Ordering::SeqCst) {
-                0 => PermissionLevel::None,
-                _ => PermissionLevel::Read,
+                0 => PermissionLevel::Read,
+                _ => PermissionLevel::Execute,
             },
         }
     }
@@ -894,6 +899,28 @@ impl Tool for MutablePermissionTool {
         self.executions.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput {
             content: vec![ToolContent::Text("current permission accepted".to_owned())],
+            is_error: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for MutableDefinitionTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn execute(
+        &self,
+        _input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ToolContent::Text("mutable definition accepted".to_owned())],
             is_error: false,
         })
     }
@@ -1304,36 +1331,152 @@ async fn aliases_dispatch_distinct_tools_and_map_json_error_outputs() {
 }
 
 #[tokio::test]
-async fn permission_is_read_from_the_registered_definition_at_execution_time() {
-    let permission = Arc::new(AtomicU8::new(0));
-    let executions = Arc::new(AtomicUsize::new(0));
-    let mut registry = ToolRegistry::new();
-    registry
-        .register(Arc::new(MutablePermissionTool {
-            permission: Arc::clone(&permission),
-            executions: Arc::clone(&executions),
-        }))
-        .expect("register mutable permission tool");
-    let (runtime, mut peer, _) =
-        connected_bridge(Arc::new(registry), vec![PermissionLevel::Read]).await;
-    let (handle, _) = start_bridge(&runtime, &mut peer).await;
+async fn permission_snapshot_changes_fail_closed_even_when_new_permission_is_allowed() {
+    for (initial, current, allowed, label) in [
+        (0, 1, PermissionLevel::Execute, "read-to-execute"),
+        (1, 0, PermissionLevel::Read, "execute-to-read"),
+    ] {
+        let permission = Arc::new(AtomicU8::new(initial));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(MutablePermissionTool {
+                permission: Arc::clone(&permission),
+                executions: Arc::clone(&executions),
+            }))
+            .expect("register mutable permission tool");
+        let (runtime, mut peer, _) = connected_bridge(Arc::new(registry), vec![allowed]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
 
-    permission.store(1, Ordering::SeqCst);
-    peer.send(tool_request(
-        json!(72),
-        "private-thread",
-        "private-turn",
-        "permission-refresh",
-        "mutable_permission",
-        json!({}),
-    ));
-    assert_eq!(peer.next_sent().await["result"]["success"], true);
+        permission.store(current, Ordering::SeqCst);
+        peer.send(tool_request(
+            json!(72),
+            "private-thread",
+            "private-turn",
+            label,
+            "mutable_permission",
+            json!({}),
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false);
+        assert_eq!(
+            response["result"]["contentItems"][0]["text"],
+            "RAH permission policy denied the dynamic tool call"
+        );
 
-    finish_turn(&peer, "completed");
-    let events = handle.into_events().collect::<Vec<_>>().await;
-    assert_eq!(executions.load(Ordering::SeqCst), 1);
-    assert_eq!(tool_event_count(&events), 3);
-    runtime.shutdown().await.expect("shutdown");
+        finish_turn(&peer, "completed");
+        let events = handle.into_events().collect::<Vec<_>>().await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "{label}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolRequested { .. }))
+                .count(),
+            1,
+            "{label}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+                .count(),
+            0,
+            "{label}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+                .count(),
+            0,
+            "{label}"
+        );
+        runtime.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
+async fn changed_description_or_schema_is_rejected_before_tool_start() {
+    for (changed_description, changed_schema, label) in
+        [(true, false, "description"), (false, true, "schema")]
+    {
+        let initial = ToolDefinition {
+            name: ToolName::new("mutable_definition"),
+            description: "stable description".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
+            permission: PermissionLevel::Read,
+        };
+        let mut current = initial.clone();
+        if changed_description {
+            current.description = "changed description".to_owned();
+        }
+        if changed_schema {
+            current.input_schema = json!({"type": "string"});
+        }
+        let definition = Arc::new(Mutex::new(initial));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(MutableDefinitionTool {
+                definition: Arc::clone(&definition),
+                executions: Arc::clone(&executions),
+            }))
+            .expect("register mutable definition tool");
+        let (runtime, mut peer, _) =
+            connected_bridge(Arc::new(registry), vec![PermissionLevel::Read]).await;
+        let (handle, _) = start_bridge(&runtime, &mut peer).await;
+
+        *definition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = current;
+        peer.send(tool_request(
+            json!(73),
+            "private-thread",
+            "private-turn",
+            label,
+            "mutable_definition",
+            json!({}),
+        ));
+        let response = peer.next_sent().await;
+        assert_eq!(response["result"]["success"], false, "{label}");
+        assert_eq!(
+            response["result"]["contentItems"][0]["text"],
+            "RAH permission policy denied the dynamic tool call",
+            "{label}"
+        );
+
+        finish_turn(&peer, "completed");
+        let events = handle.into_events().collect::<Vec<_>>().await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "{label}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolRequested { .. }))
+                .count(),
+            1,
+            "{label}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+                .count(),
+            0,
+            "{label}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolFinished { .. }))
+                .count(),
+            0,
+            "{label}"
+        );
+        runtime.shutdown().await.expect("shutdown");
+    }
 }
 
 #[tokio::test]

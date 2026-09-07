@@ -37,7 +37,8 @@ mod trusted_profile;
 mod trusted_profile_source;
 
 pub use authorized_dispatch::{
-    AuthorizedDispatchError, AuthorizedDispatchRejection, authorized_tool_dispatch,
+    AuthorizedDispatchError, AuthorizedDispatchRejection, authorize_tool_dispatch,
+    authorized_tool_dispatch,
 };
 pub use cargo_version::{CARGO_VERSION_TOOL_NAME, CargoVersionTool};
 pub use echo::EchoTool;
