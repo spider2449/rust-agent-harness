@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation complete; commit and exact-head CI remain.
+Implementation complete.
 
 ## Checkpoint
 
@@ -111,7 +111,7 @@ Executed results:
 
 Preferred commit message: `feat: add non-effectful repository patch preparation`.
 
-Commit: pending.
+Implementation commit: `5c6f792bf18adf3825b2fb24e7ec8500927fe63f`.
 
 ## Exact-head CI
 
@@ -119,7 +119,8 @@ Before push, run `git fetch origin` and require `origin/master` to remain
 `c1ffde06ee954e75e53b8d110276b2f734178e12`. Push `master` normally and require
 the exact Task 248 SHA CI run to be `master` / `push` / `completed` / `success`.
 
-Exact-head CI: pending.
+Exact-head CI: run `34101405212`, branch `master`, event `push`, exact head
+`5c6f792bf18adf3825b2fb24e7ec8500927fe63f`, completed / success.
 
 ## Next task
 
