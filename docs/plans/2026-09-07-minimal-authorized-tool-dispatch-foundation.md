@@ -83,6 +83,8 @@ Passed sequentially:
 
 The first workspace attempt encountered Windows linker error LNK1104 while an earlier Cargo invocation still held the Desktop test executable. After all active Cargo processes exited, the serial rerun completed successfully.
 
+The first exact-head CI run caught `clippy::result_large_err` with the CI Rust/Clippy version. `DefinitionMismatch` retains both complete definitions but boxes them so the public structured error remains compact. Required validation is rerun after this corrective change.
+
 ## Files changed
 
 - `crates/rah-tools/src/authorized_dispatch.rs`

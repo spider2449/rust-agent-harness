@@ -26,9 +26,9 @@ pub enum AuthorizedDispatchRejection {
     #[error("current tool definition does not match the expected definition")]
     DefinitionMismatch {
         /// Host-owned definition expected for this dispatch.
-        expected: ToolDefinition,
+        expected: Box<ToolDefinition>,
         /// Current definition returned by the registered tool.
-        current: ToolDefinition,
+        current: Box<ToolDefinition>,
     },
     /// The current tool permission is absent from the host-owned policy.
     #[error("current tool permission is not allowed")]
@@ -82,8 +82,8 @@ pub async fn authorized_tool_dispatch(
     if current_definition != *expected_definition {
         return Err(AuthorizedDispatchError::Rejected(
             AuthorizedDispatchRejection::DefinitionMismatch {
-                expected: expected_definition.clone(),
-                current: current_definition,
+                expected: Box::new(expected_definition.clone()),
+                current: Box::new(current_definition),
             },
         ));
     }
