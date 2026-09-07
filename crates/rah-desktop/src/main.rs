@@ -8154,6 +8154,7 @@ mod tests {
         .map_err(|error| format!("Desktop repository construction failed: {error}"))?;
 
         let app = tauri::Builder::default()
+            .any_thread()
             .manage(DesktopAppState::new(storage.0.clone()))
             .build(tauri::generate_context!())
             .map_err(|error| format!("Desktop test app construction failed: {error}"))?;

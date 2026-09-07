@@ -175,6 +175,14 @@ before the live gate.
 Pending the single certified command through `scripts/codex-live-gate.ps1`
 with the pinned Codex version, SHA-256, model, and reasoning effort.
 
+The first certified harness attempt reached the test binary but stopped before
+Desktop connection publication: the real Tauri builder rejected Windows event
+loop initialization from the Tokio test thread. No Codex connection, model
+request, HostExplicit action, or branch effect occurred. The test-only harness
+was corrected to enable Tauri's explicit any-thread test construction. This
+requires a correction commit and exact-head CI before a fresh live attempt;
+there is no automatic retry.
+
 ## Live evidence
 
 The test emits bounded connection, eligibility, read, prepare, branch,
