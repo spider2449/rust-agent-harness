@@ -117,6 +117,9 @@ pub enum RepositoryPatchPreparationError {
     /// The request would make no content change.
     #[error("repository patch preparation has no effect")]
     NoEffect,
+    /// The previously captured preparation no longer matches current state.
+    #[error("repository patch preparation is stale")]
+    Stale,
     /// The complete exact review could not be represented within the bound.
     #[error("repository patch review is too large")]
     ReviewTooLarge,
@@ -298,6 +301,7 @@ impl RepositoryPatchReview {
 /// revalidation but is not serializable or exposed through public getters.
 #[allow(dead_code)]
 pub struct RepositoryPatchPreparation {
+    preparer_identity: Uuid,
     tool_input: ToolInput,
     review: RepositoryPatchReview,
     review_identity: String,
@@ -375,6 +379,7 @@ impl std::fmt::Debug for RepositoryPatchPreparation {
 /// This type is not a `Tool`; it has no public method that writes a temporary
 /// file, replaces a target, or executes a tool.
 pub struct RepositoryPatchPreparer {
+    identity: Uuid,
     policy: RepositoryWorktreeMutationPolicy,
 }
 
@@ -386,6 +391,7 @@ impl RepositoryPatchPreparer {
         repository_root: impl AsRef<Path>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
+            identity: Uuid::new_v4(),
             policy: RepositoryWorktreeMutationPolicy::new(
                 git_executable.as_ref(),
                 repository_root.as_ref(),
@@ -423,6 +429,7 @@ impl RepositoryPatchPreparer {
         let review_identity =
             compute_review_identity(&self.policy, &candidate, &postimage, &tool_input, &review);
         let preparation = RepositoryPatchPreparation {
+            preparer_identity: self.identity,
             tool_input,
             preimage_sha256: sha256_hex(&candidate.bytes),
             preimage_byte_length: candidate.bytes.len(),
@@ -441,6 +448,90 @@ impl RepositoryPatchPreparer {
             return Err(RepositoryPatchPreparationError::ReviewTooLarge);
         }
         Ok(preparation)
+    }
+
+    /// Revalidates a previously prepared replacement without any effect.
+    ///
+    /// The canonical input, target admission, repository lease, Git state,
+    /// exact preimage, shared postimage semantics, review, and review identity
+    /// must all still match the captured preparation.
+    pub async fn revalidate(
+        &self,
+        preparation: &RepositoryPatchPreparation,
+    ) -> Result<(), RepositoryPatchPreparationError> {
+        let _lease = self.policy.acquire_lease().await;
+        if preparation.preparer_identity != self.identity
+            || preparation.root_identity != self.policy.root_identity
+            || preparation.dot_git_identity != self.policy.dot_git_identity
+            || preparation.git_identity != self.policy.git_identity
+        {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        if self.policy.revalidate_repository().is_err() || self.policy.revalidate_git().is_err() {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+
+        let request = PatchRequest::parse(&preparation.tool_input, self.policy.limits)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if canonical_tool_input(&request) != preparation.tool_input {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        let target = Target::capture(&self.policy.root, &request.path)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if request.logical_path != preparation.review.path()
+            || request.logical_path != target.git_path
+            || target.identity != preparation.target_identity
+            || target.parent_identity != preparation.parent_identity
+        {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+
+        let git = self
+            .policy
+            .git_state(&target)
+            .await
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if git != preparation.git_state {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        self.policy
+            .git_worktree_clean(&target)
+            .await
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        let bytes = read_bounded(&target.path, self.policy.limits.max_file_bytes)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if bytes.len() != preparation.preimage_byte_length
+            || sha256_hex(&bytes) != preparation.preimage_sha256
+        {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+
+        let candidate = Preimage { target, git, bytes };
+        validate_preconditions(&candidate.bytes, &request, self.policy.limits)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        let postimage = build_postimage(&candidate, &request, self.policy.limits)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if postimage.bytes.len() != preparation.postimage_byte_length
+            || sha256_hex(&postimage.bytes) != preparation.postimage_sha256
+        {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        let review = build_review(&candidate, &postimage, &request)
+            .map_err(|_| RepositoryPatchPreparationError::Stale)?;
+        if review != preparation.review {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        let review_identity = compute_review_identity(
+            &self.policy,
+            &candidate,
+            &postimage,
+            &preparation.tool_input,
+            &review,
+        );
+        if review_identity != preparation.review_identity {
+            return Err(RepositoryPatchPreparationError::Stale);
+        }
+        Ok(())
     }
 }
 
@@ -2632,6 +2723,149 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn unchanged_preparation_revalidates_without_effect() {
+        let base = TestDirectory::new("revalidate-unchanged");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(preparer.revalidate(&preparation).await, Ok(()));
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn changed_target_bytes_make_preparation_stale() {
+        let base = TestDirectory::new("revalidate-bytes");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer).await;
+
+        fs::write(root.join("target.txt"), b"alpha\nchanged\nomega\n").unwrap();
+
+        assert_eq!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_bytes_on_a_replaced_target_make_preparation_stale() {
+        let base = TestDirectory::new("revalidate-identity");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer).await;
+        let original = fs::read(root.join("target.txt")).unwrap();
+
+        fs::rename(root.join("target.txt"), root.join("displaced.txt")).unwrap();
+        fs::write(root.join("target.txt"), original).unwrap();
+
+        assert_eq!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dirty_target_makes_preparation_stale() {
+        let base = TestDirectory::new("revalidate-dirty");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer).await;
+
+        fs::write(root.join("target.txt"), b"alpha\nold\nomega\nextra\n").unwrap();
+
+        assert_eq!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn staged_index_change_makes_preparation_stale() {
+        let base = TestDirectory::new("revalidate-index");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer).await;
+
+        fs::write(root.join("target.txt"), b"alpha\nstaged\nomega\n").unwrap();
+        git(&root, &["add", "--", "target.txt"]);
+
+        assert_eq!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn head_and_ref_change_make_preparation_stale() {
+        let base = TestDirectory::new("revalidate-head");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer).await;
+
+        fs::write(root.join("other.txt"), b"other changed\n").unwrap();
+        git(&root, &["add", "--", "other.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "external head change"]);
+
+        assert_eq!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparation_from_another_preparer_is_stale() {
+        let base = TestDirectory::new("revalidate-preparer");
+        let root = base.repository();
+        let preparer_a = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparer_b = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let preparation = prepare_default(&preparer_a).await;
+
+        assert_eq!(
+            preparer_b.revalidate(&preparation).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer_a, &root);
+        assert_zero_revalidation_effect(&preparer_b, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutated_postimage_and_review_make_preparation_stale() {
+        let base = TestDirectory::new("revalidate-evidence");
+        let root = base.repository();
+        let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
+        let mut postimage_mismatch = prepare_default(&preparer).await;
+        postimage_mismatch.postimage_sha256 = "0".repeat(64);
+
+        assert_eq!(
+            preparer.revalidate(&postimage_mismatch).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+
+        let mut review_mismatch = prepare_default(&preparer).await;
+        review_mismatch.review.old_text_escaped = "tampered".to_owned();
+
+        assert_eq!(
+            preparer.revalidate(&review_mismatch).await,
+            Err(RepositoryPatchPreparationError::Stale)
+        );
+        assert_zero_revalidation_effect(&preparer, &root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn preparer_input_executes_with_existing_tool_semantics_once() {
         let base = TestDirectory::new("prepare-equivalence");
         let root = base.repository();
@@ -3828,6 +4062,31 @@ mod tests {
             PatchLimits::default(),
         )
         .unwrap()
+    }
+
+    async fn prepare_default(
+        preparer: &RepositoryPatchPreparer,
+    ) -> super::RepositoryPatchPreparation {
+        preparer
+            .prepare(RepositoryPatchPreparationRequest {
+                path: "target.txt".to_owned(),
+                expected_old_text: "old".to_owned(),
+                replacement_text: "new".to_owned(),
+            })
+            .await
+            .unwrap()
+    }
+
+    fn assert_zero_revalidation_effect(preparer: &RepositoryPatchPreparer, root: &Path) {
+        assert_eq!(
+            preparer
+                .policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_no_patch_temporary(root);
     }
 
     fn has_patch_temporary(root: &Path) -> bool {
