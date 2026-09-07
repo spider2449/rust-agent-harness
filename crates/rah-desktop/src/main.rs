@@ -6203,7 +6203,13 @@ fn main() {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
-    use super::effective_authority::{EffectClass, EffectiveToolEntry};
+    use super::effective_authority::{
+        AuthorityCategory, EffectClass, EffectiveToolEntry, SnapshotStatus,
+    };
+    use super::host_invocation::{
+        CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
+        HostPrepareBranchRequest, HostReadRequest,
+    };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
         ActivityEvent, ActivityResult, BranchActivityClassification, CancelRecoveryOutcome,
@@ -6223,20 +6229,23 @@ mod tests {
         activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
         await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
         branch_result_classification, clear_conversation_allowed, clear_trusted_profile_selection,
-        commit_activity_presentation, connect_prepared_codex,
+        commit_activity_presentation, connect_codex, connect_prepared_codex,
         connection_activation_publication_is_current, current_app_status,
         current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
-        frontend_error, install_repository_workflow, invalidate_repository_commit_review,
-        model_configuration_status, prepare_codex_connection, publish_connected_provider_state,
-        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
-        replace_selected_repository, repository_context_fingerprint, repository_index_action,
-        repository_selection_allowed, repository_selection_allowed_for_connection,
+        frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
+        host_invoke_read, host_prepare_repo_create_branch, install_repository_workflow,
+        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
+        publish_connected_provider_state, publish_readiness_result,
+        publish_trusted_profile_selection, refresh_repository_workflow,
+        replace_selected_repository, repository_authorize_commit_review,
+        repository_context_fingerprint, repository_index_action, repository_selection_allowed,
+        repository_selection_allowed_for_connection, repository_snapshot,
         repository_tool_authority, request_connect, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
         revoke_repository_commit_context, same_arc, save_trusted_profile_preference,
-        selected_git_executable, uncertain_repository_effect_pending,
+        selected_git_executable, set_commit_identity, uncertain_repository_effect_pending,
         uncertain_repository_effect_requires_refresh, validate_prompt,
     };
     use futures::StreamExt;
@@ -6254,6 +6263,7 @@ mod tests {
         RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
         RepositoryFileRenameAuthority, ToolContext,
     };
+    use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::{
         collections::HashMap,
@@ -6270,6 +6280,7 @@ mod tests {
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
+    use tauri::{Listener, Manager};
 
     #[derive(Debug)]
     struct RuntimeMarker;
@@ -8023,6 +8034,626 @@ mod tests {
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ConnectionState::NotConnected;
+    }
+
+    fn listen_for_test_event(
+        app: &tauri::AppHandle,
+        event_name: &'static str,
+    ) -> (Arc<Mutex<Vec<String>>>, tauri::EventId) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let listener = app.listen(event_name, move |event| {
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.payload().to_owned());
+        });
+        (events, listener)
+    }
+
+    async fn wait_for_test_events(
+        events: &Arc<Mutex<Vec<String>>>,
+        count: usize,
+    ) -> Result<Vec<Value>, String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let captured = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if captured.len() >= count {
+                return captured
+                    .into_iter()
+                    .map(|payload| {
+                        serde_json::from_str(&payload)
+                            .map_err(|error| format!("Desktop event payload was invalid: {error}"))
+                    })
+                    .collect();
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for {count} Desktop events; observed {}",
+                    captured.len()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn event_tool_output(event: &Value) -> Result<ToolOutput, String> {
+        serde_json::from_value(
+            event
+                .get("result")
+                .cloned()
+                .ok_or_else(|| "HostExplicit completion did not contain a result".to_owned())?,
+        )
+        .map_err(|error| format!("HostExplicit result was not a ToolOutput: {error}"))
+    }
+
+    fn require_host_event(event: &Value, state: &str, tool: &str) -> Result<(), String> {
+        if event.get("source") != Some(&Value::String("host_explicit".to_owned()))
+            || event.get("tool") != Some(&Value::String(tool.to_owned()))
+            || event.get("state") != Some(&Value::String(state.to_owned()))
+        {
+            return Err(format!("unexpected HostExplicit event: {event}"));
+        }
+        Ok(())
+    }
+
+    fn status_entry_path(entry: &Value) -> Option<&str> {
+        entry
+            .get("path")
+            .and_then(|path| path.get("value"))
+            .and_then(Value::as_str)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the certified Windows Codex live gate"]
+    async fn windows_live_desktop_explicit_host_tool_invocation() -> Result<(), String> {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+
+        fs::write(fixture.0.join("nested/ordinary.txt"), "live unstaged\n")
+            .map_err(|error| format!("unstaged fixture modification failed: {error}"))?;
+        fs::write(fixture.0.join("tracked.txt"), "live staged\n")
+            .map_err(|error| format!("staged fixture modification failed: {error}"))?;
+        let stage = Command::new(&git)
+            .args(["add", "tracked.txt"])
+            .current_dir(&fixture.0)
+            .status()
+            .map_err(|error| format!("staged fixture command failed to start: {error}"))?;
+        if !stage.success() {
+            return Err("staged fixture command failed".to_owned());
+        }
+
+        let branch_name = format!(
+            "rah-host-explicit-live-{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| format!("clock failed: {error}"))?
+                .as_nanos(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        );
+        let before = live_git_state(&git, &fixture.0, &branch_name)?;
+        if live_target_exists(&git, &fixture.0, &branch_name)? {
+            return Err("generated live target unexpectedly exists".to_owned());
+        }
+
+        let authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            None,
+            None,
+            Some(authority),
+        )
+        .map_err(|error| format!("Desktop repository construction failed: {error}"))?;
+
+        let app = tauri::Builder::default()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let refresh_events = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        set_commit_identity(
+            app.handle().clone(),
+            app.state(),
+            "RAH Host Live Test".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit identity setup failed: {error:?}"))?;
+
+        connect_codex(app.state())
+            .await
+            .map_err(|error| format!("production Desktop connection failed: {error:?}"))?;
+        let status = app.state::<DesktopAppState>().status();
+        if status.runtime_status != "connected"
+            || status.codex_status != "connected"
+            || status.codex_version != Some("0.149.0")
+        {
+            return Err("connected Desktop did not report the certified Codex baseline".to_owned());
+        }
+
+        let connected_snapshot = get_effective_authority_snapshot(app.state());
+        if connected_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || connected_snapshot.connection.state
+                != super::effective_authority::ConnectionBindingState::Connected
+            || !connected_snapshot.connection.advertised
+            || !connected_snapshot.repository.selected
+            || connected_snapshot.repository.identity
+                != super::effective_authority::RepositoryIdentity::Current
+        {
+            return Err("Desktop connection was not connected-current".to_owned());
+        }
+        if app
+            .state::<DesktopAppState>()
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err("unexpected external provider activation was present".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_CONNECTION_CURRENT=1");
+
+        let find_tool = |name: &str| {
+            connected_snapshot
+                .effective_tools
+                .iter()
+                .find(|tool| tool.public_tool_name == name)
+        };
+        let status_tool = find_tool("repo.status")
+            .ok_or_else(|| "repo.status was not in the current Effective Authority".to_owned())?;
+        if !status_tool.host_invocation.eligible
+            || status_tool.host_invocation.kind != Some(HostInvocationKind::RepoStatus {})
+        {
+            return Err("repo.status was not host eligible".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_ELIGIBLE=1");
+        let branch_tool = find_tool(REPOSITORY_CREATE_BRANCH_TOOL_NAME).ok_or_else(|| {
+            "repo.create-branch was not in the current Effective Authority".to_owned()
+        })?;
+        if !branch_tool.host_invocation.eligible
+            || branch_tool.host_invocation.kind != Some(HostInvocationKind::RepoCreateBranch)
+            || branch_tool.effect_class != EffectClass::RepositoryMutation
+            || branch_tool.authority_category != AuthorityCategory::RepositoryLocalBranchCreation
+            || branch_tool.permission != PermissionLevel::Execute
+            || !branch_tool.repository_bound
+        {
+            return Err(
+                "repo.create-branch Effective Authority classification was wrong".to_owned(),
+            );
+        }
+        let deferred = find_tool("repo.commit")
+            .or_else(|| find_tool("repo.patch"))
+            .ok_or_else(|| "no known deferred Tool was registered".to_owned())?;
+        if deferred.host_invocation.eligible {
+            return Err("a deferred Tool was incorrectly host eligible".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH_ELIGIBLE=1");
+        println!("RAH_HOST_EXPLICIT_LIVE_DEFERRED_UNAVAILABLE=1");
+
+        let generations_before_read =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let conversation_namespace_before_read =
+            app.state::<DesktopAppState>().persistence_namespace();
+        let conversation_presentation_before_read = serde_json::to_value(
+            app.state::<DesktopAppState>()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("conversation presentation serialization failed: {error}"))?;
+        if app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::Idle
+        {
+            return Err("coordinator was not Idle before repo.status".to_owned());
+        }
+        let read_response = host_invoke_read(
+            HostReadRequest::RepoStatus {
+                fields: EmptyHostRequest::default(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.status host command failed: {error:?}"))?;
+        if read_response.invocation_id.is_empty() {
+            return Err("repo.status HostExplicit invocation ID was empty".to_owned());
+        }
+        let read_events = wait_for_test_events(&host_activity.0, 2).await?;
+        require_host_event(&read_events[0], "started", "repo.status")?;
+        require_host_event(&read_events[1], "tool_completed", "repo.status")?;
+        let read_output = event_tool_output(&read_events[1])?;
+        if read_output.is_error || read_output.content.len() != 1 {
+            return Err(
+                "repo.status did not return one successful ToolOutput content item".to_owned(),
+            );
+        }
+        let ToolContent::Json(read_value) = &read_output.content[0] else {
+            return Err("repo.status did not return structured JSON".to_owned());
+        };
+        if read_value["status"] != "ok"
+            || read_value["consistency"] != "best_effort"
+            || read_value["sparse_index_flags"] != "not_enumerated"
+        {
+            return Err("repo.status returned the wrong normalized result shape".to_owned());
+        }
+        let entries = read_value["entries"]
+            .as_array()
+            .ok_or_else(|| "repo.status entries were not an array".to_owned())?;
+        let staged = entries.iter().find(|entry| {
+            status_entry_path(entry) == Some("tracked.txt")
+                && entry["index_state"] == "modified"
+                && entry["worktree_state"] == "unmodified"
+        });
+        let unstaged = entries.iter().find(|entry| {
+            status_entry_path(entry) == Some("nested/ordinary.txt")
+                && entry["index_state"] == "unmodified"
+                && entry["worktree_state"] == "modified"
+        });
+        if staged.is_none() || unstaged.is_none() {
+            return Err(
+                "repo.status did not reflect the fresh staged and unstaged fixture".to_owned(),
+            );
+        }
+        if live_git_state(&git, &fixture.0, &branch_name)? != before
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != generations_before_read
+            || app.state::<DesktopAppState>().persistence_namespace()
+                != conversation_namespace_before_read
+            || serde_json::to_value(
+                app.state::<DesktopAppState>()
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .presentation(),
+            )
+            .map_err(|error| format!("conversation presentation serialization failed: {error}"))?
+                != conversation_presentation_before_read
+        {
+            return Err("repo.status changed protected repository or Desktop state".to_owned());
+        }
+        if app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::Idle
+        {
+            return Err("coordinator did not return to Idle after repo.status".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_STARTED=1");
+        println!("RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_COMPLETED=1");
+
+        let review_snapshot = repository_snapshot(app.state())
+            .await
+            .map_err(|error| format!("production repository review snapshot failed: {error:?}"))?;
+        let review_id = match review_snapshot.review {
+            StagedReviewPresentation::ReviewAvailable {
+                review_id: Some(review_id),
+                can_authorize: true,
+                authorization_state: CommitAuthorizationPresentation::ReadyToAuthorize,
+            } => review_id,
+            other => return Err(format!("fixture did not expose a valid review: {other:?}")),
+        };
+        let authorization = repository_authorize_commit_review(app.state(), review_id)
+            .await
+            .map_err(|error| format!("production review authorization failed: {error:?}"))?;
+        if authorization.authorization_state != CommitAuthorizationPresentation::AuthorizedPending
+            || get_effective_authority_snapshot(app.state()).reviewed_commit
+                != super::effective_authority::ReviewedCommitState::AuthorizedPending
+        {
+            return Err(
+                "reviewed authorization was not pending before branch preparation".to_owned(),
+            );
+        }
+        let reviewed_commit_control = app
+            .state::<DesktopAppState>()
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control))
+            .ok_or_else(|| "Desktop reviewed commit control was not composed".to_owned())?;
+
+        let branch_tool_generations =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let branch_conversation_namespace = app.state::<DesktopAppState>().persistence_namespace();
+        let branch_snapshot_before_prepare = get_effective_authority_snapshot(app.state());
+        let prepared = host_prepare_repo_create_branch(
+            HostPrepareBranchRequest {
+                name: branch_name.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .map_err(|error| format!("production branch prepare failed: {error:?}"))?;
+        let prepare_events = wait_for_test_events(&host_activity.0, 3).await?;
+        require_host_event(
+            &prepare_events[2],
+            "prepared",
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        )?;
+        if prepared.ticket_id.is_empty()
+            || prepared.ticket_id == branch_name
+            || prepared.ticket_id.len() > 256
+            || prepared.review.branch != branch_name
+            || prepared.review.operation != "Create local branch"
+            || !prepared
+                .review
+                .non_effect
+                .contains("Does not switch branches")
+            || !prepared
+                .review
+                .effect
+                .contains("one new local branch reference")
+            || live_target_exists(&git, &fixture.0, &branch_name)?
+            || live_git_state(&git, &fixture.0, &branch_name)? != before
+        {
+            return Err(
+                "branch prepare did not remain zero effect with the exact review".to_owned(),
+            );
+        }
+        if app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::HostPrepared
+        {
+            return Err("coordinator was not HostPrepared after branch prepare".to_owned());
+        }
+        if !matches!(
+            app.state::<DesktopAppState>().start_chat(),
+            Err(FrontendError::HostInvocationBusy)
+        ) {
+            return Err("production model-start admission did not reject HostPrepared".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH_PREPARED=1");
+
+        if prepared.review.branch != branch_name
+            || get_effective_authority_snapshot(app.state()).status
+                != SnapshotStatus::ConnectedCurrent
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != branch_tool_generations
+            || app.state::<DesktopAppState>().persistence_namespace()
+                != branch_conversation_namespace
+            || get_effective_authority_snapshot(app.state())
+                .effective_tools
+                .iter()
+                .find(|tool| tool.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+                .is_none_or(|tool| tool.host_invocation.eligible)
+        {
+            return Err(
+                "branch preparation changed currentness or advertised eligibility".to_owned(),
+            );
+        }
+        if branch_snapshot_before_prepare
+            .effective_tools
+            .iter()
+            .find(|tool| tool.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+            .is_none_or(|tool| tool.host_invocation.eligible)
+        {
+            return Err("branch was not eligible immediately before prepare".to_owned());
+        }
+
+        let pre_confirm_head_oid = live_git_text(&git, &fixture.0, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        if pre_confirm_head_oid != before.head_oid.trim() {
+            return Err("pre-confirm HEAD changed before the possible-effect boundary".to_owned());
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH_EFFECT_BOUNDARY=1");
+
+        let confirmed = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id,
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production branch confirm failed: {error:?}"))?;
+        if confirmed.invocation_id.is_empty() {
+            return Err(
+                "branch HostExplicit confirmation returned an empty invocation ID".to_owned(),
+            );
+        }
+
+        let mut branch_output_marker = "unavailable".to_owned();
+        let mut observed_ref = "unavailable".to_owned();
+        let mut observed_reflog = "unavailable".to_owned();
+        macro_rules! fail_after_branch_start {
+            ($message:expr) => {{
+                let message = $message.to_owned();
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_POST_START_FAILURE={message}");
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_BRANCH={branch_name}");
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_OID={pre_confirm_head_oid}");
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_TOOL_OUTPUT={branch_output_marker}");
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_REF={observed_ref}");
+                eprintln!("RAH_HOST_EXPLICIT_LIVE_REFLOG={observed_reflog}");
+                std::mem::forget(fixture);
+                return Err(message);
+            }};
+        }
+        let branch_events = match wait_for_test_events(&host_activity.0, 5).await {
+            Ok(events) => events,
+            Err(error) => fail_after_branch_start!(error),
+        };
+        if let Err(error) = require_host_event(
+            &branch_events[3],
+            "started",
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ) {
+            fail_after_branch_start!(error);
+        }
+        if let Err(error) = require_host_event(
+            &branch_events[4],
+            "tool_completed",
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ) {
+            fail_after_branch_start!(error);
+        }
+        let branch_output = match event_tool_output(&branch_events[4]) {
+            Ok(output) => output,
+            Err(error) => fail_after_branch_start!(error),
+        };
+        branch_output_marker = serde_json::to_string(&branch_output)
+            .unwrap_or_else(|_| "serialization-failed".to_owned());
+        if !matches!(
+            branch_result_classification(&branch_output),
+            BranchActivityClassification::ProvenSafe
+        ) || branch_output.is_error
+        {
+            fail_after_branch_start!("branch result was not strictly ProvenSafe");
+        }
+        let [ToolContent::Json(branch_value)] = branch_output.content.as_slice() else {
+            fail_after_branch_start!("branch result was not one structured JSON value");
+        };
+        if branch_value["status"] != "branch_created_verified"
+            || branch_value["uncertain"] != false
+            || branch_value["name"] != branch_name
+            || branch_value["oid"] != pre_confirm_head_oid
+        {
+            fail_after_branch_start!("branch result did not match the prepared name and HEAD OID");
+        }
+
+        let after = match live_git_state(&git, &fixture.0, &branch_name) {
+            Ok(state) => state,
+            Err(error) => fail_after_branch_start!(error),
+        };
+        let target_ref = format!("refs/heads/{branch_name}");
+        let target_heads = match live_git_text(
+            &git,
+            &fixture.0,
+            &["for-each-ref", "--format=%(refname)", &target_ref],
+        ) {
+            Ok(value) => value,
+            Err(error) => fail_after_branch_start!(error),
+        };
+        observed_ref = match live_git_text(&git, &fixture.0, &["rev-parse", &target_ref]) {
+            Ok(value) => value.trim().to_owned(),
+            Err(error) => fail_after_branch_start!(error),
+        };
+        observed_reflog = match live_git_text(
+            &git,
+            &fixture.0,
+            &[
+                "reflog",
+                "show",
+                "--format=%gn%x09%ge%x09%gs",
+                "-n",
+                "1",
+                &target_ref,
+            ],
+        ) {
+            Ok(value) => value.trim().to_owned(),
+            Err(error) => fail_after_branch_start!(error),
+        };
+        let target_tracking = match live_git_text(
+            &git,
+            &fixture.0,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short) %(upstream:short)",
+                &target_ref,
+            ],
+        ) {
+            Ok(value) => value.trim().to_owned(),
+            Err(error) => fail_after_branch_start!(error),
+        };
+        if target_heads.lines().count() != 1
+            || target_heads.trim() != target_ref
+            || observed_ref != pre_confirm_head_oid
+            || observed_reflog != "RAH Host\trah-host@example.invalid\tRAH create local branch"
+            || target_tracking != branch_name
+            || after != before
+        {
+            fail_after_branch_start!("verified branch effect changed protected Git state");
+        }
+        let after_snapshot = get_effective_authority_snapshot(app.state());
+        let review_preserved = reviewed_commit_control.has_pending_authorization().await
+            && after_snapshot.reviewed_commit
+                == super::effective_authority::ReviewedCommitState::AuthorizedPending;
+        if after_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || !review_preserved
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != branch_tool_generations
+            || app.state::<DesktopAppState>().persistence_namespace()
+                != branch_conversation_namespace
+            || !app
+                .state::<DesktopAppState>()
+                .provider_activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            || !refresh_events
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        {
+            fail_after_branch_start!(
+                "verified branch effect changed review, currentness, or providers"
+            );
+        }
+        let after_branch_tool = match after_snapshot
+            .effective_tools
+            .iter()
+            .find(|tool| tool.public_tool_name == REPOSITORY_CREATE_BRANCH_TOOL_NAME)
+        {
+            Some(tool) => tool,
+            None => {
+                fail_after_branch_start!("repo.create-branch disappeared after verified success")
+            }
+        };
+        if !after_branch_tool.host_invocation.eligible
+            || after_branch_tool.effect_class != EffectClass::RepositoryMutation
+            || after_branch_tool.authority_category
+                != AuthorityCategory::RepositoryLocalBranchCreation
+            || after_branch_tool.permission != PermissionLevel::Execute
+            || !after_branch_tool.repository_bound
+        {
+            fail_after_branch_start!("repo.create-branch was not still advertised and eligible");
+        }
+        if app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::Idle
+        {
+            fail_after_branch_start!("coordinator did not return to Idle after branch completion");
+        }
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH_STARTED=1");
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH_COMPLETED=1");
+        println!("RAH_HOST_EXPLICIT_LIVE_MODEL_TURN_STARTED=0");
+        println!("RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_REQUESTED=0");
+        println!("RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_STARTED=0");
+        println!("RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_FINISHED=0");
+        println!("RAH_HOST_EXPLICIT_LIVE_BRANCH={branch_name}");
+        println!("RAH_HOST_EXPLICIT_LIVE_OID={pre_confirm_head_oid}");
+        app.unlisten(host_activity.1);
+        app.unlisten(refresh_events.1);
+        shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+        println!("RAH_HOST_EXPLICIT_LIVE_OK");
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
