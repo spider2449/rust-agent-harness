@@ -2,7 +2,7 @@
 
 ## Status
 
-IMPLEMENTED — AWAITING EXACT-HEAD CI
+COMPLETE — EXACT-HEAD CI PASS
 
 ## Starting checkpoint
 
@@ -125,12 +125,13 @@ Required validation was run sequentially:
 
 ## Commit
 
-Preferred commit: `feat: harden Codex bridge with authorized dispatch`.
+Implementation commit: `6485614671d5a2b920e6ce97949e4f81dc00e637`
+(`feat: harden Codex bridge with authorized dispatch`).
 
 ## Exact-head CI
 
-Await the push CI for the exact Task 238 commit on `master` and require
-completed/success before marking this task complete.
+Exact-head CI run `34075995320` completed successfully for the implementation
+commit on `master`.
 
 ## Next task
 
