@@ -2,7 +2,7 @@
 
 ## Status
 
-HARNESS READY — AWAITING EXACT-HEAD CI
+LIVE PASS — AWAITING EXACT-HEAD CI
 
 ## Starting checkpoint
 
@@ -163,12 +163,18 @@ effectful ignored live test was executed.
 
 ## Harness commit
 
-Pending: `test: add Windows host invocation live gate`.
+Initial harness commit: `4e162987f139910baee19d4741a8c367e4ff9f5b`,
+`test: add Windows host invocation live gate`; exact-head CI `34082521267`
+passed. Test-only corrections were then committed as `791317f`, `0270fd1`,
+and `a8c0658c590fa8f0ce1606a5262e6ac947076697`; the final harness head used
+for live certification is `a8c0658c590fa8f0ce1606a5262e6ac947076697`.
 
 ## Harness exact-head CI
 
-Pending: push the harness commit and require successful CI for that exact head
-before the live gate.
+The final harness exact-head CI was `34083260988`, completed successfully for
+the exact live-certified harness head. Earlier correction CI runs were
+`34082788768` and `34083024251`, also successful before their respective
+fresh pre-effect attempts.
 
 ## Live run
 
@@ -198,6 +204,20 @@ assertion. No branch Started event or branch Tool effect occurred. The
 test-only assertion is corrected and requires another exact-head CI before a
 fresh effectful attempt.
 
+The corrected fresh attempt passed the complete certification. It used the
+exact command below once on Windows after correction commit CI passed:
+
+```powershell
+& .\scripts\codex-live-gate.ps1 `
+  -Version '0.149.0' `
+  -ExpectedSha256 '14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00' `
+  -Model 'gpt-5.6-terra' `
+  -ReasoningEffort 'medium' `
+  -Command {
+      cargo test -p rah-desktop tests::windows_live_desktop_explicit_host_tool_invocation -- --ignored --exact --nocapture
+  }
+```
+
 ## Live evidence
 
 The test emits bounded connection, eligibility, read, prepare, branch,
@@ -205,16 +225,50 @@ HostExplicit provenance, zero-model, provider-absence, branch-name, and OID
 markers without absolute paths, environment, credentials, tokens, profile
 paths, Codex home, or Git executable paths.
 
+Observed successful markers included:
+
+- `RAH_HOST_EXPLICIT_LIVE_CONNECTION_CURRENT=1`
+- `RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_ELIGIBLE=1`
+- `RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_STARTED=1`
+- `RAH_HOST_EXPLICIT_LIVE_REPO_STATUS_COMPLETED=1`
+- `RAH_HOST_EXPLICIT_LIVE_BRANCH_ELIGIBLE=1`
+- `RAH_HOST_EXPLICIT_LIVE_BRANCH_PREPARED=1`
+- `RAH_HOST_EXPLICIT_LIVE_BRANCH_EFFECT_BOUNDARY=1`
+- `RAH_HOST_EXPLICIT_LIVE_BRANCH_STARTED=1`
+- `RAH_HOST_EXPLICIT_LIVE_BRANCH_COMPLETED=1`
+- `RAH_HOST_EXPLICIT_LIVE_MODEL_TURN_STARTED=0`
+- `RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_REQUESTED=0`
+- `RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_STARTED=0`
+- `RAH_HOST_EXPLICIT_LIVE_MODEL_TOOL_FINISHED=0`
+- `RAH_HOST_EXPLICIT_LIVE_OK`
+
+The successful fixture values were branch
+`rah-host-explicit-live-18d2efa09d330900-2` and OID
+`e6b376c26b0d97e12c1be2c7981aecc32974e29c`. The live test independently
+verified the exact target ref, no-upstream state, ADR 0020 reflog identity and
+message, unchanged protected Git planes, preserved reviewed authorization,
+unchanged generations and conversation namespace, no refresh event, and
+connection currentness. Cleanup succeeded after all assertions.
+
 ## Live result
 
-Pending. A full PASS requires all connected-current, eligibility, read,
-prepare, confirm, exact effect, non-effect, review/currentness, provider,
-provenance, zero-model, and cleanup assertions.
+PASS. The certified environment reported Windows NT `10.0.19045.0`, Git
+`2.54.0.windows.1`, Codex `0.149.0`, the pinned executable SHA-256, model
+`gpt-5.6-terra`, and medium reasoning. The production connected-current
+Desktop path certified `repo.status` and `repo.create-branch` through typed
+HostExplicit commands, D2 revalidation, normal ToolRegistry dispatch, and
+existing capability authority. No model turn, AgentRequest, prompt, model Tool
+lifecycle, fake AgentEvent lifecycle, provider activation, retry, rollback, or
+branch deletion occurred.
+
+HostExplicit provenance was `Started -> tool_completed` for `repo.status` and
+`prepared -> Started -> tool_completed` for `repo.create-branch`; each Tool
+executed exactly once.
 
 ## Closure
 
-Pending live-pass documentation commit and final documentation-only exact-head
-CI. The final closure must state that model-selected Tool dispatch was not
+Live-pass documentation commit pending: `docs: record Windows host invocation
+live pass`. Final closure must state that model-selected Tool dispatch was not
 exercised and that Task 229 and Task 207 limitations remain unchanged.
 
 ## Next task
