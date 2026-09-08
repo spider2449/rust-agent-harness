@@ -9116,6 +9116,7 @@ mod tests {
             } => review_id,
             other => return Err(format!("fixture did not expose a review: {other:?}")),
         };
+        let original_review_id = review_id.clone();
         let authorization = repository_authorize_commit_review(app.state(), review_id)
             .await
             .map_err(|error| format!("review authorization failed: {error:?}"))?;
@@ -9364,10 +9365,40 @@ mod tests {
             fail_after_patch_start!("repository refresh count was not exactly one");
         }
         let after_snapshot = get_effective_authority_snapshot(app.state());
+        let (
+            fresh_authorization_is_ready,
+            fresh_review_is_current,
+            fresh_review_selector_is_distinct,
+            fresh_commit_review_present,
+        ) = {
+            let state = app.state::<DesktopAppState>();
+            let workflow = state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                workflow.authorization == CommitAuthorizationPresentation::ReadyToAuthorize,
+                workflow.review.as_ref().is_some_and(|review| {
+                    review.repository_generation == before_prepare_generations[0]
+                        && review.observation_generation == workflow.observation_generation
+                        && review.complete
+                        && review.binary_supported
+                }),
+                workflow
+                    .review_selector
+                    .as_deref()
+                    .is_some_and(|selector| selector != original_review_id),
+                workflow.commit_review.is_some(),
+            )
+        };
         if after_snapshot.status != SnapshotStatus::ConnectedCurrent
             || after_snapshot.reviewed_commit
-                != super::effective_authority::ReviewedCommitState::AuthorizationRevoked
+                != super::effective_authority::ReviewedCommitState::ReadyToAuthorize
             || reviewed_commit_control.has_pending_authorization().await
+            || !fresh_authorization_is_ready
+            || !fresh_review_is_current
+            || !fresh_review_selector_is_distinct
+            || !fresh_commit_review_present
             || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
                 != before_prepare_generations
             || app.state::<DesktopAppState>().persistence_namespace() != before_prepare_namespace

@@ -2,7 +2,13 @@
 
 ## Status
 
-HARNESS READY — AWAITING EXACT-HEAD CI
+TASK 251C — TEST/DOCS DISPOSITION — AWAITING EXACT-HEAD CI
+
+## Task 251C checkpoint
+
+- `HEAD == origin/master == 36d4cfa3e11a7c5ad0a37d65112b684ebfbbfe0c`.
+- Task 251A CI: `34192808012 PASS`.
+- Worktree was clean before the Task 251C correction.
 
 ## Starting checkpoint
 
@@ -107,9 +113,52 @@ Confirm, rollback, restoration, or evidence-hiding cleanup is permitted.
 
 ## Live result record
 
-Pending the certified run. After a successful run, record the harness commit,
-exact-head CI, Windows/Git/Codex baseline, exact command, bounded Prepare and
-Confirm evidence, pre/post SHA-256 values, `ChangedVerified`, authorization
+Task 251 remains not certified. The preserved Attempt 2 fixture remains
+untouched.
+
+### Attempt 1
+
+- POST-START live attempt was blocked before effect by the Prepare reservation
+  defect.
+- Ticket, HostExplicit Started, Tool execution, and native replacement were
+  all zero.
+
+### Task 251A
+
+- Corrected the production coordinator reservation behavior.
+- Commit: `36d4cfa3e11a7c5ad0a37d65112b684ebfbbfe0c`.
+- CI: `34192808012 PASS`.
+
+### Attempt 2
+
+- POST-START attempt: Prepare had zero effect; HostExplicit Started occurred
+  once; ToolCompleted occurred once; the result was `ChangedVerified`; one
+  native replacement occurred; and the exact target postimage was observed.
+- Protected Git state was unchanged, including the staged sentinel, HEAD,
+  branch, and refs.
+- No retry, second Confirm, rollback, or restoration occurred.
+- The attempt failed only at the final reviewed/currentness assertion, and the
+  disposable fixture was preserved.
+
+### Disposition
+
+Source audit determined that the test assertion was over-strict. The old
+one-shot authorization must be invalidated, but the mandatory repository
+refresh may create a fresh `ReadyToAuthorize` staged review from the unchanged
+sentinel. The corrected invariant requires `ConnectedCurrent`, a fresh
+`ReadyToAuthorize` review with no pending underlying authorization, unchanged
+current generations and persistence namespace, Idle coordinator and chat,
+and zero providers. Freshness is proven by requiring a new review selector,
+current workflow review and opaque commit review, with the new review tied to
+the post-refresh observation generation; no additional refresh is performed.
+
+Task 251 remains NOT CERTIFIED pending one separately authorized fresh attempt.
+Task 251D — Final Fresh Windows HostExplicit `repo.patch` Live Attempt — is not
+started automatically.
+
+After a successful fresh run, record the harness commit, exact-head CI,
+Windows/Git/Codex baseline, exact command, bounded Prepare and Confirm
+evidence, pre/post SHA-256 values, `ChangedVerified`, authorization
 invalidation, currentness/non-effects, activity privacy, provider absence,
 and all-zero model lifecycle markers here. Then update only this plan, commit:
 
