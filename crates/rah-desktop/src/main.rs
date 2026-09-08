@@ -2818,7 +2818,7 @@ async fn host_prepare_repo_patch(
                 preparer,
             },
         );
-        if coordinator.prepare(ticket).is_err() {
+        if coordinator.finalize_prepare(ticket).is_err() {
             coordinator.abort_prepare();
             return Err(FrontendError::HostInvocationBusy);
         }
@@ -6510,10 +6510,11 @@ mod tests {
         DESKTOP_TOOL_NAME, DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity,
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, DesktopToolComposition, FrontendError, GracefulCancelOutcome,
-        HardShutdownOutcome, HostActivityEvent, HostActivityState, HostInvocationDescriptor,
-        HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
-        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication, Preferences, PreferencesWarning,
+        HardShutdownOutcome, HostActivityEvent, HostActivityState, HostInvocationCoordinator,
+        HostInvocationDescriptor, HostInvocationUnavailableReason, LlamaCppReadinessProbe,
+        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
+        ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
+        Preferences, PreferencesWarning, PreparedHostInvocation, PreparedHostPayload,
         ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
         READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
         ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
@@ -10796,6 +10797,102 @@ mod tests {
         assert!(composition.repository_patch_preparer.is_some());
         assert!(
             host_descriptor(patch, true, true, true, false, true, CoordinatorState::Idle,).eligible
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_patch_prepare_finalizes_a_real_ticket_without_effect() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryPatchPreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("shared patch preparer should construct"),
+        );
+        let target = fixture.0.join("tracked.txt");
+        let before_target = fs::read(&target).expect("patch target should read");
+        let before_temporary_count = live_patch_temporary_count(&fixture.0)
+            .expect("temporary artifacts should be observable");
+        let preparation = preparer
+            .prepare(super::RepositoryPatchPreparationRequest {
+                path: "tracked.txt".to_owned(),
+                expected_old_text: "base".to_owned(),
+                replacement_text: "changed".to_owned(),
+            })
+            .await
+            .expect("shared production preparation should succeed");
+
+        let definition = desktop_tool_registry(Some(&fixture.desktop_repository()), None)
+            .expect("host registry should compose")
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.patch")
+            .expect("repo.patch definition should exist");
+        let mut coordinator = HostInvocationCoordinator::default();
+        coordinator
+            .begin_prepare()
+            .expect("preparation reservation should begin");
+        let ticket_id = coordinator.next_ticket_id();
+        coordinator
+            .finalize_prepare(PreparedHostInvocation::new(
+                ticket_id.clone(),
+                HostInvocationKind::RepoPatch,
+                ToolName::new("repo.patch"),
+                definition.clone(),
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.patch"),
+                    input: preparation.tool_input().clone(),
+                },
+                Arc::new(super::ToolRegistry::new()),
+                vec![PermissionLevel::Execute],
+                [0; 4],
+                None,
+                0,
+                PreparedHostPayload::Patch {
+                    preparation: Box::new(preparation),
+                    preparer,
+                },
+            ))
+            .expect("reserved production preparation should finalize");
+        let ticket = coordinator
+            .take_prepared(&ticket_id, std::time::Instant::now())
+            .expect("production preparation should expose a real ticket");
+        assert_eq!(ticket.kind, HostInvocationKind::RepoPatch);
+        assert_eq!(
+            fs::read(&target).expect("patch target should still read"),
+            before_target
+        );
+        assert_eq!(
+            live_patch_temporary_count(&fixture.0)
+                .expect("temporary artifacts should be observable"),
+            before_temporary_count
+        );
+        coordinator.finish_host();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_shared_patch_preparation_aborts_its_reservation() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer =
+            rah_tools::RepositoryPatchPreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("shared patch preparer should construct");
+        let mut coordinator = HostInvocationCoordinator::default();
+        coordinator
+            .begin_prepare()
+            .expect("preparation reservation should begin");
+        let result = preparer
+            .prepare(super::RepositoryPatchPreparationRequest {
+                path: "tracked.txt".to_owned(),
+                expected_old_text: "missing".to_owned(),
+                replacement_text: "changed".to_owned(),
+            })
+            .await;
+        assert!(result.is_err(), "shared preparation should fail closed");
+        coordinator.abort_prepare();
+        assert_eq!(coordinator.state(), CoordinatorState::Idle);
+        assert_eq!(
+            live_patch_temporary_count(&fixture.0)
+                .expect("temporary artifacts should be observable"),
+            0
         );
     }
 

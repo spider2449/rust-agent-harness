@@ -324,6 +324,21 @@ impl HostInvocationCoordinator {
         Ok(())
     }
 
+    pub(crate) fn finalize_prepare(
+        &mut self,
+        ticket: PreparedHostInvocation,
+    ) -> Result<(), CoordinatorError> {
+        if self.state != CoordinatorState::HostPrepared
+            || !self.preparing
+            || self.prepared.is_some()
+        {
+            return Err(CoordinatorError::Busy);
+        }
+        self.prepared = Some(ticket);
+        self.preparing = false;
+        Ok(())
+    }
+
     pub(crate) fn abort_prepare(&mut self) {
         if self.state == CoordinatorState::HostPrepared && self.preparing {
             self.preparing = false;
@@ -612,6 +627,85 @@ mod tests {
         coordinator
             .begin_model()
             .expect("terminal host releases coordinator");
+    }
+
+    #[test]
+    fn async_prepare_reservation_has_one_finalize_path() {
+        let now = Instant::now();
+        let mut coordinator = HostInvocationCoordinator::default();
+
+        coordinator
+            .begin_prepare()
+            .expect("idle coordinator reserves preparation");
+        assert_eq!(coordinator.state(), CoordinatorState::HostPrepared);
+        assert_eq!(coordinator.begin_prepare(), Err(CoordinatorError::Busy));
+        assert_eq!(coordinator.begin_model(), Err(CoordinatorError::Busy));
+        assert_eq!(coordinator.begin_read(), Err(CoordinatorError::Busy));
+        assert!(matches!(
+            coordinator.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+        assert_eq!(
+            coordinator.cancel("test-ticket"),
+            Err(CoordinatorError::NotPrepared)
+        );
+
+        coordinator
+            .finalize_prepare(PreparedHostInvocation::for_test(now))
+            .expect("reserved preparation finalizes");
+        assert_eq!(coordinator.state(), CoordinatorState::HostPrepared);
+
+        let ticket = coordinator
+            .take_prepared("test-ticket", now)
+            .expect("finalized ticket is available");
+        assert_eq!(ticket.ticket_id, "test-ticket");
+        assert!(matches!(
+            coordinator.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+    }
+
+    #[test]
+    fn finalize_prepare_requires_the_exact_transient_reservation() {
+        let now = Instant::now();
+        let mut coordinator = HostInvocationCoordinator::default();
+
+        assert!(matches!(
+            coordinator.finalize_prepare(PreparedHostInvocation::for_test(now)),
+            Err(CoordinatorError::Busy)
+        ));
+
+        coordinator
+            .prepare(PreparedHostInvocation::for_test(now))
+            .expect("direct branch preparation still works");
+        assert!(matches!(
+            coordinator.finalize_prepare(PreparedHostInvocation::for_test(now)),
+            Err(CoordinatorError::Busy)
+        ));
+        assert!(coordinator.take_prepared("test-ticket", now).is_ok());
+        coordinator.finish_host();
+    }
+
+    #[test]
+    fn abort_only_releases_a_transient_reservation() {
+        let now = Instant::now();
+        let mut coordinator = HostInvocationCoordinator::default();
+
+        coordinator
+            .begin_prepare()
+            .expect("idle coordinator reserves preparation");
+        coordinator.abort_prepare();
+        assert_eq!(coordinator.state(), CoordinatorState::Idle);
+
+        coordinator
+            .begin_prepare()
+            .expect("reservation can be retried after abort");
+        coordinator
+            .finalize_prepare(PreparedHostInvocation::for_test(now))
+            .expect("reserved preparation finalizes");
+        coordinator.abort_prepare();
+        assert_eq!(coordinator.state(), CoordinatorState::HostPrepared);
+        assert!(coordinator.take_prepared("test-ticket", now).is_ok());
     }
 
     #[test]
