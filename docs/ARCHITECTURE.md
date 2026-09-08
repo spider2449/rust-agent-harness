@@ -1,12 +1,59 @@
-# RAH v0.20.0 Architecture
+# RAH v0.21.0 Release-Candidate Architecture
 
-This document describes the released v0.20.0 architecture.
+This document describes the v0.21.0 release-candidate architecture. It is
+prepared for publication, but v0.21.0 is not released.
 
 v0.20.0 is the current immutable published release.
 
 v0.19.0 is the prior release.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0022 reviewed HostExplicit worktree-authoring path
+
+The v0.21 milestone is HostExplicit Reviewed Single-File Patch Authoring. The
+product flow is:
+
+```text
+inspect
+ -> typed human repo.patch Prepare
+ -> exact bounded review
+ -> ticket-only Confirm
+ -> existing repo.patch
+ -> inspect diff
+ -> existing Stage / Unstage
+ -> existing reviewed Commit
+```
+
+The exact HostExplicit eligibility is seven Tools: `fs.read`, `repo.file-info`,
+`repo.status`, `repo.diff`, `repo.diff-staged`, `repo.create-branch`, and
+`repo.patch`. The v0.21 authoring form is H1 only: `path`,
+`expectedOldText`, and `replacementText`. The frontend renders those typed
+fields and does not choose eligibility or authority.
+
+The host derives SHA-256 and byte-length bindings and the canonical
+`repo.patch` ToolInput. Shared non-effectful `RepositoryPatchPreparer` creates
+the exact escaped R4 review and opaque process-local single-use five-minute
+ticket. Confirm receives only the ticket ID, revalidates the preparation, runs
+D2 preflight before `Started`, then uses `authorized_tool_dispatch` to reach
+the existing `repo.patch` Tool and its ADR 0012 policy. Prepare performs zero
+Tool executions and zero replacements; the effectful path permits exactly one
+Tool execution and one native replacement attempt.
+
+ADR 0012 remains the sole underlying worktree-content mutation authority. ADR
+0021 remains the general HostExplicit dispatch, currentness, D2, coordinator,
+and provenance boundary. ADR 0022 adds only the reviewed workflow around that
+existing capability; it creates no generic write authority. Stage, Unstage, and
+reviewed Commit remain separate existing actions. `repo.create-file`,
+`repo.edit-files`, `repo.delete-file`, `repo.rename-file`,
+`repo.create-directory`, `repo.commit`, MCP Tools, and Process Plugin Tools are
+not HostExplicit eligible.
+
+Effectful start clears old reviewed-commit authorization. Repository refresh
+may produce a new `ReadyToAuthorize` review, but never automatically
+authorizes it. Changing content alone does not increment
+`repository_generation`. Strict result classification and conservative
+post-start uncertainty prohibit retry, replay, rollback, or restore-preimage.
 
 ## ADR 0021 explicit Host Tool invocation path
 

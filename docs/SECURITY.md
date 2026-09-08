@@ -1,12 +1,74 @@
-# RAH v0.20.0 Security Model
+# RAH v0.21.0 Release-Candidate Security Model
 
-This document describes the released v0.20.0 Security Model.
+This document describes the v0.21.0 release-candidate security model. It is
+prepared for publication, but v0.21.0 is not released.
 
 v0.20.0 is the current immutable published release.
 
 v0.19.0 is the prior release.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0022 reviewed HostExplicit authoring boundary
+
+ADR 0012 remains the sole underlying `repo.patch` worktree-content mutation
+authority. ADR 0021 remains the general HostExplicit dispatch/currentness/D2
+boundary. ADR 0022 adds only the reviewed human workflow around that existing
+capability and adds no generic write authority.
+
+The exact v0.21 HostExplicit set is:
+
+- `fs.read`
+- `repo.file-info`
+- `repo.status`
+- `repo.diff`
+- `repo.diff-staged`
+- `repo.create-branch`
+- `repo.patch`
+
+`repo.create-file`, `repo.edit-files`, `repo.delete-file`, `repo.rename-file`,
+`repo.create-directory`, `repo.commit`, MCP Tools, and Process Plugin Tools are
+not eligible. There is no other HostExplicit authoring Tool enablement.
+
+The human supplies only typed H1 input: `path`, `expectedOldText`, and
+`replacementText`. The host derives SHA-256 and byte-length values and the
+canonical `repo.patch` ToolInput. The shared non-effectful
+`RepositoryPatchPreparer` derives the postimage and exact bounded escaped R4
+review. No mutation-relevant review content is hidden; if the complete changed
+material cannot fit, preparation fails closed.
+
+The security distinctions are explicit:
+
+```text
+human review != authorization
+frontend != authority
+model request != authorization
+preparation != mutation
+D2 != underlying capability authority
+confirmation != generic write authority
+```
+
+Prepare has zero Tool executions and zero native replacements. Its opaque
+process-local single-use five-minute ticket binds the host-derived input,
+review, identities, definitions, permissions, and currentness. Confirm accepts
+the ticket ID only, revalidates shared preparation before `Started`, performs
+D2 preflight before `Started`, and uses `authorized_tool_dispatch` after
+`Started` to call the existing `repo.patch` Tool. The underlying ADR 0012
+policy performs the mutation, with one possible native replacement attempt.
+
+The host strictly classifies the exact result schema. Malformed, contradictory,
+uncertain, lost, or post-start `ToolError` outcomes are handled as possible
+effect/uncertain; success is never inferred merely from observing changed
+bytes. There is no retry, replay, rollback, restore-preimage, compensation, or
+automatic second confirmation.
+
+Patch review/source text remains bounded to process-local prepared state and
+the local review. It is absent from generic activity, conversation persistence,
+conversation replay, and evidence logs. Once an effectful patch reaches
+`Started`, old reviewed-commit authorization is invalidated. Refresh may create
+a new `ReadyToAuthorize` review, but it does not automatically authorize the
+new review. Content mutation alone does not increment
+`repository_generation`.
 
 ## ADR 0021 explicit host invocation dispatch boundary
 

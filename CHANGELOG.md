@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.21.0 — 2026-09-08
+
+RAH v0.21.0 is prepared for publication but is NOT released yet. v0.20.0
+remains the current immutable published release until v0.21.0 is actually
+tagged and published.
+
+### Added
+
+- HostExplicit reviewed single-file `repo.patch` authoring workflow:
+  `inspect -> typed human repo.patch Prepare -> exact bounded review ->
+  ticket-only Confirm -> existing repo.patch -> inspect diff -> existing Stage /
+  Unstage -> existing reviewed Commit`.
+- Shared non-effectful `RepositoryPatchPreparer` and opaque revalidation for the
+  host-derived canonical patch input.
+- Exact bounded escaped review and ticket-only confirmation for the H1 fields
+  `path`, `expectedOldText`, and `replacementText`.
+- Frontend reviewed patch UX using typed fields and no generic Tool/JSON route.
+
+### Security
+
+- ADR 0022 adds the reviewed HostExplicit worktree-authoring boundary around
+  the existing ADR 0012 `repo.patch` authority; ADR 0021 remains the general
+  HostExplicit dispatch/currentness/D2 boundary.
+- Host-derived SHA/length and canonical `ToolInput`, shared non-effectful
+  preparation, exact R4 review, opaque process-local single-use five-minute
+  tickets, strict pre-start revalidation/D2 ordering, and exactly-once mutation
+  are retained.
+- Confirm receives only a ticket ID; `authorized_tool_dispatch` reaches the
+  existing `repo.patch` Tool after `Started`; strict result classification,
+  source-review privacy, and conservative malformed/uncertain/post-start
+  ToolError handling are required.
+- No retry, replay, rollback, or restore-preimage is performed. Patch source
+  text is absent from generic activity and persistence. Effectful patch start
+  invalidates old reviewed-commit authorization; refresh may create a new
+  `ReadyToAuthorize` review but never automatically authorizes it. Content
+  mutation alone does not increment `repository_generation`.
+
+### Validation
+
+- Task 252 Verdict A: milestone complete; release preparation may begin.
+- Deterministic workspace validation: 672 passed, 10 ignored, 0 failed.
+- Task 251 final Windows connected-current HostExplicit reviewed `repo.patch`
+  certification through the production backend, with Prepare `0 Tool / 0
+  replacement`, Confirm `1 Tool / 1 replacement`, `ChangedVerified`, exact
+  postimage, protected repository state unchanged, model lifecycle `0/0/0`,
+  and MCP/Process Plugin providers `0`.
+
+### Limitations
+
+- No GUI mouse automation certification; no model-selected `repo.patch`
+  certification; no Linux/macOS live certification.
+- No other HostExplicit authoring Tool enablement and no external-provider
+  HostExplicit.
+- No generic filesystem write, shell, or generic process authority; no
+  automatic Stage or Commit.
+- No rollback guarantee, race-free TOCTOU guarantee, network isolation claim,
+  or OS sandbox claim; process supervision is not OS sandboxing.
+- No staged, binary, new-file, delete, rename, directory, or multi-file
+  HostExplicit authoring, and no claim that a refreshed review is automatically
+  authorized.
+
 ## v0.20.0 — 2026-09-07
 
 RAH v0.20.0 is released and is the current immutable published release.

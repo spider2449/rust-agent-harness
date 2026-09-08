@@ -5,6 +5,45 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.21.0 release candidate
+
+v0.21.0 is prepared for publication but is NOT released yet. v0.20.0 remains
+the current immutable published release until Task 254 publishes v0.21.0.
+
+RAH v0.21 adds HostExplicit Reviewed Single-File Patch Authoring:
+
+```text
+inspect
+ -> typed human repo.patch Prepare
+ -> exact bounded review
+ -> ticket-only Confirm
+ -> existing repo.patch
+ -> inspect diff
+ -> existing Stage / Unstage
+ -> existing reviewed Commit
+```
+
+The human supplies only typed `path`, `expectedOldText`, and `replacementText`.
+The host derives the preimage/postimage SHA-256 and lengths and canonical
+`ToolInput`, prepares a non-effectful exact escaped review, and issues an opaque
+single-use five-minute ticket. Confirm receives only the ticket ID and performs
+shared preparation revalidation, D2 preflight before `Started`, and
+`authorized_tool_dispatch` before the existing ADR 0012 `repo.patch` mutation.
+Malformed or uncertain post-start results are handled conservatively; there is
+no retry, replay, rollback, or restore-preimage.
+
+The exact v0.21 HostExplicit eligibility is:
+`fs.read`, `repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`,
+`repo.create-branch`, and `repo.patch`. `repo.create-file`, `repo.edit-files`,
+`repo.delete-file`, `repo.rename-file`, `repo.create-directory`, `repo.commit`,
+MCP Tools, and Process Plugin Tools are not eligible.
+
+Task 252 Verdict A completed the milestone audit. Task 251 provides the final
+Windows connected-current production-backend certification: Prepare `0 Tool / 0
+replacement`, Confirm `1 Tool / 1 replacement`, `ChangedVerified`, exact
+postimage, protected repository state unchanged, and no model or external
+provider activity. This is not a model-selected or GUI mouse-automation claim.
+
 ## RAH v0.20.0 released
 
 v0.20.0 is now the current immutable published release. v0.19.0 is the prior
