@@ -1866,7 +1866,7 @@ fn eof_marker(state: RepositoryPatchEofState) -> &'static str {
     }
 }
 
-fn escape_review_text(text: &str) -> String {
+pub(crate) fn escape_review_text(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {

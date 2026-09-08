@@ -71,6 +71,13 @@ pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInf
 pub use repository_multi_file_edit::{
     REPOSITORY_EDIT_FILES_TOOL_NAME, RepositoryMultiFileEditTool,
 };
+pub use repository_multi_file_preflight::{
+    REPOSITORY_MULTI_FILE_EDIT_PREPARATION_OPERATION, RepositoryMultiFileEditChangedRange,
+    RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparationError,
+    RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
+    RepositoryMultiFileEditPreparer, RepositoryMultiFileEditReview,
+    RepositoryMultiFileEditTargetReview, RepositoryMultiFileEditTextReplacement,
+};
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use repository_rename_file::{
     REPOSITORY_RENAME_FILE_TOOL_NAME, RepositoryFileRenameAuthority, RepositoryFileRenameTool,

@@ -17,13 +17,16 @@ use std::fs::File;
 
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use rah_protocol::ToolInput;
-use serde_json::{Map, Value};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     git_stage::repository_lease,
     host_execute::{is_beneath, paths_equivalent},
+    repository_worktree_patch::escape_review_text,
 };
 
 const MAX_SERIALIZED_REQUEST_BYTES: usize = 256 * 1024;
@@ -34,6 +37,755 @@ const MAX_AGGREGATE_REPLACEMENTS: usize = 64;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ESCAPED_CHANGED_MATERIAL_BYTES: usize = 768 * 1024;
+const MAX_UNCHANGED_CONTEXT_PER_TARGET_BYTES: usize = 32 * 1024;
+const MAX_UNCHANGED_CONTEXT_BYTES: usize = 128 * 1024;
+const MAX_SERIALIZED_REVIEW_BYTES: usize = 1024 * 1024;
+const MAX_PREPARED_STATE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Stable name of the existing multi-file edit capability.
+pub const REPOSITORY_MULTI_FILE_EDIT_PREPARATION_OPERATION: &str = "repo.edit-files";
+
+/// Closed, host-owned human request for a bounded multi-file preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryMultiFileEditPreparationRequest {
+    /// Logical repository-relative targets.
+    pub targets: Vec<RepositoryMultiFileEditPreparationTarget>,
+}
+
+/// One target in a multi-file preparation request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryMultiFileEditPreparationTarget {
+    /// Logical repository-relative path.
+    pub path: String,
+    /// Exact literal replacements, all resolved against one original snapshot.
+    pub replacements: Vec<RepositoryMultiFileEditTextReplacement>,
+}
+
+/// One exact literal replacement in a preparation request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryMultiFileEditTextReplacement {
+    /// Nonempty literal text expected in the original snapshot.
+    pub expected_old_text: String,
+    /// Literal replacement text; empty text removes the match.
+    pub replacement_text: String,
+}
+
+/// Sanitized failure classes for non-effectful multi-file preparation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RepositoryMultiFileEditPreparationError {
+    /// The closed preparation request violated a bound or input rule.
+    #[error("invalid multi-file edit preparation input: {reason}")]
+    InvalidInput { reason: &'static str },
+    /// A target cannot be admitted safely for this capability.
+    #[error("multi-file edit preparation has an invalid target: {reason}")]
+    InvalidTarget { reason: &'static str },
+    /// Current repository state no longer satisfies the reviewed precondition.
+    #[error("multi-file edit preparation precondition changed: {reason}")]
+    PreconditionChanged { reason: &'static str },
+    /// The earlier prepared change-set no longer binds to this preparer.
+    #[error("multi-file edit preparation is stale")]
+    Stale,
+    /// Complete changed/review material exceeded the accepted bound.
+    #[error("multi-file edit review is too large")]
+    ReviewTooLarge,
+}
+
+/// One half-open byte range and complete changed material in a multi-file review.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryMultiFileEditChangedRange {
+    start: usize,
+    end: usize,
+    length: usize,
+    expected_old_text_escaped: String,
+    replacement_text_escaped: String,
+}
+
+impl RepositoryMultiFileEditChangedRange {
+    /// Start offset in the original raw file.
+    #[must_use]
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    /// Exclusive end offset in the original raw file.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.end
+    }
+
+    /// Matched old-text byte length.
+    #[must_use]
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    /// Complete escaped old text.
+    #[must_use]
+    pub fn expected_old_text_escaped(&self) -> &str {
+        &self.expected_old_text_escaped
+    }
+
+    /// Complete escaped replacement text.
+    #[must_use]
+    pub fn replacement_text_escaped(&self) -> &str {
+        &self.replacement_text_escaped
+    }
+}
+
+/// Complete review of one host-ordered target.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryMultiFileEditTargetReview {
+    ordinal: usize,
+    path: String,
+    target_identity: String,
+    replacement_count: usize,
+    changed_ranges: Vec<RepositoryMultiFileEditChangedRange>,
+    preimage_sha256: String,
+    preimage_byte_length: usize,
+    postimage_sha256: String,
+    postimage_byte_length: usize,
+}
+
+impl RepositoryMultiFileEditTargetReview {
+    /// Host-owned zero-based deterministic target ordinal.
+    #[must_use]
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    /// Canonical logical repository-relative path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Stable redacted identity digest for the target and parent binding.
+    #[must_use]
+    pub fn target_identity(&self) -> &str {
+        &self.target_identity
+    }
+
+    /// Number of exact replacements for this target.
+    #[must_use]
+    pub fn replacement_count(&self) -> usize {
+        self.replacement_count
+    }
+
+    /// Every mutation-relevant changed range.
+    #[must_use]
+    pub fn changed_ranges(&self) -> &[RepositoryMultiFileEditChangedRange] {
+        &self.changed_ranges
+    }
+
+    /// Exact preimage SHA-256.
+    #[must_use]
+    pub fn preimage_sha256(&self) -> &str {
+        &self.preimage_sha256
+    }
+
+    /// Exact preimage byte length.
+    #[must_use]
+    pub fn preimage_byte_length(&self) -> usize {
+        self.preimage_byte_length
+    }
+
+    /// Exact postimage SHA-256.
+    #[must_use]
+    pub fn postimage_sha256(&self) -> &str {
+        &self.postimage_sha256
+    }
+
+    /// Exact postimage byte length.
+    #[must_use]
+    pub fn postimage_byte_length(&self) -> usize {
+        self.postimage_byte_length
+    }
+}
+
+/// Complete bounded review for one `repo.edit-files` change-set.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryMultiFileEditReview {
+    operation: &'static str,
+    target_count: usize,
+    replacement_count: usize,
+    targets: Vec<RepositoryMultiFileEditTargetReview>,
+    matching: &'static str,
+    unchanged_context: &'static str,
+    intended_effect: &'static str,
+    non_effects: Vec<&'static str>,
+    non_atomic_warning: &'static str,
+}
+
+impl RepositoryMultiFileEditReview {
+    /// Reviewed operation name.
+    #[must_use]
+    pub fn operation(&self) -> &str {
+        self.operation
+    }
+
+    /// Number of reviewed targets.
+    #[must_use]
+    pub fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    /// Total number of reviewed replacements.
+    #[must_use]
+    pub fn replacement_count(&self) -> usize {
+        self.replacement_count
+    }
+
+    /// Targets in deterministic host order.
+    #[must_use]
+    pub fn targets(&self) -> &[RepositoryMultiFileEditTargetReview] {
+        &self.targets
+    }
+
+    /// Matching semantics represented by this review.
+    #[must_use]
+    pub fn matching(&self) -> &str {
+        self.matching
+    }
+
+    /// Statement of unchanged-context handling.
+    #[must_use]
+    pub fn unchanged_context(&self) -> &str {
+        self.unchanged_context
+    }
+
+    /// Intended bounded worktree effect.
+    #[must_use]
+    pub fn intended_effect(&self) -> &str {
+        self.intended_effect
+    }
+
+    /// Explicit protected non-effects.
+    #[must_use]
+    pub fn non_effects(&self) -> &[&'static str] {
+        &self.non_effects
+    }
+
+    /// Required non-atomic warning.
+    #[must_use]
+    pub fn non_atomic_warning(&self) -> &str {
+        self.non_atomic_warning
+    }
+}
+
+/// Opaque, immutable non-effectful multi-file preparation.
+pub struct RepositoryMultiFileEditPreparation {
+    preparer_identity: Uuid,
+    tool_input: ToolInput,
+    review: RepositoryMultiFileEditReview,
+    review_identity: String,
+    plan: PreparedMultiFilePlan,
+}
+
+impl RepositoryMultiFileEditPreparation {
+    /// Exact canonical closed `repo.edit-files` input for future binding.
+    #[must_use]
+    pub fn tool_input(&self) -> &ToolInput {
+        &self.tool_input
+    }
+
+    /// Complete backend-derived review.
+    #[must_use]
+    pub fn review(&self) -> &RepositoryMultiFileEditReview {
+        &self.review
+    }
+
+    /// Stable identity of the complete prepared change-set.
+    #[must_use]
+    pub fn review_identity(&self) -> &str {
+        &self.review_identity
+    }
+
+    /// Exact target postimage bytes retained for later same-plan validation.
+    #[must_use]
+    pub fn postimage(&self, ordinal: usize) -> Option<&[u8]> {
+        self.plan
+            .targets
+            .get(ordinal)
+            .map(|target| target.postimage.as_slice())
+    }
+}
+
+impl std::fmt::Debug for RepositoryMultiFileEditPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryMultiFileEditPreparation")
+            .field("review_identity", &self.review_identity)
+            .field("target_count", &self.plan.targets.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-bound non-effectful preparation and revalidation for `repo.edit-files`.
+pub struct RepositoryMultiFileEditPreparer {
+    identity: Uuid,
+    policy: RepositoryMultiFileMutationPolicy,
+}
+
+impl RepositoryMultiFileEditPreparer {
+    /// Creates a preparer bound to one trusted non-bare repository.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, crate::ToolError> {
+        RepositoryMultiFileMutationPolicy::new(git_executable.as_ref(), repository_root.as_ref())
+            .map(|policy| Self {
+                identity: Uuid::new_v4(),
+                policy,
+            })
+            .map_err(|_| crate::ToolError::Execution {
+                message: "repository multi-file edit policy rejected host authority".to_owned(),
+            })
+    }
+
+    /// Captures one exact change-set without Tool execution, replacement, or
+    /// repository-adjacent temporary-file creation.
+    pub async fn prepare(
+        &self,
+        request: RepositoryMultiFileEditPreparationRequest,
+    ) -> Result<RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparationError> {
+        let request = HumanMultiFileRequest::validate(request)?;
+        let _lease = self.policy.acquire_lease().await;
+        let plan = self
+            .policy
+            .prepare_human_locked(request)
+            .map_err(human_preparation_error)?;
+        let tool_input = canonical_tool_input_for_plan(&plan);
+        let review = build_multi_file_review(&plan)?;
+        let review_identity =
+            compute_multi_file_review_identity(&self.policy, &plan, &tool_input, &review);
+        let preparation = RepositoryMultiFileEditPreparation {
+            preparer_identity: self.identity,
+            tool_input,
+            review,
+            review_identity,
+            plan,
+        };
+        if serialized_multi_file_preparation_size(&preparation) > MAX_PREPARED_STATE_BYTES {
+            return Err(RepositoryMultiFileEditPreparationError::ReviewTooLarge);
+        }
+        Ok(preparation)
+    }
+
+    /// Revalidates the exact earlier change-set without any effect.
+    pub async fn revalidate(
+        &self,
+        preparation: &RepositoryMultiFileEditPreparation,
+    ) -> Result<(), RepositoryMultiFileEditPreparationError> {
+        let _lease = self.policy.acquire_lease().await;
+        if preparation.preparer_identity != self.identity {
+            return Err(RepositoryMultiFileEditPreparationError::Stale);
+        }
+        let request = MultiFileRequest::parse(&preparation.tool_input)
+            .map_err(|_| RepositoryMultiFileEditPreparationError::Stale)?;
+        let current = self
+            .policy
+            .prepare_tool_locked(request)
+            .map_err(revalidation_error)?;
+        if !plans_match(&preparation.plan, &current) {
+            return Err(classify_plan_drift(&preparation.plan, &current));
+        }
+        let tool_input = canonical_tool_input_for_plan(&current);
+        if tool_input != preparation.tool_input {
+            return Err(RepositoryMultiFileEditPreparationError::Stale);
+        }
+        let review = build_multi_file_review(&current)
+            .map_err(|_| RepositoryMultiFileEditPreparationError::Stale)?;
+        if review != preparation.review {
+            return Err(RepositoryMultiFileEditPreparationError::Stale);
+        }
+        let identity =
+            compute_multi_file_review_identity(&self.policy, &current, &tool_input, &review);
+        if identity != preparation.review_identity {
+            return Err(RepositoryMultiFileEditPreparationError::Stale);
+        }
+        Ok(())
+    }
+}
+
+struct HumanMultiFileRequest {
+    targets: Vec<RequestTarget>,
+}
+
+impl HumanMultiFileRequest {
+    fn validate(
+        request: RepositoryMultiFileEditPreparationRequest,
+    ) -> Result<Self, RepositoryMultiFileEditPreparationError> {
+        if request.targets.is_empty() || request.targets.len() > MAX_TARGETS {
+            return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                reason: "target_count",
+            });
+        }
+        let mut total_replacements = 0usize;
+        let mut serialized_targets = Vec::with_capacity(request.targets.len());
+        let mut targets = Vec::with_capacity(request.targets.len());
+        for target in request.targets {
+            if target.path.len() > MAX_PATH_BYTES || validate_logical_path(&target.path).is_err() {
+                return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                    reason: "path",
+                });
+            }
+            if target.replacements.is_empty()
+                || target.replacements.len() > MAX_REPLACEMENTS_PER_TARGET
+            {
+                return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                    reason: "replacement_count",
+                });
+            }
+            total_replacements = total_replacements
+                .checked_add(target.replacements.len())
+                .ok_or(RepositoryMultiFileEditPreparationError::InvalidInput {
+                    reason: "replacement_count",
+                })?;
+            if total_replacements > MAX_AGGREGATE_REPLACEMENTS {
+                return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                    reason: "replacement_count",
+                });
+            }
+            let mut serialized_replacements = Vec::with_capacity(target.replacements.len());
+            let mut replacements = Vec::with_capacity(target.replacements.len());
+            for replacement in target.replacements {
+                if replacement.expected_old_text.is_empty()
+                    || replacement.expected_old_text.len() > MAX_TEXT_BYTES
+                    || replacement.replacement_text.len() > MAX_TEXT_BYTES
+                    || replacement.expected_old_text.contains('\0')
+                    || replacement.replacement_text.contains('\0')
+                {
+                    return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                        reason: "text",
+                    });
+                }
+                serialized_replacements.push(json!({
+                    "expected_old_text": replacement.expected_old_text,
+                    "replacement_text": replacement.replacement_text,
+                }));
+                replacements.push(Replacement {
+                    old: replacement.expected_old_text,
+                    new: replacement.replacement_text,
+                });
+            }
+            serialized_targets.push(json!({
+                "path": target.path,
+                "replacements": serialized_replacements,
+            }));
+            targets.push(RequestTarget {
+                path: target.path,
+                expected_sha256: None,
+                expected_length: None,
+                replacements,
+            });
+        }
+        let serialized =
+            serde_json::to_vec(&json!({ "targets": serialized_targets })).map_err(|_| {
+                RepositoryMultiFileEditPreparationError::InvalidInput {
+                    reason: "request_serialization",
+                }
+            })?;
+        if serialized.len() > MAX_SERIALIZED_REQUEST_BYTES {
+            return Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                reason: "request_size",
+            });
+        }
+        Ok(Self { targets })
+    }
+}
+
+fn human_preparation_error(error: PreflightError) -> RepositoryMultiFileEditPreparationError {
+    match error {
+        PreflightError::InvalidTarget(reason) => {
+            RepositoryMultiFileEditPreparationError::InvalidTarget { reason }
+        }
+        PreflightError::Precondition(reason) if is_target_admission_reason(reason) => {
+            RepositoryMultiFileEditPreparationError::InvalidTarget { reason }
+        }
+        PreflightError::Precondition(reason) => {
+            RepositoryMultiFileEditPreparationError::PreconditionChanged { reason }
+        }
+    }
+}
+
+fn revalidation_error(error: PreflightError) -> RepositoryMultiFileEditPreparationError {
+    match error {
+        PreflightError::InvalidTarget(reason) => {
+            RepositoryMultiFileEditPreparationError::InvalidTarget { reason }
+        }
+        PreflightError::Precondition(reason)
+            if reason.contains("identity changed")
+                && (reason.contains("repository") || reason.contains("Git executable")) =>
+        {
+            RepositoryMultiFileEditPreparationError::Stale
+        }
+        PreflightError::Precondition(reason) if is_target_admission_reason(reason) => {
+            RepositoryMultiFileEditPreparationError::InvalidTarget { reason }
+        }
+        PreflightError::Precondition(reason) => {
+            RepositoryMultiFileEditPreparationError::PreconditionChanged { reason }
+        }
+    }
+}
+
+fn is_target_admission_reason(reason: &str) -> bool {
+    reason.contains("regular")
+        || reason.contains("hard-linked")
+        || reason.contains("identity changed")
+        || reason.contains("UTF-8")
+        || reason.contains("NUL")
+        || reason.contains("symbolic")
+        || reason.contains("reparse")
+        || reason.contains("attributes")
+        || reason.contains("target aliases")
+        || reason.contains("path")
+}
+
+fn plans_match(left: &PreparedMultiFilePlan, right: &PreparedMultiFilePlan) -> bool {
+    left.repository == right.repository
+        && left.targets.len() == right.targets.len()
+        && left
+            .targets
+            .iter()
+            .zip(&right.targets)
+            .all(|(left, right)| {
+                left.canonical_logical == right.canonical_logical
+                    && paths_equivalent(&left.target.path, &right.target.path)
+                    && left.target.identity == right.target.identity
+                    && left.target.parent_identity == right.target.parent_identity
+                    && target_mode(&left.target) == target_mode(&right.target)
+                    && left.original == right.original
+                    && left.postimage == right.postimage
+                    && left.replacements == right.replacements
+                    && left.ranges == right.ranges
+            })
+}
+
+fn classify_plan_drift(
+    old: &PreparedMultiFilePlan,
+    current: &PreparedMultiFilePlan,
+) -> RepositoryMultiFileEditPreparationError {
+    if old.targets.len() != current.targets.len()
+        || old
+            .targets
+            .iter()
+            .zip(&current.targets)
+            .any(|(old, current)| old.canonical_logical != current.canonical_logical)
+    {
+        return RepositoryMultiFileEditPreparationError::Stale;
+    }
+    if old
+        .targets
+        .iter()
+        .zip(&current.targets)
+        .any(|(old, current)| {
+            old.target.identity != current.target.identity
+                || old.target.parent_identity != current.target.parent_identity
+                || target_mode(&old.target) != target_mode(&current.target)
+        })
+    {
+        return RepositoryMultiFileEditPreparationError::InvalidTarget {
+            reason: "target identity or mode changed",
+        };
+    }
+    if old.repository != current.repository {
+        return RepositoryMultiFileEditPreparationError::PreconditionChanged {
+            reason: "protected repository state changed",
+        };
+    }
+    RepositoryMultiFileEditPreparationError::PreconditionChanged {
+        reason: "prepared change-set changed",
+    }
+}
+
+fn target_mode(target: &SafeTarget) -> u32 {
+    #[cfg(unix)]
+    {
+        target.mode & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        0
+    }
+}
+
+fn canonical_tool_input_for_plan(plan: &PreparedMultiFilePlan) -> ToolInput {
+    ToolInput(json!({
+        "targets": plan.targets.iter().map(|target| {
+            let mut order = (0..target.replacements.len()).collect::<Vec<_>>();
+            order.sort_unstable_by_key(|index| target.ranges[*index].start);
+            json!({
+                "path": target.canonical_logical,
+                "expected_file_sha256": sha256(&target.original),
+                "expected_file_byte_length": target.original.len(),
+                "replacements": order.into_iter().map(|index| json!({
+                    "expected_old_text": target.replacements[target.ranges[index].replacement_index].old,
+                    "replacement_text": target.replacements[target.ranges[index].replacement_index].new,
+                })).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+    }))
+}
+
+fn build_multi_file_review(
+    plan: &PreparedMultiFilePlan,
+) -> Result<RepositoryMultiFileEditReview, RepositoryMultiFileEditPreparationError> {
+    let mut total_replacements = 0usize;
+    let mut escaped_changed = 0usize;
+    let targets = plan
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(ordinal, target)| {
+            total_replacements = total_replacements.saturating_add(target.replacements.len());
+            let changed_ranges = target
+                .ranges
+                .iter()
+                .map(|range| {
+                    let replacement = &target.replacements[range.replacement_index];
+                    let old = escape_review_text(&replacement.old);
+                    let new = escape_review_text(&replacement.new);
+                    escaped_changed = escaped_changed
+                        .saturating_add(old.len())
+                        .saturating_add(new.len());
+                    RepositoryMultiFileEditChangedRange {
+                        start: range.start,
+                        end: range.end,
+                        length: range.end - range.start,
+                        expected_old_text_escaped: old,
+                        replacement_text_escaped: new,
+                    }
+                })
+                .collect::<Vec<_>>();
+            RepositoryMultiFileEditTargetReview {
+                ordinal,
+                path: target.canonical_logical.clone(),
+                target_identity: target_identity_digest(&target.target),
+                replacement_count: target.replacements.len(),
+                changed_ranges,
+                preimage_sha256: sha256(&target.original),
+                preimage_byte_length: target.original.len(),
+                postimage_sha256: sha256(&target.postimage),
+                postimage_byte_length: target.postimage.len(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if escaped_changed > MAX_ESCAPED_CHANGED_MATERIAL_BYTES {
+        return Err(RepositoryMultiFileEditPreparationError::ReviewTooLarge);
+    }
+    let unchanged_context_per_target = 0usize;
+    let unchanged_context_total = 0usize;
+    if unchanged_context_per_target > MAX_UNCHANGED_CONTEXT_PER_TARGET_BYTES
+        || unchanged_context_total > MAX_UNCHANGED_CONTEXT_BYTES
+    {
+        return Err(RepositoryMultiFileEditPreparationError::ReviewTooLarge);
+    }
+    let review = RepositoryMultiFileEditReview {
+        operation: REPOSITORY_MULTI_FILE_EDIT_PREPARATION_OPERATION,
+        target_count: targets.len(),
+        replacement_count: total_replacements,
+        targets,
+        matching: "all literal matches resolve exactly once against the same original snapshot; duplicate, overlap, and no-op replacements are rejected",
+        unchanged_context: "unchanged surrounding context omitted; complete changed material is retained",
+        intended_effect: "replace complete postimages of the reviewed clean tracked files in host order",
+        non_effects: vec![
+            "preparation performs no Tool execution or native replacement",
+            "the worktree, index, HEAD, refs, and history remain unchanged",
+            "Stage, Unstage, and Commit remain separate operations",
+            "no provider, model, runtime, shell, process, or network action occurs",
+        ],
+        non_atomic_warning: "repo.edit-files is non-atomic; targets have independent native commit points",
+    };
+    if serde_json::to_vec(&review)
+        .map(|serialized| serialized.len() > MAX_SERIALIZED_REVIEW_BYTES)
+        .unwrap_or(true)
+    {
+        return Err(RepositoryMultiFileEditPreparationError::ReviewTooLarge);
+    }
+    Ok(review)
+}
+
+fn target_identity_digest(target: &SafeTarget) -> String {
+    let mut digest = Sha256::new();
+    update_identity(&mut digest, &target.identity);
+    update_identity(&mut digest, &target.parent_identity);
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn compute_multi_file_review_identity(
+    policy: &RepositoryMultiFileMutationPolicy,
+    plan: &PreparedMultiFilePlan,
+    tool_input: &ToolInput,
+    review: &RepositoryMultiFileEditReview,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"rah-repository-multi-file-edit-preparation-v1\0");
+    update_serialized(&mut digest, tool_input);
+    update_serialized(&mut digest, review);
+    update_identity(&mut digest, &policy.root_identity);
+    update_identity(&mut digest, &policy.dot_git_identity);
+    update_identity(&mut digest, &policy.git_identity);
+    digest.update(&plan.repository.index);
+    digest.update(&plan.repository.head);
+    digest.update(&plan.repository.refs);
+    for target in &plan.targets {
+        digest.update(target.canonical_logical.as_bytes());
+        update_identity(&mut digest, &target.target.identity);
+        update_identity(&mut digest, &target.target.parent_identity);
+        digest.update(&target.original);
+        digest.update(&target.postimage);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn update_serialized<T: Serialize>(digest: &mut Sha256, value: &T) {
+    if let Ok(serialized) = serde_json::to_vec(value) {
+        digest.update(serialized);
+    }
+}
+
+fn update_identity(digest: &mut Sha256, identity: &Identity) {
+    #[cfg(unix)]
+    {
+        digest.update(identity.device.to_le_bytes());
+        digest.update(identity.inode.to_le_bytes());
+    }
+    #[cfg(windows)]
+    {
+        digest.update(identity.volume_serial.to_le_bytes());
+        digest.update(identity.file_index.to_le_bytes());
+    }
+    digest.update(identity.link_count.to_le_bytes());
+}
+
+fn serialized_multi_file_preparation_size(
+    preparation: &RepositoryMultiFileEditPreparation,
+) -> usize {
+    let metadata = serde_json::to_vec(&json!({
+        "tool_input": &preparation.tool_input,
+        "review": &preparation.review,
+        "review_identity": &preparation.review_identity,
+    }))
+    .map(|bytes| bytes.len())
+    .unwrap_or(usize::MAX);
+    preparation
+        .plan
+        .targets
+        .iter()
+        .map(|target| target.original.len().saturating_add(target.postimage.len()))
+        .try_fold(metadata, |total, bytes| total.checked_add(bytes))
+        .unwrap_or(usize::MAX)
+}
 
 /// Private host-owned authority. It is intentionally not a tool and cannot be
 /// registered until a later task supplies the separate commit semantics.
@@ -116,66 +868,8 @@ impl RepositoryMultiFileMutationPolicy {
         input: &ToolInput,
     ) -> Result<PreparedMultiFilePlan, PreflightError> {
         let request = MultiFileRequest::parse(input)?;
-        self.revalidate_repository()?;
-        let repository = self.repository_observation()?;
-        let mut seen_logical = HashSet::new();
-        let mut seen_canonical = HashSet::new();
-        let mut seen_identity = HashSet::new();
-        let mut total_original = 0usize;
-        let mut total_postimage = 0usize;
-        let mut total_replacements = 0usize;
-        let mut targets = Vec::with_capacity(request.targets.len());
-        for request_target in request.targets {
-            let logical = request_target.path.clone();
-            if !seen_logical.insert(logical.clone()) {
-                return Err(PreflightError::InvalidTarget("duplicate logical target"));
-            }
-            let target = SafeTarget::capture(&self.root, &logical)?;
-            if !seen_canonical.insert(target.canonical_logical.clone()) {
-                return Err(PreflightError::InvalidTarget("duplicate canonical target"));
-            }
-            if !seen_identity.insert(target.identity.clone()) {
-                return Err(PreflightError::InvalidTarget(
-                    "duplicate underlying file identity",
-                ));
-            }
-            self.validate_git_target(&target)?;
-            self.validate_worktree_clean(&target)?;
-            let original = read_bounded(&target.path, MAX_FILE_BYTES)
-                .map_err(|_| PreflightError::Precondition("could not read bounded target"))?;
-            validate_snapshot(&original, &request_target)?;
-            total_original = checked_total(
-                total_original,
-                original.len(),
-                MAX_AGGREGATE_BYTES,
-                "aggregate original bytes",
-            )?;
-            total_replacements = checked_total(
-                total_replacements,
-                request_target.replacements.len(),
-                MAX_AGGREGATE_REPLACEMENTS,
-                "aggregate replacements",
-            )?;
-            let postimage = build_postimage(&original, &request_target.replacements)?;
-            total_postimage = checked_total(
-                total_postimage,
-                postimage.len(),
-                MAX_AGGREGATE_BYTES,
-                "aggregate postimage bytes",
-            )?;
-            targets.push(PreparedTarget {
-                canonical_logical: target.canonical_logical.clone(),
-                target,
-                original,
-                postimage,
-                replacements: request_target.replacements,
-            });
-        }
-        targets.sort_by(|a, b| {
-            a.canonical_logical
-                .as_bytes()
-                .cmp(b.canonical_logical.as_bytes())
-        });
+        let mut plan = self.prepare_tool_locked(request)?;
+        let targets = std::mem::take(&mut plan.targets);
         let mut temporaries = Vec::with_capacity(targets.len());
         for (_index, prepared) in targets.iter().enumerate() {
             #[cfg(not(test))]
@@ -214,11 +908,8 @@ impl RepositoryMultiFileMutationPolicy {
             }
         }
         let _target_count = targets.len();
-        let plan = PreparedMultiFilePlan {
-            repository,
-            targets,
-            temporaries,
-        };
+        plan.targets = targets;
+        plan.temporaries = temporaries;
         #[cfg(test)]
         test_hook::check(
             &self.root,
@@ -230,6 +921,117 @@ impl RepositoryMultiFileMutationPolicy {
             return Err(error);
         }
         Ok(plan)
+    }
+
+    fn prepare_tool_locked(
+        &self,
+        request: MultiFileRequest,
+    ) -> Result<PreparedMultiFilePlan, PreflightError> {
+        self.revalidate_repository()?;
+        let repository = self.repository_observation()?;
+        let targets = self.capture_prepared_targets(request.targets)?;
+        Ok(PreparedMultiFilePlan {
+            repository,
+            targets,
+            temporaries: Vec::new(),
+        })
+    }
+
+    fn prepare_human_locked(
+        &self,
+        request: HumanMultiFileRequest,
+    ) -> Result<PreparedMultiFilePlan, PreflightError> {
+        self.revalidate_repository()?;
+        let repository = self.repository_observation()?;
+        let mut seen_logical = HashSet::new();
+        let mut targets = Vec::with_capacity(request.targets.len());
+        for request_target in request.targets {
+            let logical = request_target.path;
+            if !seen_logical.insert(logical.clone()) {
+                return Err(PreflightError::InvalidTarget("duplicate logical target"));
+            }
+            targets.push(RequestTarget {
+                path: logical,
+                expected_sha256: None,
+                expected_length: None,
+                replacements: request_target.replacements,
+            });
+        }
+        self.capture_prepared_targets(targets).map(|mut targets| {
+            targets.sort_by(|a, b| {
+                a.canonical_logical
+                    .as_bytes()
+                    .cmp(b.canonical_logical.as_bytes())
+            });
+            PreparedMultiFilePlan {
+                repository,
+                targets,
+                temporaries: Vec::new(),
+            }
+        })
+    }
+
+    fn capture_prepared_targets(
+        &self,
+        request_targets: Vec<RequestTarget>,
+    ) -> Result<Vec<PreparedTarget>, PreflightError> {
+        let mut seen_canonical = HashSet::new();
+        let mut seen_identity = HashSet::new();
+        let mut total_image_material = 0usize;
+        let mut total_replacements = 0usize;
+        let mut targets = Vec::with_capacity(request_targets.len());
+        for request_target in request_targets {
+            let target = SafeTarget::capture(&self.root, &request_target.path)?;
+            if !seen_canonical.insert(target.canonical_logical.clone()) {
+                return Err(PreflightError::InvalidTarget("duplicate canonical target"));
+            }
+            if !seen_identity.insert(target.identity.clone()) {
+                return Err(PreflightError::InvalidTarget(
+                    "duplicate underlying file identity",
+                ));
+            }
+            self.validate_git_target(&target)?;
+            self.validate_worktree_clean(&target)?;
+            let original = read_bounded(&target.path, MAX_FILE_BYTES)
+                .map_err(|_| PreflightError::Precondition("could not read bounded target"))?;
+            validate_snapshot(&original, &request_target)?;
+            total_image_material = checked_total(
+                total_image_material,
+                original.len(),
+                MAX_AGGREGATE_BYTES,
+                "aggregate original/postimage bytes",
+            )?;
+            total_replacements = checked_total(
+                total_replacements,
+                request_target.replacements.len(),
+                MAX_AGGREGATE_REPLACEMENTS,
+                "aggregate replacements",
+            )?;
+            let postimage = build_postimage(&original, &request_target.replacements)?;
+            total_image_material = checked_total(
+                total_image_material,
+                postimage.len(),
+                MAX_AGGREGATE_BYTES,
+                "aggregate original/postimage bytes",
+            )?;
+            let ranges = resolve_replacement_ranges(&original, &request_target.replacements)?;
+            let mut prepared = PreparedTarget {
+                canonical_logical: target.canonical_logical.clone(),
+                target,
+                original,
+                postimage,
+                replacements: request_target.replacements,
+                ranges,
+            };
+            canonicalize_prepared_target(&mut prepared);
+            targets.push(prepared);
+        }
+        targets.sort_by(|a, b| {
+            a.canonical_logical
+                .as_bytes()
+                .cmp(b.canonical_logical.as_bytes())
+        });
+        Ok(targets)
     }
 
     fn commit_prepared(&self, plan: &PreparedMultiFilePlan) -> MultiFileEditOutcome {
@@ -343,6 +1145,7 @@ impl RepositoryMultiFileMutationPolicy {
                 "target identity is no longer trusted",
             ));
         }
+        reject_unsupported_file_attributes(&metadata)?;
         #[cfg(unix)]
         if unix_mode(&metadata) != prepared.target.mode & 0o7777 {
             return Err(PreflightError::Precondition("target mode changed"));
@@ -621,11 +1424,11 @@ struct MultiFileRequest {
 }
 struct RequestTarget {
     path: String,
-    expected_sha256: String,
-    expected_length: usize,
+    expected_sha256: Option<String>,
+    expected_length: Option<usize>,
     replacements: Vec<Replacement>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Replacement {
     old: String,
     new: String,
@@ -710,8 +1513,8 @@ fn parse_target(value: &Value) -> Result<RequestTarget, PreflightError> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(RequestTarget {
         path,
-        expected_sha256,
-        expected_length,
+        expected_sha256: Some(expected_sha256),
+        expected_length: Some(expected_length),
         replacements,
     })
 }
@@ -889,16 +1692,19 @@ impl SafeTarget {
             current.push(component);
             reject_link_or_reparse(&current, "target path component")?;
         }
-        let path = fs::canonicalize(&current).map_err(fs_error)?;
+        let path = fs::canonicalize(&current)
+            .map_err(|_| PreflightError::InvalidTarget("target missing or cannot be resolved"))?;
         if !is_beneath(&path, root) || !paths_equivalent(&path, &current) {
             return Err(PreflightError::InvalidTarget(
                 "target aliases or escapes repository",
             ));
         }
-        let metadata = fs::metadata(&path).map_err(fs_error)?;
+        let metadata = fs::metadata(&path)
+            .map_err(|_| PreflightError::InvalidTarget("target metadata unavailable"))?;
         if !metadata.is_file() {
             return Err(PreflightError::Precondition("target is not regular file"));
         }
+        reject_unsupported_file_attributes(&metadata)?;
         let identity = Identity::capture(&path)?;
         if identity.link_count > 1 {
             return Err(PreflightError::Precondition(
@@ -952,7 +1758,10 @@ impl SafeTarget {
 }
 
 fn validate_snapshot(bytes: &[u8], request: &RequestTarget) -> Result<(), PreflightError> {
-    if bytes.len() != request.expected_length || sha256(bytes) != request.expected_sha256 {
+    if let (Some(expected_length), Some(expected_sha256)) =
+        (&request.expected_length, &request.expected_sha256)
+        && (bytes.len() != *expected_length || sha256(bytes) != *expected_sha256)
+    {
         return Err(PreflightError::Precondition(
             "target SHA or length mismatch",
         ));
@@ -1010,6 +1819,60 @@ fn build_postimage(
     }
 }
 
+fn resolve_replacement_ranges(
+    original: &[u8],
+    replacements: &[Replacement],
+) -> Result<Vec<ResolvedRange>, PreflightError> {
+    let text = std::str::from_utf8(original)
+        .map_err(|_| PreflightError::Precondition("target is not UTF-8"))?;
+    let mut ranges = Vec::with_capacity(replacements.len());
+    for (replacement_index, replacement) in replacements.iter().enumerate() {
+        let matches = text.match_indices(&replacement.old).collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PreflightError::Precondition(
+                "replacement must match exactly once",
+            ));
+        }
+        let (start, found) = matches[0];
+        ranges.push(ResolvedRange {
+            start,
+            end: start + found.len(),
+            replacement_index,
+        });
+    }
+    ranges.sort_unstable_by_key(|range| range.start);
+    if ranges.windows(2).any(|pair| pair[1].start < pair[0].end) {
+        return Err(PreflightError::Precondition("replacement ranges overlap"));
+    }
+    Ok(ranges)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedRange {
+    start: usize,
+    end: usize,
+    replacement_index: usize,
+}
+
+fn canonicalize_prepared_target(target: &mut PreparedTarget) {
+    let replacements = target
+        .ranges
+        .iter()
+        .map(|range| target.replacements[range.replacement_index].clone())
+        .collect::<Vec<_>>();
+    target.ranges = target
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(replacement_index, range)| ResolvedRange {
+            start: range.start,
+            end: range.end,
+            replacement_index,
+        })
+        .collect();
+    target.replacements = replacements;
+}
+
 #[derive(Eq, PartialEq)]
 struct RepositoryObservation {
     index: Vec<u8>,
@@ -1023,6 +1886,7 @@ struct PreparedTarget {
     postimage: Vec<u8>,
     #[allow(dead_code)]
     replacements: Vec<Replacement>,
+    ranges: Vec<ResolvedRange>,
 }
 pub(crate) struct PreparedMultiFilePlan {
     repository: RepositoryObservation,
@@ -1461,6 +2325,28 @@ fn reject_link_or_reparse(path: &Path, _label: &str) -> Result<(), PreflightErro
     }
     Ok(())
 }
+
+fn reject_unsupported_file_attributes(metadata: &fs::Metadata) -> Result<(), PreflightError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+        const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
+        const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
+        if metadata.file_attributes()
+            & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_ENCRYPTED)
+            != 0
+        {
+            return Err(PreflightError::Precondition(
+                "target has unsupported file attributes",
+            ));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = metadata;
+    Ok(())
+}
+
 fn fs_error(_: std::io::Error) -> PreflightError {
     PreflightError::Precondition("filesystem validation failed")
 }
@@ -1828,6 +2714,7 @@ mod tests {
                     original: vec![],
                     postimage: vec![],
                     replacements: vec![],
+                    ranges: vec![],
                 },
                 PreparedTarget {
                     canonical_logical: "src/m.rs".into(),
@@ -1835,6 +2722,7 @@ mod tests {
                     original: vec![],
                     postimage: vec![],
                     replacements: vec![],
+                    ranges: vec![],
                 },
                 PreparedTarget {
                     canonical_logical: "src/z.rs".into(),
@@ -1842,12 +2730,242 @@ mod tests {
                     original: vec![],
                     postimage: vec![],
                     replacements: vec![],
+                    ranges: vec![],
                 },
             ],
             temporaries: vec![],
         };
         assert_eq!(plan.paths(), vec!["src/a.rs", "src/m.rs", "src/z.rs"]);
     }
+
+    fn human_request(
+        paths: &[&str],
+        replacements: &[(&str, &str)],
+    ) -> RepositoryMultiFileEditPreparationRequest {
+        RepositoryMultiFileEditPreparationRequest {
+            targets: paths
+                .iter()
+                .map(|path| RepositoryMultiFileEditPreparationTarget {
+                    path: (*path).to_owned(),
+                    replacements: replacements
+                        .iter()
+                        .map(|(old, new)| RepositoryMultiFileEditTextReplacement {
+                            expected_old_text: (*old).to_owned(),
+                            replacement_text: (*new).to_owned(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_preparation_is_exact_and_host_ordered() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(
+                &["z.txt", "a.txt", "m.txt"],
+                &[("old", "new")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            preparation
+                .review()
+                .targets()
+                .iter()
+                .map(RepositoryMultiFileEditTargetReview::path)
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "m.txt", "z.txt"]
+        );
+        assert_eq!(preparation.review().target_count(), 3);
+        assert_eq!(preparation.review().replacement_count(), 3);
+        assert_eq!(preparation.review().targets()[0].preimage_byte_length(), 6);
+        assert_eq!(preparation.review().targets()[0].postimage_byte_length(), 6);
+        assert_eq!(preparation.postimage(0), Some(b"A new\n".as_slice()));
+        assert_eq!(preparation.postimage(2), Some(b"Z new\n".as_slice()));
+        let targets = preparation.tool_input().0["targets"].as_array().unwrap();
+        assert_eq!(targets[0]["path"], "a.txt");
+        assert_eq!(targets[2]["path"], "z.txt");
+        assert_eq!(targets[0]["expected_file_byte_length"], 6);
+        assert_eq!(targets[0]["replacements"][0]["expected_old_text"], "old");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_preparation_has_zero_effect_and_no_repository_temporary() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let before = state(&root);
+        let before_names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        preparer
+            .prepare(human_request(&["z.txt", "a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        assert_eq!(state(&root), before);
+        let after_names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(after_names, before_names);
+        assert_eq!(
+            after_names
+                .iter()
+                .filter(|name| name.to_string_lossy().contains("rah-repo-edit-files"))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_preparation_uses_one_original_snapshot_and_rejects_literal_errors() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("A", "B"), ("old", "new")]))
+            .await
+            .unwrap();
+        assert_eq!(preparation.postimage(0), Some(b"B new\n".as_slice()));
+        for replacements in [
+            vec![("missing", "new")],
+            vec![("old", "new"), ("old", "other")],
+            vec![("A old", "x"), ("old", "y")],
+            vec![("old", "old")],
+        ] {
+            assert!(matches!(
+                preparer
+                    .prepare(human_request(&["a.txt"], &replacements))
+                    .await,
+                Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+            ));
+        }
+        assert!(
+            preparer
+                .prepare(human_request(&["a.txt"], &[("old", "")]))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_preparation_enforces_closed_counts_and_material_bounds() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        assert!(matches!(
+            preparer
+                .prepare(human_request(&[], &[("old", "new")]))
+                .await,
+            Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                reason: "target_count"
+            })
+        ));
+        let too_many = (0..17)
+            .map(|n| (format!("{n}"), format!("x{n}")))
+            .collect::<Vec<_>>();
+        let too_many = too_many
+            .iter()
+            .map(|(old, new)| (old.as_str(), new.as_str()))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            preparer.prepare(human_request(&["a.txt"], &too_many)).await,
+            Err(RepositoryMultiFileEditPreparationError::InvalidInput {
+                reason: "replacement_count"
+            })
+        ));
+        assert!(matches!(
+            preparer
+                .prepare(human_request(
+                    &["a.txt"],
+                    &[("x", &"x".repeat(MAX_TEXT_BYTES + 1))]
+                ))
+                .await,
+            Err(RepositoryMultiFileEditPreparationError::InvalidInput { reason: "text" })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_revalidation_rejects_bytes_identity_and_git_drift_without_effect() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        assert!(preparer.revalidate(&preparation).await.is_ok());
+        fs::write(root.join("a.txt"), b"A changed\n").unwrap();
+        assert!(matches!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+        ));
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        fs::remove_file(root.join("a.txt")).unwrap();
+        fs::write(root.join("a.txt"), b"A old\n").unwrap();
+        let result = preparer.revalidate(&preparation).await;
+        assert!(
+            matches!(
+                &result,
+                Err(RepositoryMultiFileEditPreparationError::InvalidTarget { .. })
+                    | Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+                    | Err(RepositoryMultiFileEditPreparationError::Stale)
+            ),
+            "identity drift must fail closed: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_revalidation_rejects_protected_head_ref_and_index_drift() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        git(
+            &git_path,
+            &root,
+            &["update-ref", "refs/heads/task-259-test", "HEAD"],
+        );
+        assert!(matches!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+        ));
+
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        let head = fs::read(root.join(".git/HEAD")).unwrap();
+        fs::write(root.join(".git/HEAD"), b"ref: refs/heads/other\n").unwrap();
+        assert!(matches!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+        ));
+        fs::write(root.join(".git/HEAD"), head).unwrap();
+
+        let (_base, git_path, root) = TestDirectory::repository();
+        let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        fs::write(root.join("a.txt"), b"A staged\n").unwrap();
+        git(&git_path, &root, &["add", "--", "a.txt"]);
+        assert!(matches!(
+            preparer.revalidate(&preparation).await,
+            Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn real_git_preflight_sorts_and_has_zero_target_effect_on_failure() {
         let (_base, git_path, root) = TestDirectory::repository();
