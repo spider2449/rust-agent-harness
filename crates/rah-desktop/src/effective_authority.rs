@@ -1,7 +1,7 @@
 #![cfg(target_os = "windows")]
 
 use rah_protocol::PermissionLevel;
-use rah_tools::{ToolRegistry, TrustedStaticProfile};
+use rah_tools::{RepositoryPatchPreparer, ToolRegistry, TrustedStaticProfile};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -220,6 +220,7 @@ pub(crate) struct DesktopToolComposition {
     pub expected_definitions: Vec<rah_protocol::ToolDefinition>,
     pub tools: Vec<EffectiveToolEntry>,
     pub unavailable: Vec<UnavailableCapability>,
+    pub repository_patch_preparer: Option<Arc<RepositoryPatchPreparer>>,
 }
 
 /// Builds only bounded presentation metadata from the validated host profile.
@@ -338,6 +339,18 @@ pub(crate) fn compose(
     commit_tool_present: bool,
     external_descriptors: &[ExternalToolDescriptor],
 ) -> Result<DesktopToolComposition, CompositionError> {
+    let repository_patch_preparer = repository
+        .filter(|_| {
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.patch")
+        })
+        .and_then(|repository| {
+            RepositoryPatchPreparer::new(&repository.git_executable, &repository.root)
+                .ok()
+                .map(Arc::new)
+        });
     let mut tools = Vec::new();
     let mut matched_external = vec![false; external_descriptors.len()];
     for definition in registry.definitions() {
@@ -389,6 +402,7 @@ pub(crate) fn compose(
                     repository.is_some(),
                     false,
                     repository.is_some_and(|value| value.branch_creation_authority.is_some()),
+                    repository_patch_preparer.is_some(),
                     CoordinatorState::Idle,
                 ),
             }
@@ -494,6 +508,7 @@ pub(crate) fn compose(
         registry,
         tools,
         unavailable,
+        repository_patch_preparer,
     })
 }
 

@@ -8,7 +8,9 @@ use std::{
 };
 
 use rah_protocol::{PermissionLevel, ToolCall, ToolDefinition, ToolInput, ToolName};
-use rah_tools::ToolRegistry;
+use rah_tools::{
+    RepositoryPatchPreparation, RepositoryPatchPreparer, RepositoryPatchReview, ToolRegistry,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::effective_authority::{EffectiveToolEntry, SourceKind};
@@ -26,6 +28,7 @@ pub(crate) enum HostInvocationKind {
     RepoDiff {},
     RepoDiffStaged {},
     RepoCreateBranch,
+    RepoPatch,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -87,6 +90,14 @@ pub(crate) struct HostPrepareBranchRequest {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HostPreparePatchRequest {
+    pub path: String,
+    pub expected_old_text: String,
+    pub replacement_text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HostConfirmRequest {
     pub ticket_id: String,
 }
@@ -106,6 +117,13 @@ pub(crate) struct PreparedBranchResponse {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedPatchResponse {
+    pub ticket_id: String,
+    pub review: RepositoryPatchReview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BranchReview {
     pub operation: &'static str,
     pub branch: String,
@@ -114,6 +132,23 @@ pub(crate) struct BranchReview {
     pub non_effect: &'static str,
     pub permission_category: &'static str,
     pub authority_category: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum HostInvocationReview {
+    Branch(BranchReview),
+    Patch(RepositoryPatchReview),
+}
+
+pub(crate) enum PreparedHostPayload {
+    Branch {
+        review: BranchReview,
+    },
+    Patch {
+        preparation: Box<RepositoryPatchPreparation>,
+        preparer: Arc<RepositoryPatchPreparer>,
+    },
 }
 
 pub(crate) struct PreparedHostInvocation {
@@ -127,7 +162,7 @@ pub(crate) struct PreparedHostInvocation {
     pub generations: [u64; 4],
     pub repository_identity: Option<String>,
     pub composition_identity: usize,
-    pub review: BranchReview,
+    pub payload: PreparedHostPayload,
     created_at: Instant,
 }
 
@@ -144,7 +179,7 @@ impl PreparedHostInvocation {
         generations: [u64; 4],
         repository_identity: Option<String>,
         composition_identity: usize,
-        review: BranchReview,
+        payload: PreparedHostPayload,
     ) -> Self {
         Self {
             ticket_id,
@@ -157,7 +192,7 @@ impl PreparedHostInvocation {
             generations,
             repository_identity,
             composition_identity,
-            review,
+            payload,
             created_at: Instant::now(),
         }
     }
@@ -189,14 +224,16 @@ impl PreparedHostInvocation {
             generations: [0; 4],
             repository_identity: None,
             composition_identity: 0,
-            review: BranchReview {
-                operation: "Create local branch",
-                branch: "test".to_owned(),
-                target: "Current committed HEAD",
-                effect: "Creates one new local branch reference.",
-                non_effect: "Does not switch branches or modify HEAD/index/worktree.",
-                permission_category: "execute",
-                authority_category: "repository_local_branch_creation",
+            payload: PreparedHostPayload::Branch {
+                review: BranchReview {
+                    operation: "Create local branch",
+                    branch: "test".to_owned(),
+                    target: "Current committed HEAD",
+                    effect: "Creates one new local branch reference.",
+                    non_effect: "Does not switch branches or modify HEAD/index/worktree.",
+                    permission_category: "execute",
+                    authority_category: "repository_local_branch_creation",
+                },
             },
             created_at,
         }
@@ -223,6 +260,7 @@ pub(crate) struct HostInvocationCoordinator {
     state: CoordinatorState,
     next_id: u64,
     prepared: Option<PreparedHostInvocation>,
+    preparing: bool,
 }
 
 impl HostInvocationCoordinator {
@@ -273,8 +311,25 @@ impl HostInvocationCoordinator {
             return Err(CoordinatorError::Busy);
         }
         self.prepared = Some(ticket);
+        self.preparing = false;
         self.state = CoordinatorState::HostPrepared;
         Ok(())
+    }
+
+    pub(crate) fn begin_prepare(&mut self) -> Result<(), CoordinatorError> {
+        if self.state != CoordinatorState::Idle {
+            return Err(CoordinatorError::Busy);
+        }
+        self.state = CoordinatorState::HostPrepared;
+        self.preparing = true;
+        Ok(())
+    }
+
+    pub(crate) fn abort_prepare(&mut self) {
+        if self.state == CoordinatorState::HostPrepared && self.preparing {
+            self.preparing = false;
+            self.state = CoordinatorState::Idle;
+        }
     }
 
     pub(crate) fn take_prepared(
@@ -283,6 +338,9 @@ impl HostInvocationCoordinator {
         now: Instant,
     ) -> Result<PreparedHostInvocation, CoordinatorError> {
         if self.state != CoordinatorState::HostPrepared {
+            return Err(CoordinatorError::NotPrepared);
+        }
+        if self.preparing {
             return Err(CoordinatorError::NotPrepared);
         }
         let Some(ticket) = self.prepared.take() else {
@@ -306,7 +364,10 @@ impl HostInvocationCoordinator {
         Ok(id)
     }
 
-    pub(crate) fn cancel(&mut self, ticket_id: &str) -> Result<(), CoordinatorError> {
+    pub(crate) fn cancel(
+        &mut self,
+        ticket_id: &str,
+    ) -> Result<HostInvocationKind, CoordinatorError> {
         if self.state != CoordinatorState::HostPrepared {
             return Err(CoordinatorError::NotPrepared);
         }
@@ -317,9 +378,15 @@ impl HostInvocationCoordinator {
         {
             return Err(CoordinatorError::NotPrepared);
         }
+        let kind = self
+            .prepared
+            .as_ref()
+            .map(|ticket| ticket.kind)
+            .ok_or(CoordinatorError::NotPrepared)?;
         self.prepared = None;
+        self.preparing = false;
         self.state = CoordinatorState::Idle;
-        Ok(())
+        Ok(kind)
     }
 
     pub(crate) fn finish_host(&mut self) {
@@ -331,6 +398,7 @@ impl HostInvocationCoordinator {
     pub(crate) fn clear_prepared(&mut self) {
         if self.state == CoordinatorState::HostPrepared {
             self.prepared = None;
+            self.preparing = false;
             self.state = CoordinatorState::Idle;
         }
     }
@@ -344,6 +412,7 @@ pub(crate) fn host_kind(name: &str) -> Option<HostInvocationKind> {
         "repo.diff" => HostInvocationKind::RepoDiff {},
         "repo.diff-staged" => HostInvocationKind::RepoDiffStaged {},
         "repo.create-branch" => HostInvocationKind::RepoCreateBranch,
+        "repo.patch" => HostInvocationKind::RepoPatch,
         _ => return None,
     })
 }
@@ -354,6 +423,7 @@ pub(crate) fn host_descriptor(
     repository_selected: bool,
     permission_allowed: bool,
     branch_authority_present: bool,
+    patch_preparer_present: bool,
     coordinator_state: CoordinatorState,
 ) -> HostInvocationDescriptor {
     let kind = host_kind(&entry.public_tool_name);
@@ -374,7 +444,9 @@ pub(crate) fn host_descriptor(
         HostInvocationUnavailableReason::RepositoryRequired
     } else if !permission_allowed {
         HostInvocationUnavailableReason::PermissionDenied
-    } else if entry.public_tool_name == "repo.create-branch" && !branch_authority_present {
+    } else if (entry.public_tool_name == "repo.create-branch" && !branch_authority_present)
+        || (entry.public_tool_name == "repo.patch" && !patch_preparer_present)
+    {
         HostInvocationUnavailableReason::AuthorityNotGranted
     } else {
         return HostInvocationDescriptor {
@@ -449,13 +521,13 @@ mod tests {
             "repo.diff",
             "repo.diff-staged",
             "repo.create-branch",
+            "repo.patch",
         ];
         for name in supported {
             assert!(host_kind(name).is_some());
         }
         for name in [
             "repo.commit",
-            "repo.patch",
             "repo.create-file",
             "repo.edit-files",
             "repo.delete-file",
@@ -468,6 +540,52 @@ mod tests {
         ] {
             assert!(host_kind(name).is_none());
         }
+    }
+
+    #[test]
+    fn patch_host_descriptor_requires_the_retained_preparer() {
+        let entry = EffectiveToolEntry {
+            public_tool_name: "repo.patch".to_owned(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: crate::effective_authority::EffectClass::RepositoryMutation,
+            authority_category:
+                crate::effective_authority::AuthorityCategory::RepositoryContentMutation,
+            permission: PermissionLevel::Execute,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        };
+        let unavailable = host_descriptor(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            CoordinatorState::Idle,
+        );
+        assert!(!unavailable.eligible);
+        assert_eq!(
+            unavailable.unavailable_reason,
+            Some(HostInvocationUnavailableReason::AuthorityNotGranted)
+        );
+        assert!(
+            host_descriptor(
+                &entry,
+                true,
+                true,
+                true,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
     }
 
     #[test]
@@ -556,6 +674,22 @@ mod tests {
             }))
             .is_err()
         );
+        let patch = serde_json::from_value::<HostPreparePatchRequest>(serde_json::json!({
+            "path": "src/lib.rs",
+            "expectedOldText": "old",
+            "replacementText": "new"
+        }))
+        .expect("typed patch request should deserialize");
+        assert_eq!(patch.path, "src/lib.rs");
+        assert_eq!(patch.expected_old_text, "old");
+        assert_eq!(patch.replacement_text, "new");
+        for field in [
+            serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","hash":"x"}),
+            serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","toolName":"repo.patch"}),
+            serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","input":{}}),
+        ] {
+            assert!(serde_json::from_value::<HostPreparePatchRequest>(field).is_err());
+        }
     }
 
     #[test]

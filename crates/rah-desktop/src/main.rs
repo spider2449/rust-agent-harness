@@ -40,8 +40,9 @@ use futures::StreamExt;
 use host_invocation::{
     BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
     HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
-    HostInvocationResponse, HostInvocationUnavailableReason, HostPrepareBranchRequest,
-    HostReadRequest, PreparedBranchResponse, PreparedHostInvocation, host_descriptor, host_kind,
+    HostInvocationResponse, HostInvocationReview, HostInvocationUnavailableReason,
+    HostPrepareBranchRequest, HostPreparePatchRequest, HostReadRequest, PreparedBranchResponse,
+    PreparedHostInvocation, PreparedHostPayload, PreparedPatchResponse, host_descriptor, host_kind,
     read_request, validate_bounded_string,
 };
 #[cfg(target_os = "windows")]
@@ -71,7 +72,8 @@ use rah_tools::{
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
-    RepositoryMultiFileEditTool, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
+    RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
+    RepositoryPatchPreparationRequest, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
     ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
 };
 #[cfg(target_os = "windows")]
@@ -1687,7 +1689,7 @@ struct HostActivityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<ToolOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    review: Option<BranchReview>,
+    review: Option<HostInvocationReview>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2167,6 +2169,9 @@ fn get_effective_authority_snapshot(
             selected,
             allowed_permissions.contains(&tool.permission),
             branch_authority_present,
+            composition
+                .as_ref()
+                .is_some_and(|value| value.repository_patch_preparer.is_some()),
             coordinator_state,
         );
     }
@@ -2243,6 +2248,7 @@ struct CurrentHostComposition {
     generations: [u64; 4],
     repository_identity: Option<String>,
     repository: Option<Arc<DesktopRepository>>,
+    repository_patch_preparer: Option<Arc<rah_tools::RepositoryPatchPreparer>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2297,6 +2303,7 @@ fn current_host_composition(
         generations,
         repository_identity,
         repository,
+        repository_patch_preparer: composition.repository_patch_preparer.clone(),
     })
 }
 
@@ -2317,12 +2324,26 @@ fn host_tool_definition(
         if kind.is_none() {
             return Err(FrontendError::HostInvocationNotEligible);
         }
+        let (effect_class, authority_category) = match name.as_str() {
+            "repo.patch" => (
+                effective_authority::EffectClass::RepositoryMutation,
+                effective_authority::AuthorityCategory::RepositoryContentMutation,
+            ),
+            "repo.create-branch" => (
+                effective_authority::EffectClass::RepositoryMutation,
+                effective_authority::AuthorityCategory::RepositoryLocalBranchCreation,
+            ),
+            _ => (
+                effective_authority::EffectClass::ReadOnly,
+                effective_authority::AuthorityCategory::RepositoryObservation,
+            ),
+        };
         effective_authority::EffectiveToolEntry {
             public_tool_name: name.to_string(),
             source_kind: SourceKind::RepositoryHost,
             source_label: "desktop_repository".to_owned(),
-            effect_class: effective_authority::EffectClass::ReadOnly,
-            authority_category: effective_authority::AuthorityCategory::RepositoryObservation,
+            effect_class,
+            authority_category,
             permission: entry.permission,
             repository_bound: true,
             advertised: true,
@@ -2335,13 +2356,14 @@ fn host_tool_definition(
     };
     let descriptor = host_descriptor(
         &effective,
-        true,
+        current.allowed_permissions.contains(&entry.permission),
         current.repository.is_some(),
         true,
         current
             .repository
             .as_ref()
             .is_some_and(|value| value.branch_creation_authority.is_some()),
+        current.repository_patch_preparer.is_some(),
         coordinator_state,
     );
     if !descriptor.eligible {
@@ -2394,6 +2416,7 @@ async fn run_host_tool(
     kind: HostInvocationKind,
     invocation_id: String,
     repository_identity: Option<String>,
+    generations: [u64; 4],
 ) {
     let tool_name = call.name.to_string();
     let result = authorized_tool_dispatch(
@@ -2414,8 +2437,22 @@ async fn run_host_tool(
                 )
             {
                 invalidate_repository_commit_review(state.inner()).await;
-                if host_repository_context_is_current(state.inner(), repository_identity.as_deref())
-                {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    emit_repository_refresh(&app);
+                }
+            }
+            if kind == HostInvocationKind::RepoPatch {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
                     emit_repository_refresh(&app);
                 }
             }
@@ -2430,10 +2467,19 @@ async fn run_host_tool(
         }
         Err(AuthorizedDispatchError::Rejected(_)) => (HostActivityState::RejectedStale, None),
         Err(AuthorizedDispatchError::Tool(_)) => {
-            if kind == HostInvocationKind::RepoCreateBranch {
+            if matches!(
+                kind,
+                HostInvocationKind::RepoCreateBranch | HostInvocationKind::RepoPatch
+            ) {
                 invalidate_repository_commit_review(state.inner()).await;
-                if host_repository_context_is_current(state.inner(), repository_identity.as_deref())
-                {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    if kind == HostInvocationKind::RepoPatch {
+                        let _ = refresh_repository_workflow(state.inner()).await;
+                    }
                     emit_repository_refresh(&app);
                 }
             }
@@ -2459,14 +2505,18 @@ async fn run_host_tool(
 }
 
 #[cfg(target_os = "windows")]
-fn host_repository_context_is_current(state: &DesktopAppState, captured: Option<&str>) -> bool {
+fn host_repository_context_is_current(
+    state: &DesktopAppState,
+    captured: Option<&str>,
+    captured_generations: [u64; 4],
+) -> bool {
     let current = state
         .repository
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .map(|value| repository_context_fingerprint(&value.root));
-    current.as_deref() == captured
+    current.as_deref() == captured && current_host_generation_tuple(state) == captured_generations
 }
 
 #[cfg(target_os = "windows")]
@@ -2529,6 +2579,7 @@ async fn host_invoke_read(
         kind,
         invocation_id.clone(),
         current.repository_identity,
+        current.generations,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -2599,7 +2650,9 @@ fn host_prepare_repo_create_branch(
         current.generations,
         current.repository_identity,
         current.composition_identity,
-        review.clone(),
+        PreparedHostPayload::Branch {
+            review: review.clone(),
+        },
     );
     coordinator
         .prepare(ticket)
@@ -2612,10 +2665,151 @@ fn host_prepare_repo_create_branch(
             tool: REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
             state: HostActivityState::Prepared,
             result: None,
-            review: Some(review.clone()),
+            review: Some(HostInvocationReview::Branch(review.clone())),
         },
     );
     Ok(PreparedBranchResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+fn patch_preparation_frontend_error(error: RepositoryPatchPreparationError) -> FrontendError {
+    match error {
+        RepositoryPatchPreparationError::Stale => FrontendError::HostInvocationStale,
+        RepositoryPatchPreparationError::InvalidInput { .. }
+        | RepositoryPatchPreparationError::Unsupported { .. }
+        | RepositoryPatchPreparationError::PreconditionFailed { .. }
+        | RepositoryPatchPreparationError::NoEffect
+        | RepositoryPatchPreparationError::ReviewTooLarge => {
+            FrontendError::HostInvocationInvalidInput
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn abort_host_patch_prepare(state: &DesktopAppState) {
+    state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .abort_prepare();
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn host_prepare_repo_patch(
+    request: HostPreparePatchRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedPatchResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let name = ToolName::new("repo.patch");
+    let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
+        Ok(definition) => definition,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let preparer = match current.repository_patch_preparer.clone() {
+        Some(preparer) => preparer,
+        None => {
+            abort_host_patch_prepare(state.inner());
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+    };
+
+    let preflight_call = host_call(name.clone(), ToolInput(serde_json::json!({})));
+    if let Err(rejection) = authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &preflight_call,
+    ) {
+        abort_host_patch_prepare(state.inner());
+        return Err(match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        });
+    }
+
+    let preparation = match preparer
+        .prepare(RepositoryPatchPreparationRequest {
+            path: request.path,
+            expected_old_text: request.expected_old_text,
+            replacement_text: request.replacement_text,
+        })
+        .await
+    {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(patch_preparation_frontend_error(error));
+        }
+    };
+    let review = preparation.review().clone();
+    let call = host_call(name.clone(), preparation.tool_input().clone());
+    let (ticket_id, ticket) = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket_id = coordinator.next_ticket_id();
+        let ticket = PreparedHostInvocation::new(
+            ticket_id.clone(),
+            HostInvocationKind::RepoPatch,
+            name,
+            expected_definition,
+            call,
+            current.registry,
+            current.allowed_permissions,
+            current.generations,
+            current.repository_identity,
+            current.composition_identity,
+            PreparedHostPayload::Patch {
+                preparation: Box::new(preparation),
+                preparer,
+            },
+        );
+        if coordinator.prepare(ticket).is_err() {
+            coordinator.abort_prepare();
+            return Err(FrontendError::HostInvocationBusy);
+        }
+        (ticket_id, review)
+    };
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: ticket_id.clone(),
+            tool: "repo.patch".to_owned(),
+            state: HostActivityState::Prepared,
+            result: None,
+            review: Some(HostInvocationReview::Patch(ticket.clone())),
+        },
+    );
+    Ok(PreparedPatchResponse {
+        ticket_id,
+        review: ticket,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -2625,18 +2819,24 @@ async fn host_confirm_tool_invocation(
     app: AppHandle,
     state: State<'_, DesktopAppState>,
 ) -> Result<HostInvocationResponse, FrontendError> {
-    let mut coordinator = state
-        .host_invocation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    coordinator.reap_expired(std::time::Instant::now());
-    let ticket = coordinator
-        .take_prepared(&request.ticket_id, std::time::Instant::now())
-        .map_err(|_| FrontendError::HostInvocationTicketInvalid)?;
+    let ticket = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .take_prepared(&request.ticket_id, std::time::Instant::now())
+            .map_err(|_| FrontendError::HostInvocationTicketInvalid)?
+    };
     let current = match current_host_composition(state.inner()) {
         Ok(current) => current,
         Err(error) => {
-            coordinator.finish_host();
+            state
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish_host();
             return Err(error);
         }
     };
@@ -2644,22 +2844,60 @@ async fn host_confirm_tool_invocation(
         || ticket.composition_identity != current.composition_identity
         || ticket.repository_identity != current.repository_identity
     {
-        coordinator.finish_host();
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
         return Err(FrontendError::HostInvocationStale);
     }
     let current_definition =
         match host_tool_definition(&current, &ticket.tool_name, CoordinatorState::Idle) {
             Ok(definition) => definition,
             Err(error) => {
-                coordinator.finish_host();
+                state
+                    .host_invocation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .finish_host();
                 return Err(error);
             }
         };
     if current_definition != ticket.expected_definition
         || current.allowed_permissions != ticket.allowed_permissions
     {
-        coordinator.finish_host();
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
         return Err(FrontendError::HostInvocationStale);
+    }
+    if let PreparedHostPayload::Patch { preparer, .. } = &ticket.payload
+        && current
+            .repository_patch_preparer
+            .as_ref()
+            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
+    {
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
+    if let PreparedHostPayload::Patch {
+        preparation,
+        preparer,
+    } = &ticket.payload
+        && let Err(error) = preparer.revalidate(preparation).await
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.finish_host();
+        return Err(patch_preparation_frontend_error(error));
     }
     authorize_tool_dispatch(
         &current.registry,
@@ -2668,7 +2906,11 @@ async fn host_confirm_tool_invocation(
         &ticket.call,
     )
     .map_err(|rejection| {
-        coordinator.finish_host();
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
         match rejection {
             AuthorizedDispatchRejection::PermissionDenied { .. } => {
                 FrontendError::HostInvocationPermissionDenied
@@ -2676,8 +2918,25 @@ async fn host_confirm_tool_invocation(
             _ => FrontendError::HostInvocationStale,
         }
     })?;
-    let invocation_id = coordinator.next_invocation_id();
-    drop(coordinator);
+    let is_patch = matches!(&ticket.payload, PreparedHostPayload::Patch { .. });
+    if is_patch {
+        invalidate_repository_commit_review(state.inner()).await;
+    }
+    let invocation_id = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.next_invocation_id()
+    };
+    let review = match &ticket.payload {
+        PreparedHostPayload::Branch { review } => {
+            Some(HostInvocationReview::Branch(review.clone()))
+        }
+        PreparedHostPayload::Patch { preparation, .. } => {
+            Some(HostInvocationReview::Patch(preparation.review().clone()))
+        }
+    };
     emit_host_activity(
         &app,
         HostActivityEvent {
@@ -2686,7 +2945,7 @@ async fn host_confirm_tool_invocation(
             tool: ticket.tool_name.to_string(),
             state: HostActivityState::Started,
             result: None,
-            review: Some(ticket.review.clone()),
+            review,
         },
     );
     tauri::async_runtime::spawn(run_host_tool(
@@ -2698,6 +2957,7 @@ async fn host_confirm_tool_invocation(
         ticket.kind,
         invocation_id.clone(),
         ticket.repository_identity,
+        ticket.generations,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -2714,7 +2974,7 @@ fn host_cancel_tool_invocation(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     coordinator.reap_expired(std::time::Instant::now());
-    coordinator
+    let kind = coordinator
         .cancel(&request.ticket_id)
         .map_err(|_| FrontendError::HostInvocationTicketInvalid)?;
     emit_host_activity(
@@ -2722,7 +2982,10 @@ fn host_cancel_tool_invocation(
         HostActivityEvent {
             source: "host_explicit",
             invocation_id: request.ticket_id,
-            tool: REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
+            tool: match kind {
+                HostInvocationKind::RepoPatch => "repo.patch".to_owned(),
+                _ => REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
+            },
             state: HostActivityState::CancelledBeforeStart,
             result: None,
             review: None,
@@ -5297,6 +5560,7 @@ fn empty_composition_metadata() -> DesktopToolComposition {
         expected_definitions: Vec::new(),
         tools: Vec::new(),
         unavailable: Vec::new(),
+        repository_patch_preparer: None,
     }
 }
 
@@ -6167,6 +6431,7 @@ fn main() -> ExitCode {
             get_effective_authority_snapshot,
             host_invoke_read,
             host_prepare_repo_create_branch,
+            host_prepare_repo_patch,
             host_confirm_tool_invocation,
             host_cancel_tool_invocation
         ])
@@ -6235,10 +6500,10 @@ mod tests {
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
-        host_invoke_read, host_prepare_repo_create_branch, install_repository_workflow,
-        invalidate_repository_commit_review, model_configuration_status, prepare_codex_connection,
-        publish_connected_provider_state, publish_readiness_result,
-        publish_trusted_profile_selection, refresh_repository_workflow,
+        host_descriptor, host_invoke_read, host_prepare_repo_create_branch,
+        install_repository_workflow, invalidate_repository_commit_review,
+        model_configuration_status, prepare_codex_connection, publish_connected_provider_state,
+        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot,
@@ -9985,6 +10250,40 @@ mod tests {
     }
 
     #[test]
+    fn patch_is_the_seventh_host_tool_and_retains_its_shared_preparer() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.desktop_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&repository), None).expect("registry should build"),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("patch composition should build");
+        let patch = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.patch")
+            .expect("repo.patch should be composed");
+        assert_eq!(patch.source_kind, SourceKind::RepositoryHost);
+        assert_eq!(patch.effect_class, EffectClass::RepositoryMutation);
+        assert_eq!(
+            patch.authority_category,
+            super::effective_authority::AuthorityCategory::RepositoryContentMutation
+        );
+        assert_eq!(patch.permission, PermissionLevel::Execute);
+        assert!(patch.repository_bound);
+        assert_eq!(
+            patch.host_invocation.kind,
+            Some(HostInvocationKind::RepoPatch)
+        );
+        assert!(composition.repository_patch_preparer.is_some());
+        assert!(
+            host_descriptor(patch, true, true, true, false, true, CoordinatorState::Idle,).eligible
+        );
+    }
+
+    #[test]
     fn host_composed_commit_tool_is_registered_with_execute_permission() {
         let fixture = TestRepository::new();
         let repository = fixture.desktop_repository();
@@ -11300,6 +11599,7 @@ mod tests {
                 },
             }],
             unavailable: Vec::new(),
+            repository_patch_preparer: None,
         }
     }
 

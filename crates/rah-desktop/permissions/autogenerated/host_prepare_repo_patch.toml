@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-host-prepare-repo-patch"
+description = "Enables the host_prepare_repo_patch command without any pre-configured scope."
+commands.allow = ["host_prepare_repo_patch"]
+
+[[permission]]
+identifier = "deny-host-prepare-repo-patch"
+description = "Denies the host_prepare_repo_patch command without any pre-configured scope."
+commands.deny = ["host_prepare_repo_patch"]
