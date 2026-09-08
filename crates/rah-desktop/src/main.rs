@@ -6500,7 +6500,7 @@ mod tests {
     };
     use super::host_invocation::{
         CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
-        HostPrepareBranchRequest, HostReadRequest,
+        HostPrepareBranchRequest, HostPreparePatchRequest, HostReadRequest,
     };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -6528,7 +6528,7 @@ mod tests {
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
         host_descriptor, host_invoke_read, host_prepare_repo_create_branch,
-        install_repository_workflow, invalidate_repository_commit_review,
+        host_prepare_repo_patch, install_repository_workflow, invalidate_repository_commit_review,
         model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
         publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
@@ -6559,6 +6559,7 @@ mod tests {
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
+    use std::os::windows::io::AsRawHandle;
     use std::{
         collections::HashMap,
         ffi::OsString,
@@ -6575,6 +6576,9 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tauri::{Listener, Manager};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
 
     #[derive(Debug)]
     struct RuntimeMarker;
@@ -8401,6 +8405,38 @@ mod tests {
             .and_then(Value::as_str)
     }
 
+    fn live_sha256(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn live_file_identity(path: &Path) -> Result<(u32, u64), String> {
+        let file = fs::File::open(path).map_err(|_| "target metadata failed".to_owned())?;
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+        let result =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if result == 0 {
+            return Err("target identity observation failed".to_owned());
+        }
+        let information = unsafe { information.assume_init() };
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        Ok((information.dwVolumeSerialNumber, file_index))
+    }
+
+    fn live_patch_temporary_count(root: &Path) -> Result<usize, String> {
+        fs::read_dir(root)
+            .map_err(|_| "patch temporary-artifact observation failed".to_owned())?
+            .try_fold(0, |count, entry| {
+                let entry = entry.map_err(|_| "patch directory observation failed".to_owned())?;
+                let name = entry.file_name();
+                let is_patch_temporary = name.to_str().is_some_and(|name| {
+                    name.starts_with(".rah-repo-patch-") && name.ends_with(".tmp")
+                });
+                Ok::<_, String>(count + usize::from(is_patch_temporary))
+            })
+    }
+
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires the certified Windows Codex live gate"]
     async fn windows_live_desktop_explicit_host_tool_invocation() -> Result<(), String> {
@@ -8948,6 +8984,457 @@ mod tests {
         app.unlisten(refresh_events.1);
         shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
         println!("RAH_HOST_EXPLICIT_LIVE_OK");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the certified Windows Codex live gate"]
+    async fn windows_live_desktop_hostexplicit_repo_patch() -> Result<(), String> {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+        let target = fixture.0.join("tracked.txt");
+        let sentinel = fixture.0.join("nested/ordinary.txt");
+        let preimage = b"alpha\nRAH_PATCH_OLD\nomega\n".to_vec();
+        let postimage = b"alpha\nRAH_PATCH_NEW\nomega\n".to_vec();
+
+        fs::write(&target, &preimage).map_err(|_| "patch target setup failed".to_owned())?;
+        let run_git = |arguments: &[&str]| -> Result<(), String> {
+            let status = Command::new(&git)
+                .args(arguments)
+                .current_dir(&fixture.0)
+                .status()
+                .map_err(|_| "Git fixture command failed to start".to_owned())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Git fixture command failed".to_owned())
+            }
+        };
+        run_git(&["add", "tracked.txt"])?;
+        run_git(&["commit", "--quiet", "-m", "patch preimage"])?;
+        fs::write(&sentinel, b"RAH_PATCH_SENTINEL\n")
+            .map_err(|_| "review sentinel setup failed".to_owned())?;
+        run_git(&["add", "nested/ordinary.txt"])?;
+
+        let before_target = fs::read(&target).map_err(|_| "target read failed".to_owned())?;
+        let before_target_identity = live_file_identity(&target)?;
+        let before_target_sha256 = live_sha256(&before_target);
+        let before_sentinel = fs::read(&sentinel).map_err(|_| "sentinel read failed".to_owned())?;
+        let before_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        if before_target != preimage
+            || before_target_sha256 != live_sha256(&preimage)
+            || live_patch_temporary_count(&fixture.0)? != 0
+        {
+            return Err("fixture did not start in the expected zero-effect state".to_owned());
+        }
+
+        let repository = DesktopRepository::new(&git, &fixture.0)
+            .map_err(|_| "Desktop repository construction failed".to_owned())?;
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let refresh_events = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        set_commit_identity(
+            app.handle().clone(),
+            app.state(),
+            "RAH Host Patch Live Test".to_owned(),
+            "rah-host-patch@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit identity setup failed: {error:?}"))?;
+        connect_codex(app.state())
+            .await
+            .map_err(|error| format!("production Desktop connection failed: {error:?}"))?;
+
+        let connected_snapshot = get_effective_authority_snapshot(app.state());
+        let find_tool = |name: &str| {
+            connected_snapshot
+                .effective_tools
+                .iter()
+                .find(|tool| tool.public_tool_name == name)
+        };
+        let patch_tool = find_tool("repo.patch")
+            .ok_or_else(|| "repo.patch was not in the current Effective Authority".to_owned())?;
+        if connected_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || !patch_tool.host_invocation.eligible
+            || patch_tool.host_invocation.kind != Some(HostInvocationKind::RepoPatch)
+            || patch_tool.effect_class != EffectClass::RepositoryMutation
+            || patch_tool.authority_category != AuthorityCategory::RepositoryContentMutation
+            || patch_tool.permission != PermissionLevel::Execute
+            || !patch_tool.repository_bound
+        {
+            return Err("repo.patch was not connected-current HostExplicit eligible".to_owned());
+        }
+        let deferred = find_tool("repo.edit-files")
+            .ok_or_else(|| "repo.edit-files was not registered as deferred".to_owned())?;
+        if deferred.host_invocation.eligible {
+            return Err("repo.edit-files was incorrectly host eligible".to_owned());
+        }
+        let external_effective = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+            })
+            .count();
+        if external_effective != 0
+            || connected_snapshot.configured.configured_provider_count != 0
+            || app
+                .state::<DesktopAppState>()
+                .provider_activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            || app
+                .state::<DesktopAppState>()
+                .trusted_profile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        {
+            return Err("unexpected external provider or Trusted Profile state".to_owned());
+        }
+
+        let review_snapshot = repository_snapshot(app.state())
+            .await
+            .map_err(|error| format!("review snapshot failed: {error:?}"))?;
+        let review_id = match review_snapshot.review {
+            StagedReviewPresentation::ReviewAvailable {
+                review_id: Some(review_id),
+                can_authorize: true,
+                authorization_state: CommitAuthorizationPresentation::ReadyToAuthorize,
+            } => review_id,
+            other => return Err(format!("fixture did not expose a review: {other:?}")),
+        };
+        let authorization = repository_authorize_commit_review(app.state(), review_id)
+            .await
+            .map_err(|error| format!("review authorization failed: {error:?}"))?;
+        if authorization.authorization_state != CommitAuthorizationPresentation::AuthorizedPending
+            || get_effective_authority_snapshot(app.state()).reviewed_commit
+                != super::effective_authority::ReviewedCommitState::AuthorizedPending
+        {
+            return Err("reviewed authorization was not pending before preparation".to_owned());
+        }
+        let reviewed_commit_control = app
+            .state::<DesktopAppState>()
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control))
+            .ok_or_else(|| "reviewed commit control was not composed".to_owned())?;
+
+        let before_prepare_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let before_prepare_generations =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let before_prepare_namespace = app.state::<DesktopAppState>().persistence_namespace();
+        if before_prepare_git != before_git
+            || before_prepare_generations[0] == 0
+            || before_prepare_namespace.is_empty()
+        {
+            return Err("preparation baseline was not stable".to_owned());
+        }
+
+        let prepared = host_prepare_repo_patch(
+            HostPreparePatchRequest {
+                path: "tracked.txt".to_owned(),
+                expected_old_text: "RAH_PATCH_OLD".to_owned(),
+                replacement_text: "RAH_PATCH_NEW".to_owned(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.patch Prepare failed: {error:?}"))?;
+        let prepare_events = wait_for_test_events(&host_activity.0, 1).await?;
+        require_host_event(&prepare_events[0], "prepared", "repo.patch")?;
+        let prepare_event_json = serde_json::to_string(&prepare_events[0])
+            .map_err(|_| "Prepare activity serialization failed".to_owned())?;
+        if prepare_events[0].get("review").is_some()
+            || prepare_events[0].get("result").is_some()
+            || prepare_event_json.contains("RAH_PATCH_OLD")
+            || prepare_event_json.contains("RAH_PATCH_NEW")
+        {
+            return Err("Prepare activity exposed patch review or source text".to_owned());
+        }
+        if prepared.ticket_id.is_empty()
+            || prepared.ticket_id == "tracked.txt"
+            || prepared.ticket_id.len() > 256
+        {
+            return Err("Prepare did not return one opaque bounded ticket".to_owned());
+        }
+        let expected_review = serde_json::json!({
+            "operation": "repo.patch",
+            "path": "tracked.txt",
+            "replacement_count": 1,
+            "changed_range": {"start": 6, "end": 19, "length": 13},
+            "old_text_escaped": "RAH_PATCH_OLD",
+            "replacement_text_escaped": "RAH_PATCH_NEW",
+            "bom": "absent",
+            "preimage_eof": "final_newline",
+            "postimage_eof": "final_newline",
+            "preimage_eof_marker": "EOF after final newline",
+            "postimage_eof_marker": "EOF after final newline",
+            "intended_effect": "replace exactly one literal match in the selected tracked worktree file",
+            "non_effects": [
+                "preparation performs no target replacement",
+                "preparation performs no temporary-file write",
+                "the Git index, HEAD, refs, and history remain unchanged",
+                "other paths remain unchanged",
+                "no shell, process, network, or provider action occurs"
+            ],
+            "unchanged_context": "unchanged surrounding context omitted",
+            "preimage_sha256": before_target_sha256,
+            "preimage_byte_length": preimage.len(),
+            "postimage_sha256": live_sha256(&postimage),
+            "postimage_byte_length": postimage.len()
+        });
+        if serde_json::to_value(&prepared.review)
+            .map_err(|_| "Prepare review serialization failed".to_owned())?
+            != expected_review
+            || prepared.review.preimage_sha256() != before_target_sha256
+            || prepared.review.preimage_byte_length() != preimage.len()
+            || prepared.review.postimage_sha256() != live_sha256(&postimage)
+            || prepared.review.postimage_byte_length() != postimage.len()
+        {
+            return Err("Prepare returned an unexpected exact RepositoryPatchReview".to_owned());
+        }
+        if app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::HostPrepared
+        {
+            return Err("coordinator was not HostPrepared after Prepare".to_owned());
+        }
+        if !matches!(
+            app.state::<DesktopAppState>().start_chat(),
+            Err(FrontendError::HostInvocationBusy)
+        ) {
+            return Err("model-start admission did not reject HostPrepared".to_owned());
+        }
+        let after_prepare_target =
+            fs::read(&target).map_err(|_| "target read failed".to_owned())?;
+        let after_prepare_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        if after_prepare_target != before_target
+            || live_file_identity(&target)? != before_target_identity
+            || after_prepare_git != before_prepare_git
+            || fs::read(&sentinel).map_err(|_| "sentinel read failed".to_owned())?
+                != before_sentinel
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_prepare_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_prepare_namespace
+            || !reviewed_commit_control.has_pending_authorization().await
+            || get_effective_authority_snapshot(app.state()).reviewed_commit
+                != super::effective_authority::ReviewedCommitState::AuthorizedPending
+            || live_patch_temporary_count(&fixture.0)? != 0
+        {
+            return Err("Prepare was not zero effect".to_owned());
+        }
+        println!("RAH_DESKTOP_PATCH_PREPARE_TOOL_EXECUTIONS=0");
+        println!("RAH_DESKTOP_PATCH_PREPARE_REPLACEMENTS=0");
+        println!("RAH_DESKTOP_PATCH_PREPARED=1");
+
+        let confirmed = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id,
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.patch Confirm failed: {error:?}"))?;
+        if confirmed.invocation_id.is_empty() {
+            return Err("Confirm returned an empty invocation ID".to_owned());
+        }
+
+        macro_rules! fail_after_patch_start {
+            ($message:expr) => {{
+                let message = $message.to_owned();
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                eprintln!("RAH_DESKTOP_PATCH_POST_START_FAILURE={message}");
+                std::mem::forget(fixture);
+                return Err(message);
+            }};
+        }
+
+        let events = match wait_for_test_events(&host_activity.0, 3).await {
+            Ok(events) => events,
+            Err(error) => fail_after_patch_start!(error),
+        };
+        if events.len() != 3 {
+            fail_after_patch_start!("unexpected HostExplicit event count");
+        }
+        for event in [&events[1], &events[2]] {
+            if event.get("review").is_some() {
+                fail_after_patch_start!("patch activity exposed a review");
+            }
+            let serialized = match serde_json::to_string(event) {
+                Ok(serialized) => serialized,
+                Err(_) => fail_after_patch_start!("patch activity serialization failed"),
+            };
+            if serialized.contains("RAH_PATCH_OLD") || serialized.contains("RAH_PATCH_NEW") {
+                fail_after_patch_start!("patch activity exposed source text");
+            }
+        }
+        if let Err(error) = require_host_event(&events[1], "started", "repo.patch") {
+            fail_after_patch_start!(error);
+        }
+        if let Err(error) = require_host_event(&events[2], "tool_completed", "repo.patch") {
+            fail_after_patch_start!(error);
+        }
+        let output = match event_tool_output(&events[2]) {
+            Ok(output) => output,
+            Err(error) => fail_after_patch_start!(error),
+        };
+        if output.is_error
+            || !matches!(
+                classify_repository_patch_output(&output),
+                RepositoryPatchResultClassification::ChangedVerified
+            )
+        {
+            fail_after_patch_start!("repo.patch did not classify as ChangedVerified");
+        }
+        let [ToolContent::Json(result)] = output.content.as_slice() else {
+            fail_after_patch_start!("repo.patch result was not one structured JSON value");
+        };
+        if result
+            != &serde_json::json!({
+                "status": "ok",
+                "changed": true,
+                "uncertain": false,
+                "reason": "none"
+            })
+        {
+            fail_after_patch_start!("repo.patch result contract was not exact");
+        }
+
+        let after_target = match fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(_) => fail_after_patch_start!("target read failed after Confirm"),
+        };
+        let after_git = match live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__") {
+            Ok(state) => state,
+            Err(error) => fail_after_patch_start!(error),
+        };
+        let worktree_names = match live_git_text(&git, &fixture.0, &["diff", "--name-only"]) {
+            Ok(names) => names,
+            Err(error) => fail_after_patch_start!(error),
+        };
+        let staged_names =
+            match live_git_text(&git, &fixture.0, &["diff", "--cached", "--name-only"]) {
+                Ok(names) => names,
+                Err(error) => fail_after_patch_start!(error),
+            };
+        if after_target != postimage
+            || live_sha256(&after_target) != prepared.review.postimage_sha256()
+            || after_target.len() != prepared.review.postimage_byte_length()
+            || worktree_names.trim() != "tracked.txt"
+            || staged_names.trim() != "nested/ordinary.txt"
+            || fs::read(&sentinel).unwrap_or_default() != before_sentinel
+            || after_git.symbolic_head != before_git.symbolic_head
+            || after_git.head_oid != before_git.head_oid
+            || after_git.current_branch != before_git.current_branch
+            || after_git.index_semantics != before_git.index_semantics
+            || after_git.raw_staged_diff != before_git.raw_staged_diff
+            || after_git.tracking != before_git.tracking
+            || after_git.local_heads != before_git.local_heads
+            || after_git.tags_and_remotes != before_git.tags_and_remotes
+            || live_patch_temporary_count(&fixture.0).unwrap_or(usize::MAX) != 0
+        {
+            fail_after_patch_start!("repo.patch changed protected repository state");
+        }
+        let refresh = match wait_for_test_events(&refresh_events.0, 1).await {
+            Ok(events) => events,
+            Err(error) => fail_after_patch_start!(error),
+        };
+        if refresh.len() != 1 {
+            fail_after_patch_start!("repository refresh count was not exactly one");
+        }
+        let after_snapshot = get_effective_authority_snapshot(app.state());
+        if after_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || after_snapshot.reviewed_commit
+                != super::effective_authority::ReviewedCommitState::AuthorizationRevoked
+            || reviewed_commit_control.has_pending_authorization().await
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_prepare_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_prepare_namespace
+            || app
+                .state::<DesktopAppState>()
+                .provider_activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            || after_snapshot.configured.configured_provider_count != 0
+            || after_snapshot.effective_tools.iter().any(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+            })
+            || app
+                .state::<DesktopAppState>()
+                .trusted_profile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            || app
+                .state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                != CoordinatorState::Idle
+            || *app
+                .state::<DesktopAppState>()
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                != ChatState::Idle
+            || app
+                .state::<DesktopAppState>()
+                .active_chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        {
+            fail_after_patch_start!("patch success changed currentness or authorization state");
+        }
+
+        // ChangedVerified plus distinct exact preimage and postimage proves the one native replacement point was reached.
+        println!("RAH_DESKTOP_PATCH_CONFIRM_TOOL_EXECUTIONS=1");
+        println!("RAH_DESKTOP_PATCH_CONFIRM_REPLACEMENTS=1");
+        println!("RAH_DESKTOP_PATCH_RESULT=changed_verified");
+        println!("RAH_DESKTOP_PATCH_REVIEW_INVALIDATED=1");
+        println!("RAH_DESKTOP_PATCH_MODEL_RUNTIME_STARTS=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_AGENT_REQUESTS=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_PROMPTS=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_TOOL_REQUESTED=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_TOOL_STARTED=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_TOOL_FINISHED=0");
+        println!("RAH_DESKTOP_PATCH_MODEL_TOOL_LIFECYCLE=0/0/0");
+        println!("RAH_DESKTOP_PATCH_MCP_PROVIDERS=0");
+        println!("RAH_DESKTOP_PATCH_PROCESS_PLUGINS=0");
+        println!("RAH_DESKTOP_PATCH_PRE_SHA256={before_target_sha256}");
+        println!(
+            "RAH_DESKTOP_PATCH_POST_SHA256={}",
+            live_sha256(&after_target)
+        );
+        app.unlisten(host_activity.1);
+        app.unlisten(refresh_events.1);
+        shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+        println!("RAH_DESKTOP_PATCH_LIVE_OK");
         Ok(())
     }
 
