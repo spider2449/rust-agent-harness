@@ -2483,8 +2483,7 @@ async fn run_host_tool(
                 }
                 (
                     multi_file_host_terminal_state(classification),
-                    (!matches!(classification, MultiFileResultClassification::Malformed))
-                        .then_some(output),
+                    safe_multi_file_activity_result(output, classification),
                 )
             } else {
                 if kind == HostInvocationKind::RepoCreateBranch
@@ -2512,7 +2511,20 @@ async fn run_host_tool(
                 )
             }
         }
-        Err(AuthorizedDispatchError::Rejected(_)) => (HostActivityState::RejectedStale, None),
+        Err(AuthorizedDispatchError::Rejected(_)) => {
+            if repository_bound_authoring_kind(kind) {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+            }
+            (HostActivityState::RejectedStale, None)
+        }
         Err(AuthorizedDispatchError::Tool(_)) => {
             if kind == HostInvocationKind::RepoPatch {
                 if host_repository_context_is_current(
@@ -2563,6 +2575,14 @@ async fn run_host_tool(
             review: None,
         },
     );
+}
+
+#[cfg(target_os = "windows")]
+fn repository_bound_authoring_kind(kind: HostInvocationKind) -> bool {
+    matches!(
+        kind,
+        HostInvocationKind::RepoPatch | HostInvocationKind::RepoEditFiles
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -2880,6 +2900,14 @@ fn multi_file_host_terminal_state(
             HostActivityState::PossibleEffectUnknown
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn safe_multi_file_activity_result(
+    output: ToolOutput,
+    classification: MultiFileResultClassification,
+) -> Option<ToolOutput> {
+    (!matches!(classification, MultiFileResultClassification::Malformed)).then_some(output)
 }
 
 #[cfg(target_os = "windows")]
@@ -3285,8 +3313,7 @@ async fn host_confirm_tool_invocation(
             _ => FrontendError::HostInvocationStale,
         }
     })?;
-    let is_patch = matches!(&ticket.payload, PreparedHostPayload::Patch { .. });
-    if is_patch {
+    if repository_bound_authoring_kind(ticket.kind) {
         invalidate_repository_commit_review(state.inner()).await;
     }
     let invocation_id = {
@@ -11418,6 +11445,59 @@ mod tests {
             classify_repository_multi_file_output(&malformed, &paths),
             MultiFileResultClassification::Malformed
         );
+        let assert_malformed = |output: ToolOutput| {
+            assert_eq!(
+                classify_repository_multi_file_output(&output, &paths),
+                MultiFileResultClassification::Malformed
+            );
+            assert_eq!(
+                super::multi_file_host_terminal_state(MultiFileResultClassification::Malformed),
+                HostActivityState::PossibleEffectUnknown
+            );
+        };
+        assert_malformed(ToolOutput {
+            content: vec![ToolContent::Text("not-json".to_owned())],
+            is_error: true,
+        });
+        assert_malformed(ToolOutput {
+            content: vec![
+                ToolContent::Json(serde_json::json!({"status": "ok"})),
+                ToolContent::Json(serde_json::json!({"status": "ok"})),
+            ],
+            is_error: false,
+        });
+        assert_malformed(output(serde_json::json!({}), true));
+        assert_malformed(output(serde_json::json!({"status": "unknown"}), true));
+        assert_malformed(output(
+            serde_json::json!({"status": "ok", "effects": []}),
+            true,
+        ));
+        assert_malformed(output(
+            serde_json::json!({"status": "invalid_target", "effects": []}),
+            true,
+        ));
+        let mut extra_effect_field = effects(&["committed_verified", "committed_verified"]);
+        extra_effect_field["status"] = serde_json::json!("ok");
+        extra_effect_field["effects"][0]["detail"] = serde_json::json!("source");
+        assert_malformed(output(extra_effect_field, false));
+        let mut wrong_order = effects(&["committed_verified", "committed_verified"]);
+        wrong_order["status"] = serde_json::json!("ok");
+        wrong_order["effects"][0]["path"] = serde_json::json!("b.rs");
+        wrong_order["effects"][1]["path"] = serde_json::json!("a.rs");
+        assert_malformed(output(wrong_order, false));
+        let mut impossible_state = effects(&["not_attempted", "committed_verified"]);
+        impossible_state["status"] = serde_json::json!("ok");
+        assert_malformed(output(impossible_state, false));
+        let mut non_prefix = effects(&["committed_verified", "unchanged_verified"]);
+        non_prefix["status"] = serde_json::json!("partial_effect");
+        non_prefix["effects"][1]["state"] = serde_json::json!("committed_verified");
+        assert_malformed(output(non_prefix, true));
+        let mut contradictory_uncertain = effects(&["uncertain", "committed_verified"]);
+        contradictory_uncertain["status"] = serde_json::json!("uncertain");
+        assert_malformed(output(contradictory_uncertain, true));
+        let mut contradictory_known_no_effect = effects(&["committed_verified", "not_attempted"]);
+        contradictory_known_no_effect["status"] = serde_json::json!("failed_known_no_effect");
+        assert_malformed(output(contradictory_known_no_effect, true));
         let redacted = output(
             serde_json::json!({
                 "status": "partial_effect",
@@ -11439,6 +11519,55 @@ mod tests {
         let serialized = serde_json::to_string(&activity).unwrap();
         assert!(!serialized.contains("OLD_SOURCE_SENTINEL"));
         assert!(!serialized.contains("NEW_REPLACEMENT_SENTINEL"));
+        for forbidden in [
+            "ticketId",
+            "ToolInput",
+            "ToolOutput",
+            "expectedOldText",
+            "replacementText",
+            "C:\\\\Users\\\\secret",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "activity leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_file_malformed_source_is_never_retained_as_generic_activity() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(serde_json::json!({
+                "status": "ok",
+                "source": "<script>alert(1)</script> SECRET_EXPECTED_OLD_SOURCE",
+                "replacement": "SECRET_REPLACEMENT <img src=x>",
+            }))],
+            is_error: false,
+        };
+        let classification =
+            classify_repository_multi_file_output(&output, &["safe.txt".to_owned()]);
+        assert_eq!(classification, MultiFileResultClassification::Malformed);
+        assert_eq!(
+            super::multi_file_host_terminal_state(classification),
+            HostActivityState::PossibleEffectUnknown
+        );
+        assert!(super::safe_multi_file_activity_result(output, classification).is_none());
+    }
+
+    #[test]
+    fn repository_bound_authoring_invalidates_commit_at_started_boundary() {
+        assert!(super::repository_bound_authoring_kind(
+            HostInvocationKind::RepoPatch
+        ));
+        assert!(super::repository_bound_authoring_kind(
+            HostInvocationKind::RepoEditFiles
+        ));
+        assert!(!super::repository_bound_authoring_kind(
+            HostInvocationKind::RepoCreateBranch
+        ));
+        assert!(!super::repository_bound_authoring_kind(
+            HostInvocationKind::FsRead
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

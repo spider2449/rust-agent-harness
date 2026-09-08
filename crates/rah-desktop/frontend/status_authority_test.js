@@ -160,4 +160,20 @@ assert.match(source, /ticketId: active\.ticketId/);
 assert.match(source, /host_cancel_tool_invocation/);
 assert.match(source, /void refreshEffectiveAuthority\(invoke\)/);
 
+const hostileReviewValues = [
+  "<script>alert(1)</script>",
+  "<b>quoted & hostile</b>",
+  "{\"expectedOldText\":\"secret\"}",
+  "tauri://invoke('run_command')",
+  "\\u202Epath\\u200Bwith\\u0000controls",
+];
+function textNodeValue(value) {
+  return String(value ?? "");
+}
+for (const hostile of hostileReviewValues) {
+  assert.equal(textNodeValue(hostile), hostile);
+}
+assert.match(source, /pre\.textContent = String\(value \?\? ""\)/);
+assert.equal(hostActivityRenderer.includes("textContent = payload"), false);
+
 console.log("effective authority frontend static tests passed");

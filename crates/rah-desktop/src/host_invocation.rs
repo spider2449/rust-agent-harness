@@ -907,4 +907,63 @@ mod tests {
             Err(CoordinatorError::NotPrepared)
         ));
     }
+
+    #[test]
+    fn ticket_matrix_is_single_use_for_valid_expired_cancelled_and_stale_paths() {
+        let now = Instant::now();
+
+        let mut valid = HostInvocationCoordinator::default();
+        valid
+            .prepare(PreparedHostInvocation::for_test(now))
+            .expect("valid ticket prepares");
+        assert!(valid.take_prepared("test-ticket", now).is_ok());
+        valid.finish_host();
+        assert_eq!(valid.state(), CoordinatorState::Idle);
+        assert!(matches!(
+            valid.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+
+        let mut expired = HostInvocationCoordinator::default();
+        expired
+            .prepare(PreparedHostInvocation::for_test(now - BRANCH_TICKET_TTL))
+            .expect("expired ticket prepares for deterministic test");
+        expired.reap_expired(now);
+        assert_eq!(expired.state(), CoordinatorState::Idle);
+        assert!(matches!(
+            expired.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+
+        let mut cancelled = HostInvocationCoordinator::default();
+        cancelled
+            .prepare(PreparedHostInvocation::for_test(now))
+            .expect("cancelled ticket prepares");
+        assert_eq!(
+            cancelled.cancel("test-ticket"),
+            Ok(HostInvocationKind::RepoCreateBranch)
+        );
+        assert_eq!(
+            cancelled.cancel("test-ticket"),
+            Err(CoordinatorError::NotPrepared)
+        );
+        assert!(matches!(
+            cancelled.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+
+        let mut stale = HostInvocationCoordinator::default();
+        stale
+            .prepare(PreparedHostInvocation::for_test(now))
+            .expect("stale ticket prepares");
+        assert!(matches!(
+            stale.take_prepared("different-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+        assert_eq!(stale.state(), CoordinatorState::Idle);
+        assert!(matches!(
+            stale.take_prepared("test-ticket", now),
+            Err(CoordinatorError::NotPrepared)
+        ));
+    }
 }

@@ -85,10 +85,49 @@ impl Tool for RepositoryMultiFileEditTool {
         input: ToolInput,
         _context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
+        #[cfg(test)]
+        test_execute_hook::record(self.policy.test_root());
         match self.policy.commit(&input).await {
             Ok(outcome) => Ok(output_for_outcome(outcome)),
             Err(error) => Ok(status_output(error.public_status())),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_execute_hook {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static EXECUTIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+    pub(crate) fn record(root: &Path) {
+        let mut executions = EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        *executions.entry(root.to_path_buf()).or_default() += 1;
+    }
+
+    pub(crate) fn count(root: &Path) -> usize {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(root)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn clear(root: &Path) {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(root);
     }
 }
 
@@ -207,6 +246,7 @@ mod tests {
         let (_fixture, git, root) = Fixture::new();
         let before = git_state(&git, &root);
         let tool = RepositoryMultiFileEditTool::new(&git, &root).unwrap();
+        let policy_root = tool.policy.test_root();
         let output = run(&tool, request(&root, &["d.rs", "b.rs", "a.rs", "c.rs"])).await;
 
         assert!(!output.is_error);
@@ -235,6 +275,8 @@ mod tests {
         assert_eq!(after.1, before.1, "HEAD changed");
         assert_eq!(after.2, before.2, "refs changed");
         assert_eq!(after.3, " M a.rs\0 M b.rs\0 M c.rs\0 M d.rs\0");
+        assert_eq!(test_execute_hook::count(policy_root), 1);
+        test_execute_hook::clear(policy_root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -349,6 +391,8 @@ mod tests {
             }
             assert_no_private_fields(content(&output));
             test_commit_hook::clear(policy_root);
+            assert_eq!(test_execute_hook::count(policy_root), 1);
+            test_execute_hook::clear(policy_root);
         }
     }
 

@@ -2806,6 +2806,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state(&root), before);
+        assert_eq!(
+            crate::repository_multi_file_edit::test_execute_hook::count(&root),
+            0
+        );
+        for index in 0..4 {
+            assert_eq!(test_commit_hook::attempts(&root, index), 0);
+        }
         let after_names = fs::read_dir(&root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -2818,6 +2825,81 @@ mod tests {
                 .count(),
             0
         );
+        crate::repository_multi_file_edit::test_execute_hook::clear(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_prepare_is_zero_effect_for_one_and_four_targets_with_multiple_replacements()
+    {
+        for (paths, replacements) in [
+            (vec!["a.txt"], vec![vec![("A", "a"), ("old", "new")]]),
+            (
+                vec!["a.txt", "m.txt", "sentinel.txt", "z.txt"],
+                vec![
+                    vec![("old", "new"), ("\n", "\r\n")],
+                    vec![("old", "new"), ("\n", "\r\n")],
+                    vec![("sentinel", "SENTINEL"), ("\n", "\r\n")],
+                    vec![("old", "new"), ("\n", "\r\n")],
+                ],
+            ),
+        ] {
+            let (_base, git_path, root) = TestDirectory::repository();
+            let before = state(&root);
+            let before_entries = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).ok())
+                })
+                .collect::<Vec<_>>();
+            let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
+            let preparation = preparer
+                .prepare(RepositoryMultiFileEditPreparationRequest {
+                    targets: paths
+                        .iter()
+                        .zip(&replacements)
+                        .map(
+                            |(path, replacements)| RepositoryMultiFileEditPreparationTarget {
+                                path: (*path).to_owned(),
+                                replacements: replacements
+                                    .iter()
+                                    .map(|(old, new)| RepositoryMultiFileEditTextReplacement {
+                                        expected_old_text: (*old).to_owned(),
+                                        replacement_text: (*new).to_owned(),
+                                    })
+                                    .collect(),
+                            },
+                        )
+                        .collect(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(preparation.review().target_count(), paths.len());
+            assert_eq!(
+                preparation.review().replacement_count(),
+                replacements.iter().map(Vec::len).sum::<usize>()
+            );
+            assert_eq!(state(&root), before, "Prepare changed repository state");
+            let after_entries = fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).ok())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                after_entries, before_entries,
+                "Prepare changed worktree entries"
+            );
+            assert_eq!(
+                crate::repository_multi_file_edit::test_execute_hook::count(&root),
+                0
+            );
+            for index in 0..4 {
+                assert_eq!(test_commit_hook::attempts(&root, index), 0);
+            }
+            crate::repository_multi_file_edit::test_execute_hook::clear(&root);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2895,11 +2977,12 @@ mod tests {
             .await
             .unwrap();
         assert!(preparer.revalidate(&preparation).await.is_ok());
-        fs::write(root.join("a.txt"), b"A changed\n").unwrap();
+        fs::write(root.join("a.txt"), b"B old\n").unwrap();
         assert!(matches!(
             preparer.revalidate(&preparation).await,
             Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
         ));
+        assert_eq!(fs::metadata(root.join("a.txt")).unwrap().len(), 6);
         let (_base, git_path, root) = TestDirectory::repository();
         let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
         let preparation = preparer
