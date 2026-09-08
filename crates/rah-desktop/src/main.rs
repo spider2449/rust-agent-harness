@@ -41,9 +41,10 @@ use host_invocation::{
     BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
     HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
     HostInvocationResponse, HostInvocationReview, HostInvocationUnavailableReason,
-    HostPrepareBranchRequest, HostPreparePatchRequest, HostReadRequest, PreparedBranchResponse,
-    PreparedHostInvocation, PreparedHostPayload, PreparedPatchResponse, host_descriptor, host_kind,
-    read_request, validate_bounded_string,
+    HostPrepareBranchRequest, HostPrepareMultiFileEditRequest, HostPreparePatchRequest,
+    HostReadRequest, PreparedBranchResponse, PreparedHostInvocation, PreparedHostPayload,
+    PreparedMultiFileEditResponse, PreparedPatchResponse, host_descriptor, host_kind, read_request,
+    validate_bounded_string,
 };
 #[cfg(target_os = "windows")]
 use provider_composition::{
@@ -72,6 +73,8 @@ use rah_tools::{
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+    RepositoryMultiFileEditPreparationError, RepositoryMultiFileEditPreparationRequest,
+    RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditTextReplacement,
     RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
     RepositoryPatchPreparationRequest, RepositoryPatchResultClassification, RepositoryStatusTool,
     RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
@@ -1291,6 +1294,9 @@ pub(crate) enum FrontendError {
     HostInvocationStale,
     HostInvocationInvalidInput,
     HostInvocationTicketInvalid,
+    HostInvocationInvalidTarget,
+    HostInvocationPreconditionChanged,
+    HostInvocationReviewTooLarge,
 }
 
 #[cfg(target_os = "windows")]
@@ -1670,6 +1676,7 @@ enum HostActivityState {
     Started,
     ToolCompleted,
     ToolError,
+    PartialEffect,
     RejectedNotEligible,
     RejectedPermission,
     RejectedStale,
@@ -2173,6 +2180,9 @@ fn get_effective_authority_snapshot(
             composition
                 .as_ref()
                 .is_some_and(|value| value.repository_patch_preparer.is_some()),
+            composition
+                .as_ref()
+                .is_some_and(|value| value.repository_multi_file_edit_preparer.is_some()),
             coordinator_state,
         );
     }
@@ -2250,6 +2260,7 @@ struct CurrentHostComposition {
     repository_identity: Option<String>,
     repository: Option<Arc<DesktopRepository>>,
     repository_patch_preparer: Option<Arc<rah_tools::RepositoryPatchPreparer>>,
+    repository_multi_file_edit_preparer: Option<Arc<rah_tools::RepositoryMultiFileEditPreparer>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2305,6 +2316,9 @@ fn current_host_composition(
         repository_identity,
         repository,
         repository_patch_preparer: composition.repository_patch_preparer.clone(),
+        repository_multi_file_edit_preparer: composition
+            .repository_multi_file_edit_preparer
+            .clone(),
     })
 }
 
@@ -2333,6 +2347,10 @@ fn host_tool_definition(
             "repo.create-branch" => (
                 effective_authority::EffectClass::RepositoryMutation,
                 effective_authority::AuthorityCategory::RepositoryLocalBranchCreation,
+            ),
+            "repo.edit-files" => (
+                effective_authority::EffectClass::RepositoryMutation,
+                effective_authority::AuthorityCategory::RepositoryContentMutation,
             ),
             _ => (
                 effective_authority::EffectClass::ReadOnly,
@@ -2365,6 +2383,7 @@ fn host_tool_definition(
             .as_ref()
             .is_some_and(|value| value.branch_creation_authority.is_some()),
         current.repository_patch_preparer.is_some(),
+        current.repository_multi_file_edit_preparer.is_some(),
         coordinator_state,
     );
     if !descriptor.eligible {
@@ -2418,6 +2437,7 @@ async fn run_host_tool(
     invocation_id: String,
     repository_identity: Option<String>,
     generations: [u64; 4],
+    multi_file_target_order: Option<Vec<String>>,
 ) {
     let tool_name = call.name.to_string();
     let result = authorized_tool_dispatch(
@@ -2445,6 +2465,25 @@ async fn run_host_tool(
                 (
                     patch_host_terminal_state(classification),
                     (classification != RepositoryPatchResultClassification::Malformed)
+                        .then_some(output),
+                )
+            } else if kind == HostInvocationKind::RepoEditFiles {
+                let classification = classify_repository_multi_file_output(
+                    &output,
+                    multi_file_target_order.as_deref().unwrap_or(&[]),
+                );
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    multi_file_host_terminal_state(classification),
+                    (!matches!(classification, MultiFileResultClassification::Malformed))
                         .then_some(output),
                 )
             } else {
@@ -2482,6 +2521,16 @@ async fn run_host_tool(
                     generations,
                 ) {
                     invalidate_repository_commit_review(state.inner()).await;
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+            } else if kind == HostInvocationKind::RepoEditFiles {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
                     let _ = refresh_repository_workflow(state.inner()).await;
                     emit_repository_refresh(&app);
                 }
@@ -2609,6 +2658,7 @@ async fn host_invoke_read(
         invocation_id.clone(),
         current.repository_identity,
         current.generations,
+        None,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -2710,6 +2760,145 @@ fn patch_preparation_frontend_error(error: RepositoryPatchPreparationError) -> F
         | RepositoryPatchPreparationError::NoEffect
         | RepositoryPatchPreparationError::ReviewTooLarge => {
             FrontendError::HostInvocationInvalidInput
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MultiFileResultClassification {
+    Ok,
+    InvalidTarget,
+    PreconditionFailed,
+    FailedKnownNoEffect,
+    PartialEffect,
+    Uncertain,
+    Malformed,
+}
+
+#[cfg(target_os = "windows")]
+fn classify_repository_multi_file_output(
+    output: &ToolOutput,
+    expected_paths: &[String],
+) -> MultiFileResultClassification {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return MultiFileResultClassification::Malformed;
+    };
+    let Some(object) = value.as_object() else {
+        return MultiFileResultClassification::Malformed;
+    };
+    let Some(status) = object.get("status").and_then(serde_json::Value::as_str) else {
+        return MultiFileResultClassification::Malformed;
+    };
+    let exact_keys = |keys: &[&str]| {
+        object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
+    };
+    let Some(effects) = object.get("effects").and_then(serde_json::Value::as_array) else {
+        if output.is_error
+            && matches!(status, "invalid_target" | "precondition_failed")
+            && exact_keys(&["status"])
+        {
+            return if status == "invalid_target" {
+                MultiFileResultClassification::InvalidTarget
+            } else {
+                MultiFileResultClassification::PreconditionFailed
+            };
+        }
+        return MultiFileResultClassification::Malformed;
+    };
+    if !exact_keys(&["status", "effects"]) || effects.len() != expected_paths.len() {
+        return MultiFileResultClassification::Malformed;
+    }
+    let mut states = Vec::with_capacity(effects.len());
+    for (effect, expected_path) in effects.iter().zip(expected_paths) {
+        let Some(effect) = effect.as_object() else {
+            return MultiFileResultClassification::Malformed;
+        };
+        if effect.len() != 2
+            || effect.get("path").and_then(serde_json::Value::as_str) != Some(expected_path)
+        {
+            return MultiFileResultClassification::Malformed;
+        }
+        let Some(state) = effect.get("state").and_then(serde_json::Value::as_str) else {
+            return MultiFileResultClassification::Malformed;
+        };
+        states.push(state);
+    }
+    let prefix_len = states
+        .iter()
+        .take_while(|state| **state == "committed_verified")
+        .count();
+    let valid = match status {
+        "ok" => !output.is_error && states.iter().all(|state| *state == "committed_verified"),
+        "failed_known_no_effect" => {
+            output.is_error
+                && prefix_len == 0
+                && states.first() == Some(&"unchanged_verified")
+                && states[1..].iter().all(|state| *state == "not_attempted")
+        }
+        "partial_effect" => {
+            output.is_error
+                && prefix_len > 0
+                && prefix_len < states.len()
+                && states[prefix_len..]
+                    .iter()
+                    .all(|state| matches!(*state, "unchanged_verified" | "not_attempted"))
+        }
+        "uncertain" => {
+            output.is_error
+                && prefix_len < states.len()
+                && states[prefix_len] == "uncertain"
+                && states[prefix_len + 1..]
+                    .iter()
+                    .all(|state| *state == "not_attempted")
+        }
+        _ => false,
+    };
+    if !valid {
+        return MultiFileResultClassification::Malformed;
+    }
+    match status {
+        "ok" => MultiFileResultClassification::Ok,
+        "failed_known_no_effect" => MultiFileResultClassification::FailedKnownNoEffect,
+        "partial_effect" => MultiFileResultClassification::PartialEffect,
+        "uncertain" => MultiFileResultClassification::Uncertain,
+        _ => MultiFileResultClassification::Malformed,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn multi_file_host_terminal_state(
+    classification: MultiFileResultClassification,
+) -> HostActivityState {
+    match classification {
+        MultiFileResultClassification::Ok => HostActivityState::ToolCompleted,
+        MultiFileResultClassification::InvalidTarget
+        | MultiFileResultClassification::PreconditionFailed
+        | MultiFileResultClassification::FailedKnownNoEffect => HostActivityState::ToolError,
+        MultiFileResultClassification::PartialEffect => HostActivityState::PartialEffect,
+        MultiFileResultClassification::Uncertain | MultiFileResultClassification::Malformed => {
+            HostActivityState::PossibleEffectUnknown
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn multi_file_edit_preparation_frontend_error(
+    error: RepositoryMultiFileEditPreparationError,
+) -> FrontendError {
+    match error {
+        RepositoryMultiFileEditPreparationError::InvalidInput { .. } => {
+            FrontendError::HostInvocationInvalidInput
+        }
+        RepositoryMultiFileEditPreparationError::InvalidTarget { .. } => {
+            FrontendError::HostInvocationInvalidTarget
+        }
+        RepositoryMultiFileEditPreparationError::PreconditionChanged { .. } => {
+            FrontendError::HostInvocationPreconditionChanged
+        }
+        RepositoryMultiFileEditPreparationError::Stale => FrontendError::HostInvocationStale,
+        RepositoryMultiFileEditPreparationError::ReviewTooLarge => {
+            FrontendError::HostInvocationReviewTooLarge
         }
     }
 }
@@ -2843,6 +3032,129 @@ async fn host_prepare_repo_patch(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+async fn host_prepare_repo_edit_files(
+    request: HostPrepareMultiFileEditRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedMultiFileEditResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let name = ToolName::new("repo.edit-files");
+    let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
+        Ok(definition) => definition,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let preparer = match current.repository_multi_file_edit_preparer.clone() {
+        Some(preparer) => preparer,
+        None => {
+            abort_host_patch_prepare(state.inner());
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+    };
+    let preflight_call = host_call(name.clone(), ToolInput(serde_json::json!({"targets": []})));
+    if let Err(rejection) = authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &preflight_call,
+    ) {
+        abort_host_patch_prepare(state.inner());
+        return Err(match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        });
+    }
+    let request = RepositoryMultiFileEditPreparationRequest {
+        targets: request
+            .targets
+            .into_iter()
+            .map(|target| RepositoryMultiFileEditPreparationTarget {
+                path: target.path,
+                replacements: target
+                    .replacements
+                    .into_iter()
+                    .map(|replacement| RepositoryMultiFileEditTextReplacement {
+                        expected_old_text: replacement.expected_old_text,
+                        replacement_text: replacement.replacement_text,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let preparation = match preparer.prepare(request).await {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(multi_file_edit_preparation_frontend_error(error));
+        }
+    };
+    let review = preparation.review().clone();
+    let call = host_call(name.clone(), preparation.tool_input().clone());
+    let ticket_id = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket_id = coordinator.next_ticket_id();
+        let ticket = PreparedHostInvocation::new(
+            ticket_id.clone(),
+            HostInvocationKind::RepoEditFiles,
+            name,
+            expected_definition,
+            call,
+            current.registry,
+            current.allowed_permissions,
+            current.generations,
+            current.repository_identity,
+            current.composition_identity,
+            PreparedHostPayload::MultiFileEdit {
+                preparation: Box::new(preparation),
+                preparer,
+            },
+        );
+        if coordinator.finalize_prepare(ticket).is_err() {
+            coordinator.abort_prepare();
+            return Err(FrontendError::HostInvocationBusy);
+        }
+        ticket_id
+    };
+    emit_host_activity(
+        &app,
+        HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: ticket_id.clone(),
+            tool: "repo.edit-files".to_owned(),
+            state: HostActivityState::Prepared,
+            result: None,
+            review: None,
+        },
+    );
+    Ok(PreparedMultiFileEditResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 async fn host_confirm_tool_invocation(
     request: HostConfirmRequest,
     app: AppHandle,
@@ -2915,6 +3227,19 @@ async fn host_confirm_tool_invocation(
             .finish_host();
         return Err(FrontendError::HostInvocationStale);
     }
+    if let PreparedHostPayload::MultiFileEdit { preparer, .. } = &ticket.payload
+        && current
+            .repository_multi_file_edit_preparer
+            .as_ref()
+            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
+    {
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
     if let PreparedHostPayload::Patch {
         preparation,
         preparer,
@@ -2927,6 +3252,19 @@ async fn host_confirm_tool_invocation(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         coordinator.finish_host();
         return Err(patch_preparation_frontend_error(error));
+    }
+    if let PreparedHostPayload::MultiFileEdit {
+        preparation,
+        preparer,
+    } = &ticket.payload
+        && let Err(error) = preparer.revalidate(preparation).await
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.finish_host();
+        return Err(multi_file_edit_preparation_frontend_error(error));
     }
     authorize_tool_dispatch(
         &current.registry,
@@ -2958,11 +3296,23 @@ async fn host_confirm_tool_invocation(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         coordinator.next_invocation_id()
     };
+    let multi_file_target_order = match &ticket.payload {
+        PreparedHostPayload::MultiFileEdit { preparation, .. } => Some(
+            preparation
+                .review()
+                .targets()
+                .iter()
+                .map(|target| target.path().to_owned())
+                .collect(),
+        ),
+        _ => None,
+    };
     let review = match &ticket.payload {
         PreparedHostPayload::Branch { review } => {
             Some(HostInvocationReview::Branch(review.clone()))
         }
         PreparedHostPayload::Patch { .. } => None,
+        PreparedHostPayload::MultiFileEdit { .. } => None,
     };
     emit_host_activity(
         &app,
@@ -2985,6 +3335,7 @@ async fn host_confirm_tool_invocation(
         invocation_id.clone(),
         ticket.repository_identity,
         ticket.generations,
+        multi_file_target_order,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -3011,6 +3362,7 @@ fn host_cancel_tool_invocation(
             invocation_id: request.ticket_id,
             tool: match kind {
                 HostInvocationKind::RepoPatch => "repo.patch".to_owned(),
+                HostInvocationKind::RepoEditFiles => "repo.edit-files".to_owned(),
                 _ => REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
             },
             state: HostActivityState::CancelledBeforeStart,
@@ -5588,6 +5940,7 @@ fn empty_composition_metadata() -> DesktopToolComposition {
         tools: Vec::new(),
         unavailable: Vec::new(),
         repository_patch_preparer: None,
+        repository_multi_file_edit_preparer: None,
     }
 }
 
@@ -6459,6 +6812,7 @@ fn main() -> ExitCode {
             host_invoke_read,
             host_prepare_repo_create_branch,
             host_prepare_repo_patch,
+            host_prepare_repo_edit_files,
             host_confirm_tool_invocation,
             host_cancel_tool_invocation
         ])
@@ -6513,18 +6867,19 @@ mod tests {
         HardShutdownOutcome, HostActivityEvent, HostActivityState, HostInvocationCoordinator,
         HostInvocationDescriptor, HostInvocationUnavailableReason, LlamaCppReadinessProbe,
         MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
-        ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
-        Preferences, PreferencesWarning, PreparedHostInvocation, PreparedHostPayload,
-        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
-        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
-        TerminalOwnership, activity_event, activity_event_with_composition, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, branch_result_classification, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
-        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
-        current_host_generation_tuple, desktop_repository_snapshot,
+        ModelConfigurationPresentation, MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY,
+        PendingConnectedPublication, Preferences, PreferencesWarning, PreparedHostInvocation,
+        PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
+        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
+        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
+        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
+        SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
+        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        branch_result_classification, classify_repository_multi_file_output,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
+        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
+        current_app_status, current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
@@ -6555,7 +6910,9 @@ mod tests {
     use rah_tools::{
         RepositoryBranchCreationAuthority, RepositoryCommitTool,
         RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
-        RepositoryFileRenameAuthority, RepositoryPatchResultClassification, ToolContext,
+        RepositoryFileRenameAuthority, RepositoryMultiFileEditPreparationRequest,
+        RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditPreparer,
+        RepositoryMultiFileEditTextReplacement, RepositoryPatchResultClassification, ToolContext,
         classify_repository_patch_output,
     };
     use serde_json::Value;
@@ -9072,10 +9429,13 @@ mod tests {
         {
             return Err("repo.patch was not connected-current HostExplicit eligible".to_owned());
         }
-        let deferred = find_tool("repo.edit-files")
-            .ok_or_else(|| "repo.edit-files was not registered as deferred".to_owned())?;
-        if deferred.host_invocation.eligible {
-            return Err("repo.edit-files was incorrectly host eligible".to_owned());
+        let multi_file_tool = find_tool("repo.edit-files").ok_or_else(|| {
+            "repo.edit-files was not in the current Effective Authority".to_owned()
+        })?;
+        if !multi_file_tool.host_invocation.eligible
+            || multi_file_tool.host_invocation.kind != Some(HostInvocationKind::RepoEditFiles)
+        {
+            return Err("repo.edit-files was not HostExplicit eligible".to_owned());
         }
         let external_effective = connected_snapshot
             .effective_tools
@@ -10827,7 +11187,17 @@ mod tests {
         );
         assert!(composition.repository_patch_preparer.is_some());
         assert!(
-            host_descriptor(patch, true, true, true, false, true, CoordinatorState::Idle,).eligible
+            host_descriptor(
+                patch,
+                true,
+                true,
+                true,
+                false,
+                true,
+                false,
+                CoordinatorState::Idle,
+            )
+            .eligible
         );
     }
 
@@ -10898,6 +11268,177 @@ mod tests {
             before_temporary_count
         );
         coordinator.finish_host();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_multi_file_prepare_retains_shared_review_without_effect() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            RepositoryMultiFileEditPreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("shared multi-file preparer should construct"),
+        );
+        let before_tracked = fs::read(fixture.0.join("tracked.txt")).unwrap();
+        let before_nested = fs::read(fixture.0.join("nested/ordinary.txt")).unwrap();
+        let preparation = preparer
+            .prepare(RepositoryMultiFileEditPreparationRequest {
+                targets: vec![
+                    RepositoryMultiFileEditPreparationTarget {
+                        path: "nested/ordinary.txt".to_owned(),
+                        replacements: vec![RepositoryMultiFileEditTextReplacement {
+                            expected_old_text: "ordinary".to_owned(),
+                            replacement_text: "nested changed".to_owned(),
+                        }],
+                    },
+                    RepositoryMultiFileEditPreparationTarget {
+                        path: "tracked.txt".to_owned(),
+                        replacements: vec![RepositoryMultiFileEditTextReplacement {
+                            expected_old_text: "base".to_owned(),
+                            replacement_text: "tracked changed".to_owned(),
+                        }],
+                    },
+                ],
+            })
+            .await
+            .expect("shared multi-file preparation should succeed");
+        assert_eq!(preparation.review().target_count(), 2);
+        assert_eq!(
+            preparation
+                .review()
+                .targets()
+                .iter()
+                .map(|target| target.path())
+                .collect::<Vec<_>>(),
+            vec!["nested/ordinary.txt", "tracked.txt"]
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("tracked.txt")).unwrap(),
+            before_tracked
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("nested/ordinary.txt")).unwrap(),
+            before_nested
+        );
+
+        let repository = fixture.desktop_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&repository), None).expect("registry should build"),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("multi-file composition should build");
+        assert!(composition.repository_multi_file_edit_preparer.is_some());
+        let edit = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.edit-files")
+            .expect("repo.edit-files should be composed");
+        assert_eq!(
+            edit.host_invocation.kind,
+            Some(HostInvocationKind::RepoEditFiles)
+        );
+        assert!(
+            host_descriptor(
+                edit,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true,
+                CoordinatorState::Idle
+            )
+            .eligible
+        );
+    }
+
+    #[test]
+    fn multi_file_result_mapping_is_strict_and_preserves_all_six_classes() {
+        let paths = vec!["a.rs".to_owned(), "b.rs".to_owned()];
+        let output = |value: Value, is_error| ToolOutput {
+            content: vec![ToolContent::Json(value)],
+            is_error,
+        };
+        let effects = |states: &[&str]| {
+            serde_json::json!({
+                "status": "placeholder",
+                "effects": [
+                    {"path": "a.rs", "state": states[0]},
+                    {"path": "b.rs", "state": states[1]}
+                ]
+            })
+        };
+        assert_eq!(
+            classify_repository_multi_file_output(
+                &output(serde_json::json!({"status": "invalid_target"}), true),
+                &paths,
+            ),
+            MultiFileResultClassification::InvalidTarget
+        );
+        assert_eq!(
+            classify_repository_multi_file_output(
+                &output(serde_json::json!({"status": "precondition_failed"}), true),
+                &paths,
+            ),
+            MultiFileResultClassification::PreconditionFailed
+        );
+        let mut value = effects(&["committed_verified", "committed_verified"]);
+        value["status"] = serde_json::json!("ok");
+        assert_eq!(
+            classify_repository_multi_file_output(&output(value, false), &paths),
+            MultiFileResultClassification::Ok
+        );
+        let mut value = effects(&["unchanged_verified", "not_attempted"]);
+        value["status"] = serde_json::json!("failed_known_no_effect");
+        assert_eq!(
+            classify_repository_multi_file_output(&output(value, true), &paths),
+            MultiFileResultClassification::FailedKnownNoEffect
+        );
+        let mut value = effects(&["committed_verified", "not_attempted"]);
+        value["status"] = serde_json::json!("partial_effect");
+        assert_eq!(
+            classify_repository_multi_file_output(&output(value, true), &paths),
+            MultiFileResultClassification::PartialEffect
+        );
+        let mut value = effects(&["committed_verified", "uncertain"]);
+        value["status"] = serde_json::json!("uncertain");
+        assert_eq!(
+            classify_repository_multi_file_output(&output(value, true), &paths),
+            MultiFileResultClassification::Uncertain
+        );
+        let malformed = output(
+            serde_json::json!({
+                "status": "ok",
+                "effects": [{"path": "a.rs", "state": "committed_verified"},
+                             {"path": "wrong.rs", "state": "committed_verified"}]
+            }),
+            false,
+        );
+        assert_eq!(
+            classify_repository_multi_file_output(&malformed, &paths),
+            MultiFileResultClassification::Malformed
+        );
+        let redacted = output(
+            serde_json::json!({
+                "status": "partial_effect",
+                "effects": [
+                    {"path": "a.rs", "state": "committed_verified"},
+                    {"path": "b.rs", "state": "not_attempted"}
+                ]
+            }),
+            true,
+        );
+        let activity = HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: "host-explicit-test".to_owned(),
+            tool: "repo.edit-files".to_owned(),
+            state: HostActivityState::PartialEffect,
+            result: Some(redacted),
+            review: None,
+        };
+        let serialized = serde_json::to_string(&activity).unwrap();
+        assert!(!serialized.contains("OLD_SOURCE_SENTINEL"));
+        assert!(!serialized.contains("NEW_REPLACEMENT_SENTINEL"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12336,6 +12877,7 @@ mod tests {
             }],
             unavailable: Vec::new(),
             repository_patch_preparer: None,
+            repository_multi_file_edit_preparer: None,
         }
     }
 

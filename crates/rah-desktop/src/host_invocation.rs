@@ -9,7 +9,9 @@ use std::{
 
 use rah_protocol::{PermissionLevel, ToolCall, ToolDefinition, ToolInput, ToolName};
 use rah_tools::{
-    RepositoryPatchPreparation, RepositoryPatchPreparer, RepositoryPatchReview, ToolRegistry,
+    RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparer,
+    RepositoryMultiFileEditReview, RepositoryPatchPreparation, RepositoryPatchPreparer,
+    RepositoryPatchReview, ToolRegistry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +31,7 @@ pub(crate) enum HostInvocationKind {
     RepoDiffStaged {},
     RepoCreateBranch,
     RepoPatch,
+    RepoEditFiles,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -97,6 +100,26 @@ pub(crate) struct HostPreparePatchRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostPrepareMultiFileEditRequest {
+    pub targets: Vec<HostPrepareMultiFileEditTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostPrepareMultiFileEditTarget {
+    pub path: String,
+    pub replacements: Vec<HostPrepareMultiFileEditReplacement>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HostPrepareMultiFileEditReplacement {
+    pub expected_old_text: String,
+    pub replacement_text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HostConfirmRequest {
     pub ticket_id: String,
@@ -124,6 +147,13 @@ pub(crate) struct PreparedPatchResponse {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedMultiFileEditResponse {
+    pub ticket_id: String,
+    pub review: RepositoryMultiFileEditReview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BranchReview {
     pub operation: &'static str,
     pub branch: String,
@@ -147,6 +177,10 @@ pub(crate) enum PreparedHostPayload {
     Patch {
         preparation: Box<RepositoryPatchPreparation>,
         preparer: Arc<RepositoryPatchPreparer>,
+    },
+    MultiFileEdit {
+        preparation: Box<RepositoryMultiFileEditPreparation>,
+        preparer: Arc<RepositoryMultiFileEditPreparer>,
     },
 }
 
@@ -427,10 +461,12 @@ pub(crate) fn host_kind(name: &str) -> Option<HostInvocationKind> {
         "repo.diff-staged" => HostInvocationKind::RepoDiffStaged {},
         "repo.create-branch" => HostInvocationKind::RepoCreateBranch,
         "repo.patch" => HostInvocationKind::RepoPatch,
+        "repo.edit-files" => HostInvocationKind::RepoEditFiles,
         _ => return None,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn host_descriptor(
     entry: &EffectiveToolEntry,
     connected_current: bool,
@@ -438,6 +474,7 @@ pub(crate) fn host_descriptor(
     permission_allowed: bool,
     branch_authority_present: bool,
     patch_preparer_present: bool,
+    multi_file_edit_preparer_present: bool,
     coordinator_state: CoordinatorState,
 ) -> HostInvocationDescriptor {
     let kind = host_kind(&entry.public_tool_name);
@@ -460,6 +497,7 @@ pub(crate) fn host_descriptor(
         HostInvocationUnavailableReason::PermissionDenied
     } else if (entry.public_tool_name == "repo.create-branch" && !branch_authority_present)
         || (entry.public_tool_name == "repo.patch" && !patch_preparer_present)
+        || (entry.public_tool_name == "repo.edit-files" && !multi_file_edit_preparer_present)
     {
         HostInvocationUnavailableReason::AuthorityNotGranted
     } else {
@@ -536,6 +574,7 @@ mod tests {
             "repo.diff-staged",
             "repo.create-branch",
             "repo.patch",
+            "repo.edit-files",
         ];
         for name in supported {
             assert!(host_kind(name).is_some());
@@ -543,7 +582,6 @@ mod tests {
         for name in [
             "repo.commit",
             "repo.create-file",
-            "repo.edit-files",
             "repo.delete-file",
             "repo.rename-file",
             "repo.create-directory",
@@ -581,6 +619,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             CoordinatorState::Idle,
         );
         assert!(!unavailable.eligible);
@@ -595,6 +634,53 @@ mod tests {
                 true,
                 true,
                 false,
+                true,
+                false,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+    }
+
+    #[test]
+    fn multi_file_host_descriptor_requires_the_retained_preparer() {
+        let entry = EffectiveToolEntry {
+            public_tool_name: "repo.edit-files".to_owned(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: crate::effective_authority::EffectClass::RepositoryMutation,
+            authority_category:
+                crate::effective_authority::AuthorityCategory::RepositoryContentMutation,
+            permission: PermissionLevel::Execute,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        };
+        assert!(
+            !host_descriptor(
+                &entry,
+                true,
+                true,
+                true,
+                false,
+                true,
+                false,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+        assert!(
+            host_descriptor(
+                &entry,
+                true,
+                true,
+                true,
+                false,
+                true,
                 true,
                 CoordinatorState::Idle,
             )
@@ -776,12 +862,31 @@ mod tests {
         assert_eq!(patch.path, "src/lib.rs");
         assert_eq!(patch.expected_old_text, "old");
         assert_eq!(patch.replacement_text, "new");
+        let multi = serde_json::from_value::<HostPrepareMultiFileEditRequest>(serde_json::json!({
+            "targets": [{
+                "path": "src/lib.rs",
+                "replacements": [{
+                    "expectedOldText": "old",
+                    "replacementText": "new"
+                }]
+            }]
+        }))
+        .expect("typed multi-file request should deserialize");
+        assert_eq!(multi.targets.len(), 1);
+        assert_eq!(multi.targets[0].replacements[0].expected_old_text, "old");
         for field in [
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","hash":"x"}),
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","toolName":"repo.patch"}),
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","input":{}}),
         ] {
             assert!(serde_json::from_value::<HostPreparePatchRequest>(field).is_err());
+        }
+        for field in [
+            serde_json::json!({"targets": [], "toolName": "repo.edit-files"}),
+            serde_json::json!({"targets": [{"path":"a","replacements":[],"hash":"x"}]}),
+            serde_json::json!({"targets": [{"path":"a","replacements":[{"expectedOldText":"b","replacementText":"c","order":1}]}]}),
+        ] {
+            assert!(serde_json::from_value::<HostPrepareMultiFileEditRequest>(field).is_err());
         }
     }
 

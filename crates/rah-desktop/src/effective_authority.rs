@@ -1,7 +1,9 @@
 #![cfg(target_os = "windows")]
 
 use rah_protocol::PermissionLevel;
-use rah_tools::{RepositoryPatchPreparer, ToolRegistry, TrustedStaticProfile};
+use rah_tools::{
+    RepositoryMultiFileEditPreparer, RepositoryPatchPreparer, ToolRegistry, TrustedStaticProfile,
+};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -221,6 +223,7 @@ pub(crate) struct DesktopToolComposition {
     pub tools: Vec<EffectiveToolEntry>,
     pub unavailable: Vec<UnavailableCapability>,
     pub repository_patch_preparer: Option<Arc<RepositoryPatchPreparer>>,
+    pub repository_multi_file_edit_preparer: Option<Arc<RepositoryMultiFileEditPreparer>>,
 }
 
 /// Builds only bounded presentation metadata from the validated host profile.
@@ -351,6 +354,18 @@ pub(crate) fn compose(
                 .ok()
                 .map(Arc::new)
         });
+    let repository_multi_file_edit_preparer = repository
+        .filter(|_| {
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.edit-files")
+        })
+        .and_then(|repository| {
+            RepositoryMultiFileEditPreparer::new(&repository.git_executable, &repository.root)
+                .ok()
+                .map(Arc::new)
+        });
     let mut tools = Vec::new();
     let mut matched_external = vec![false; external_descriptors.len()];
     for definition in registry.definitions() {
@@ -403,6 +418,7 @@ pub(crate) fn compose(
                     false,
                     repository.is_some_and(|value| value.branch_creation_authority.is_some()),
                     repository_patch_preparer.is_some(),
+                    repository_multi_file_edit_preparer.is_some(),
                     CoordinatorState::Idle,
                 ),
             }
@@ -509,6 +525,7 @@ pub(crate) fn compose(
         tools,
         unavailable,
         repository_patch_preparer,
+        repository_multi_file_edit_preparer,
     })
 }
 
