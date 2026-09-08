@@ -2417,6 +2417,22 @@ fn emit_host_activity(app: &AppHandle, event: HostActivityEvent) {
 }
 
 #[cfg(target_os = "windows")]
+fn prepared_host_activity(
+    activity_id: String,
+    tool: String,
+    review: Option<HostInvocationReview>,
+) -> HostActivityEvent {
+    HostActivityEvent {
+        source: "host_explicit",
+        invocation_id: activity_id,
+        tool,
+        state: HostActivityState::Prepared,
+        result: None,
+        review,
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn host_call(name: ToolName, input: ToolInput) -> ToolCall {
     ToolCall {
         id: ToolCallId::new(),
@@ -2729,6 +2745,7 @@ fn host_prepare_repo_create_branch(
         return Err(FrontendError::HostInvocationNotEligible);
     }
     let ticket_id = coordinator.next_ticket_id();
+    let activity_id = coordinator.next_invocation_id();
     let review = BranchReview {
         operation: "Create local branch",
         branch: request.name,
@@ -2740,6 +2757,7 @@ fn host_prepare_repo_create_branch(
     };
     let ticket = PreparedHostInvocation::new(
         ticket_id.clone(),
+        activity_id.clone(),
         HostInvocationKind::RepoCreateBranch,
         name,
         expected_definition,
@@ -2758,14 +2776,11 @@ fn host_prepare_repo_create_branch(
         .map_err(|_| FrontendError::HostInvocationBusy)?;
     emit_host_activity(
         &app,
-        HostActivityEvent {
-            source: "host_explicit",
-            invocation_id: ticket_id.clone(),
-            tool: REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
-            state: HostActivityState::Prepared,
-            result: None,
-            review: Some(HostInvocationReview::Branch(review.clone())),
-        },
+        prepared_host_activity(
+            activity_id,
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
+            Some(HostInvocationReview::Branch(review.clone())),
+        ),
     );
     Ok(PreparedBranchResponse { ticket_id, review })
 }
@@ -3013,14 +3028,16 @@ async fn host_prepare_repo_patch(
     };
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
-    let (ticket_id, ticket) = {
+    let (ticket_id, activity_id, ticket) = {
         let mut coordinator = state
             .host_invocation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
         let ticket = PreparedHostInvocation::new(
             ticket_id.clone(),
+            activity_id.clone(),
             HostInvocationKind::RepoPatch,
             name,
             expected_definition,
@@ -3039,18 +3056,11 @@ async fn host_prepare_repo_patch(
             coordinator.abort_prepare();
             return Err(FrontendError::HostInvocationBusy);
         }
-        (ticket_id, review)
+        (ticket_id, activity_id, review)
     };
     emit_host_activity(
         &app,
-        HostActivityEvent {
-            source: "host_explicit",
-            invocation_id: ticket_id.clone(),
-            tool: "repo.patch".to_owned(),
-            state: HostActivityState::Prepared,
-            result: None,
-            review: None,
-        },
+        prepared_host_activity(activity_id, "repo.patch".to_owned(), None),
     );
     Ok(PreparedPatchResponse {
         ticket_id,
@@ -3139,14 +3149,16 @@ async fn host_prepare_repo_edit_files(
     };
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
-    let ticket_id = {
+    let (ticket_id, activity_id) = {
         let mut coordinator = state
             .host_invocation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
         let ticket = PreparedHostInvocation::new(
             ticket_id.clone(),
+            activity_id.clone(),
             HostInvocationKind::RepoEditFiles,
             name,
             expected_definition,
@@ -3165,18 +3177,11 @@ async fn host_prepare_repo_edit_files(
             coordinator.abort_prepare();
             return Err(FrontendError::HostInvocationBusy);
         }
-        ticket_id
+        (ticket_id, activity_id)
     };
     emit_host_activity(
         &app,
-        HostActivityEvent {
-            source: "host_explicit",
-            invocation_id: ticket_id.clone(),
-            tool: "repo.edit-files".to_owned(),
-            state: HostActivityState::Prepared,
-            result: None,
-            review: None,
-        },
+        prepared_host_activity(activity_id, "repo.edit-files".to_owned(), None),
     );
     Ok(PreparedMultiFileEditResponse { ticket_id, review })
 }
@@ -3316,13 +3321,7 @@ async fn host_confirm_tool_invocation(
     if repository_bound_authoring_kind(ticket.kind) {
         invalidate_repository_commit_review(state.inner()).await;
     }
-    let invocation_id = {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.next_invocation_id()
-    };
+    let invocation_id = ticket.activity_id.clone();
     let multi_file_target_order = match &ticket.payload {
         PreparedHostPayload::MultiFileEdit { preparation, .. } => Some(
             preparation
@@ -3379,14 +3378,14 @@ fn host_cancel_tool_invocation(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     coordinator.reap_expired(std::time::Instant::now());
-    let kind = coordinator
+    let (kind, activity_id) = coordinator
         .cancel(&request.ticket_id)
         .map_err(|_| FrontendError::HostInvocationTicketInvalid)?;
     emit_host_activity(
         &app,
         HostActivityEvent {
             source: "host_explicit",
-            invocation_id: request.ticket_id,
+            invocation_id: activity_id,
             tool: match kind {
                 HostInvocationKind::RepoPatch => "repo.patch".to_owned(),
                 HostInvocationKind::RepoEditFiles => "repo.edit-files".to_owned(),
@@ -4272,11 +4271,17 @@ async fn desktop_repository_snapshot_with_review(
         .await
         .map_err(|_| RepositoryObservationStage::WorktreeDiffExecution)?;
     let (staged_diff, review) = if let Some(control) = commit_control {
-        let (presentation, review) = control
-            .review_current_staged_snapshot()
-            .await
-            .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?;
-        (presentation, review)
+        match control.review_current_staged_snapshot().await {
+            Ok((presentation, review)) => (presentation, review),
+            Err(_) => (
+                repository
+                    .staged_diff
+                    .execute(input, ToolContext::default())
+                    .await
+                    .map_err(|_| RepositoryObservationStage::StagedDiffExecution)?,
+                None,
+            ),
+        }
     } else {
         (
             repository
@@ -6880,8 +6885,10 @@ mod tests {
         AuthorityCategory, EffectClass, EffectiveToolEntry, SnapshotStatus,
     };
     use super::host_invocation::{
-        CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
-        HostPrepareBranchRequest, HostPreparePatchRequest, HostReadRequest,
+        BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
+        HostInvocationReview, HostPrepareBranchRequest, HostPrepareMultiFileEditReplacement,
+        HostPrepareMultiFileEditRequest, HostPrepareMultiFileEditTarget, HostPreparePatchRequest,
+        HostReadRequest,
     };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -6900,28 +6907,31 @@ mod tests {
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
         REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
         RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
-        SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
-        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        branch_result_classification, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
-        current_app_status, current_host_generation_tuple, desktop_repository_snapshot,
+        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
+        activity_event, activity_event_with_composition, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, branch_result_classification,
+        classify_repository_multi_file_output, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
+        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
+        current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
-        frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
-        host_descriptor, host_invoke_read, host_prepare_repo_create_branch,
-        host_prepare_repo_patch, install_repository_workflow, invalidate_repository_commit_review,
+        frontend_error, get_effective_authority_snapshot, host_cancel_tool_invocation,
+        host_confirm_tool_invocation, host_descriptor, host_invoke_read,
+        host_prepare_repo_create_branch, host_prepare_repo_edit_files, host_prepare_repo_patch,
+        install_repository_workflow, invalidate_repository_commit_review,
         model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
-        publish_connected_provider_state, publish_readiness_result,
+        prepared_host_activity, publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot,
-        repository_tool_authority, request_connect, resolve_codex_executable,
-        resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
-        revoke_repository_commit_context, same_arc, save_trusted_profile_preference,
-        selected_git_executable, set_commit_identity, uncertain_repository_effect_pending,
+        repository_tool_authority, request_connect, reset_startup_activation_counters,
+        resolve_codex_executable, resolve_prepare_and_connect_codex,
+        restore_trusted_profile_selection, revoke_repository_commit_context, same_arc,
+        save_trusted_profile_preference, selected_git_executable, set_commit_identity,
+        startup_activation_snapshot, uncertain_repository_effect_pending,
         uncertain_repository_effect_requires_refresh, validate_prompt,
     };
     use futures::StreamExt;
@@ -6940,13 +6950,15 @@ mod tests {
         RepositoryFileRenameAuthority, RepositoryMultiFileEditPreparationRequest,
         RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditPreparer,
         RepositoryMultiFileEditTextReplacement, RepositoryPatchResultClassification, ToolContext,
-        classify_repository_patch_output,
+        classify_repository_patch_output, clear_live_test_multi_file_native_attempts,
+        clear_live_test_multi_file_tool_executions, live_test_multi_file_native_attempts,
+        live_test_multi_file_tool_executions,
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::os::windows::io::AsRawHandle;
     use std::{
-        collections::HashMap,
+        collections::{BTreeSet, HashMap},
         ffi::OsString,
         fs,
         io::{Read, Write},
@@ -8623,6 +8635,7 @@ mod tests {
         tracking: String,
         local_heads: String,
         tags_and_remotes: String,
+        all_refs: String,
     }
 
     fn live_git_text(git: &Path, root: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -8694,7 +8707,58 @@ mod tests {
                     "refs/remotes",
                 ],
             )?,
+            all_refs: live_git_text(
+                git,
+                root,
+                &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+            )?,
         })
+    }
+
+    fn live_git_exit_success(git: &Path, root: &Path, arguments: &[&str]) -> Result<bool, String> {
+        let output = Command::new(git)
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("Git status command failed to start: {error}"))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            code => Err(format!("Git status command returned {code:?}")),
+        }
+    }
+
+    fn live_directory_entries(root: &Path) -> Result<BTreeSet<String>, String> {
+        fs::read_dir(root)
+            .map_err(|error| format!("repository directory observation failed: {error}"))?
+            .map(|entry| {
+                entry
+                    .map_err(|error| format!("repository directory entry failed: {error}"))
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    fn live_multi_file_temporary_count(root: &Path) -> Result<usize, String> {
+        let mut count = 0;
+        for directory in [root.to_owned(), root.join("nested")] {
+            if !directory.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(directory)
+                .map_err(|error| format!("temporary-artifact observation failed: {error}"))?
+            {
+                let name = entry
+                    .map_err(|error| format!("temporary directory entry failed: {error}"))?
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned();
+                if name.starts_with(".rah-repo-edit-files-") && name.ends_with(".tmp") {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
     }
 
     fn live_target_exists(git: &Path, root: &Path, branch: &str) -> Result<bool, String> {
@@ -9854,6 +9918,705 @@ mod tests {
         app.unlisten(refresh_events.1);
         shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
         println!("RAH_DESKTOP_PATCH_LIVE_OK");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the certified Windows Codex live gate"]
+    async fn windows_live_desktop_hostexplicit_multi_file_edit() -> Result<(), String> {
+        let fixture = TestRepository::new();
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+        fs::remove_dir_all(fixture.0.join(".git"))
+            .map_err(|error| format!("placeholder Git metadata removal failed: {error}"))?;
+        fs::remove_file(fixture.0.join("inside.txt"))
+            .map_err(|error| format!("placeholder file removal failed: {error}"))?;
+
+        type Replacement = (&'static str, &'static str);
+        type Specification = (
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static [Replacement],
+        );
+        let specifications: [Specification; 4] = [
+            (
+                "a.txt",
+                "A_PREIMAGE\n",
+                "A_POSTIMAGE\n",
+                &[("A_PREIMAGE", "A_POSTIMAGE")],
+            ),
+            (
+                "b.txt",
+                "B_PREIMAGE_1\nB_PREIMAGE_2\n",
+                "B_POSTIMAGE_1\nB_POSTIMAGE_2\n",
+                &[
+                    ("B_PREIMAGE_1", "B_POSTIMAGE_1"),
+                    ("B_PREIMAGE_2", "B_POSTIMAGE_2"),
+                ],
+            ),
+            (
+                "c.txt",
+                "C_PREIMAGE\n",
+                "C_POSTIMAGE\n",
+                &[("C_PREIMAGE", "C_POSTIMAGE")],
+            ),
+            (
+                "d.txt",
+                "D_PREIMAGE\n",
+                "D_POSTIMAGE\n",
+                &[("D_PREIMAGE", "D_POSTIMAGE")],
+            ),
+        ];
+        let run_git = |arguments: &[&str]| -> Result<(), String> {
+            let status = Command::new(&git)
+                .args(arguments)
+                .current_dir(&fixture.0)
+                .status()
+                .map_err(|error| format!("Git fixture command failed to start: {error}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Git fixture command failed: {arguments:?}"))
+            }
+        };
+        run_git(&["init", "--quiet"])?;
+        run_git(&["config", "user.email", "rah-multi-file@example.invalid"])?;
+        run_git(&["config", "user.name", "RAH Multi-File Live Test"])?;
+        for (path, preimage, _, _) in specifications {
+            fs::write(fixture.0.join(path), preimage.as_bytes())
+                .map_err(|error| format!("fixture target setup failed for {path}: {error}"))?;
+        }
+        run_git(&["add", "a.txt", "b.txt", "c.txt", "d.txt"])?;
+        run_git(&[
+            "commit",
+            "--quiet",
+            "-m",
+            "multi-file HostExplicit preimage",
+        ])?;
+
+        let target_paths = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        let caller_order = ["d.txt", "b.txt", "a.txt", "c.txt"];
+        let before_directory_entries = live_directory_entries(&fixture.0)?;
+        let before_index = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("Git index baseline read failed: {error}"))?;
+        let before_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let tracked = live_git_text(
+            &git,
+            &fixture.0,
+            &[
+                "ls-files",
+                "--error-unmatch",
+                "a.txt",
+                "b.txt",
+                "c.txt",
+                "d.txt",
+            ],
+        )?;
+        if tracked.lines().collect::<BTreeSet<_>>()
+            != target_paths.iter().copied().collect::<BTreeSet<_>>()
+            || live_git_text(&git, &fixture.0, &["ls-tree", "-r", "--name-only", "HEAD"])?
+                .lines()
+                .collect::<BTreeSet<_>>()
+                != target_paths.iter().copied().collect::<BTreeSet<_>>()
+            || !live_git_exit_success(&git, &fixture.0, &["diff", "--quiet"])?
+            || !live_git_exit_success(&git, &fixture.0, &["diff", "--cached", "--quiet"])?
+            || !before_git.status.is_empty()
+            || before_git.index_semantics.lines().count() != 4
+            || live_multi_file_temporary_count(&fixture.0)? != 0
+        {
+            return Err("multi-file fixture was not clean and fully tracked".to_owned());
+        }
+        let before_targets = specifications
+            .iter()
+            .map(|(path, preimage, postimage, _)| {
+                let bytes = fs::read(fixture.0.join(path))
+                    .map_err(|error| format!("target baseline read failed for {path}: {error}"))?;
+                if bytes != preimage.as_bytes() {
+                    return Err(format!("target preimage mismatch for {path}"));
+                }
+                Ok((
+                    (*path).to_owned(),
+                    bytes.clone(),
+                    live_sha256(&bytes),
+                    bytes.len(),
+                    live_file_identity(&fixture.0.join(path))?,
+                    postimage.as_bytes().to_vec(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let before_target_identities = before_targets
+            .iter()
+            .map(|(_, _, _, _, identity, _)| *identity)
+            .collect::<Vec<_>>();
+
+        clear_live_test_multi_file_tool_executions(&fixture.0);
+        clear_live_test_multi_file_native_attempts(&fixture.0);
+        let branch_authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            None,
+            None,
+            Some(branch_authority),
+        )
+        .map_err(|error| format!("Desktop repository construction failed: {error:?}"))?;
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let refresh_events = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+        let chat_events = listen_for_test_event(app.handle(), "chat_event");
+        let model_activity = listen_for_test_event(app.handle(), "activity_event");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        set_commit_identity(
+            app.handle().clone(),
+            app.state(),
+            "RAH Multi-File HostExplicit Live Test".to_owned(),
+            "rah-multi-file@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit identity setup failed: {error:?}"))?;
+        connect_codex(app.state())
+            .await
+            .map_err(|error| format!("production Desktop connection failed: {error:?}"))?;
+
+        let connected_snapshot = get_effective_authority_snapshot(app.state());
+        let eligible = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| tool.host_invocation.eligible)
+            .map(|tool| tool.public_tool_name.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_eligible = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let multi_file_tool = connected_snapshot
+            .effective_tools
+            .iter()
+            .find(|tool| tool.public_tool_name == "repo.edit-files");
+        let external_effective = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+            })
+            .count();
+        let multi_file_eligible = multi_file_tool.is_some_and(|tool| {
+            tool.host_invocation.eligible
+                && tool.host_invocation.kind == Some(HostInvocationKind::RepoEditFiles)
+                && tool.effect_class == EffectClass::RepositoryMutation
+                && tool.authority_category == AuthorityCategory::RepositoryContentMutation
+                && tool.permission == PermissionLevel::Execute
+                && tool.repository_bound
+        });
+        let provider_activation_present = app
+            .state::<DesktopAppState>()
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let trusted_profile_present = app
+            .state::<DesktopAppState>()
+            .trusted_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let coordinator_state = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state();
+        let chat_state = *app
+            .state::<DesktopAppState>()
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active_chat_present = app
+            .state::<DesktopAppState>()
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if connected_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || eligible != expected_eligible
+            || !multi_file_eligible
+            || external_effective != 0
+            || connected_snapshot.configured.configured_provider_count != 0
+            || provider_activation_present
+            || trusted_profile_present
+            || coordinator_state != CoordinatorState::Idle
+            || chat_state != ChatState::Idle
+            || active_chat_present
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err(format!(
+                "connected-current baseline mismatch: status={:?} eligible={eligible:?} expected={expected_eligible:?} multi_file_eligible={multi_file_eligible} external={external_effective} configured_providers={} provider_activation={provider_activation_present} trusted_profile={trusted_profile_present} coordinator={coordinator_state:?} chat={chat_state:?} active_chat={active_chat_present}",
+                connected_snapshot.status, connected_snapshot.configured.configured_provider_count
+            ));
+        }
+        let before_generations =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let before_namespace = app.state::<DesktopAppState>().persistence_namespace();
+        if before_generations[0] == 0 || before_namespace.is_empty() {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err(
+                "connected-current generation or persistence baseline was empty".to_owned(),
+            );
+        }
+        reset_startup_activation_counters();
+        let operation_baseline = startup_activation_snapshot();
+        if operation_baseline != StartupActivationCounters::default() {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err(format!(
+                "operation baseline was not zero: {operation_baseline:?}"
+            ));
+        }
+
+        let request = HostPrepareMultiFileEditRequest {
+            targets: caller_order
+                .iter()
+                .map(|path| {
+                    let (_, _, _, replacements) = specifications
+                        .iter()
+                        .find(|(candidate, _, _, _)| candidate == path)
+                        .expect("caller target has a specification");
+                    HostPrepareMultiFileEditTarget {
+                        path: (*path).to_owned(),
+                        replacements: replacements
+                            .iter()
+                            .map(|(old, new)| HostPrepareMultiFileEditReplacement {
+                                expected_old_text: (*old).to_owned(),
+                                replacement_text: (*new).to_owned(),
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
+        };
+        let prepared = host_prepare_repo_edit_files(request, app.handle().clone(), app.state())
+            .await
+            .map_err(|error| format!("production repo.edit-files Prepare failed: {error:?}"))?;
+        let prepare_events = wait_for_test_events(&host_activity.0, 1).await?;
+        require_host_event(&prepare_events[0], "prepared", "repo.edit-files")?;
+        let prepare_activity = serde_json::to_string(&prepare_events[0])
+            .map_err(|error| format!("Prepare activity serialization failed: {error}"))?;
+        let activity_id = prepare_events[0]
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Prepare activity omitted invocationId".to_owned())?;
+        if prepare_events[0].get("review").is_some()
+            || prepare_events[0].get("result").is_some()
+            || prepare_activity.contains(&prepared.ticket_id)
+            || prepare_activity.contains("A_PREIMAGE")
+            || prepare_activity.contains("A_POSTIMAGE")
+            || prepare_activity.contains("expectedOldText")
+            || prepare_activity.contains("replacementText")
+            || prepare_activity.contains(&fixture.0.display().to_string())
+            || activity_id == prepared.ticket_id
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err(format!(
+                "Prepare activity redaction mismatch: ticket_id_present={} source_material_present={} raw_fields_present={} absolute_fixture_path_present={}",
+                prepare_activity.contains(&prepared.ticket_id),
+                prepare_activity.contains("A_PREIMAGE") || prepare_activity.contains("A_POSTIMAGE"),
+                prepare_activity.contains("expectedOldText")
+                    || prepare_activity.contains("replacementText"),
+                prepare_activity.contains(&fixture.0.display().to_string())
+            ));
+        }
+        if prepared.ticket_id.is_empty()
+            || prepared.ticket_id.len() > 256
+            || prepared.ticket_id == "repo.edit-files"
+            || prepared.review.operation() != "repo.edit-files"
+            || prepared.review.target_count() != 4
+            || prepared.review.replacement_count() != 5
+            || prepared
+                .review
+                .targets()
+                .iter()
+                .map(|target| target.path())
+                .collect::<Vec<_>>()
+                != target_paths
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("Prepare review or ticket contract was incomplete".to_owned());
+        }
+        if prepared.review.matching()
+            != "all literal matches resolve exactly once against the same original snapshot; duplicate, overlap, and no-op replacements are rejected"
+            || prepared.review.unchanged_context()
+                != "unchanged surrounding context omitted; complete changed material is retained"
+            || prepared.review.intended_effect()
+                != "replace complete postimages of the reviewed clean tracked files in host order"
+            || prepared.review.non_atomic_warning()
+                != "repo.edit-files is non-atomic; targets have independent native commit points"
+            || prepared.review.non_effects().len() != 4
+            || !prepared
+                .review
+                .non_effects()
+                .iter()
+                .any(|effect| effect.contains("no Tool execution or native replacement"))
+            || !prepared
+                .review
+                .non_effects()
+                .iter()
+                .any(|effect| effect.contains("Stage, Unstage, and Commit"))
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err(
+                "Prepare review semantics or protected non-effects were incomplete".to_owned(),
+            );
+        }
+        for (ordinal, (path, preimage, pre_sha256, pre_len, _, postimage)) in
+            before_targets.iter().enumerate()
+        {
+            let review_target = &prepared.review.targets()[ordinal];
+            let expected = specifications
+                .iter()
+                .find(|(candidate, _, _, _)| candidate == path)
+                .expect("review target has a specification");
+            if review_target.ordinal() != ordinal
+                || review_target.path() != path
+                || review_target.target_identity().len() != 64
+                || review_target.replacement_count() != expected.3.len()
+                || review_target.preimage_sha256() != pre_sha256
+                || review_target.preimage_byte_length() != *pre_len
+                || review_target.postimage_sha256() != live_sha256(postimage)
+                || review_target.postimage_byte_length() != postimage.len()
+                || review_target.changed_ranges().len() != expected.3.len()
+            {
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                return Err(format!("Prepare review evidence was incomplete for {path}"));
+            }
+            for (range, (old, new)) in review_target.changed_ranges().iter().zip(expected.3) {
+                let start = String::from_utf8(preimage.clone())
+                    .expect("fixture preimage is UTF-8")
+                    .find(old)
+                    .expect("replacement old text is present");
+                if range.start() != start
+                    || range.end() != start + old.len()
+                    || range.length() != old.len()
+                    || range.expected_old_text_escaped() != *old
+                    || range.replacement_text_escaped() != *new
+                {
+                    shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                    return Err(format!(
+                        "Prepare changed range evidence was incomplete for {path}"
+                    ));
+                }
+            }
+        }
+        if live_directory_entries(&fixture.0)? != before_directory_entries
+            || fs::read(fixture.0.join(".git").join("index"))
+                .map_err(|error| format!("Git index Prepare read failed: {error}"))?
+                != before_index
+            || live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")? != before_git
+            || live_multi_file_temporary_count(&fixture.0)? != 0
+            || live_test_multi_file_tool_executions(&fixture.0) != 0
+            || (0..4).any(|index| live_test_multi_file_native_attempts(&fixture.0, index) != 0)
+            || before_targets
+                .iter()
+                .enumerate()
+                .any(|(index, (path, bytes, _, _, _, _))| {
+                    fs::read(fixture.0.join(path)).ok().as_deref() != Some(bytes.as_slice())
+                        || live_file_identity(&fixture.0.join(path)).ok()
+                            != Some(before_target_identities[index])
+                })
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_namespace
+            || app
+                .state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                != CoordinatorState::HostPrepared
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("Prepare was not zero effect".to_owned());
+        }
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_PREPARE_TOOL_EXECUTIONS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_PREPARE_NATIVE_ATTEMPTS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_PREPARED=1");
+
+        let ticket_id = prepared.ticket_id.clone();
+        let confirmed = host_confirm_tool_invocation(
+            HostConfirmRequest { ticket_id },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.edit-files Confirm failed: {error:?}"))?;
+        if confirmed.invocation_id.is_empty() || confirmed.invocation_id != activity_id {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("Confirm did not preserve the separate activity correlation ID".to_owned());
+        }
+        let events = wait_for_test_events(&host_activity.0, 3).await?;
+        if events.len() != 3
+            || require_host_event(&events[1], "started", "repo.edit-files").is_err()
+            || require_host_event(&events[2], "tool_completed", "repo.edit-files").is_err()
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err(
+                "HostExplicit lifecycle was not exactly prepared/started/completed".to_owned(),
+            );
+        }
+        if events
+            .iter()
+            .any(|event| event.get("invocationId").and_then(Value::as_str) != Some(activity_id))
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("HostExplicit activity correlation ID changed unexpectedly".to_owned());
+        }
+        for event in [&events[1], &events[2]] {
+            let serialized = serde_json::to_string(event)
+                .map_err(|error| format!("HostExplicit activity serialization failed: {error}"))?;
+            if event.get("review").is_some()
+                || serialized.contains("A_PREIMAGE")
+                || serialized.contains("A_POSTIMAGE")
+                || serialized.contains("expectedOldText")
+                || serialized.contains("replacementText")
+                || serialized.contains(&prepared.ticket_id)
+                || serialized.contains(&fixture.0.display().to_string())
+            {
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                std::mem::forget(fixture);
+                return Err("Confirm activity was not redacted".to_owned());
+            }
+        }
+        let output = event_tool_output(&events[2])?;
+        let [ToolContent::Json(result)] = output.content.as_slice() else {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("Confirm result was not one structured JSON value".to_owned());
+        };
+        let expected_effects = target_paths
+            .iter()
+            .map(|path| serde_json::json!({"path": path, "state": "committed_verified"}))
+            .collect::<Vec<_>>();
+        if output.is_error
+            || classify_repository_multi_file_output(
+                &output,
+                &target_paths
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>(),
+            ) != MultiFileResultClassification::Ok
+            || result != &serde_json::json!({"status": "ok", "effects": expected_effects})
+            || live_test_multi_file_tool_executions(&fixture.0) != 1
+            || (0..4).any(|index| live_test_multi_file_native_attempts(&fixture.0, index) != 1)
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("Confirm was not one exact-once four-target effect".to_owned());
+        }
+        let after_targets = target_paths
+            .iter()
+            .map(|path| {
+                let bytes = fs::read(fixture.0.join(path)).map_err(|error| {
+                    format!("post-effect target read failed for {path}: {error}")
+                })?;
+                let expected = specifications
+                    .iter()
+                    .find(|(candidate, _, _, _)| candidate == path)
+                    .expect("post-effect target has a specification");
+                if bytes != expected.2.as_bytes() {
+                    return Err(format!("postimage mismatch for {path}"));
+                }
+                Ok((
+                    (*path).to_owned(),
+                    bytes.clone(),
+                    live_sha256(&bytes),
+                    bytes.len(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let after_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let expected_worktree_names = target_paths.join("\n") + "\n";
+        if after_git.index_semantics != before_git.index_semantics
+            || after_git.head_oid != before_git.head_oid
+            || after_git.symbolic_head != before_git.symbolic_head
+            || after_git.current_branch != before_git.current_branch
+            || after_git.local_heads != before_git.local_heads
+            || after_git.tags_and_remotes != before_git.tags_and_remotes
+            || after_git.all_refs != before_git.all_refs
+            || fs::read(fixture.0.join(".git").join("index"))
+                .map_err(|error| format!("Git index post-effect read failed: {error}"))?
+                != before_index
+            || !live_git_text(&git, &fixture.0, &["diff", "--cached", "--name-only"])?.is_empty()
+            || live_git_text(&git, &fixture.0, &["diff", "--name-only"])? != expected_worktree_names
+            || live_directory_entries(&fixture.0)? != before_directory_entries
+            || live_multi_file_temporary_count(&fixture.0)? != 0
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("protected Git state or exact worktree scope changed".to_owned());
+        }
+        let refresh = wait_for_test_events(&refresh_events.0, 1).await?;
+        if refresh.len() != 1 {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("repository refresh/reconciliation was not exactly once".to_owned());
+        }
+        let refreshed = repository_snapshot(app.state())
+            .await
+            .map_err(|error| format!("refreshed repository snapshot failed: {error:?}"))?;
+        if refreshed.status_entries.len() != 4
+            || refreshed.worktree_diff.len() != 4
+            || !refreshed.staged_diff.is_empty()
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err(format!(
+                "refresh did not observe exactly four unstaged worktree changes: path={} status_entries={} worktree_diff={} staged_diff={}",
+                refreshed.path,
+                refreshed.status_entries.len(),
+                refreshed.worktree_diff.len(),
+                refreshed.staged_diff.len()
+            ));
+        }
+        let (
+            refreshed_workflow_is_descriptive,
+            coordinator_is_idle,
+            chat_is_idle,
+            active_chat_is_idle,
+        ) = {
+            let app_state = app.state::<DesktopAppState>();
+            let refreshed_workflow = app_state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let coordinator_is_idle = app_state
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                == CoordinatorState::Idle;
+            let chat_is_idle = *app_state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == ChatState::Idle;
+            let active_chat_is_idle = app_state
+                .active_chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none();
+            (
+                refreshed_workflow.authorization
+                    == CommitAuthorizationPresentation::AuthorizationRevoked
+                    && refreshed_workflow.commit_review.is_none(),
+                coordinator_is_idle,
+                chat_is_idle,
+                active_chat_is_idle,
+            )
+        };
+        if !refreshed_workflow_is_descriptive
+            || !coordinator_is_idle
+            || !chat_is_idle
+            || !active_chat_is_idle
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_namespace
+            || get_effective_authority_snapshot(app.state()).status
+                != SnapshotStatus::ConnectedCurrent
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err(
+                "refresh or terminal Desktop state was not current and descriptive".to_owned(),
+            );
+        }
+        let duplicate = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        if duplicate != Err(FrontendError::HostInvocationTicketInvalid)
+            || live_test_multi_file_tool_executions(&fixture.0) != 1
+            || (0..4).any(|index| live_test_multi_file_native_attempts(&fixture.0, index) != 1)
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("consumed ticket was reusable".to_owned());
+        }
+        if !chat_events.0.lock().unwrap().is_empty() || !model_activity.0.lock().unwrap().is_empty()
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("HostExplicit operation initiated model/chat activity".to_owned());
+        }
+        let activity_as_ticket = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.to_owned(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        let activity_as_cancel = host_cancel_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.to_owned(),
+            },
+            app.handle().clone(),
+            app.state(),
+        );
+        if activity_as_ticket != Err(FrontendError::HostInvocationTicketInvalid)
+            || activity_as_cancel != Err(FrontendError::HostInvocationTicketInvalid)
+            || live_test_multi_file_tool_executions(&fixture.0) != 1
+            || (0..4).any(|index| live_test_multi_file_native_attempts(&fixture.0, index) != 1)
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            std::mem::forget(fixture);
+            return Err("activity correlation ID was accepted as authority".to_owned());
+        }
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_CONFIRM_TOOL_EXECUTIONS=1");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_CONFIRM_NATIVE_ATTEMPTS=1/1/1/1");
+        for (path, _, sha256, length) in &after_targets {
+            println!("RAH_MULTI_FILE_HOSTEXPLICIT_POSTIMAGE_{path}={sha256}:{length}");
+        }
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_RUNTIME_STARTS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_AGENT_REQUESTS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_PROMPTS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_TOOL_REQUESTED=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_TOOL_STARTED=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_TOOL_FINISHED=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MODEL_TOOL_LIFECYCLE=0/0/0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_MCP_PROVIDERS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_PROCESS_PLUGINS=0");
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_GENERATIONS={before_generations:?}");
+        app.unlisten(host_activity.1);
+        app.unlisten(refresh_events.1);
+        app.unlisten(chat_events.1);
+        app.unlisten(model_activity.1);
+        shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+        clear_live_test_multi_file_tool_executions(&fixture.0);
+        clear_live_test_multi_file_native_attempts(&fixture.0);
+        println!("RAH_MULTI_FILE_HOSTEXPLICIT_LIVE_OK");
         Ok(())
     }
 
@@ -11262,6 +12025,7 @@ mod tests {
         coordinator
             .finalize_prepare(PreparedHostInvocation::new(
                 ticket_id.clone(),
+                "test-activity".to_owned(),
                 HostInvocationKind::RepoPatch,
                 ToolName::new("repo.patch"),
                 definition.clone(),
@@ -12745,6 +13509,36 @@ mod tests {
         assert!(!serialized.contains("oldTextEscaped"));
         assert!(!serialized.contains("replacementTextEscaped"));
         assert!(!serialized.contains("review"));
+    }
+
+    #[test]
+    fn prepared_host_activity_uses_separate_value_level_correlation_for_all_prepared_tools() {
+        const TICKET: &str = "RAH_SECRET_AUTHORITY_TICKET_SENTINEL";
+        let cases = [
+            (
+                "repo.create-branch",
+                Some(HostInvocationReview::Branch(BranchReview {
+                    operation: "Create local branch",
+                    branch: "safe-topic".to_owned(),
+                    target: "Current committed HEAD",
+                    effect: "Creates one new local branch reference.",
+                    non_effect: "Does not switch branches or modify HEAD/index/worktree.",
+                    permission_category: "execute",
+                    authority_category: "repository_local_branch_creation",
+                })),
+            ),
+            ("repo.patch", None),
+            ("repo.edit-files", None),
+        ];
+        for (tool, review) in cases {
+            let activity_id = format!("host-explicit-activity-{tool}");
+            assert_ne!(activity_id, TICKET);
+            let event = prepared_host_activity(activity_id.clone(), tool.to_owned(), review);
+            let serialized = serde_json::to_string(&event).expect("prepared activity serializes");
+            assert!(serialized.contains(&activity_id));
+            assert!(!serialized.contains(TICKET));
+            assert!(!serialized.contains("ticketId"));
+        }
     }
 
     #[test]

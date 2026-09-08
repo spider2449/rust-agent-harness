@@ -68,8 +68,18 @@ pub use repository_delete_file::{
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};
 pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInfoTool};
+#[cfg(feature = "live-test-support")]
+pub use repository_multi_file_edit::live_test_multi_file_tool_executions::{
+    clear as clear_live_test_multi_file_tool_executions,
+    count as live_test_multi_file_tool_executions,
+};
 pub use repository_multi_file_edit::{
     REPOSITORY_EDIT_FILES_TOOL_NAME, RepositoryMultiFileEditTool,
+};
+#[cfg(feature = "live-test-support")]
+pub use repository_multi_file_preflight::live_test_multi_file_native_attempts::{
+    clear as clear_live_test_multi_file_native_attempts,
+    count as live_test_multi_file_native_attempts,
 };
 pub use repository_multi_file_preflight::{
     REPOSITORY_MULTI_FILE_EDIT_PREPARATION_OPERATION, RepositoryMultiFileEditChangedRange,

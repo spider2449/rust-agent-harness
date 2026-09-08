@@ -186,6 +186,7 @@ pub(crate) enum PreparedHostPayload {
 
 pub(crate) struct PreparedHostInvocation {
     pub ticket_id: String,
+    pub activity_id: String,
     pub kind: HostInvocationKind,
     pub tool_name: ToolName,
     pub expected_definition: ToolDefinition,
@@ -203,6 +204,7 @@ impl PreparedHostInvocation {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         ticket_id: String,
+        activity_id: String,
         kind: HostInvocationKind,
         tool_name: ToolName,
         expected_definition: ToolDefinition,
@@ -216,6 +218,7 @@ impl PreparedHostInvocation {
     ) -> Self {
         Self {
             ticket_id,
+            activity_id,
             kind,
             tool_name,
             expected_definition,
@@ -239,6 +242,7 @@ impl PreparedHostInvocation {
     pub(crate) fn for_test(created_at: Instant) -> Self {
         Self {
             ticket_id: "test-ticket".to_owned(),
+            activity_id: "test-activity".to_owned(),
             kind: HostInvocationKind::RepoCreateBranch,
             tool_name: ToolName::new("repo.create-branch"),
             expected_definition: ToolDefinition {
@@ -415,7 +419,7 @@ impl HostInvocationCoordinator {
     pub(crate) fn cancel(
         &mut self,
         ticket_id: &str,
-    ) -> Result<HostInvocationKind, CoordinatorError> {
+    ) -> Result<(HostInvocationKind, String), CoordinatorError> {
         if self.state != CoordinatorState::HostPrepared {
             return Err(CoordinatorError::NotPrepared);
         }
@@ -431,10 +435,15 @@ impl HostInvocationCoordinator {
             .as_ref()
             .map(|ticket| ticket.kind)
             .ok_or(CoordinatorError::NotPrepared)?;
+        let activity_id = self
+            .prepared
+            .as_ref()
+            .map(|ticket| ticket.activity_id.clone())
+            .ok_or(CoordinatorError::NotPrepared)?;
         self.prepared = None;
         self.preparing = false;
         self.state = CoordinatorState::Idle;
-        Ok(kind)
+        Ok((kind, activity_id))
     }
 
     pub(crate) fn finish_host(&mut self) {
@@ -941,7 +950,10 @@ mod tests {
             .expect("cancelled ticket prepares");
         assert_eq!(
             cancelled.cancel("test-ticket"),
-            Ok(HostInvocationKind::RepoCreateBranch)
+            Ok((
+                HostInvocationKind::RepoCreateBranch,
+                "test-activity".to_owned()
+            ))
         );
         assert_eq!(
             cancelled.cancel("test-ticket"),
@@ -965,5 +977,27 @@ mod tests {
             stale.take_prepared("test-ticket", now),
             Err(CoordinatorError::NotPrepared)
         ));
+    }
+
+    #[test]
+    fn activity_correlation_id_is_not_a_ticket_for_confirmation_or_cancellation() {
+        const TICKET: &str = "RAH_SECRET_AUTHORITY_TICKET_SENTINEL";
+        let now = Instant::now();
+        let mut coordinator = HostInvocationCoordinator::default();
+        let mut prepared = PreparedHostInvocation::for_test(now);
+        prepared.ticket_id = TICKET.to_owned();
+        prepared.activity_id = "host-explicit-activity-1".to_owned();
+        let activity_id = prepared.activity_id.clone();
+        coordinator
+            .prepare(prepared)
+            .expect("separated ticket and activity state prepares");
+        assert_eq!(
+            coordinator.cancel(&activity_id),
+            Err(CoordinatorError::NotPrepared)
+        );
+        assert_eq!(
+            coordinator.cancel(TICKET),
+            Ok((HostInvocationKind::RepoCreateBranch, activity_id,))
+        );
     }
 }

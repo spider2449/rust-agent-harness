@@ -1054,6 +1054,8 @@ impl RepositoryMultiFileMutationPolicy {
             }
             #[cfg(test)]
             test_commit_hook::attempt(&self.root, index);
+            #[cfg(feature = "live-test-support")]
+            live_test_multi_file_native_attempts::record(&self.root, index);
             #[cfg(test)]
             if test_commit_hook::take(&self.root, CommitTestPhase::KnownNoEffectFailure, index) {
                 effects[index].state = MultiFileEffectState::UnchangedVerified;
@@ -1234,7 +1236,7 @@ impl RepositoryMultiFileMutationPolicy {
         self.prepare_retained_inner(input).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-test-support"))]
     pub(crate) fn test_root(&self) -> &Path {
         &self.root
     }
@@ -1347,6 +1349,47 @@ impl RepositoryMultiFileMutationPolicy {
             return Err(PreflightError::Precondition("Git observation failed"));
         }
         Ok(output.stdout)
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+pub mod live_test_multi_file_native_attempts {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static ATTEMPTS: OnceLock<Mutex<HashMap<(PathBuf, usize), usize>>> = OnceLock::new();
+
+    fn key(root: &Path) -> PathBuf {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub fn record(root: &Path, index: usize) {
+        let mut attempts = ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        *attempts.entry((key(root), index)).or_default() += 1;
+    }
+
+    pub fn count(root: &Path, index: usize) -> usize {
+        ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&(key(root), index))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn clear(root: &Path) {
+        ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .retain(|(path, _), _| path != &key(root));
     }
 }
 

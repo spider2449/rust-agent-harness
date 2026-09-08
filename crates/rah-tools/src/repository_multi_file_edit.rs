@@ -87,10 +87,53 @@ impl Tool for RepositoryMultiFileEditTool {
     ) -> Result<ToolOutput, ToolError> {
         #[cfg(test)]
         test_execute_hook::record(self.policy.test_root());
+        #[cfg(feature = "live-test-support")]
+        live_test_multi_file_tool_executions::record(self.policy.test_root());
         match self.policy.commit(&input).await {
             Ok(outcome) => Ok(output_for_outcome(outcome)),
             Err(error) => Ok(status_output(error.public_status())),
         }
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+pub mod live_test_multi_file_tool_executions {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static EXECUTIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+    fn key(root: &Path) -> PathBuf {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub fn record(root: &Path) {
+        let mut executions = EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        *executions.entry(key(root)).or_default() += 1;
+    }
+
+    pub fn count(root: &Path) -> usize {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&key(root))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn clear(root: &Path) {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(&key(root));
     }
 }
 
