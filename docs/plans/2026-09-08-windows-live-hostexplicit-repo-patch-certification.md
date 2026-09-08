@@ -2,13 +2,16 @@
 
 ## Status
 
-TASK 251C — TEST/DOCS DISPOSITION — AWAITING EXACT-HEAD CI
+LIVE PASS — AWAITING FINAL CI
 
 ## Task 251C checkpoint
 
-- `HEAD == origin/master == 36d4cfa3e11a7c5ad0a37d65112b684ebfbbfe0c`.
+- `HEAD == origin/master == 05e50396ebb46fd80c4b9f6c8f8ab2a3d4f83175`.
 - Task 251A CI: `34192808012 PASS`.
-- Worktree was clean before the Task 251C correction.
+- Task 251C: test-only assertion correction.
+- Task 251C commit: `05e50396ebb46fd80c4b9f6c8f8ab2a3d4f83175`.
+- Task 251C exact-head CI: `34194725872 PASS`.
+- Worktree was clean before the final fresh live attempt.
 
 ## Starting checkpoint
 
@@ -113,8 +116,7 @@ Confirm, rollback, restoration, or evidence-hiding cleanup is permitted.
 
 ## Live result record
 
-Task 251 remains not certified. The preserved Attempt 2 fixture remains
-untouched.
+The preserved Attempt 2 fixture remains untouched.
 
 ### Attempt 1
 
@@ -152,15 +154,70 @@ and zero providers. Freshness is proven by requiring a new review selector,
 current workflow review and opaque commit review, with the new review tied to
 the post-refresh observation generation; no additional refresh is performed.
 
-Task 251 remains NOT CERTIFIED pending one separately authorized fresh attempt.
-Task 251D — Final Fresh Windows HostExplicit `repo.patch` Live Attempt — is not
-started automatically.
+Task 251D — Final Fresh Windows HostExplicit `repo.patch` Live Attempt — was
+authorized and completed below.
 
-After a successful fresh run, record the harness commit, exact-head CI,
-Windows/Git/Codex baseline, exact command, bounded Prepare and Confirm
-evidence, pre/post SHA-256 values, `ChangedVerified`, authorization
-invalidation, currentness/non-effects, activity privacy, provider absence,
-and all-zero model lifecycle markers here. Then update only this plan, commit:
+### Attempt 3 — final fresh live pass
+
+- Result: PASS. This was exactly one fresh live attempt using a new disposable
+  Windows Git repository. The preserved Attempt 2 fixture was not reused,
+  deleted, restored, or altered. No retry, replay, second Confirm, rollback,
+  or restore-preimage occurred.
+- Host: Microsoft Windows 10 `10.0.19045` (build `19045`). Git:
+  `2.54.0.windows.1`.
+- Codex gate baseline: `codex-cli 0.149.0`, SHA-256
+  `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+  Model: `gpt-5.6-terra`; reasoning effort: `medium`.
+- Exact command:
+
+  ```powershell
+  & .\scripts\codex-live-gate.ps1 `
+    -Version '0.149.0' `
+    -ExpectedSha256 '14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00' `
+    -Model 'gpt-5.6-terra' `
+    -ReasoningEffort 'medium' `
+    -Command {
+        cargo test -p rah-desktop tests::windows_live_desktop_hostexplicit_repo_patch -- --ignored --exact --nocapture
+    }
+  ```
+
+- Prepare: connected-current; `repo.patch` was HostExplicit eligible;
+  `repo.edit-files` was not HostExplicit eligible; MCP providers and Process
+  Plugin providers were both zero. Exact `RepositoryPatchReview`, opaque
+  ticket, private Prepared activity, zero Tool executions, and zero
+  replacements were observed. Target, index, HEAD, and refs were unchanged,
+  and the old reviewed authorization remained pending before Confirm.
+- Confirm: ticket ID only; retained-preparer revalidation succeeded before
+  `Started`; D2 preflight succeeded; HostExplicit Started was one; Tool
+  execution was one; native replacement was one; terminal ToolCompleted was
+  one. Result classification was `ChangedVerified`.
+- Target proof: exact preimage SHA-256 was
+  `39b37d45697c4371a30248f1e60244dec3f66bca1254babfcbf25ce021c9af7a` and
+  exact expected postimage SHA-256 was
+  `0991d9f445b98cfd0566f218cb8ef3ee4cbd47e89380f9bc1eb81737fd77387e`.
+  The target was the only worktree-content change in the disposable fixture;
+  the staged sentinel was unchanged. Semantic index, HEAD OID, branch, and
+  refs were unchanged. No patch temporary artifact remained.
+- Review authorization: the old pending authorization was cleared
+  (`REVIEW_INVALIDATED=1`). Reviewed-commit presentation was
+  `ReadyToAuthorize`, while the underlying reviewed-commit control had no
+  pending authorization. A fresh staged review existed without an extra
+  refresh solely for proof; its selector differed from the original
+  pre-patch selector, its repository generation was current, its observation
+  generation matched the current workflow observation generation, and a fresh
+  `commit_review` existed.
+- Currentness and lifecycle: connection remained `ConnectedCurrent`; the
+  generation tuple and persistence namespace were unchanged; coordinator and
+  chat were Idle. Prepared, Started, and terminal activity exposed no source
+  review. MCP providers and Process Plugin providers remained zero.
+- Model non-involvement: `runtime.start=0`, `AgentRequest=0`, `prompt=0`,
+  `ToolRequested=0`, `ToolStarted=0`, `ToolFinished=0`, and lifecycle `0/0/0`.
+- Gate result: `RAH_DESKTOP_PATCH_LIVE_OK`; one test passed, zero failed.
+
+Task 251 is now complete pending the final docs-only commit and exact-head
+CI closure below.
+
+After the successful fresh run, update only this plan, then commit:
 
 ```text
 docs: record Windows HostExplicit patch live pass
