@@ -2,9 +2,18 @@
 
 ## v0.21.0 — 2026-09-08
 
-RAH v0.21.0 is prepared for publication but is NOT released yet. v0.20.0
-remains the current immutable published release until v0.21.0 is actually
-tagged and published.
+RAH v0.21.0 is released and is the current immutable published release.
+v0.20.0 is the prior release.
+
+### Release record
+
+- Release commit: `7faa13a16425cc9d3bdb0dc540923eae8685ba90`.
+- Annotated tag: `v0.21.0`.
+- Tag object: `aa178f05d12d881745932800e8fc40a7431ce7b9`.
+- Task 253 exact-head CI: `34198526278` PASS.
+- Tag CI: `34199221802` PASS.
+- GitHub Release ID: `384519493`.
+- Published: `2026-09-08T07:27:35Z`.
 
 ### Added
 
@@ -63,8 +72,8 @@ tagged and published.
 
 ## v0.20.0 — 2026-09-07
 
-RAH v0.20.0 is released and is the current immutable published release.
-v0.19.0 is the prior release.
+At publication, RAH v0.20.0 was the current immutable published release.
+v0.19.0 was the prior release.
 
 ### Release record
 

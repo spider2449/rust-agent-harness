@@ -2,22 +2,35 @@
 
 ## Status
 
-**RELEASE PREPARATION — NOT TAGGED OR PUBLISHED**
+**RELEASED — HISTORICAL RECORD**
 
-v0.21.0 is prepared for publication but is not released. v0.20.0 remains the
-current immutable published release. Publication is Task 254.
+v0.21.0 is the current immutable published release. v0.20.0 is the prior
+release.
 
 ## Release identity
 
 - Task 252 audit commit: `563301f2627b50c5c256ad221c34a931b28aa1e2`.
 - Task 252 exact-head CI: `34196931238` PASS.
 - Task 252 verdict: **A — MILESTONE COMPLETE — RELEASE PREPARATION MAY BEGIN**.
-- v0.21.0 tag: absent.
-- GitHub Release v0.21.0: absent.
-- Publication: Task 254.
+- Task 253 release commit: `7faa13a16425cc9d3bdb0dc540923eae8685ba90`.
+- Task 253 exact-head CI: `34198526278` PASS.
+- Annotated tag: `v0.21.0`.
+- Tag object: `aa178f05d12d881745932800e8fc40a7431ce7b9`.
+- Peeled target: `7faa13a16425cc9d3bdb0dc540923eae8685ba90`.
+- Tag CI: `34199221802` PASS.
+- GitHub Release ID: `384519493`.
+- Published: `2026-09-08T07:27:35Z`.
+- Draft: `false`.
+- Prerelease: `false`.
 
-The final Task 253 release-preparation commit SHA and its exact-head CI are to
-be recorded after they exist. This gate does not invent either value.
+## Completed publication checklist
+
+- [x] Task 252 audit completed with Verdict A and passing exact-head CI.
+- [x] Task 253 release-preparation commit pushed with passing exact-head CI.
+- [x] Annotated `v0.21.0` tag published with the recorded tag object.
+- [x] Tag CI completed successfully for the immutable release tag.
+- [x] GitHub Release `RAH v0.21.0` published as non-draft and non-prerelease.
+- [x] Release source remains the recorded peeled target.
 
 ## Release scope
 
@@ -132,5 +145,6 @@ not automatically authorized.
 
 ## Publication boundary
 
-No v0.21.0 tag, GitHub Release, artifact publication, or live gate rerun is
-part of Task 253. Task 254 is the next task and is not started automatically.
+The later Task 255 documentation cleanup is not the v0.21.0 release source and
+does not change the tag, GitHub Release, or release commit. No live gate rerun
+is part of Task 255.

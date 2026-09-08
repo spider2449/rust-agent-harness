@@ -5,10 +5,10 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.21.0 release candidate
+## RAH v0.21.0 released
 
-v0.21.0 is prepared for publication but is NOT released yet. v0.20.0 remains
-the current immutable published release until Task 254 publishes v0.21.0.
+v0.21.0 is the current immutable published release. v0.20.0 is the prior
+release.
 
 RAH v0.21 adds HostExplicit Reviewed Single-File Patch Authoring:
 
@@ -46,8 +46,8 @@ provider activity. This is not a model-selected or GUI mouse-automation claim.
 
 ## RAH v0.20.0 released
 
-v0.20.0 is now the current immutable published release. v0.19.0 is the prior
-release.
+At publication, v0.20.0 was the current immutable published release. v0.19.0
+was the prior release.
 
 RAH v0.20 adds an explicit Desktop Host Tool invocation workflow for a closed
 first-party Tool set. The exact first-release HostExplicit eligibility is:

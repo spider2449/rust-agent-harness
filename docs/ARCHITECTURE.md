@@ -1,11 +1,10 @@
-# RAH v0.21.0 Release-Candidate Architecture
+# RAH v0.21.0 Architecture
 
-This document describes the v0.21.0 release-candidate architecture. It is
-prepared for publication, but v0.21.0 is not released.
+This document describes the released v0.21.0 architecture.
 
-v0.20.0 is the current immutable published release.
+v0.21.0 is the current immutable published release.
 
-v0.19.0 is the prior release.
+v0.20.0 is the prior release.
 
 v0.18.0 preceded v0.19.0.
 
