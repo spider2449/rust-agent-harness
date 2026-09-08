@@ -28,6 +28,71 @@ use crate::{
 /// Stable name for the bounded repository worktree text replacement capability.
 pub const REPOSITORY_WORKTREE_PATCH_TOOL_NAME: &str = "repo.patch";
 
+/// Strict classification of the current `repo.patch` ToolOutput contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryPatchResultClassification {
+    /// The host proved that no native replacement attempt was made.
+    PreconditionFailed,
+    /// The host verified the constructed postimage after replacement.
+    ChangedVerified,
+    /// A replacement was attempted and the exact preimage remained intact.
+    ReplacementFailedKnown,
+    /// The native effect or its observation cannot be proven safe.
+    Uncertain,
+    /// The output does not exactly match the current producer contract.
+    Malformed,
+}
+
+/// Classifies the exact four-field `repo.patch` ToolOutput contract.
+///
+/// This deliberately accepts no provider extensions, text output, alternate
+/// JSON shapes, or contradictory status flags.
+#[must_use]
+pub fn classify_repository_patch_output(
+    output: &ToolOutput,
+) -> RepositoryPatchResultClassification {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    let Some(object) = value.as_object() else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    const KEYS: [&str; 4] = ["status", "changed", "uncertain", "reason"];
+    if object.len() != KEYS.len() || KEYS.iter().any(|key| !object.contains_key(*key)) {
+        return RepositoryPatchResultClassification::Malformed;
+    }
+    let Some(status) = object.get("status").and_then(Value::as_str) else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    let Some(changed) = object.get("changed").and_then(Value::as_bool) else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    let Some(uncertain) = object.get("uncertain").and_then(Value::as_bool) else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    let Some(reason) = object.get("reason").and_then(Value::as_str) else {
+        return RepositoryPatchResultClassification::Malformed;
+    };
+    let reason_is_failure_class = matches!(
+        reason,
+        "path_or_filesystem" | "repository_state" | "precondition" | "temporary" | "replacement"
+    );
+
+    match (status, changed, uncertain, output.is_error, reason) {
+        ("precondition_failed", false, false, true, _reason) if reason_is_failure_class => {
+            RepositoryPatchResultClassification::PreconditionFailed
+        }
+        ("ok", true, false, false, "none") => RepositoryPatchResultClassification::ChangedVerified,
+        ("replacement_failed_known", false, false, true, "replacement") => {
+            RepositoryPatchResultClassification::ReplacementFailedKnown
+        }
+        ("uncertain", false, true, true, _reason) if reason_is_failure_class => {
+            RepositoryPatchResultClassification::Uncertain
+        }
+        _ => RepositoryPatchResultClassification::Malformed,
+    }
+}
+
 const MAX_SERIALIZED_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -2600,14 +2665,15 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     };
 
-    use rah_protocol::ToolInput;
+    use rah_protocol::{ToolContent, ToolInput, ToolOutput};
     use serde_json::{Value, json};
 
     use super::{
         MAX_FILE_BYTES, PatchLimits, PatchRequest, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
         RepositoryPatchBomState, RepositoryPatchEofState, RepositoryPatchPreparationError,
         RepositoryPatchPreparationRequest, RepositoryPatchPreparer,
-        RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, TestPhase, sha256_hex,
+        RepositoryPatchResultClassification, RepositoryWorktreeMutationPolicy,
+        RepositoryWorktreePatchTool, TestPhase, classify_repository_patch_output, sha256_hex,
     };
     use crate::{Tool, ToolContext};
 
@@ -4117,6 +4183,199 @@ mod tests {
         tool.execute(ToolInput(input), ToolContext::default())
             .await
             .expect("well-formed patch request should return a bounded outcome")
+    }
+
+    fn classified_output(
+        status: &str,
+        changed: bool,
+        uncertain: bool,
+        reason: &str,
+        is_error: bool,
+    ) -> ToolOutput {
+        ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": status,
+                "changed": changed,
+                "uncertain": uncertain,
+                "reason": reason,
+            }))],
+            is_error,
+        }
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_accepts_current_classes() {
+        for (output, expected) in [
+            (
+                classified_output("precondition_failed", false, false, "precondition", true),
+                RepositoryPatchResultClassification::PreconditionFailed,
+            ),
+            (
+                classified_output("ok", true, false, "none", false),
+                RepositoryPatchResultClassification::ChangedVerified,
+            ),
+            (
+                classified_output(
+                    "replacement_failed_known",
+                    false,
+                    false,
+                    "replacement",
+                    true,
+                ),
+                RepositoryPatchResultClassification::ReplacementFailedKnown,
+            ),
+            (
+                classified_output("uncertain", false, true, "temporary", true),
+                RepositoryPatchResultClassification::Uncertain,
+            ),
+        ] {
+            assert_eq!(classify_repository_patch_output(&output), expected);
+        }
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_wrong_error_flag() {
+        assert_eq!(
+            classify_repository_patch_output(&classified_output("ok", true, false, "none", true,)),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_contradictory_changed_flag() {
+        assert_eq!(
+            classify_repository_patch_output(&classified_output(
+                "precondition_failed",
+                true,
+                false,
+                "precondition",
+                true,
+            )),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_contradictory_uncertain_flag() {
+        assert_eq!(
+            classify_repository_patch_output(&classified_output(
+                "uncertain",
+                false,
+                false,
+                "temporary",
+                true,
+            )),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_missing_key() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "ok",
+                "changed": true,
+                "uncertain": false,
+            }))],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_patch_output(&output),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_extra_key() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "ok",
+                "changed": true,
+                "uncertain": false,
+                "reason": "none",
+                "extra": "rejected",
+            }))],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_patch_output(&output),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_wrong_type() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Json(json!({
+                "status": "ok",
+                "changed": "true",
+                "uncertain": false,
+                "reason": "none",
+            }))],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_patch_output(&output),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_multiple_content_items() {
+        let item = ToolContent::Json(json!({
+            "status": "ok",
+            "changed": true,
+            "uncertain": false,
+            "reason": "none",
+        }));
+        let output = ToolOutput {
+            content: vec![item.clone(), item],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_patch_output(&output),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_text_content() {
+        let output = ToolOutput {
+            content: vec![ToolContent::Text("{\"status\":\"ok\"}".to_owned())],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_patch_output(&output),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_unknown_status() {
+        assert_eq!(
+            classify_repository_patch_output(&classified_output(
+                "future_status",
+                false,
+                false,
+                "precondition",
+                true,
+            )),
+            RepositoryPatchResultClassification::Malformed
+        );
+    }
+
+    #[test]
+    fn strict_repository_patch_result_classifier_rejects_unknown_reason() {
+        assert_eq!(
+            classify_repository_patch_output(&classified_output(
+                "uncertain",
+                false,
+                true,
+                "future_reason",
+                true,
+            )),
+            RepositoryPatchResultClassification::Malformed
+        );
     }
 
     fn content(output: &crate::ToolOutput) -> &Value {

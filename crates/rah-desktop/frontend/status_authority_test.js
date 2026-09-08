@@ -29,9 +29,23 @@ assert.match(source, /authorityLabel\("authorityCategory", tool\.authorityCatego
 assert.match(source, /tool\.hostInvocation/);
 assert.match(source, /host\.eligible === true/);
 assert.match(source, /host\.kind/);
+assert.match(source, /const isPatch = host\.kind === "repo_patch"/);
+assert.match(source, /input\.dataset\.hostInput = isPatch \? "path"/);
+assert.match(source, /oldText\.dataset\.hostInput = "expectedOldText"/);
+assert.match(source, /replacementText\.dataset\.hostInput = "replacementText"/);
 assert.match(source, /host_prepare_repo_create_branch/);
+assert.match(source, /host_prepare_repo_patch/);
+assert.match(source, /expectedOldText: form\.querySelector/);
+assert.match(source, /replacementText: form\.querySelector/);
 assert.match(source, /host_confirm_tool_invocation/);
-assert.match(source, /ticketId: prepared\.ticketId/);
+assert.match(source, /request: \{ ticketId: active\.ticketId \}/);
+assert.match(source, /confirmation\.addEventListener\("cancel"/);
+assert.match(source, /event\.preventDefault\(\)/);
+assert.match(source, /confirm\.disabled = true/);
+assert.match(source, /cancel\.disabled = true/);
+assert.match(source, /oldTextEscaped/);
+assert.match(source, /replacementTextEscaped/);
+assert.match(source, /pre\.textContent/);
 assert.match(source, /Host action — not Model/);
 assert.match(source, /JSON\.stringify\(content\.value/);
 assert.match(source, /content\.type === "text"/);
@@ -79,5 +93,9 @@ for (const field of [
 ]) {
   assert.match(authorityRenderer, new RegExp(`snapshot\\.${field}`));
 }
+
+const hostActivityRenderer = source.slice(source.indexOf("function appendHostActivity"), source.indexOf("function renderHostReview"));
+assert.equal(hostActivityRenderer.includes("payload.review"), false);
+assert.match(source, /activePreparedHostReview/);
 
 console.log("effective authority frontend static tests passed");

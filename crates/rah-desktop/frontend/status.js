@@ -22,7 +22,7 @@ let resumeUsed = false;
 let renderedModelConfiguration = null;
 let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
-let preparedHostBranch = null;
+let activePreparedHostReview = null;
 const maxActivityEntries = 100;
 
 const authorityStatusLabels = {
@@ -130,7 +130,7 @@ function errorMessage(error) {
     host_invocation_permission_denied: "The current host permission policy does not admit this action.",
     host_invocation_stale: "Host action is stale. Refresh Effective Authority and prepare again.",
     host_invocation_invalid_input: "The Host action input is invalid or too large.",
-    host_invocation_ticket_invalid: "This branch review is no longer valid. Prepare again.",
+    host_invocation_ticket_invalid: "This Host action review is no longer valid. Prepare again.",
     preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
@@ -235,18 +235,31 @@ function renderEffectiveTool(tool) {
     form.dataset.hostKind = host.kind;
     const needsPath = ["fs_read", "repo_file_info"].includes(host.kind);
     const isBranch = host.kind === "repo_create_branch";
-    if (needsPath || isBranch) {
+    const isPatch = host.kind === "repo_patch";
+    if (needsPath || isBranch || isPatch) {
       const input = document.createElement("input");
       input.type = "text";
       input.required = true;
       input.maxLength = isBranch ? 128 : 1024;
       input.placeholder = isBranch ? "Branch name" : "Relative path";
-      input.dataset.hostInput = "value";
+      input.dataset.hostInput = isPatch ? "path" : "value";
       form.append(input);
+    }
+    if (isPatch) {
+      const oldText = document.createElement("textarea");
+      oldText.required = true;
+      oldText.maxLength = 64 * 1024;
+      oldText.placeholder = "Expected old text";
+      oldText.dataset.hostInput = "expectedOldText";
+      const replacementText = document.createElement("textarea");
+      replacementText.maxLength = 64 * 1024;
+      replacementText.placeholder = "Replacement text (may be empty)";
+      replacementText.dataset.hostInput = "replacementText";
+      form.append(oldText, replacementText);
     }
     const button = document.createElement("button");
     button.type = "submit";
-    button.textContent = isBranch ? "Prepare" : "Invoke";
+    button.textContent = isBranch || isPatch ? "Prepare" : "Invoke";
     form.append(button);
     hostBox.append(form);
   }
@@ -287,9 +300,115 @@ function appendHostActivity(payload) {
   state.textContent = `${payload.tool}: ${labels[payload.state] ?? "Host action state unavailable"}`;
   entry.append(title, state);
   if (payload.result) entry.append(renderHostOutput(payload.result));
+  if (["tool_completed", "tool_error", "rejected_stale", "possible_effect_unknown", "cancelled_before_start"].includes(payload.state)) {
+    clearActiveHostReview();
+  }
   entries.append(entry);
   while (entries.children.length > maxActivityEntries) entries.firstElementChild.remove();
   entries.scrollTop = entries.scrollHeight;
+}
+
+function renderHostReview(review, kind) {
+  const content = document.createElement("div");
+  if (kind === "branch") {
+    const text = document.createElement("p");
+    text.textContent = `Create branch only: ${review.branch}. Does not switch branch.`;
+    content.append(text);
+    return content;
+  }
+  const details = document.createElement("dl");
+  const values = [
+    ["Operation", review.operation],
+    ["Relative path", review.path],
+    ["Byte range start", review.changedRange.start],
+    ["Byte range end", review.changedRange.end],
+    ["Byte range length", review.changedRange.length],
+    ["BOM state", review.bom],
+    ["Preimage EOF state", review.preimageEof],
+    ["Preimage EOF detail", review.preimageEofMarker],
+    ["Postimage EOF state", review.postimageEof],
+    ["Postimage EOF detail", review.postimageEofMarker],
+    ["Preimage SHA-256", review.preimageSha256],
+    ["Preimage length", review.preimageByteLength],
+    ["Postimage SHA-256", review.postimageSha256],
+    ["Postimage length", review.postimageByteLength],
+    ["Intended effect", review.intendedEffect],
+    ["Unchanged context", review.unchangedContext],
+  ];
+  for (const [label, value] of values) {
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = label;
+    detail.textContent = String(value ?? "");
+    details.append(term, detail);
+  }
+  content.append(details);
+  for (const [label, value] of [["Expected old text", review.oldTextEscaped], ["Replacement text", review.replacementTextEscaped]]) {
+    const heading = document.createElement("strong");
+    const pre = document.createElement("pre");
+    heading.textContent = label;
+    pre.textContent = String(value ?? "");
+    content.append(heading, pre);
+  }
+  const nonEffects = document.createElement("ul");
+  for (const value of review.nonEffects ?? []) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    nonEffects.append(item);
+  }
+  const nonEffectsHeading = document.createElement("strong");
+  nonEffectsHeading.textContent = "Explicit non-effects";
+  content.append(nonEffectsHeading, nonEffects);
+  return content;
+}
+
+function clearActiveHostReview() {
+  if (!activePreparedHostReview) return;
+  activePreparedHostReview.actionStarted = true;
+  if (activePreparedHostReview.dialog.open) activePreparedHostReview.dialog.close();
+  activePreparedHostReview.dialog.remove();
+  activePreparedHostReview = null;
+}
+
+function openHostReview(invoke, prepared, kind) {
+  const confirmation = document.createElement("dialog");
+  const title = document.createElement("h3");
+  const confirm = document.createElement("button");
+  const cancel = document.createElement("button");
+  title.textContent = kind === "patch" ? "Review Host patch" : "Review Host action";
+  confirm.type = "button";
+  confirm.textContent = "Confirm Host action";
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  confirmation.append(title, renderHostReview(prepared.review, kind), confirm, cancel);
+  const active = { dialog: confirmation, actionStarted: false, ticketId: prepared.ticketId };
+  activePreparedHostReview = active;
+  const settle = async (action) => {
+    if (active.actionStarted) return;
+    active.actionStarted = true;
+    confirm.disabled = true;
+    cancel.disabled = true;
+    try {
+      await invoke(action === "confirm" ? "host_confirm_tool_invocation" : "host_cancel_tool_invocation", { request: { ticketId: active.ticketId } });
+    } catch (error) {
+      showChatError(error);
+    } finally {
+      if (activePreparedHostReview === active) activePreparedHostReview = null;
+      if (confirmation.open) confirmation.close();
+      confirmation.remove();
+    }
+  };
+  confirm.addEventListener("click", () => { void settle("confirm"); }, { once: true });
+  cancel.addEventListener("click", () => { void settle("cancel"); }, { once: true });
+  confirmation.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    void settle("cancel");
+  });
+  confirmation.addEventListener("close", () => {
+    if (!active.actionStarted) void settle("cancel");
+  });
+  document.body.append(confirmation);
+  confirmation.showModal();
 }
 
 async function submitHostForm(invoke, form) {
@@ -297,41 +416,17 @@ async function submitHostForm(invoke, form) {
   const value = form.querySelector("[data-host-input]")?.value;
   if (kind === "repo_create_branch") {
     const prepared = await invoke("host_prepare_repo_create_branch", { request: { name: value } });
-    preparedHostBranch = prepared;
-    const confirmation = document.createElement("dialog");
-    const text = document.createElement("p");
-    text.textContent = `Create branch only: ${prepared.review.branch}. Does not switch branch.`;
-    const confirm = document.createElement("button");
-    confirm.type = "button";
-    confirm.textContent = "Confirm Host action";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.textContent = "Cancel";
-    confirmation.append(text, confirm, cancel);
-    document.body.append(confirmation);
-    confirm.addEventListener("click", async () => {
-      confirmation.close();
-      try {
-        await invoke("host_confirm_tool_invocation", { request: { ticketId: prepared.ticketId } });
-      } catch (error) {
-        showChatError(error);
-      } finally {
-        preparedHostBranch = null;
-        confirmation.remove();
-      }
-    }, { once: true });
-    cancel.addEventListener("click", async () => {
-      confirmation.close();
-      try {
-        await invoke("host_cancel_tool_invocation", { request: { ticketId: prepared.ticketId } });
-      } catch (error) {
-        showChatError(error);
-      } finally {
-        preparedHostBranch = null;
-        confirmation.remove();
-      }
-    }, { once: true });
-    confirmation.showModal();
+    openHostReview(invoke, prepared, "branch");
+    return;
+  }
+  if (kind === "repo_patch") {
+    const request = {
+      path: form.querySelector('[data-host-input="path"]').value,
+      expectedOldText: form.querySelector('[data-host-input="expectedOldText"]').value,
+      replacementText: form.querySelector('[data-host-input="replacementText"]').value,
+    };
+    const prepared = await invoke("host_prepare_repo_patch", { request });
+    openHostReview(invoke, prepared, "patch");
     return;
   }
   const request = { kind };

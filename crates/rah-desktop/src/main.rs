@@ -73,8 +73,9 @@ use rah_tools::{
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
     RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
-    RepositoryPatchPreparationRequest, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
+    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -2430,56 +2431,67 @@ async fn run_host_tool(
     let state = app.state::<DesktopAppState>();
     let (activity_state, output) = match result {
         Ok(output) => {
-            if kind == HostInvocationKind::RepoCreateBranch
-                && matches!(
-                    branch_result_classification(&output),
-                    BranchActivityClassification::Uncertain
-                )
-            {
-                invalidate_repository_commit_review(state.inner()).await;
-                if host_repository_context_is_current(
-                    state.inner(),
-                    repository_identity.as_deref(),
-                    generations,
-                ) {
-                    emit_repository_refresh(&app);
-                }
-            }
             if kind == HostInvocationKind::RepoPatch {
-                invalidate_repository_commit_review(state.inner()).await;
+                let classification = classify_repository_patch_output(&output);
                 if host_repository_context_is_current(
                     state.inner(),
                     repository_identity.as_deref(),
                     generations,
                 ) {
+                    invalidate_repository_commit_review(state.inner()).await;
                     let _ = refresh_repository_workflow(state.inner()).await;
                     emit_repository_refresh(&app);
                 }
+                (
+                    patch_host_terminal_state(classification),
+                    (classification != RepositoryPatchResultClassification::Malformed)
+                        .then_some(output),
+                )
+            } else {
+                if kind == HostInvocationKind::RepoCreateBranch
+                    && matches!(
+                        branch_result_classification(&output),
+                        BranchActivityClassification::Uncertain
+                    )
+                {
+                    invalidate_repository_commit_review(state.inner()).await;
+                    if host_repository_context_is_current(
+                        state.inner(),
+                        repository_identity.as_deref(),
+                        generations,
+                    ) {
+                        emit_repository_refresh(&app);
+                    }
+                }
+                (
+                    if output.is_error {
+                        HostActivityState::ToolError
+                    } else {
+                        HostActivityState::ToolCompleted
+                    },
+                    Some(output),
+                )
             }
-            (
-                if output.is_error {
-                    HostActivityState::ToolError
-                } else {
-                    HostActivityState::ToolCompleted
-                },
-                Some(output),
-            )
         }
         Err(AuthorizedDispatchError::Rejected(_)) => (HostActivityState::RejectedStale, None),
         Err(AuthorizedDispatchError::Tool(_)) => {
-            if matches!(
-                kind,
-                HostInvocationKind::RepoCreateBranch | HostInvocationKind::RepoPatch
-            ) {
+            if kind == HostInvocationKind::RepoPatch {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    invalidate_repository_commit_review(state.inner()).await;
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+            } else if kind == HostInvocationKind::RepoCreateBranch {
                 invalidate_repository_commit_review(state.inner()).await;
                 if host_repository_context_is_current(
                     state.inner(),
                     repository_identity.as_deref(),
                     generations,
                 ) {
-                    if kind == HostInvocationKind::RepoPatch {
-                        let _ = refresh_repository_workflow(state.inner()).await;
-                    }
                     emit_repository_refresh(&app);
                 }
             }
@@ -2502,6 +2514,23 @@ async fn run_host_tool(
             review: None,
         },
     );
+}
+
+#[cfg(target_os = "windows")]
+fn patch_host_terminal_state(
+    classification: RepositoryPatchResultClassification,
+) -> HostActivityState {
+    match classification {
+        RepositoryPatchResultClassification::ChangedVerified => HostActivityState::ToolCompleted,
+        RepositoryPatchResultClassification::PreconditionFailed
+        | RepositoryPatchResultClassification::ReplacementFailedKnown => {
+            HostActivityState::ToolError
+        }
+        RepositoryPatchResultClassification::Uncertain
+        | RepositoryPatchResultClassification::Malformed => {
+            HostActivityState::PossibleEffectUnknown
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -2803,7 +2832,7 @@ async fn host_prepare_repo_patch(
             tool: "repo.patch".to_owned(),
             state: HostActivityState::Prepared,
             result: None,
-            review: Some(HostInvocationReview::Patch(ticket.clone())),
+            review: None,
         },
     );
     Ok(PreparedPatchResponse {
@@ -2933,9 +2962,7 @@ async fn host_confirm_tool_invocation(
         PreparedHostPayload::Branch { review } => {
             Some(HostInvocationReview::Branch(review.clone()))
         }
-        PreparedHostPayload::Patch { preparation, .. } => {
-            Some(HostInvocationReview::Patch(preparation.review().clone()))
-        }
+        PreparedHostPayload::Patch { .. } => None,
     };
     emit_host_activity(
         &app,
@@ -6483,27 +6510,28 @@ mod tests {
         DESKTOP_TOOL_NAME, DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity,
         DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
         DesktopRepository, DesktopToolComposition, FrontendError, GracefulCancelOutcome,
-        HardShutdownOutcome, HostInvocationDescriptor, HostInvocationUnavailableReason,
-        LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES,
-        MAX_PROMPT_BYTES, ModelConfigurationPresentation, NEUTRAL_WORKSPACE_DIRECTORY,
-        PendingConnectedPublication, Preferences, PreferencesWarning, ProviderEndpoint,
-        ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme, READINESS_BODY_LIMIT,
-        READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState,
-        RepositoryIndexActionKind, RepositoryObservationStage, RepositoryRefreshReason, ResumePair,
-        SendChatResult, SourceKind, StagedReviewPresentation, TerminalOwnership, activity_event,
-        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        branch_result_classification, clear_conversation_allowed, clear_trusted_profile_selection,
-        commit_activity_presentation, connect_codex, connect_prepared_codex,
-        connection_activation_publication_is_current, current_app_status,
+        HardShutdownOutcome, HostActivityEvent, HostActivityState, HostInvocationDescriptor,
+        HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
+        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication, Preferences, PreferencesWarning,
+        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
+        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
+        TerminalOwnership, activity_event, activity_event_with_composition, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, branch_result_classification, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
+        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
         current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_confirm_tool_invocation,
         host_descriptor, host_invoke_read, host_prepare_repo_create_branch,
         install_repository_workflow, invalidate_repository_commit_review,
-        model_configuration_status, prepare_codex_connection, publish_connected_provider_state,
-        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
+        model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
+        publish_connected_provider_state, publish_readiness_result,
+        publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot,
@@ -6526,7 +6554,8 @@ mod tests {
     use rah_tools::{
         RepositoryBranchCreationAuthority, RepositoryCommitTool,
         RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
-        RepositoryFileRenameAuthority, ToolContext,
+        RepositoryFileRenameAuthority, RepositoryPatchResultClassification, ToolContext,
+        classify_repository_patch_output,
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -11339,6 +11368,98 @@ mod tests {
             serialized,
             r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
         );
+    }
+
+    #[test]
+    fn patch_terminal_matrix_is_strict_and_conservative() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "status": "precondition_failed",
+                    "changed": false,
+                    "uncertain": false,
+                    "reason": "precondition",
+                }),
+                true,
+                RepositoryPatchResultClassification::PreconditionFailed,
+                HostActivityState::ToolError,
+            ),
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "changed": true,
+                    "uncertain": false,
+                    "reason": "none",
+                }),
+                false,
+                RepositoryPatchResultClassification::ChangedVerified,
+                HostActivityState::ToolCompleted,
+            ),
+            (
+                serde_json::json!({
+                    "status": "replacement_failed_known",
+                    "changed": false,
+                    "uncertain": false,
+                    "reason": "replacement",
+                }),
+                true,
+                RepositoryPatchResultClassification::ReplacementFailedKnown,
+                HostActivityState::ToolError,
+            ),
+            (
+                serde_json::json!({
+                    "status": "uncertain",
+                    "changed": false,
+                    "uncertain": true,
+                    "reason": "temporary",
+                }),
+                true,
+                RepositoryPatchResultClassification::Uncertain,
+                HostActivityState::PossibleEffectUnknown,
+            ),
+            (
+                serde_json::json!({
+                    "status": "ok",
+                    "changed": true,
+                    "uncertain": false,
+                    "reason": "none",
+                    "source": "must be rejected",
+                }),
+                true,
+                RepositoryPatchResultClassification::Malformed,
+                HostActivityState::PossibleEffectUnknown,
+            ),
+        ];
+        for (value, is_error, expected_classification, expected_state) in cases {
+            let output = ToolOutput {
+                content: vec![ToolContent::Json(value)],
+                is_error,
+            };
+            let classification = classify_repository_patch_output(&output);
+            assert_eq!(classification, expected_classification);
+            assert_eq!(patch_host_terminal_state(classification), expected_state);
+            assert_eq!(
+                classification == RepositoryPatchResultClassification::Malformed,
+                expected_state == HostActivityState::PossibleEffectUnknown
+                    && expected_classification == RepositoryPatchResultClassification::Malformed
+            );
+        }
+    }
+
+    #[test]
+    fn patch_host_activity_does_not_serialize_review_source_content() {
+        let event = HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: "host-explicit-1".to_owned(),
+            tool: "repo.patch".to_owned(),
+            state: HostActivityState::Started,
+            result: None,
+            review: None,
+        };
+        let serialized = serde_json::to_string(&event).expect("host activity serializes");
+        assert!(!serialized.contains("oldTextEscaped"));
+        assert!(!serialized.contains("replacementTextEscaped"));
+        assert!(!serialized.contains("review"));
     }
 
     #[test]

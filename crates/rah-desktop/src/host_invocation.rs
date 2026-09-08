@@ -138,7 +138,6 @@ pub(crate) struct BranchReview {
 #[serde(untagged)]
 pub(crate) enum HostInvocationReview {
     Branch(BranchReview),
-    Patch(RepositoryPatchReview),
 }
 
 pub(crate) enum PreparedHostPayload {
