@@ -2906,18 +2906,16 @@ mod tests {
             .prepare(human_request(&["a.txt"], &[("old", "new")]))
             .await
             .unwrap();
-        fs::remove_file(root.join("a.txt")).unwrap();
-        fs::write(root.join("a.txt"), b"A old\n").unwrap();
-        let result = preparer.revalidate(&preparation).await;
-        assert!(
-            matches!(
-                &result,
-                Err(RepositoryMultiFileEditPreparationError::InvalidTarget { .. })
-                    | Err(RepositoryMultiFileEditPreparationError::PreconditionChanged { .. })
-                    | Err(RepositoryMultiFileEditPreparationError::Stale)
-            ),
-            "identity drift must fail closed: {result:?}"
-        );
+        if fs::hard_link(root.join("a.txt"), root.join("a-alias.txt")).is_ok() {
+            let result = preparer.revalidate(&preparation).await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(RepositoryMultiFileEditPreparationError::InvalidTarget { .. })
+                ),
+                "hard-link identity drift must fail closed: {result:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
