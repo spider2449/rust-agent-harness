@@ -29,12 +29,36 @@ assert.match(source, /authorityLabel\("authorityCategory", tool\.authorityCatego
 assert.match(source, /tool\.hostInvocation/);
 assert.match(source, /host\.eligible === true/);
 assert.match(source, /host\.kind/);
+for (const unavailableReason of [
+  "not_connected_current",
+  "repository_required",
+  "permission_denied",
+  "authority_not_granted",
+  "model_turn_active",
+  "host_invocation_busy",
+  "stale",
+  "not_supported",
+]) {
+  assert.match(source, new RegExp(`${unavailableReason}:`));
+}
 assert.match(source, /const isPatch = host\.kind === "repo_patch"/);
+assert.match(source, /const isMultiFileEdit = host\.kind === "repo_edit_files"/);
 assert.match(source, /input\.dataset\.hostInput = isPatch \? "path"/);
 assert.match(source, /oldText\.dataset\.hostInput = "expectedOldText"/);
 assert.match(source, /replacementText\.dataset\.hostInput = "replacementText"/);
 assert.match(source, /host_prepare_repo_create_branch/);
 assert.match(source, /host_prepare_repo_patch/);
+assert.match(source, /host_prepare_repo_edit_files/);
+assert.match(source, /targets: \[\.\.\.form\.querySelectorAll\("\[data-multi-file-target\]"\)\]/);
+assert.match(source, /expectedOldText: replacement\.querySelector/);
+assert.match(source, /replacementText: replacement\.querySelector/);
+assert.match(source, /multiFileMaxTargets = 4/);
+assert.match(source, /multiFileMaxReplacements = 16/);
+assert.match(source, /add-target/);
+assert.match(source, /remove-target/);
+assert.match(source, /add-replacement/);
+assert.match(source, /remove-replacement/);
+assert.match(source, /reset-draft/);
 assert.match(source, /expectedOldText: form\.querySelector/);
 assert.match(source, /replacementText: form\.querySelector/);
 assert.match(source, /host_confirm_tool_invocation/);
@@ -45,10 +69,38 @@ assert.match(source, /confirm\.disabled = true/);
 assert.match(source, /cancel\.disabled = true/);
 assert.match(source, /oldTextEscaped/);
 assert.match(source, /replacementTextEscaped/);
+assert.match(source, /target_count/);
+assert.match(source, /replacement_count/);
+assert.match(source, /changed_ranges/);
+assert.match(source, /target_identity/);
+assert.match(source, /preimage_sha256/);
+assert.match(source, /postimage_sha256/);
+assert.match(source, /non_atomic_warning/);
+assert.match(source, /NON-ATOMIC/);
+assert.match(source, /files execute in backend\/host order/);
+for (const result of [
+  "ok",
+  "invalid_target",
+  "precondition_failed",
+  "failed_known_no_effect",
+  "partial_effect",
+  "uncertain",
+]) {
+  assert.match(source, new RegExp(`${result}:`));
+}
+assert.match(source, /committed_verified/);
+assert.match(source, /unchanged_verified/);
+assert.match(source, /not_attempted/);
+assert.match(source, /Final effects cannot be fully determined/);
+assert.match(source, /nothing was rolled back or continued/);
+assert.match(source, /host_invocation_review_too_large/);
+assert.match(source, /host_invocation_invalid_target/);
+assert.match(source, /host_invocation_precondition_changed/);
 assert.match(source, /pre\.textContent/);
 assert.match(source, /Host action — not Model/);
-assert.match(source, /JSON\.stringify\(content\.value/);
-assert.match(source, /content\.type === "text"/);
+assert.match(source, /content\?\.type !== "json"/);
+assert.match(source, /renderHostResult\(payload\)/);
+assert.equal(source.includes("renderHostOutput"), false);
 assert.equal(source.includes("tool.name"), false);
 assert.equal(source.includes("tool.publicToolName ==="), false);
 assert.equal(source.includes("tool.permission ==="), false);
@@ -70,6 +122,12 @@ for (const forbidden of [
   "innerHTML",
   "insertAdjacentHTML",
   "outerHTML",
+  "localStorage",
+  "sessionStorage",
+  "JSON.stringify",
+  "toolName",
+  "expectedSha256",
+  "ticketId: request",
   'startsWith("repo.")',
   'includes("repo.")',
   "currentGeneration ===",
@@ -97,5 +155,9 @@ for (const field of [
 const hostActivityRenderer = source.slice(source.indexOf("function appendHostActivity"), source.indexOf("function renderHostReview"));
 assert.equal(hostActivityRenderer.includes("payload.review"), false);
 assert.match(source, /activePreparedHostReview/);
+assert.match(source, /hostResultValue/);
+assert.match(source, /ticketId: active\.ticketId/);
+assert.match(source, /host_cancel_tool_invocation/);
+assert.match(source, /void refreshEffectiveAuthority\(invoke\)/);
 
 console.log("effective authority frontend static tests passed");

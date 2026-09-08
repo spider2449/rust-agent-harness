@@ -24,6 +24,17 @@ let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
 let activePreparedHostReview = null;
 const maxActivityEntries = 100;
+const multiFileMaxTargets = 4;
+const multiFileMaxReplacements = 16;
+
+const multiFileResultLabels = {
+  ok: "Verified — all reviewed targets committed",
+  invalid_target: "Rejected — invalid target; no target effect",
+  precondition_failed: "Rejected — precondition failed; no target effect",
+  failed_known_no_effect: "Failed — stop target verified unchanged",
+  partial_effect: "Partial effect — only the verified committed prefix is proven",
+  uncertain: "Uncertain — final effects cannot be fully determined",
+};
 
 const authorityStatusLabels = {
   no_repository: "No repository selected",
@@ -44,7 +55,7 @@ const authorityLabels = {
   permission: { none: "None", read: "Read", write: "Write", execute: "Execute" },
   sourceLabel: { desktop_builtin: "Desktop built-in", desktop_repository: "Desktop repository" },
   unavailableState: { configured_unavailable: "Configured unavailable", not_effective: "Not effective" },
-  unavailableReason: { not_configured: "Not configured", authority_not_granted: "Host authority not granted", repository_required: "Select a repository", reconnect_required: "Reconnect required", provider_not_effective: "Provider not effective", provider_unavailable: "Provider unavailable", permission_not_configured: "Permission not configured", review_required: "Reviewed commit authorization required", stale_context: "Context is stale", unknown: "Unavailable reason unknown" },
+  unavailableReason: { not_configured: "Not configured", authority_not_granted: "Host authority not granted", repository_required: "Select a repository", reconnect_required: "Reconnect required", provider_not_effective: "Provider not effective", provider_unavailable: "Provider unavailable", permission_not_configured: "Permission not configured", review_required: "Reviewed commit authorization required", stale_context: "Context is stale", not_connected_current: "Not connected/current", permission_denied: "Permission denied", model_turn_active: "Model turn active", host_invocation_busy: "HostExplicit busy", provider_not_supported: "Provider not supported for HostExplicit", not_supported: "Not supported", stale: "Stale — prepare again", unknown: "Unavailable reason unknown" },
   reviewedCommit: { not_applicable: "Not applicable", identity_not_configured: "Identity not configured", review_required: "Review required", ready_to_authorize: "Ready to authorize", authorized_pending: "Authorized pending", stale: "Stale", authorization_revoked: "Authorization revoked", unavailable: "Unavailable" },
 };
 
@@ -131,6 +142,9 @@ function errorMessage(error) {
     host_invocation_stale: "Host action is stale. Refresh Effective Authority and prepare again.",
     host_invocation_invalid_input: "The Host action input is invalid or too large.",
     host_invocation_ticket_invalid: "This Host action review is no longer valid. Prepare again.",
+    host_invocation_invalid_target: "The prepared target is no longer valid. Prepare a fresh review.",
+    host_invocation_precondition_changed: "A reviewed precondition changed. Prepare a fresh review.",
+    host_invocation_review_too_large: "The complete backend review is too large to display safely.",
     preferences_save_failed: "Model preferences could not be saved.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
@@ -228,7 +242,7 @@ function renderEffectiveTool(tool) {
   const hostBox = document.createElement("div");
   hostBox.className = "host-invocation";
   const hostLabel = document.createElement("span");
-  hostLabel.textContent = host.eligible === true ? "Host action — not Model" : `Host action unavailable: ${host.unavailableReason ?? "not_supported"}`;
+  hostLabel.textContent = host.eligible === true ? "Host action — not Model" : `Host action unavailable: ${authorityLabel("unavailableReason", host.unavailableReason ?? "not_supported")}`;
   hostBox.append(hostLabel);
   if (host.eligible === true && host.kind) {
     const form = document.createElement("form");
@@ -236,6 +250,7 @@ function renderEffectiveTool(tool) {
     const needsPath = ["fs_read", "repo_file_info"].includes(host.kind);
     const isBranch = host.kind === "repo_create_branch";
     const isPatch = host.kind === "repo_patch";
+    const isMultiFileEdit = host.kind === "repo_edit_files";
     if (needsPath || isBranch || isPatch) {
       const input = document.createElement("input");
       input.type = "text";
@@ -257,9 +272,32 @@ function renderEffectiveTool(tool) {
       replacementText.dataset.hostInput = "replacementText";
       form.append(oldText, replacementText);
     }
+    if (isMultiFileEdit) {
+      form.classList.add("multi-file-edit-form");
+      const guidance = document.createElement("p");
+      guidance.textContent = "Typed literal replacements only. The host derives target order, hashes, postimages, and repository bindings.";
+      form.append(guidance);
+      const targets = document.createElement("div");
+      targets.className = "multi-file-targets";
+      targets.dataset.multiFileTargets = "true";
+      appendMultiFileTarget(targets);
+      form.append(targets);
+      const addTarget = document.createElement("button");
+      addTarget.type = "button";
+      addTarget.dataset.multiFileAction = "add-target";
+      addTarget.textContent = "Add target";
+      form.append(addTarget);
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.dataset.multiFileAction = "reset-draft";
+      reset.textContent = "Reset draft";
+      form.append(reset);
+      updateMultiFileBoundControls(form);
+    }
     const button = document.createElement("button");
     button.type = "submit";
-    button.textContent = isBranch || isPatch ? "Prepare" : "Invoke";
+    button.textContent = isBranch || isPatch || isMultiFileEdit ? "Prepare" : "Invoke";
+    if (isMultiFileEdit) button.dataset.multiFileAction = "prepare";
     form.append(button);
     hostBox.append(form);
   }
@@ -267,12 +305,158 @@ function renderEffectiveTool(tool) {
   return item;
 }
 
-function renderHostOutput(output) {
-  const box = document.createElement("pre");
-  box.className = "host-output";
-  box.textContent = output.content.map((content) => content.type === "text"
-    ? content.value
-    : JSON.stringify(content.value, null, 2)).join("\n");
+function appendMultiFileTarget(targets) {
+  const target = document.createElement("fieldset");
+  target.className = "multi-file-target";
+  target.dataset.multiFileTarget = "true";
+  const legend = document.createElement("legend");
+  legend.textContent = "Editable target";
+  target.append(legend);
+
+  const pathLabel = document.createElement("label");
+  pathLabel.textContent = "Relative file path";
+  const path = document.createElement("input");
+  path.type = "text";
+  path.required = true;
+  path.maxLength = 1024;
+  path.dataset.multiFileInput = "path";
+  pathLabel.append(path);
+  target.append(pathLabel);
+
+  const replacements = document.createElement("div");
+  replacements.className = "multi-file-replacements";
+  replacements.dataset.multiFileReplacements = "true";
+  appendMultiFileReplacement(replacements);
+  target.append(replacements);
+
+  const addReplacement = document.createElement("button");
+  addReplacement.type = "button";
+  addReplacement.dataset.multiFileAction = "add-replacement";
+  addReplacement.textContent = "Add replacement";
+  target.append(addReplacement);
+
+  const removeTarget = document.createElement("button");
+  removeTarget.type = "button";
+  removeTarget.dataset.multiFileAction = "remove-target";
+  removeTarget.textContent = "Remove target";
+  target.append(removeTarget);
+  targets.append(target);
+  updateMultiFileBoundControls(targets.closest("form"));
+}
+
+function appendMultiFileReplacement(replacements) {
+  const replacement = document.createElement("fieldset");
+  replacement.className = "multi-file-replacement";
+  replacement.dataset.multiFileReplacement = "true";
+  const legend = document.createElement("legend");
+  legend.textContent = "Literal replacement";
+  replacement.append(legend);
+
+  const oldLabel = document.createElement("label");
+  oldLabel.textContent = "Expected old text";
+  const oldText = document.createElement("textarea");
+  oldText.required = true;
+  oldText.maxLength = 64 * 1024;
+  oldText.dataset.multiFileInput = "expectedOldText";
+  oldLabel.append(oldText);
+  replacement.append(oldLabel);
+
+  const newLabel = document.createElement("label");
+  newLabel.textContent = "Replacement text";
+  const newText = document.createElement("textarea");
+  newText.maxLength = 64 * 1024;
+  newText.dataset.multiFileInput = "replacementText";
+  newLabel.append(newText);
+  replacement.append(newLabel);
+  replacements.append(replacement);
+  updateMultiFileBoundControls(replacements.closest("form"));
+}
+
+function updateMultiFileBoundControls(form) {
+  if (!form) return;
+  const targets = [...form.querySelectorAll("[data-multi-file-target]")];
+  form.querySelector('[data-multi-file-action="add-target"]').disabled = targets.length >= multiFileMaxTargets;
+  for (const target of targets) {
+    const replacements = [...target.querySelectorAll("[data-multi-file-replacement]")];
+    target.querySelector('[data-multi-file-action="add-replacement"]').disabled = replacements.length >= multiFileMaxReplacements;
+    target.querySelector('[data-multi-file-action="remove-target"]').disabled = targets.length <= 1;
+    for (const replacement of replacements) {
+      let remove = replacement.querySelector('[data-multi-file-action="remove-replacement"]');
+      if (!remove) {
+        remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.multiFileAction = "remove-replacement";
+        remove.textContent = "Remove replacement";
+        replacement.append(remove);
+      }
+      remove.disabled = replacements.length <= 1;
+    }
+  }
+}
+
+function resetMultiFileDraft(form) {
+  const targets = form.querySelector("[data-multi-file-target]").parentElement;
+  targets.replaceChildren();
+  appendMultiFileTarget(targets);
+  updateMultiFileBoundControls(form);
+}
+
+function readMultiFileRequest(form) {
+  return {
+    targets: [...form.querySelectorAll("[data-multi-file-target]")].map((target) => ({
+      path: target.querySelector('[data-multi-file-input="path"]').value,
+      replacements: [...target.querySelectorAll("[data-multi-file-replacement]")].map((replacement) => ({
+        expectedOldText: replacement.querySelector('[data-multi-file-input="expectedOldText"]').value,
+        replacementText: replacement.querySelector('[data-multi-file-input="replacementText"]').value,
+      })),
+    })),
+  };
+}
+
+function hostResultValue(output) {
+  if (!output || !Array.isArray(output.content) || output.content.length !== 1) return null;
+  const content = output.content[0];
+  if (content?.type !== "json" || !content.value || typeof content.value !== "object") return null;
+  return content.value;
+}
+
+function renderHostResult(payload) {
+  const result = hostResultValue(payload.result);
+  const status = result?.status;
+  const box = document.createElement("div");
+  box.className = "host-result";
+  const title = document.createElement("strong");
+  title.textContent = multiFileResultLabels[status] ?? (payload.state === "possible_effect_unknown"
+    ? "Uncertain — backend result was not safely classifiable"
+    : "Host result unavailable");
+  box.append(title);
+  if (!multiFileResultLabels[status]) return box;
+
+  const effects = Array.isArray(result.effects) ? result.effects : [];
+  if (effects.length) {
+    const heading = document.createElement("p");
+    heading.textContent = `Verified target effects: ${effects.length}`;
+    box.append(heading);
+    const list = document.createElement("ul");
+    for (const effect of effects) {
+      const item = document.createElement("li");
+      const state = ["committed_verified", "unchanged_verified", "not_attempted", "uncertain"].includes(effect?.state)
+        ? effect.state
+        : "unclassifiable";
+      item.textContent = `Backend-proven target effect state: ${state}`;
+      list.append(item);
+    }
+    box.append(list);
+  }
+  const explanation = document.createElement("p");
+  if (status === "partial_effect") {
+    explanation.textContent = "Only the verified committed prefix/effect subset is proven. Later targets are shown only with backend-proven effect states; nothing was rolled back or continued.";
+  } else if (status === "uncertain") {
+    explanation.textContent = "Final effects cannot be fully determined. The frontend does not infer unchanged state and offers no automatic Retry or Continue.";
+  } else {
+    explanation.textContent = "No automatic retry, replay, continuation, rollback, restore-preimage, Stage, or Commit is performed.";
+  }
+  box.append(explanation);
   return box;
 }
 
@@ -292,6 +476,7 @@ function appendHostActivity(payload) {
     rejected_busy: "Host action busy",
     invalid_input: "Host input invalid",
     cancelled_before_start: "Host action cancelled before start",
+    partial_effect: "Host action partially effected",
     possible_effect_unknown: "Host effect outcome unknown — inspect manually; do not retry",
   };
   entry.className = "activity-entry host-activity";
@@ -299,7 +484,7 @@ function appendHostActivity(payload) {
   title.textContent = "Host action — not Model";
   state.textContent = `${payload.tool}: ${labels[payload.state] ?? "Host action state unavailable"}`;
   entry.append(title, state);
-  if (payload.result) entry.append(renderHostOutput(payload.result));
+  if (payload.result) entry.append(renderHostResult(payload));
   if (["tool_completed", "tool_error", "rejected_stale", "possible_effect_unknown", "cancelled_before_start"].includes(payload.state)) {
     clearActiveHostReview();
   }
@@ -310,10 +495,101 @@ function appendHostActivity(payload) {
 
 function renderHostReview(review, kind) {
   const content = document.createElement("div");
+  content.className = "host-review-content";
   if (kind === "branch") {
     const text = document.createElement("p");
     text.textContent = `Create branch only: ${review.branch}. Does not switch branch.`;
     content.append(text);
+    return content;
+  }
+  if (kind === "multi_file_edit") {
+    const details = document.createElement("dl");
+    const values = [
+      ["Operation", review.operation],
+      ["Target count", review.target_count],
+      ["Total replacement count", review.replacement_count],
+      ["Matching semantics", review.matching],
+      ["Unchanged context", review.unchanged_context],
+      ["Intended effect", review.intended_effect],
+      ["Non-atomic warning", review.non_atomic_warning],
+    ];
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      details.append(term, detail);
+    }
+    content.append(details);
+
+    const warning = document.createElement("p");
+    warning.className = "host-review-warning";
+    warning.textContent = "NON-ATOMIC: files execute in backend/host order, not input order. partial_effect and uncertain outcomes are possible.";
+    content.append(warning);
+
+    const targetsHeading = document.createElement("h4");
+    targetsHeading.textContent = "Host-ordered targets and complete changed ranges";
+    content.append(targetsHeading);
+    for (const target of review.targets ?? []) {
+      const targetSection = document.createElement("section");
+      targetSection.className = "multi-file-review-target";
+      const heading = document.createElement("h5");
+      heading.textContent = `Host target ordinal ${target.ordinal}: ${target.path}`;
+      targetSection.append(heading);
+      const targetDetails = document.createElement("dl");
+      for (const [label, value] of [
+        ["Target ordinal", target.ordinal],
+        ["Target path", target.path],
+        ["Target identity", target.target_identity],
+        ["Replacement count", target.replacement_count],
+        ["Preimage SHA-256", target.preimage_sha256],
+        ["Preimage byte length", target.preimage_byte_length],
+        ["Postimage SHA-256", target.postimage_sha256],
+        ["Postimage byte length", target.postimage_byte_length],
+      ]) {
+        const term = document.createElement("dt");
+        const detail = document.createElement("dd");
+        term.textContent = label;
+        detail.textContent = String(value ?? "");
+        targetDetails.append(term, detail);
+      }
+      targetSection.append(targetDetails);
+
+      const rangesHeading = document.createElement("h6");
+      rangesHeading.textContent = "Changed ranges and complete changed material";
+      targetSection.append(rangesHeading);
+      for (const [rangeIndex, range] of (target.changed_ranges ?? []).entries()) {
+        const rangeSection = document.createElement("section");
+        const rangeHeading = document.createElement("strong");
+        rangeHeading.textContent = `Changed range ${rangeIndex}: [${range.start}, ${range.end}) length ${range.length}`;
+        rangeSection.append(rangeHeading);
+        for (const [label, value] of [
+          ["Complete escaped expected old text", range.expected_old_text_escaped],
+          ["Complete escaped replacement text", range.replacement_text_escaped],
+        ]) {
+          const textHeading = document.createElement("strong");
+          const pre = document.createElement("pre");
+          textHeading.textContent = label;
+          pre.textContent = String(value ?? "");
+          rangeSection.append(textHeading, pre);
+        }
+        targetSection.append(rangeSection);
+      }
+      content.append(targetSection);
+    }
+
+    const nonEffectsHeading = document.createElement("strong");
+    nonEffectsHeading.textContent = "Protected non-effects";
+    const nonEffects = document.createElement("ul");
+    for (const value of review.non_effects ?? []) {
+      const item = document.createElement("li");
+      item.textContent = value;
+      nonEffects.append(item);
+    }
+    content.append(nonEffectsHeading, nonEffects);
+    const lifecycleWarning = document.createElement("p");
+    lifecycleWarning.textContent = "There is no automatic retry, replay, continuation of remaining targets, rollback, restore-preimage, Stage, or Commit.";
+    content.append(lifecycleWarning);
     return content;
   }
   const details = document.createElement("dl");
@@ -375,7 +651,9 @@ function openHostReview(invoke, prepared, kind) {
   const title = document.createElement("h3");
   const confirm = document.createElement("button");
   const cancel = document.createElement("button");
-  title.textContent = kind === "patch" ? "Review Host patch" : "Review Host action";
+  title.textContent = kind === "patch"
+    ? "Review Host patch"
+    : kind === "multi_file_edit" ? "Review Host multi-file edit" : "Review Host action";
   confirm.type = "button";
   confirm.textContent = "Confirm Host action";
   cancel.type = "button";
@@ -429,17 +707,48 @@ async function submitHostForm(invoke, form) {
     openHostReview(invoke, prepared, "patch");
     return;
   }
+  if (kind === "repo_edit_files") {
+    const prepared = await invoke("host_prepare_repo_edit_files", { request: readMultiFileRequest(form) });
+    openHostReview(invoke, prepared, "multi_file_edit");
+    return;
+  }
   const request = { kind };
   if (value !== undefined) request.path = value;
   await invoke("host_invoke_read", { request });
 }
 
 function installHostFormHandlers(invoke) {
-  document.querySelector("#effective-tools").addEventListener("submit", async (event) => {
+  const tools = document.querySelector("#effective-tools");
+  tools.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-multi-file-action]");
+    if (!button) return;
+    const form = button.closest("form[data-host-kind]");
+    if (!form) return;
+    const action = button.dataset.multiFileAction;
+    if (action === "add-target") {
+      const targets = form.querySelector("[data-multi-file-target]").parentElement;
+      if (targets.children.length < multiFileMaxTargets) appendMultiFileTarget(targets);
+    } else if (action === "remove-target") {
+      const target = button.closest("[data-multi-file-target]");
+      if (form.querySelectorAll("[data-multi-file-target]").length > 1) target.remove();
+      updateMultiFileBoundControls(form);
+    } else if (action === "add-replacement") {
+      const replacements = button.closest("[data-multi-file-target]").querySelector("[data-multi-file-replacements]");
+      if (replacements.children.length < multiFileMaxReplacements) appendMultiFileReplacement(replacements);
+      updateMultiFileBoundControls(form);
+    } else if (action === "remove-replacement") {
+      const replacements = button.closest("[data-multi-file-replacements]");
+      if (replacements.children.length > 1) button.closest("[data-multi-file-replacement]").remove();
+      updateMultiFileBoundControls(form);
+    } else if (action === "reset-draft") {
+      resetMultiFileDraft(form);
+    }
+  });
+  tools.addEventListener("submit", async (event) => {
     const form = event.target.closest("form[data-host-kind]");
     if (!form) return;
     event.preventDefault();
-    const button = form.querySelector("button");
+    const button = form.querySelector("button[type=submit]");
     button.disabled = true;
     try {
       await submitHostForm(invoke, form);
@@ -853,7 +1162,11 @@ async function initializeDesktop() {
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));
-  await listen("host_activity_event", (event) => appendHostActivity(event.payload));
+  await listen("host_activity_event", (event) => {
+    appendHostActivity(event.payload);
+    void refreshEffectiveAuthority(invoke);
+    void loadStatus(invoke).catch(() => showBackendError());
+  });
   await listen("conversation_persistence_warning", (event) => showPersistenceWarning(event.payload));
   await listen("desktop_preferences_warning", (event) => {
     const error = document.querySelector("#model-error");
