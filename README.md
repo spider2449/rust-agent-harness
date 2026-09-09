@@ -5,6 +5,86 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.23.0 prepared — not yet published
+
+RAH v0.23.0 is prepared but not yet published. v0.22.0 remains the current
+immutable published release. The milestone is **HostExplicit Reviewed New-File
+Authoring (`repo.create-file`)**:
+
+```text
+typed human {path, content}
+ -> zero-effect shared Prepare
+ -> complete bounded backend-derived review
+ -> opaque single-use ticket-only Confirm
+ -> currentness / exact-definition / permission / preparer checks
+ -> shared revalidation -> D2 -> reviewed Commit invalidation
+ -> HostExplicit Started -> authorized_tool_dispatch
+ -> current ToolRegistry -> existing repo.create-file
+ -> ADR 0013 RepositoryFileCreationPolicy
+ -> strict result classification -> descriptive repository refresh
+```
+
+ADR 0013 remains the sole underlying file-creation authority; ADR 0024 owns
+the capability-specific reviewed HostExplicit route; ADR 0021 owns generic
+HostExplicit coordination, currentness, D2, tickets, lifecycle, and
+provenance. HostExplicit is not generic filesystem authority, and model output
+or provider metadata is never authorization.
+
+The request is closed to exactly `{path: String, content: String}`. Unknown
+fields fail closed. The route permits exactly one file, a 1..=1024 UTF-8 byte
+path, 0..=262144 UTF-8 byte content, NUL rejection, a canonical request no
+larger than 327680 bytes, and a complete review no larger than 262144 bytes.
+Empty content is allowed and content bytes remain exact, without BOM/newline
+conversion, Unicode normalization, templating, append, overwrite, or an
+automatic final newline. Complete review is required; it may not be truncated
+or ellipsized.
+
+The exact nine HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+```
+
+`repo.delete-file`, `repo.rename-file`, `repo.create-directory`, `repo.commit`,
+MCP Tools, Process Plugin Tools, fixture Tools, and unknown Tools remain
+ineligible. There is no wildcard, category, or provider-metadata route.
+
+The existing parent must already be safe and identity-verified. The target must
+be absent from the worktree, HEAD, and every index stage, including
+intent-to-add. Ignored targets, submodules, unsupported sparse-checkout,
+Windows reserved/device/ADS/UNC/verbatim names, reviewed trailing-dot/space
+components, and symlink/junction/reparse traversal fail closed. Parent mkdir,
+overwrite, append, delete, rename, Stage, and Commit do not occur. Exclusive
+create-new is the native commit point; complete writing is not an atomic
+all-or-nothing transaction.
+
+The exact results are `ok`, `invalid_target`, `precondition_failed`,
+`create_failed_known`, `write_failed_known`, and `uncertain`. Known no-effect
+classification requires proof; `write_failed_known` may retain an attributable
+empty or partial file; `uncertain` preserves unknown effect. The route does not
+retry, replay, clean up, roll back, restore, or compensate. Its ticket is
+opaque, process-local, in-memory, capability-specific, single-use, bound to
+the exact preparation/currentness, and valid for an inclusive five-minute TTL.
+Confirm and Cancel receive only the ticket ID. Generic activity has a distinct
+non-authority ID (`ticket_id != activity_id`) and excludes authority tickets,
+source-bearing review/content, raw Tool input/output, and private identities.
+
+Task 274's accepted Windows 10 connected-current host evidence is carried
+forward without rerunning the live gate or submitting a model prompt. It is
+not model-selected evidence; zero model lifecycle counts do not certify a
+model execution. The optional live Cancel-before-start subcase was not rerun;
+deterministic cancellation evidence was accepted by Task 275. The release
+preparation baseline is `533b0769618d25c1b9673a27c3e21af7a48809ca`, and this
+preparation creates no tag, GitHub Release, or published artifact.
+
 ## RAH v0.22.0 released
 
 RAH v0.22.0 is the current immutable published release for **HostExplicit

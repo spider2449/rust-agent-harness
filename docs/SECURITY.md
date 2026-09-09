@@ -1,9 +1,9 @@
-# RAH v0.22.0 Security Model
+# RAH v0.23.0 Security Model — prepared, not yet published
 
-This document describes the released v0.22.0 security model. RAH v0.22.0 is
-released and is the current immutable published release; v0.21.0 is the prior
-immutable release. The immutable v0.22.0 release source is
-`76895b4067c38167f3c41a3536f6616cffa8293a`.
+This document describes the prepared v0.23.0 security model. RAH v0.23.0 is
+prepared but not yet published. v0.22.0 remains the current immutable
+published release; v0.21.0 is the prior immutable release. The immutable
+v0.22.0 release source is `76895b4067c38167f3c41a3536f6616cffa8293a`.
 
 The later Task 267 documentation cleanup commit is not the v0.22.0 release
 source.
@@ -11,6 +11,136 @@ source.
 v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0024 reviewed HostExplicit new-file authoring boundary
+
+The v0.23 capability is **HostExplicit Reviewed New-File Authoring** through
+the existing `repo.create-file` Tool. The security route is:
+
+```text
+typed human {path, content}
+ -> zero-effect shared Prepare
+ -> complete bounded backend-derived review
+ -> opaque single-use ticket-only Confirm
+ -> currentness / exact-definition / permission / preparer checks
+ -> shared creation revalidation -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started -> authorized_tool_dispatch
+ -> current ToolRegistry -> existing repo.create-file
+ -> ADR 0013 RepositoryFileCreationPolicy
+ -> strict result classification -> descriptive repository refresh
+```
+
+ADR 0013 is the sole underlying file-creation mutation authority. ADR 0024
+owns this capability-specific reviewed HostExplicit route. ADR 0021 remains
+the generic HostExplicit coordinator, currentness, D2, ticket, lifecycle, and
+provenance boundary. HostExplicit is not generic filesystem authority;
+frontend presentation is not authority; model output and provider metadata
+cannot create or enable the route.
+
+The human Prepare request is closed to exactly `{path: String, content:
+String}`; unknown fields fail closed. It is bounded to exactly one file, a
+1..=1024 UTF-8 byte path, 0..=262144 UTF-8 byte content, NUL rejection, a
+canonical serialized request of at most 327680 bytes, and a complete
+serialized review of at most 262144 bytes. Empty content is valid. The bytes
+are retained exactly, with no BOM or newline transformation, Unicode
+normalization, templating, append, overwrite, or automatic final newline. If
+the complete mutation-relevant review cannot fit, preparation fails before a
+ticket exists. No truncated or ellipsized review can authorize mutation.
+
+The parent must already exist and pass safe-root, containment, parent identity,
+and non-link/non-reparse checks. The target must be absent from the worktree,
+HEAD, and every index stage including intent-to-add. Ignored targets,
+submodules, unsupported sparse-checkout state, Windows reserved/device/ADS/
+UNC/verbatim names, reviewed trailing-dot/space components, and symlink,
+junction, or reparse traversal fail closed. No parent directory is created.
+The native commit point is direct exclusive acquisition (`O_CREAT | O_EXCL`
+intent on Unix and `CREATE_NEW` / `FILE_CREATE` intent on Windows). Complete
+writing is not an atomic all-or-nothing transaction.
+
+The exact nine eligible HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+```
+
+`repo.delete-file`, `repo.rename-file`, `repo.create-directory`, `repo.commit`,
+MCP Tools, Process Plugin Tools, fixture Tools, and unknown Tools are
+ineligible. There is no wildcard, category, or provider route.
+
+### Conservative creation outcomes
+
+ADR 0013's exact six result classes are:
+
+```text
+ok
+invalid_target
+precondition_failed
+create_failed_known
+write_failed_known
+uncertain
+```
+
+`ok` requires one exact new regular non-reparse file verified against the
+reviewed bytes, hash, and length; it remains untracked and does not change the
+index, HEAD, or refs. `invalid_target` is rejected before valid creation
+authority can act. `precondition_failed` is an admission/currentness failure
+before native create. `create_failed_known` is allowed only after bounded
+post-observation proves no RAH creation effect; a native error category alone
+is insufficient. `write_failed_known` proves exclusive creation and may leave
+an attributable empty or partial invocation file; it is not no-effect.
+`uncertain` preserves possible absent, empty, partial, complete, or externally
+replaced state. Unknown remains unknown.
+
+For every potentially effectful result there is no retry, replay, automatic
+delete, rollback, restore, compensation, Stage, or Commit. Timeout,
+cancellation, disconnect, crash, or a lost response is not rollback. No
+race-free TOCTOU guarantee is claimed.
+
+### Ticket, activity, and currentness privacy
+
+Prepare performs zero Tool executions, zero native creates, and no repository,
+index, HEAD, ref, history, Stage, Commit, model, provider, or durable-authority
+effect. The ticket is opaque, process-local, in-memory, capability-specific,
+single-use, exact-preparation/currentness-bound, and valid for an inclusive
+five-minute TTL. It is not serializable as durable authority; there is no
+persistence, resume, or replacement ticket. Confirm and Cancel receive only
+the ticket ID. Revalidation and D2 occur before Started, and dispatch uses the
+current ToolRegistry.
+
+Generic activity uses a distinct non-authority activity ID and requires
+`ticket_id != activity_id`. The activity ID is not the ticket, is not derived
+from it, and cannot Confirm or Cancel. Generic activity, persistence, and
+logging exclude the ticket, complete source content or sentinel,
+source-bearing complete review, raw ToolInput, raw source-bearing ToolOutput,
+native repository path, native parent identity, and private object identities.
+A successful generic terminal result is status-only.
+
+An effectful or potentially effectful create route invalidates stale
+repository-bound reviewed Commit authorization. Refresh is descriptive only
+and cannot fabricate Commit authorization. A successful create is one new
+untracked worktree file; it does not Stage, Commit, mutate the index, change
+HEAD or refs, or change history. Normal `git diff` does not expose untracked
+content as a tracked diff, so direct reviewed bytes/hash/length verification is
+required.
+
+### Provider and live-evidence boundary
+
+The evidence is human/host initiated. A connected runtime process is not a
+model turn; zero model lifecycle counts do not certify model execution, and
+the route is not model-selected `repo.create-file`. MCP and Process Plugin
+Tools remain ineligible. Task 274's accepted Windows-only live evidence is
+carried forward without rerunning the gate for release preparation. It does
+not establish Linux/macOS production live parity. Process supervision is not
+an OS sandbox, and no network-isolation claim is made.
 
 ## ADR 0023 reviewed HostExplicit multi-file authoring boundary
 

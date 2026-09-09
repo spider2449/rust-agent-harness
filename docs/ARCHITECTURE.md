@@ -1,9 +1,9 @@
-# RAH v0.22.0 Architecture
+# RAH v0.23.0 Architecture — prepared, not yet published
 
-This document describes the released v0.22.0 architecture. RAH v0.22.0 is
-released and is the current immutable published release; v0.21.0 is the prior
-immutable release. The immutable v0.22.0 release source is
-`76895b4067c38167f3c41a3536f6616cffa8293a`.
+This document describes the prepared v0.23.0 architecture. RAH v0.23.0 is
+prepared but not yet published. v0.22.0 remains the current immutable
+published release; v0.21.0 is the prior immutable release. The immutable
+v0.22.0 release source is `76895b4067c38167f3c41a3536f6616cffa8293a`.
 
 The later Task 267 documentation cleanup commit is not the v0.22.0 release
 source.
@@ -11,6 +11,111 @@ source.
 v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0024 reviewed HostExplicit new-file authoring path
+
+The v0.23 milestone is **HostExplicit Reviewed New-File Authoring** through
+the existing `repo.create-file` Tool. The connected-current Desktop human
+route is:
+
+```text
+typed human {path, content}
+ -> zero-effect shared Prepare
+ -> complete bounded backend-derived review
+ -> opaque single-use ticket
+ -> ticket-only Confirm
+ -> connected-current / exact-definition / permission / preparer checks
+ -> shared creation revalidation
+ -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> current ToolRegistry
+ -> existing repo.create-file
+ -> ADR 0013 RepositoryFileCreationPolicy
+ -> strict result classification
+ -> descriptive repository refresh
+```
+
+ADR 0013 remains the sole underlying file-creation mutation authority. ADR
+0024 owns only this capability-specific reviewed HostExplicit route. ADR 0021
+remains the generic HostExplicit coordinator, connected-current/currentness,
+D2, ticket, lifecycle, and provenance boundary. HostExplicit is not generic
+filesystem authority; the frontend is presentation and typed input only, and
+model output or provider metadata is never authorization.
+
+The request is closed to exactly `{path: String, content: String}` and unknown
+fields fail closed. The bounds are exactly one file; path 1..=1024 UTF-8 bytes;
+content 0..=262144 UTF-8 bytes; NUL rejected; canonical serialized request at
+most 327680 bytes; and complete serialized review at most 262144 bytes. Empty
+content is allowed. Content remains exact: no BOM or newline transformation,
+Unicode normalization, templating, append, overwrite, or automatic final
+newline. A complete mutation-relevant review is required; if it cannot fit,
+preparation fails before ticket issuance, with no truncated or ellipsized
+review authorizing mutation.
+
+The existing parent must already exist and pass root, parent, containment,
+identity, and non-link/non-reparse checks. The target must be absent from the
+worktree, HEAD, and every index stage including intent-to-add. Ignored targets,
+submodules, unsupported sparse-checkout state, Windows reserved/device/ADS/
+UNC/verbatim names, reviewed trailing-dot/space components, and symlink,
+junction, or reparse traversal fail closed. No parent directory is created.
+The native commit point is direct exclusive name acquisition (`O_CREAT |
+O_EXCL` intent on Unix; `CREATE_NEW` / `FILE_CREATE` intent on Windows).
+Complete writing is not an atomic all-or-nothing transaction.
+
+The exact nine HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+```
+
+`repo.delete-file`, `repo.rename-file`, `repo.create-directory`, `repo.commit`,
+MCP Tools, Process Plugin Tools, fixture Tools, and unknown Tools remain
+ineligible. There is no wildcard, category, or provider HostExplicit route.
+
+The exact ADR 0013 results are `ok`, `invalid_target`,
+`precondition_failed`, `create_failed_known`, `write_failed_known`, and
+`uncertain`. `create_failed_known` requires bounded post-observation proving
+no RAH creation effect. `write_failed_known` proves exclusive creation and may
+leave an attributable empty or partial file. `uncertain` preserves unknown
+absent, empty, partial, complete, or replaced state. No result is upgraded from
+malformed or contradictory output.
+
+Prepare is zero-effect. The opaque ticket is process-local, in-memory,
+capability-specific, single-use, exact-preparation/currentness-bound, and
+valid for an inclusive five-minute TTL; it is not serializable as durable
+authority and has no persistence, resume, replay, or replacement path. Confirm
+and Cancel receive only the ticket ID. Generic activity uses a distinct
+non-authority activity ID with `ticket_id != activity_id`; it is not derived
+from the ticket and cannot Confirm or Cancel. Generic activity, persistence,
+and logging exclude the ticket, complete source/content or sentinel,
+source-bearing complete review, raw ToolInput/ToolOutput, native paths and
+parent identity, and private object identities. Successful generic terminal
+output is status-only.
+
+Effectful creation invalidates stale repository-bound reviewed Commit
+authorization before HostExplicit Started. Refresh is descriptive only. The
+route never retries, replays, deletes, rolls back, restores, compensates,
+Stages, or Commits. `write_failed_known` may retain a partial file and
+`uncertain` may retain an unknown external effect; timeout, cancellation, or
+disconnect is not rollback. No race-free TOCTOU, process-supervision-as-OS-
+sandbox, network-isolation, or Linux/macOS production live-parity claim is
+made.
+
+Task 274's accepted Windows 10 connected-current host evidence is carried
+forward without a live rerun for this preparation. It is human/host initiated,
+not model-selected; a connected process and zero model lifecycle counts do not
+certify a model turn. The optional live Cancel-before-start subcase was not
+rerun; deterministic cancellation evidence was accepted by Task 275.
 
 ## ADR 0023 reviewed HostExplicit multi-file authoring path
 

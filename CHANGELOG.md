@@ -1,5 +1,122 @@
 # Changelog
 
+## v0.23.0 — release preparation (2026-09-09)
+
+RAH v0.23.0 is **PREPARED, NOT PUBLISHED**. v0.22.0 remains the current
+immutable published release. Task 275 authorized preparation with verdict
+**A — v0.23 NEW-FILE HOSTEXPLICIT MILESTONE COMPLETE — RELEASE PREPARATION MAY
+BEGIN**. The preparation baseline is `533b0769618d25c1b9673a27c3e21af7a48809ca`.
+The workspace version moves from `0.22.0` to `0.23.0` across 13 packages,
+all edition 2024. Task 276 creates no `v0.23.0` tag, GitHub Release, artifact,
+or other publication.
+
+### Added
+
+- **HostExplicit Reviewed New-File Authoring (`repo.create-file`)** through
+  the existing capability:
+
+  ```text
+  typed human {path, content}
+   -> zero-effect shared Prepare
+   -> complete bounded backend-derived review
+   -> opaque single-use ticket
+   -> ticket-only Confirm
+   -> connected-current / exact-definition / permission / preparer checks
+   -> shared creation revalidation
+   -> D2
+   -> reviewed Commit authorization invalidation
+   -> HostExplicit Started
+   -> authorized_tool_dispatch
+   -> current ToolRegistry
+   -> existing repo.create-file
+   -> ADR 0013 RepositoryFileCreationPolicy
+   -> strict result classification
+   -> descriptive repository refresh
+  ```
+
+- ADR 0013 remains the sole underlying file-creation mutation authority. ADR
+  0024 owns only this capability-specific reviewed HostExplicit route. ADR
+  0021 remains the generic HostExplicit coordinator, currentness, D2, ticket,
+  lifecycle, and provenance boundary.
+- The human request is closed to exactly `{path: String, content: String}`;
+  unknown fields fail closed. It is exactly one file, with a 1..=1024 UTF-8
+  byte path, 0..=262144 UTF-8 byte content, NUL rejection, canonical request
+  size at most 327680 bytes, and complete serialized review at most 262144
+  bytes. Empty content is valid. Content bytes are exact: no BOM or newline
+  transformation, Unicode normalization, templating, append, overwrite, or
+  automatic final newline.
+- The reviewed route requires an existing safe parent, target absence from the
+  worktree, HEAD, every index stage including intent-to-add, and Git admission.
+  It rejects ignored targets, submodules, unsupported sparse-checkout state,
+  unsafe Windows reserved/device/ADS/UNC/verbatim names, reviewed trailing-dot
+  or trailing-space components, and symlink, junction, or reparse traversal.
+  It creates no parent directory. Native exclusive acquisition is the commit
+  point (`O_CREAT | O_EXCL` intent on Unix; `CREATE_NEW` / `FILE_CREATE` intent
+  on Windows). Complete writing is not an atomic all-or-nothing transaction.
+
+### Security
+
+- The exact nine eligible HostExplicit Tools are `fs.read`, `repo.file-info`,
+  `repo.status`, `repo.diff`, `repo.diff-staged`, `repo.create-branch`,
+  `repo.patch`, `repo.edit-files`, and `repo.create-file`. `repo.delete-file`,
+  `repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools,
+  Process Plugin Tools, fixture Tools, and unknown Tools remain ineligible.
+  There is no wildcard, category, or provider-metadata route.
+- The exact ADR 0013 result classes remain `ok`, `invalid_target`,
+  `precondition_failed`, `create_failed_known`, `write_failed_known`, and
+  `uncertain`. `create_failed_known` requires bounded post-observation proving
+  no RAH creation effect; `write_failed_known` means exclusive creation
+  succeeded and an attributable empty or partial file may remain; `uncertain`
+  preserves unknown absent, empty, partial, complete, or replaced state.
+  Malformed or contradictory results are not upgraded to success.
+- Prepare performs zero Tool executions and zero native creation attempts. The
+  ticket is opaque, process-local, in-memory, capability-specific,
+  single-use, exact-preparation/currentness-bound, and valid for an inclusive
+  five-minute TTL. It is not durable authority and has no persistence, resume,
+  or replacement path. Confirm and Cancel receive only the ticket ID.
+- Generic activity has a distinct non-authority activity ID, and
+  `ticket_id != activity_id`. The activity ID is not derived from the ticket
+  and cannot Confirm or Cancel. Generic activity, persistence, and logging
+  exclude the ticket, complete source content or source sentinel, complete
+  source-bearing review, raw ToolInput/ToolOutput, native paths and parent
+  identities, and private object identities. Successful generic terminal
+  output is status-only.
+- Effectful creation invalidates stale repository-bound reviewed Commit
+  authorization. Refresh is descriptive only. The workflow never retries,
+  replays, deletes, rolls back, restores, compensates, stages, or commits.
+  A partial file may remain after `write_failed_known`; an uncertain external
+  effect may remain. Timeout, cancellation, or disconnect is not rollback.
+
+### Validation and evidence
+
+- Task 274 evidence is carried forward and is not rerun for release
+  preparation. It was host/human initiated, not model-selected: Windows 10
+  Professional `10.0.19045` x64; Codex `0.149.0`; Codex SHA-256
+  `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`;
+  model `gpt-5.6-terra`; reasoning `medium`.
+- The guarded command was the exact `scripts/codex-live-gate.ps1` command
+  recorded in the v0.23 live-certification plan. It proved target
+  `src/rah-hostexplicit-live-created.txt`, source length 79, source SHA-256
+  `b61494980e795ac47bfc4598d9e30176a1821c0eca4e3e213503ee67b8237314`,
+  Prepare `Tool 0 / native create 0`, Confirm `Tool 1 / native create 1`,
+  result `ok`, `HostActivity tool_completed`, generation tuple `[1, 0, 0, 1]`,
+  Stage/Commit `0 / 0`, model request and lifecycle counts all zero, MCP and
+  Process Plugin counts zero, and marker
+  `RAH_CREATE_FILE_HOSTEXPLICIT_LIVE_OK`. It also retained the fresh
+  disposable repository, ordinary parent, exact bytes/hash/length, regular
+  non-symlink/non-reparse target, unchanged index/HEAD/branch/refs and
+  unrelated staged state, distinct ticket/activity IDs, privacy checks,
+  duplicate/activity-ID rejection, Commit invalidation, and Idle coordinator.
+  The optional live Cancel-before-start subcase was not rerun; deterministic
+  cancellation evidence was accepted by Task 275.
+- This evidence does not claim model-selected HostExplicit execution. It does
+  not claim generic `fs.write`, shell/process authority, arbitrary filesystem
+  writing, parent mkdir, overwrite, append, delete, rename, automatic Stage or
+  Commit, HostExplicit `repo.commit`, MCP or Process Plugin HostExplicit,
+  ticket persistence/resume, retry/replay, rollback/recovery/compensation,
+  race-free TOCTOU, process supervision as OS sandboxing, network isolation,
+  or Linux/macOS production live parity.
+
 ## v0.22.0 — released (2026-09-09)
 
 RAH v0.22.0 is released and is the current immutable published release.
