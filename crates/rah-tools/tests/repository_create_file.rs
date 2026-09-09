@@ -6,7 +6,10 @@ use std::{
 };
 
 use rah_protocol::{ToolContent, ToolInput};
-use rah_tools::{RepositoryFileCreationTool, Tool, ToolContext};
+use rah_tools::{
+    RepositoryCreateFilePreparationError, RepositoryCreateFilePreparationRequest,
+    RepositoryCreateFilePreparer, RepositoryFileCreationTool, Tool, ToolContext,
+};
 use serde_json::{Value, json};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -124,6 +127,32 @@ fn assert_snapshot(fixture: &Fixture, before: &(Vec<u8>, Vec<u8>, Vec<u8>)) {
             .stdout,
         before.2
     );
+}
+
+fn prepare(
+    preparer: &RepositoryCreateFilePreparer,
+    path: &str,
+    content: &str,
+) -> Result<rah_tools::RepositoryCreateFilePreparation, RepositoryCreateFilePreparationError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(preparer.prepare(RepositoryCreateFilePreparationRequest {
+        path: path.to_owned(),
+        content: content.to_owned(),
+    }))
+}
+
+fn revalidate(
+    preparer: &RepositoryCreateFilePreparer,
+    preparation: &rah_tools::RepositoryCreateFilePreparation,
+) -> Result<(), RepositoryCreateFilePreparationError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(preparer.revalidate(preparation))
 }
 fn result(tool: &RepositoryFileCreationTool, input: Value) -> Value {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -248,6 +277,128 @@ fn enforces_content_and_serialized_request_bounds() {
     assert_eq!(
         result(&tool, json!({"path":"src/nul","content":"a\u{0000}"}))["status"],
         "invalid_target"
+    );
+}
+
+#[test]
+fn preparation_is_complete_exact_and_zero_effect() {
+    let fixture = Fixture::new();
+    let before = snapshot(&fixture);
+    let preparer = RepositoryCreateFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let content = "\u{feff}first\r\nsecond\n";
+    let preparation = prepare(&preparer, "src/nested/review.rs", content).unwrap();
+
+    assert_eq!(
+        preparation.tool_input().0,
+        json!({"path":"src/nested/review.rs","content":content})
+    );
+    assert_eq!(preparation.review().operation(), "repo.create-file");
+    assert_eq!(preparation.review().path(), "src/nested/review.rs");
+    assert_eq!(preparation.review().parent_path(), "src/nested");
+    assert_eq!(
+        preparation.review().content_escaped(),
+        "\\u{feff}first\\r\\nsecond\\n"
+    );
+    assert_eq!(preparation.content_byte_length(), content.len());
+    assert_eq!(
+        preparation.content_sha256(),
+        "0017207417bf647819a800ac3f04185412ca8e51e52b7ae00e6f544f7f9cd265"
+    );
+    assert!(!fixture.root.join("src/nested/review.rs").exists());
+    assert_snapshot(&fixture, &before);
+    let serialized = serde_json::to_vec(preparation.review()).unwrap();
+    assert!(serialized.len() <= 256 * 1024);
+    assert!(
+        !String::from_utf8(serialized)
+            .unwrap()
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn preparation_supports_root_empty_content_and_has_deterministic_review() {
+    let fixture = Fixture::new();
+    let preparer = RepositoryCreateFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let first = prepare(&preparer, "root-empty.txt", "").unwrap();
+    let second = prepare(&preparer, "root-empty.txt", "").unwrap();
+    assert_eq!(first.review(), second.review());
+    assert_eq!(first.review_identity(), second.review_identity());
+    assert_eq!(
+        first.tool_input().0,
+        json!({"path":"root-empty.txt","content":""})
+    );
+    assert_eq!(first.content_byte_length(), 0);
+    assert!(revalidate(&preparer, &first).is_ok());
+}
+
+#[test]
+fn preparation_review_and_state_are_bounded_and_private() {
+    let fixture = Fixture::new();
+    let preparer = RepositoryCreateFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let oversized = "x".repeat(256 * 1024);
+    assert!(matches!(
+        prepare(&preparer, "src/too-large-review.rs", &oversized),
+        Err(RepositoryCreateFilePreparationError::ReviewTooLarge)
+    ));
+    let preparation = prepare(&preparer, "src/private.rs", "private-content").unwrap();
+    let debug = format!("{preparation:?}");
+    assert!(!debug.contains("private-content"));
+    assert!(!debug.contains(fixture.root.to_string_lossy().as_ref()));
+    assert!(
+        !String::from_utf8(serde_json::to_vec(preparation.review()).unwrap())
+            .unwrap()
+            .contains(fixture.root.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn preparation_revalidation_fails_on_target_parent_git_ignore_and_preparer_drift() {
+    let fixture = Fixture::new();
+    let preparer = RepositoryCreateFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let target = prepare(&preparer, "src/appears.rs", "x").unwrap();
+    fs::write(fixture.root.join("src/appears.rs"), b"external").unwrap();
+    assert_eq!(
+        revalidate(&preparer, &target),
+        Err(RepositoryCreateFilePreparationError::Stale)
+    );
+
+    let parent = fixture.root.join("src/nested");
+    let moved = fixture.root.join("src/nested-moved");
+    fs::rename(&parent, &moved).unwrap();
+    fs::create_dir(&parent).unwrap();
+    let parent_preparation = prepare(&preparer, "src/nested/parent.rs", "x").unwrap();
+    fs::rename(&parent, fixture.root.join("src/nested-replaced")).unwrap();
+    fs::create_dir(&parent).unwrap();
+    assert_eq!(
+        revalidate(&preparer, &parent_preparation),
+        Err(RepositoryCreateFilePreparationError::Stale)
+    );
+
+    let git_preparation = prepare(&preparer, "src/git-drift.rs", "x").unwrap();
+    fs::write(fixture.root.join("git-drift-sentinel"), b"drift").unwrap();
+    run(&fixture.git, &fixture.root, &["add", "git-drift-sentinel"]);
+    run(
+        &fixture.git,
+        &fixture.root,
+        &["commit", "--quiet", "-m", "drift"],
+    );
+    assert_eq!(
+        revalidate(&preparer, &git_preparation),
+        Err(RepositoryCreateFilePreparationError::Stale)
+    );
+
+    let ignored_preparation = prepare(&preparer, "src/ignored-drift.rs", "x").unwrap();
+    fs::write(fixture.root.join(".gitignore"), "src/ignored-drift.rs\n").unwrap();
+    assert_eq!(
+        revalidate(&preparer, &ignored_preparation),
+        Err(RepositoryCreateFilePreparationError::Stale)
+    );
+
+    let other = RepositoryCreateFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let fresh = prepare(&preparer, "src/other-preparer.rs", "x").unwrap();
+    assert_eq!(
+        revalidate(&other, &fresh),
+        Err(RepositoryCreateFilePreparationError::Stale)
     );
 }
 

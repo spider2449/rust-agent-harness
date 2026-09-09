@@ -9,13 +9,58 @@ use std::{
     path::{Component, Path},
 };
 
+/// Stable identity captured from the native object used by a relative
+/// operation. This representation never crosses the crate boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeObjectIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
+impl NativeObjectIdentity {
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.device == other.device && self.inode == other.inode
+        }
+        #[cfg(windows)]
+        {
+            self.volume_serial == other.volume_serial && self.file_index == other.file_index
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self == other
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct NativeCreatedObject {
+    identity: NativeObjectIdentity,
+}
+
+impl NativeCreatedObject {
+    pub(crate) fn same_identity(&self, identity: &NativeObjectIdentity) -> bool {
+        self.identity.same_object(identity)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum NativeCreateError {
     InvalidParent,
     InvalidName,
     AlreadyExists,
-    WriteFailed(io::Error),
+    WriteFailed {
+        error: io::Error,
+        created: NativeCreatedObject,
+    },
     Io(io::Error),
 }
 
@@ -25,6 +70,7 @@ pub(crate) struct NativeParent {
     fd: std::os::fd::OwnedFd,
     #[cfg(windows)]
     handle: std::fs::File,
+    identities: Vec<NativeObjectIdentity>,
 }
 
 #[allow(dead_code)]
@@ -46,6 +92,16 @@ impl NativeParent {
             Err(NativeCreateError::InvalidParent)
         }
     }
+
+    pub(crate) fn identities(&self) -> &[NativeObjectIdentity] {
+        &self.identities
+    }
+
+    pub(crate) fn same_identity(&self, identity: &NativeObjectIdentity) -> bool {
+        self.identities
+            .last()
+            .is_some_and(|current| current.same_object(identity))
+    }
 }
 
 #[allow(dead_code)]
@@ -54,7 +110,7 @@ pub(crate) fn create_new(
     name: &str,
     content: &[u8],
     fail_after: Option<usize>,
-) -> Result<(), NativeCreateError> {
+) -> Result<NativeCreatedObject, NativeCreateError> {
     if !valid_name(name) {
         return Err(NativeCreateError::InvalidName);
     }
@@ -69,6 +125,23 @@ pub(crate) fn create_new(
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (parent, name, content, fail_after);
+        Err(NativeCreateError::InvalidParent)
+    }
+}
+
+/// Captures the identity of an existing target without following a link.
+pub(crate) fn capture_existing(path: &Path) -> Result<NativeObjectIdentity, NativeCreateError> {
+    #[cfg(unix)]
+    {
+        unix::capture_existing(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::capture_existing(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
         Err(NativeCreateError::InvalidParent)
     }
 }
@@ -121,6 +194,33 @@ mod unix {
         os::fd::{AsRawFd, FromRawFd, OwnedFd},
     };
 
+    fn identity(fd: std::os::fd::RawFd) -> Result<NativeObjectIdentity, NativeCreateError> {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return Err(NativeCreateError::Io(io::Error::last_os_error()));
+        }
+        Ok(NativeObjectIdentity {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino as u64,
+        })
+    }
+
+    pub(super) fn capture_existing(path: &Path) -> Result<NativeObjectIdentity, NativeCreateError> {
+        let path = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| NativeCreateError::InvalidParent)?;
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(NativeCreateError::Io(io::Error::last_os_error()));
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        identity(fd.as_raw_fd())
+    }
+
     pub(super) fn open_parent(
         root: &Path,
         relative: &Path,
@@ -137,6 +237,7 @@ mod unix {
             return Err(NativeCreateError::Io(io::Error::last_os_error()));
         }
         let mut current = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut identities = vec![identity(current.as_raw_fd())?];
         for c in relative.components() {
             let Component::Normal(c) = c else {
                 return Err(NativeCreateError::InvalidParent);
@@ -154,15 +255,19 @@ mod unix {
                 return Err(NativeCreateError::Io(io::Error::last_os_error()));
             }
             current = unsafe { OwnedFd::from_raw_fd(next) };
+            identities.push(identity(current.as_raw_fd())?);
         }
-        Ok(NativeParent { fd: current })
+        Ok(NativeParent {
+            fd: current,
+            identities,
+        })
     }
     pub(super) fn create(
         parent: &NativeParent,
         name: &str,
         content: &[u8],
         fail_after: Option<usize>,
-    ) -> Result<(), NativeCreateError> {
+    ) -> Result<NativeCreatedObject, NativeCreateError> {
         let name = CString::new(name).map_err(|_| NativeCreateError::InvalidName)?;
         let fd = unsafe {
             libc::openat(
@@ -181,16 +286,24 @@ mod unix {
             };
         }
         let mut file = unsafe { fs::File::from_raw_fd(fd) };
+        let created = NativeCreatedObject {
+            identity: identity(file.as_raw_fd())?,
+        };
         use io::Write as _;
         let count = fail_after.unwrap_or(content.len()).min(content.len());
-        file.write_all(&content[..count])
-            .map_err(NativeCreateError::WriteFailed)?;
-        if fail_after.is_some() {
-            return Err(NativeCreateError::WriteFailed(io::Error::other(
-                "injected write failure",
-            )));
+        if let Err(error) = file.write_all(&content[..count]) {
+            return Err(NativeCreateError::WriteFailed { error, created });
         }
-        file.sync_all().map_err(NativeCreateError::WriteFailed)
+        if fail_after.is_some() {
+            return Err(NativeCreateError::WriteFailed {
+                error: io::Error::other("injected write failure"),
+                created,
+            });
+        }
+        match file.sync_all() {
+            Ok(()) => Ok(created),
+            Err(error) => Err(NativeCreateError::WriteFailed { error, created }),
+        }
     }
 
     pub(super) fn create_directory(
@@ -222,6 +335,43 @@ mod windows {
             io::{AsRawHandle, FromRawHandle},
         },
     };
+    const STATUS_OBJECT_NAME_COLLISION: i32 = 0xc000_0035u32 as i32;
+
+    fn identity(file: &fs::File) -> Result<NativeObjectIdentity, NativeCreateError> {
+        let mut info = unsafe { zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+            return Err(NativeCreateError::Io(io::Error::last_os_error()));
+        }
+        Ok(NativeObjectIdentity {
+            volume_serial: info.dwVolumeSerialNumber,
+            file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
+    }
+
+    fn is_name_collision(status: i32) -> bool {
+        status == STATUS_OBJECT_NAME_COLLISION
+    }
+
+    pub(super) fn capture_existing(path: &Path) -> Result<NativeObjectIdentity, NativeCreateError> {
+        let path = wide(path);
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(NativeCreateError::Io(io::Error::last_os_error()));
+        }
+        let file = unsafe { fs::File::from_raw_handle(handle) };
+        identity(&file)
+    }
+
     use windows_sys::{
         Wdk::{
             Foundation::OBJECT_ATTRIBUTES,
@@ -275,6 +425,7 @@ mod windows {
             return Err(NativeCreateError::Io(io::Error::last_os_error()));
         };
         let mut current = unsafe { fs::File::from_raw_handle(h) };
+        let mut identities = vec![identity(&current)?];
         reject_reparse(&current)?;
         for c in relative.components() {
             let Component::Normal(c) = c else {
@@ -319,15 +470,19 @@ mod windows {
             };
             current = unsafe { fs::File::from_raw_handle(out) };
             reject_reparse(&current)?;
+            identities.push(identity(&current)?);
         }
-        Ok(NativeParent { handle: current })
+        Ok(NativeParent {
+            handle: current,
+            identities,
+        })
     }
     pub(super) fn create(
         parent: &NativeParent,
         name: &str,
         content: &[u8],
         fail_after: Option<usize>,
-    ) -> Result<(), NativeCreateError> {
+    ) -> Result<NativeCreatedObject, NativeCreateError> {
         let mut n = name.encode_utf16().collect::<Vec<_>>();
         let mut us = UNICODE_STRING {
             Length: (n.len() * 2) as u16,
@@ -350,7 +505,7 @@ mod windows {
         let status = unsafe {
             NtCreateFile(
                 &mut out,
-                0x0010_0002,
+                FILE_READ_ATTRIBUTES | 0x0010_0002,
                 &attrs,
                 &mut ios,
                 std::ptr::null(),
@@ -363,19 +518,31 @@ mod windows {
             )
         };
         if status < 0 {
-            return Err(NativeCreateError::AlreadyExists);
+            return if is_name_collision(status) {
+                Err(NativeCreateError::AlreadyExists)
+            } else {
+                Err(NativeCreateError::Io(io::Error::last_os_error()))
+            };
         };
         let mut f = unsafe { fs::File::from_raw_handle(out) };
+        let created = NativeCreatedObject {
+            identity: identity(&f)?,
+        };
         use io::Write as _;
         let n = fail_after.unwrap_or(content.len()).min(content.len());
-        f.write_all(&content[..n])
-            .map_err(NativeCreateError::WriteFailed)?;
+        if let Err(error) = f.write_all(&content[..n]) {
+            return Err(NativeCreateError::WriteFailed { error, created });
+        }
         if fail_after.is_some() {
-            return Err(NativeCreateError::WriteFailed(io::Error::other(
-                "injected write failure",
-            )));
+            return Err(NativeCreateError::WriteFailed {
+                error: io::Error::other("injected write failure"),
+                created,
+            });
         };
-        f.sync_all().map_err(NativeCreateError::WriteFailed)
+        match f.sync_all() {
+            Ok(()) => Ok(created),
+            Err(error) => Err(NativeCreateError::WriteFailed { error, created }),
+        }
     }
 
     pub(super) fn create_directory(
@@ -428,6 +595,20 @@ mod windows {
             let _directory = unsafe { fs::File::from_raw_handle(out) };
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{STATUS_OBJECT_NAME_COLLISION, is_name_collision};
+
+        #[test]
+        fn only_object_name_collision_is_a_collision() {
+            assert!(is_name_collision(STATUS_OBJECT_NAME_COLLISION));
+            assert!(!is_name_collision(0xc000_0022u32 as i32));
+            assert!(!is_name_collision(0xc000_000fu32 as i32));
+            assert!(!is_name_collision(0xc000_0008u32 as i32));
+            assert!(!is_name_collision(-1));
+        }
     }
 }
 
@@ -505,7 +686,7 @@ mod tests {
         );
         assert!(matches!(
             create_new(&parent, "partial.txt", b"abcdef", Some(3)),
-            Err(NativeCreateError::WriteFailed(_))
+            Err(NativeCreateError::WriteFailed { .. })
         ));
         assert_eq!(
             fs::read(root.join("parent/partial.txt")).expect("partial"),

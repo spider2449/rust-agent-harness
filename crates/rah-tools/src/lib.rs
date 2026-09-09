@@ -61,7 +61,12 @@ pub use repository_create_directory::{
     REPOSITORY_CREATE_DIRECTORY_TOOL_NAME, RepositoryDirectoryCreationAuthority,
     RepositoryDirectoryCreationTool,
 };
-pub use repository_create_file::{REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryFileCreationTool};
+pub use repository_create_file::{
+    REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryCreateFileBomState,
+    RepositoryCreateFileContentFacts, RepositoryCreateFilePreparation,
+    RepositoryCreateFilePreparationError, RepositoryCreateFilePreparationRequest,
+    RepositoryCreateFilePreparer, RepositoryCreateFileReview, RepositoryFileCreationTool,
+};
 pub use repository_delete_file::{
     REPOSITORY_DELETE_FILE_TOOL_NAME, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
 };
