@@ -7200,9 +7200,9 @@ mod tests {
     };
     use super::host_invocation::{
         BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
-        HostInvocationReview, HostPrepareBranchRequest, HostPrepareMultiFileEditReplacement,
-        HostPrepareMultiFileEditRequest, HostPrepareMultiFileEditTarget, HostPreparePatchRequest,
-        HostReadRequest,
+        HostInvocationReview, HostPrepareBranchRequest, HostPrepareCreateFileRequest,
+        HostPrepareMultiFileEditReplacement, HostPrepareMultiFileEditRequest,
+        HostPrepareMultiFileEditTarget, HostPreparePatchRequest, HostReadRequest,
     };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -7233,11 +7233,11 @@ mod tests {
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_cancel_tool_invocation,
         host_confirm_tool_invocation, host_descriptor, host_invoke_read,
-        host_prepare_repo_create_branch, host_prepare_repo_edit_files, host_prepare_repo_patch,
-        install_repository_workflow, invalidate_repository_commit_review,
-        model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
-        prepared_host_activity, publish_connected_provider_state, publish_readiness_result,
-        publish_trusted_profile_selection, refresh_repository_workflow,
+        host_prepare_repo_create_branch, host_prepare_repo_create_file,
+        host_prepare_repo_edit_files, host_prepare_repo_patch, install_repository_workflow,
+        invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
+        prepare_codex_connection, prepared_host_activity, publish_connected_provider_state,
+        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot,
@@ -7266,7 +7266,9 @@ mod tests {
         RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
         RepositoryMultiFileEditPreparer, RepositoryMultiFileEditTextReplacement,
         RepositoryPatchResultClassification, ToolContext, classify_repository_patch_output,
+        clear_live_test_create_file_native_attempts, clear_live_test_create_file_tool_executions,
         clear_live_test_multi_file_native_attempts, clear_live_test_multi_file_tool_executions,
+        live_test_create_file_native_attempts, live_test_create_file_tool_executions,
         live_test_multi_file_native_attempts, live_test_multi_file_tool_executions,
     };
     use serde_json::Value;
@@ -7673,6 +7675,635 @@ mod tests {
         Untracked,
         Modified,
         Staged,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the certified Windows Codex live gate"]
+    async fn windows_live_desktop_hostexplicit_create_file() -> Result<(), String> {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Staged);
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+        let target = "src/rah-hostexplicit-live-created.txt";
+        let content =
+            "RAH_SECRET_CREATE_FILE_LIVE_CONTENT_SENTINEL\nline-two: λ\nfinal-line-no-newline";
+        let expected_bytes = content.as_bytes();
+        let expected_sha256 = live_sha256(expected_bytes);
+        let target_path = fixture.0.join(target);
+        let parent_path = fixture.0.join("src");
+        fs::create_dir(&parent_path)
+            .map_err(|error| format!("fixture parent creation failed: {error}"))?;
+
+        let require_regular_non_reparse = |path: &Path, description: &str| {
+            use std::os::windows::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|error| format!("{description} metadata failed: {error}"))?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.file_attributes() & 0x400 != 0
+            {
+                return Err(format!(
+                    "{description} was not an ordinary non-reparse file"
+                ));
+            }
+            Ok::<(), String>(())
+        };
+        let require_ordinary_directory = |path: &Path, description: &str| {
+            use std::os::windows::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|error| format!("{description} metadata failed: {error}"))?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.file_attributes() & 0x400 != 0
+            {
+                return Err(format!(
+                    "{description} was not an ordinary non-reparse directory"
+                ));
+            }
+            Ok::<(), String>(())
+        };
+        require_ordinary_directory(&parent_path, "target parent")?;
+        let sparse_checkout = {
+            let output = Command::new(&git)
+                .args(["config", "--get", "core.sparseCheckout"])
+                .current_dir(&fixture.0)
+                .output()
+                .map_err(|error| format!("sparse-checkout observation failed: {error}"))?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(format!(
+                    "sparse-checkout observation returned status {}",
+                    output.status
+                ));
+            }
+            String::from_utf8(output.stdout)
+                .map_err(|error| format!("sparse-checkout observation was not UTF-8: {error}"))?
+        };
+        if target_path.exists()
+            || live_git_text(&git, &fixture.0, &["ls-tree", "-r", "--name-only", "HEAD"])?
+                .lines()
+                .any(|line| line == target)
+            || !live_git_text(&git, &fixture.0, &["ls-files", "-s", "--", target])?.is_empty()
+            || live_git_exit_success(&git, &fixture.0, &["check-ignore", "-q", "--", target])?
+            || sparse_checkout.trim().eq_ignore_ascii_case("true")
+        {
+            return Err("live target was not a fresh supported untracked path".to_owned());
+        }
+
+        let fixture_before_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        if fixture_before_git.status.lines().count() != 1
+            || !fixture_before_git
+                .status
+                .lines()
+                .any(|line| line.starts_with("M  tracked.txt"))
+            || fixture_before_git.index_semantics.lines().count() != 2
+            || !live_git_exit_success(&git, &fixture.0, &["diff", "--quiet"])?
+            || live_git_exit_success(&git, &fixture.0, &["diff", "--cached", "--quiet"])?
+        {
+            return Err("protected staged fixture baseline was not established".to_owned());
+        }
+
+        clear_live_test_create_file_tool_executions(&fixture.0);
+        clear_live_test_create_file_native_attempts(&fixture.0);
+        let branch_authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            None,
+            None,
+            Some(branch_authority),
+        )
+        .map_err(|error| format!("Desktop repository construction failed: {error:?}"))?;
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let refresh_events = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+        let chat_events = listen_for_test_event(app.handle(), "chat_event");
+        let model_activity = listen_for_test_event(app.handle(), "activity_event");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        set_commit_identity(
+            app.handle().clone(),
+            app.state(),
+            "RAH Create-File HostExplicit Live Test".to_owned(),
+            "rah-create-file@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit identity setup failed: {error:?}"))?;
+        connect_codex(app.state())
+            .await
+            .map_err(|error| format!("production Desktop connection failed: {error:?}"))?;
+
+        let connected_snapshot = get_effective_authority_snapshot(app.state());
+        let eligible = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| tool.host_invocation.eligible)
+            .map(|tool| tool.public_tool_name.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_eligible = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let create_file_tool = connected_snapshot
+            .effective_tools
+            .iter()
+            .find(|tool| tool.public_tool_name == "repo.create-file")
+            .ok_or_else(|| "repo.create-file was not advertised".to_owned())?;
+        let external_effective = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+            })
+            .count();
+        let provider_activation_present = app
+            .state::<DesktopAppState>()
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let trusted_profile_present = app
+            .state::<DesktopAppState>()
+            .trusted_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if connected_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || eligible != expected_eligible
+            || !create_file_tool.host_invocation.eligible
+            || create_file_tool.host_invocation.kind != Some(HostInvocationKind::RepoCreateFile)
+            || create_file_tool.effect_class != EffectClass::RepositoryMutation
+            || create_file_tool.authority_category != AuthorityCategory::RepositoryFileCreation
+            || create_file_tool.permission != PermissionLevel::Execute
+            || !create_file_tool.repository_bound
+            || external_effective != 0
+            || connected_snapshot.configured.configured_provider_count != 0
+            || provider_activation_present
+            || trusted_profile_present
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("connected-current create-file composition was not exact".to_owned());
+        }
+        let commit_control = app
+            .state::<DesktopAppState>()
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control));
+        reset_startup_activation_counters();
+        if startup_activation_snapshot() != StartupActivationCounters::default() {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("live operation baseline counters were not zero".to_owned());
+        }
+
+        let reviewed = refresh_repository_workflow(app.state::<DesktopAppState>().inner())
+            .await
+            .map_err(|error| format!("review snapshot failed: {error:?}"))?;
+        let review_id = match reviewed.review {
+            StagedReviewPresentation::ReviewAvailable {
+                review_id: Some(review_id),
+                can_authorize: true,
+                authorization_state: CommitAuthorizationPresentation::ReadyToAuthorize,
+            } => review_id,
+            other => {
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                return Err(format!(
+                    "fixture did not expose a reviewed Commit authorization: {other:?}"
+                ));
+            }
+        };
+        let authorization =
+            authorize_repository_commit_review(app.state::<DesktopAppState>().inner(), &review_id)
+                .await
+                .map_err(|error| format!("review authorization failed: {error:?}"))?;
+        let commit_pending = match &commit_control {
+            Some(control) => control.has_pending_authorization().await,
+            None => false,
+        };
+        if authorization.authorization_state != CommitAuthorizationPresentation::AuthorizedPending
+            || !commit_pending
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("reviewed Commit authorization was not pending".to_owned());
+        }
+        let before_directory_entries = live_directory_entries(&fixture.0)?;
+        let before_parent_entries = live_directory_entries(&parent_path)?;
+        let before_index = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("Git index baseline read failed: {error}"))?;
+        let before_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let before_head = before_git.head_oid.clone();
+        let before_branch = before_git.current_branch.clone();
+        let before_refs = before_git.all_refs.clone();
+        let before_generations =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let before_namespace = app.state::<DesktopAppState>().persistence_namespace();
+        let before_conversation = serde_json::to_value(
+            app.state::<DesktopAppState>()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("conversation baseline serialization failed: {error}"))?;
+
+        let request = HostPrepareCreateFileRequest {
+            path: target.to_owned(),
+            content: content.to_owned(),
+        };
+        let prepared = host_prepare_repo_create_file(request, app.handle().clone(), app.state())
+            .await
+            .map_err(|error| format!("production repo.create-file Prepare failed: {error:?}"))?;
+        let prepare_events = wait_for_test_events(&host_activity.0, 1).await?;
+        require_host_event(&prepare_events[0], "prepared", "repo.create-file")?;
+        let activity_id = prepare_events[0]
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Prepared activity omitted invocationId".to_owned())?;
+        let prepare_activity = serde_json::to_string(&prepare_events[0])
+            .map_err(|error| format!("Prepared activity serialization failed: {error}"))?;
+        let native_target = target_path.to_string_lossy().into_owned();
+        let native_parent = parent_path.to_string_lossy().into_owned();
+        let forbidden_prepare_values = [
+            prepared.ticket_id.as_str(),
+            "RAH_SECRET_CREATE_FILE_LIVE_CONTENT_SENTINEL",
+            content,
+            expected_sha256.as_str(),
+            target,
+            native_target.as_str(),
+            native_parent.as_str(),
+        ];
+        if prepare_events[0].get("review").is_some()
+            || prepare_events[0].get("result").is_some()
+            || activity_id == prepared.ticket_id
+            || forbidden_prepare_values
+                .iter()
+                .any(|value| !value.is_empty() && prepare_activity.contains(value))
+        {
+            return Err("generic Prepared activity was not value-level private".to_owned());
+        }
+        let expected_escaped =
+            "RAH_SECRET_CREATE_FILE_LIVE_CONTENT_SENTINEL\\nline-two: λ\\nfinal-line-no-newline";
+        let facts = prepared.review.content_facts();
+        if prepared.ticket_id.is_empty()
+            || prepared.ticket_id.len() > 256
+            || prepared.ticket_id == activity_id
+            || prepared.review.operation() != "repo.create-file"
+            || prepared.review.target_count() != 1
+            || prepared.review.path() != target
+            || prepared.review.parent_path() != "src"
+            || prepared.review.existing_parent()
+                != "safe existing ordinary directory; no parent creation"
+            || prepared.review.target_worktree() != "absent"
+            || prepared.review.target_head() != "absent"
+            || prepared.review.target_index()
+                != "absent from every index stage, including intent-to-add"
+            || prepared.review.expected_effect() != "one new untracked regular non-executable file"
+            || prepared.review.content_escaped() != expected_escaped
+            || prepared.review.content_byte_length() != expected_bytes.len()
+            || prepared.review.content_sha256() != expected_sha256
+            || prepared.review.bom() != rah_tools::RepositoryCreateFileBomState::Absent
+            || facts.carriage_returns != 0
+            || facts.line_feeds != 2
+            || facts.crlf_pairs != 0
+            || facts.final_eof != "no_final_newline"
+            || facts.control_characters != 2
+            || facts.format_characters != 0
+            || prepared.review.file_intent() != "regular non-executable file"
+            || !prepared
+                .review
+                .creation_semantics()
+                .contains(&"exclusive create-new")
+            || !prepared.review.creation_semantics().contains(&"no clobber")
+            || !prepared
+                .review
+                .creation_semantics()
+                .contains(&"no overwrite")
+            || !prepared
+                .review
+                .non_effects()
+                .contains(&"no parent creation")
+            || !prepared.review.non_effects().contains(&"no Stage")
+            || !prepared.review.non_effects().contains(&"no Commit")
+            || !prepared
+                .review
+                .warnings()
+                .contains(&"full content creation is not crash-atomic")
+            || !prepared
+                .review
+                .warnings()
+                .contains(&"write failure may retain an empty or partial file")
+            || !prepared.review.warnings().contains(&"no automatic cleanup")
+            || !prepared.review.warnings().contains(&"no retry or replay")
+        {
+            return Err("direct Prepared review was incomplete or altered".to_owned());
+        }
+        let prepare_index_unchanged = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("Prepare index read failed: {error}"))?
+            == before_index;
+        let prepare_git_unchanged =
+            live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")? == before_git;
+        let prepare_root_unchanged =
+            live_directory_entries(&fixture.0)? == before_directory_entries;
+        let prepare_parent_unchanged =
+            live_directory_entries(&parent_path)? == before_parent_entries;
+        let prepare_conversation_unchanged = serde_json::to_value(
+            app.state::<DesktopAppState>()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("Prepare conversation serialization failed: {error}"))?
+            == before_conversation;
+        let prepare_coordinator = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state();
+        if !prepare_index_unchanged
+            || !prepare_git_unchanged
+            || !prepare_root_unchanged
+            || !prepare_parent_unchanged
+            || target_path.exists()
+            || live_test_create_file_tool_executions(&fixture.0) != 0
+            || live_test_create_file_native_attempts(&fixture.0) != 0
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_namespace
+            || !prepare_conversation_unchanged
+            || prepare_coordinator != CoordinatorState::HostPrepared
+        {
+            return Err(format!(
+                "Prepare was not zero effect: index={prepare_index_unchanged} git={prepare_git_unchanged} root={prepare_root_unchanged} parent={prepare_parent_unchanged} target_absent={} tool={} native={} generations={} namespace={} conversation={} coordinator={prepare_coordinator:?}",
+                !target_path.exists(),
+                live_test_create_file_tool_executions(&fixture.0),
+                live_test_create_file_native_attempts(&fixture.0),
+                current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                    == before_generations,
+                app.state::<DesktopAppState>().persistence_namespace() == before_namespace,
+                prepare_conversation_unchanged,
+            ));
+        }
+        let commit_pending_after_prepare = match &commit_control {
+            Some(control) => control.has_pending_authorization().await,
+            None => false,
+        };
+        if !commit_pending_after_prepare {
+            return Err("Prepare invalidated reviewed Commit authorization".to_owned());
+        }
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_PREPARE_TOOL_EXECUTIONS=0");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_PREPARE_NATIVE_ATTEMPTS=0");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_SOURCE_SHA256={expected_sha256}");
+        println!(
+            "RAH_CREATE_FILE_HOSTEXPLICIT_SOURCE_LENGTH={}",
+            expected_bytes.len()
+        );
+
+        let activity_id = activity_id.to_owned();
+        let confirmed = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.create-file Confirm failed: {error:?}"))?;
+        if confirmed.invocation_id != activity_id {
+            return Err("Confirm changed the independent activity ID".to_owned());
+        }
+        let events = wait_for_test_events(&host_activity.0, 3).await?;
+        if events.len() != 3
+            || require_host_event(&events[1], "started", "repo.create-file").is_err()
+            || require_host_event(&events[2], "tool_completed", "repo.create-file").is_err()
+        {
+            return Err("HostExplicit lifecycle was not prepared/started/completed".to_owned());
+        }
+        let terminal_output = event_tool_output(&events[2])?;
+        let [ToolContent::Json(terminal_result)] = terminal_output.content.as_slice() else {
+            return Err("terminal result was not one JSON status object".to_owned());
+        };
+        if terminal_output.is_error || terminal_result != &serde_json::json!({"status": "ok"}) {
+            return Err("terminal public result was not sanitized status-only ok".to_owned());
+        }
+        for event in &events {
+            if event.get("invocationId").and_then(Value::as_str) != Some(activity_id.as_str()) {
+                return Err("HostExplicit activity correlation ID changed".to_owned());
+            }
+            let serialized = serde_json::to_string(event)
+                .map_err(|error| format!("HostActivity serialization failed: {error}"))?;
+            if event.get("review").is_some()
+                || forbidden_prepare_values
+                    .iter()
+                    .any(|value| !value.is_empty() && serialized.contains(value))
+            {
+                return Err("generic HostActivity privacy boundary failed".to_owned());
+            }
+        }
+        if live_test_create_file_tool_executions(&fixture.0) != 1
+            || live_test_create_file_native_attempts(&fixture.0) != 1
+        {
+            return Err(
+                "Confirm was not exactly one Tool and one native CREATE_NEW attempt".to_owned(),
+            );
+        }
+        require_regular_non_reparse(&target_path, "created target")?;
+        let actual_bytes = fs::read(&target_path)
+            .map_err(|error| format!("created target read failed: {error}"))?;
+        let target_identity = live_file_identity(&target_path)?;
+        if actual_bytes != expected_bytes
+            || actual_bytes.len() != expected_bytes.len()
+            || live_sha256(&actual_bytes) != expected_sha256
+        {
+            return Err("created target bytes, length, or SHA-256 did not match".to_owned());
+        }
+
+        let after_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let mut expected_status = before_git
+            .status
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        expected_status.push(format!("?? {target}"));
+        expected_status.sort();
+        let mut actual_status = live_git_text(
+            &git,
+            &fixture.0,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        actual_status.sort();
+        let post_index_unchanged = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("post-effect index read failed: {error}"))?
+            == before_index;
+        let post_root_unchanged = live_directory_entries(&fixture.0)? == before_directory_entries;
+        let mut expected_parent_entries = before_parent_entries.clone();
+        expected_parent_entries.insert("rah-hostexplicit-live-created.txt".to_owned());
+        let post_parent_expected = live_directory_entries(&parent_path)? == expected_parent_entries;
+        let post_git_protected = after_git.index_semantics == before_git.index_semantics
+            && after_git.head_oid == before_head
+            && after_git.symbolic_head == before_git.symbolic_head
+            && after_git.current_branch == before_branch
+            && after_git.local_heads == before_git.local_heads
+            && after_git.tags_and_remotes == before_git.tags_and_remotes
+            && after_git.all_refs == before_refs
+            && after_git.raw_worktree_diff == before_git.raw_worktree_diff
+            && after_git.raw_staged_diff == before_git.raw_staged_diff;
+        if actual_status != expected_status
+            || !post_git_protected
+            || !post_index_unchanged
+            || !post_root_unchanged
+            || !post_parent_expected
+        {
+            return Err(format!(
+                "create-file protected-state proof failed: status={} git={} index={} root={} parent={} expected_status={expected_status:?} actual_status={actual_status:?}",
+                actual_status == expected_status,
+                post_git_protected,
+                post_index_unchanged,
+                post_root_unchanged,
+                post_parent_expected,
+            ));
+        }
+        let refresh = wait_for_test_events(&refresh_events.0, 1).await?;
+        if refresh.len() != 1 {
+            return Err("descriptive repository refresh was not emitted exactly once".to_owned());
+        }
+        let refreshed = repository_snapshot(app.state())
+            .await
+            .map_err(|error| format!("refreshed repository snapshot failed: {error:?}"))?;
+        if refreshed.status_entries.is_empty() {
+            return Err("descriptive refresh did not expose repository status".to_owned());
+        }
+        let commit_authorization_pending = match &commit_control {
+            Some(control) => control.has_pending_authorization().await,
+            None => false,
+        };
+        if commit_authorization_pending {
+            return Err("Started recreated reviewed Commit authorization".to_owned());
+        }
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_COMMIT_AUTHORIZATION_PENDING=0");
+        if current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+            != before_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_namespace
+            || serde_json::to_value(
+                app.state::<DesktopAppState>()
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .presentation(),
+            )
+            .map_err(|error| format!("terminal conversation serialization failed: {error}"))?
+                != before_conversation
+        {
+            return Err(
+                "terminal refresh changed currentness or conversation persistence".to_owned(),
+            );
+        }
+        let duplicate = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        let activity_as_confirm = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        let activity_as_cancel = host_cancel_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        );
+        if duplicate != Err(FrontendError::HostInvocationTicketInvalid)
+            || activity_as_confirm != Err(FrontendError::HostInvocationTicketInvalid)
+            || activity_as_cancel != Err(FrontendError::HostInvocationTicketInvalid)
+            || live_test_create_file_tool_executions(&fixture.0) != 1
+            || live_test_create_file_native_attempts(&fixture.0) != 1
+            || fs::read(&target_path)
+                .map_err(|error| format!("duplicate target read failed: {error}"))?
+                != expected_bytes
+        {
+            return Err("duplicate or activity-ID authorization caused a second effect".to_owned());
+        }
+        let final_coordinator = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state();
+        let final_chat = *app
+            .state::<DesktopAppState>()
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if final_coordinator != CoordinatorState::Idle
+            || final_chat != ChatState::Idle
+            || !app
+                .state::<DesktopAppState>()
+                .active_chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            || !chat_events.0.lock().unwrap().is_empty()
+            || !model_activity.0.lock().unwrap().is_empty()
+        {
+            return Err("HostExplicit creation left chat/coordinator/model activity".to_owned());
+        }
+        let operation_counters = startup_activation_snapshot();
+        if operation_counters != StartupActivationCounters::default() {
+            return Err(format!(
+                "unexpected model/runtime operation counters: {operation_counters:?}"
+            ));
+        }
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_CONFIRM_TOOL_EXECUTIONS=1");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_CONFIRM_NATIVE_ATTEMPTS=1");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_TARGET_IDENTITY={target_identity:?}");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_TARGET_SHA256={expected_sha256}");
+        println!(
+            "RAH_CREATE_FILE_HOSTEXPLICIT_TARGET_LENGTH={}",
+            expected_bytes.len()
+        );
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_MODEL_LIFECYCLE=0");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_MCP=0");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_PROCESS_PLUGINS=0");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_GENERATIONS={before_generations:?}");
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_COMMIT_INVALIDATED=1");
+        app.unlisten(host_activity.1);
+        app.unlisten(refresh_events.1);
+        app.unlisten(chat_events.1);
+        app.unlisten(model_activity.1);
+        shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+        clear_live_test_create_file_tool_executions(&fixture.0);
+        clear_live_test_create_file_native_attempts(&fixture.0);
+        println!("RAH_CREATE_FILE_HOSTEXPLICIT_LIVE_OK");
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]

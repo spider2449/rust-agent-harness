@@ -61,6 +61,16 @@ pub use repository_create_directory::{
     REPOSITORY_CREATE_DIRECTORY_TOOL_NAME, RepositoryDirectoryCreationAuthority,
     RepositoryDirectoryCreationTool,
 };
+#[cfg(feature = "live-test-support")]
+pub use repository_create_file::live_test_create_file_native_attempts::{
+    clear as clear_live_test_create_file_native_attempts,
+    count as live_test_create_file_native_attempts,
+};
+#[cfg(feature = "live-test-support")]
+pub use repository_create_file::live_test_create_file_tool_executions::{
+    clear as clear_live_test_create_file_tool_executions,
+    count as live_test_create_file_tool_executions,
+};
 pub use repository_create_file::{
     REPOSITORY_CREATE_FILE_TOOL_NAME, RepositoryCreateFileBomState,
     RepositoryCreateFileContentFacts, RepositoryCreateFilePreparation,
