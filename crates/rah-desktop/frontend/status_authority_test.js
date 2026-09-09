@@ -43,12 +43,27 @@ for (const unavailableReason of [
 }
 assert.match(source, /const isPatch = host\.kind === "repo_patch"/);
 assert.match(source, /const isMultiFileEdit = host\.kind === "repo_edit_files"/);
+assert.match(source, /const isCreateFile = host\.kind === "repo_create_file"/);
 assert.match(source, /input\.dataset\.hostInput = isPatch \? "path"/);
+assert.match(source, /path\.dataset\.hostInput = "path"/);
+assert.match(source, /fileContent\.dataset\.hostInput = "content"/);
+assert.match(source, /fileContent\.maxLength = 262144/);
+assert.match(source, /Prepare creates nothing/);
 assert.match(source, /oldText\.dataset\.hostInput = "expectedOldText"/);
 assert.match(source, /replacementText\.dataset\.hostInput = "replacementText"/);
 assert.match(source, /host_prepare_repo_create_branch/);
 assert.match(source, /host_prepare_repo_patch/);
 assert.match(source, /host_prepare_repo_edit_files/);
+assert.match(source, /host_prepare_repo_create_file/);
+assert.match(source, /const isCreateFile = kind === "repo_create_file"/);
+const createFileSubmit = source.slice(source.indexOf('const isCreateFile = kind === "repo_create_file"'), source.indexOf("const request = { kind }"));
+assert.match(createFileSubmit, /path: form\.querySelector\('\[data-host-input="path"\]'\)\.value/);
+assert.match(createFileSubmit, /content: form\.querySelector\('\[data-host-input="content"\]'\)\.value/);
+for (const forbiddenCreateField of ["repository", "root", "nativePath", "ToolName", "ToolInput", "hash", "length", "permission", "authority", "retry", "stage", "commit", "ticketId", "activityId"]) {
+  assert.equal(createFileSubmit.includes(forbiddenCreateField), false, `create-file DTO field: ${forbiddenCreateField}`);
+}
+assert.equal(source.includes("createHash"), false);
+assert.equal(source.includes("crypto."), false);
 assert.match(source, /targets: \[\.\.\.form\.querySelectorAll\("\[data-multi-file-target\]"\)\]/);
 assert.match(source, /expectedOldText: replacement\.querySelector/);
 assert.match(source, /replacementText: replacement\.querySelector/);
@@ -159,13 +174,69 @@ assert.match(source, /hostResultValue/);
 assert.match(source, /ticketId: active\.ticketId/);
 assert.match(source, /host_cancel_tool_invocation/);
 assert.match(source, /void refreshEffectiveAuthority\(invoke\)/);
+assert.match(source, /kind === "create_file"/);
+for (const reviewField of [
+  "target_count",
+  "parent_path",
+  "existing_parent",
+  "target_worktree",
+  "target_head",
+  "target_index",
+  "expected_effect",
+  "content_escaped",
+  "content_byte_length",
+  "content_sha256",
+  "content_facts",
+  "file_intent",
+  "creation_semantics",
+  "non_effects",
+  "warnings",
+]) {
+  assert.match(source, new RegExp(`review\\.${reviewField}`));
+}
+for (const contentFact of [
+  "carriage_returns",
+  "line_feeds",
+  "crlf_pairs",
+  "final_eof",
+  "control_characters",
+  "format_characters",
+]) {
+  assert.match(source, new RegExp(`facts\\.${contentFact}`));
+}
+assert.match(source, /contentHeading\.textContent = "Complete escaped new-file content"/);
+assert.match(source, /contentPre\.textContent = String\(review\.content_escaped \?\? ""\)/);
+assert.match(source, /Review Host new-file creation/);
+assert.match(source, /request: \{ ticketId: active\.ticketId \}/);
+assert.match(source, /\["tool_completed", "tool_error", "rejected_stale", "partial_effect", "possible_effect_unknown", "cancelled_before_start"\]/);
+
+for (const result of [
+  "ok",
+  "invalid_target",
+  "precondition_failed",
+  "create_failed_known",
+  "write_failed_known",
+  "uncertain",
+]) {
+  assert.match(source, new RegExp(`${result}:`));
+}
+const createFileLabels = source.slice(source.indexOf("const createFileResultLabels"), source.indexOf("const authorityStatusLabels"));
+assert.equal(createFileLabels.includes("all reviewed targets committed"), false);
+assert.match(source, /write_failed_known[\s\S]*empty or partial file may remain/);
+assert.match(source, /write_failed_known[\s\S]*No cleanup or retry\/replay occurred/);
+assert.match(source, /status === "uncertain"[\s\S]*do not retry automatically/);
+assert.match(source, /create_failed_known[\s\S]*no RAH creation effect/);
+assert.match(source, /payload\.tool === "repo\.create-file"/);
 
 const hostileReviewValues = [
   "<script>alert(1)</script>",
+  "<img src=x onerror=alert(1)>",
+  "</pre><script>alert(1)</script>",
   "<b>quoted & hostile</b>",
   "{\"expectedOldText\":\"secret\"}",
   "tauri://invoke('run_command')",
-  "\\u202Epath\\u200Bwith\\u0000controls",
+  "\u202Epath\u200Bwith\u0000controls",
+  "quotes / braces / JSON-looking source",
 ];
 function textNodeValue(value) {
   return String(value ?? "");

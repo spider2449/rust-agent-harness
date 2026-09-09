@@ -36,6 +36,15 @@ const multiFileResultLabels = {
   uncertain: "Uncertain — final effects cannot be fully determined",
 };
 
+const createFileResultLabels = {
+  ok: "Verified — new file created",
+  invalid_target: "Rejected — invalid target; no creation performed",
+  precondition_failed: "Rejected — creation precondition failed",
+  create_failed_known: "Create failed — no RAH creation effect proven",
+  write_failed_known: "Partial effect — new file may contain only a verified partial prefix",
+  uncertain: "Uncertain — final file effect cannot be determined",
+};
+
 const authorityStatusLabels = {
   no_repository: "No repository selected",
   disconnected: "Runtime disconnected",
@@ -251,6 +260,7 @@ function renderEffectiveTool(tool) {
     const isBranch = host.kind === "repo_create_branch";
     const isPatch = host.kind === "repo_patch";
     const isMultiFileEdit = host.kind === "repo_edit_files";
+    const isCreateFile = host.kind === "repo_create_file";
     if (needsPath || isBranch || isPatch) {
       const input = document.createElement("input");
       input.type = "text";
@@ -259,6 +269,40 @@ function renderEffectiveTool(tool) {
       input.placeholder = isBranch ? "Branch name" : "Relative path";
       input.dataset.hostInput = isPatch ? "path" : "value";
       form.append(input);
+    }
+    if (isCreateFile) {
+      const pathLabel = document.createElement("label");
+      pathLabel.textContent = "Repository-relative path";
+      const path = document.createElement("input");
+      path.type = "text";
+      path.required = true;
+      path.maxLength = 1024;
+      path.placeholder = "Relative path";
+      path.dataset.hostInput = "path";
+      pathLabel.append(path);
+      form.append(pathLabel);
+
+      const contentLabel = document.createElement("label");
+      contentLabel.textContent = "Complete new-file content";
+      const fileContent = document.createElement("textarea");
+      fileContent.maxLength = 262144;
+      fileContent.placeholder = "Complete file content (may be empty)";
+      fileContent.dataset.hostInput = "content";
+      contentLabel.append(fileContent);
+      form.append(contentLabel);
+
+      const guidance = document.createElement("ul");
+      for (const text of [
+        "Creates exactly one previously absent repository file.",
+        "The existing parent directory must already exist; existing files are never overwritten.",
+        "Prepare creates nothing. The backend provides the complete review before Confirm.",
+        "No automatic Stage or Commit is performed.",
+      ]) {
+        const item = document.createElement("li");
+        item.textContent = text;
+        guidance.append(item);
+      }
+      form.append(guidance);
     }
     if (isPatch) {
       const oldText = document.createElement("textarea");
@@ -296,7 +340,7 @@ function renderEffectiveTool(tool) {
     }
     const button = document.createElement("button");
     button.type = "submit";
-    button.textContent = isBranch || isPatch || isMultiFileEdit ? "Prepare" : "Invoke";
+    button.textContent = isBranch || isPatch || isMultiFileEdit || isCreateFile ? "Prepare" : "Invoke";
     if (isMultiFileEdit) button.dataset.multiFileAction = "prepare";
     form.append(button);
     hostBox.append(form);
@@ -423,14 +467,35 @@ function hostResultValue(output) {
 function renderHostResult(payload) {
   const result = hostResultValue(payload.result);
   const status = result?.status;
+  const isCreateFile = payload.tool === "repo.create-file";
+  const resultLabels = isCreateFile ? createFileResultLabels : multiFileResultLabels;
   const box = document.createElement("div");
   box.className = "host-result";
   const title = document.createElement("strong");
-  title.textContent = multiFileResultLabels[status] ?? (payload.state === "possible_effect_unknown"
+  title.textContent = resultLabels[status] ?? (payload.state === "possible_effect_unknown"
     ? "Uncertain — backend result was not safely classifiable"
     : "Host result unavailable");
   box.append(title);
-  if (!multiFileResultLabels[status]) return box;
+  if (!resultLabels[status]) return box;
+
+  if (isCreateFile) {
+    const explanation = document.createElement("p");
+    if (status === "ok") {
+      explanation.textContent = "The backend verified the reviewed new-file creation. No Stage or Commit was performed.";
+    } else if (status === "invalid_target") {
+      explanation.textContent = "The backend rejected the target before creation; no creation was performed.";
+    } else if (status === "precondition_failed") {
+      explanation.textContent = "The backend rejected a required creation precondition; no successful creation is reported.";
+    } else if (status === "create_failed_known") {
+      explanation.textContent = "The backend proved that this attempt produced no RAH creation effect. This is distinct from partial or uncertain effect.";
+    } else if (status === "write_failed_known") {
+      explanation.textContent = "Exclusive create may already have succeeded. An empty or partial file may remain; this is not a known-no-effect failure. No cleanup or retry/replay occurred. Inspect the current repository state.";
+    } else if (status === "uncertain") {
+      explanation.textContent = "The final target state may be unknown. Do not infer unchanged state; do not retry automatically. Inspect the refreshed repository state manually.";
+    }
+    box.append(explanation);
+    return box;
+  }
 
   const effects = Array.isArray(result.effects) ? result.effects : [];
   if (effects.length) {
@@ -482,10 +547,22 @@ function appendHostActivity(payload) {
   entry.className = "activity-entry host-activity";
   entry.dataset.state = payload.state;
   title.textContent = "Host action — not Model";
-  state.textContent = `${payload.tool}: ${labels[payload.state] ?? "Host action state unavailable"}`;
+  const result = hostResultValue(payload.result);
+  const createFileStatus = payload.tool === "repo.create-file" ? result?.status : null;
+  const createFileLabel = createFileStatus ? createFileResultLabels[createFileStatus] : null;
+  const activityLabel = payload.tool === "repo.create-file"
+    ? (createFileLabel ?? (payload.state === "partial_effect"
+      ? "Partial effect — inspect current repository state"
+      : payload.state === "possible_effect_unknown"
+        ? "Uncertain — inspect current repository state; do not retry"
+        : payload.state === "cancelled_before_start"
+          ? "Cancelled without effect"
+          : labels[payload.state] ?? "Host action state unavailable"))
+    : labels[payload.state] ?? "Host action state unavailable";
+  state.textContent = `${payload.tool}: ${activityLabel}`;
   entry.append(title, state);
   if (payload.result) entry.append(renderHostResult(payload));
-  if (["tool_completed", "tool_error", "rejected_stale", "possible_effect_unknown", "cancelled_before_start"].includes(payload.state)) {
+  if (["tool_completed", "tool_error", "rejected_stale", "partial_effect", "possible_effect_unknown", "cancelled_before_start"].includes(payload.state)) {
     clearActiveHostReview();
   }
   entries.append(entry);
@@ -592,6 +669,90 @@ function renderHostReview(review, kind) {
     content.append(lifecycleWarning);
     return content;
   }
+  if (kind === "create_file") {
+    const details = document.createElement("dl");
+    const values = [
+      ["Operation", review.operation],
+      ["Target count", review.target_count],
+      ["Relative path", review.path],
+      ["Parent path", review.parent_path],
+      ["Existing parent status", review.existing_parent],
+      ["Worktree target status", review.target_worktree],
+      ["HEAD target status", review.target_head],
+      ["Index target status", review.target_index],
+      ["Expected effect", review.expected_effect],
+      ["Content byte length", review.content_byte_length],
+      ["Content SHA-256", review.content_sha256],
+      ["BOM state", review.bom],
+      ["File intent", review.file_intent],
+    ];
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      details.append(term, detail);
+    }
+    content.append(details);
+
+    const contentHeading = document.createElement("h4");
+    contentHeading.textContent = "Complete escaped new-file content";
+    const contentPre = document.createElement("pre");
+    contentPre.textContent = String(review.content_escaped ?? "");
+    content.append(contentHeading, contentPre);
+
+    const factsHeading = document.createElement("h4");
+    factsHeading.textContent = "Content visibility facts";
+    const facts = review.content_facts ?? {};
+    const factsDetails = document.createElement("dl");
+    for (const [label, value] of [
+      ["CR count", facts.carriage_returns],
+      ["LF count", facts.line_feeds],
+      ["CRLF count", facts.crlf_pairs],
+      ["Final EOF/newline state", facts.final_eof],
+      ["Control-character count", facts.control_characters],
+      ["Format/bidi/zero-width count", facts.format_characters],
+    ]) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      factsDetails.append(term, detail);
+    }
+    content.append(factsHeading, factsDetails);
+
+    const semanticsHeading = document.createElement("h4");
+    semanticsHeading.textContent = "Creation semantics";
+    const semantics = document.createElement("ul");
+    for (const value of review.creation_semantics ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      semantics.append(item);
+    }
+    content.append(semanticsHeading, semantics);
+
+    const nonEffectsHeading = document.createElement("h4");
+    nonEffectsHeading.textContent = "Explicit non-effects";
+    const nonEffects = document.createElement("ul");
+    for (const value of review.non_effects ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      nonEffects.append(item);
+    }
+    content.append(nonEffectsHeading, nonEffects);
+
+    const warningsHeading = document.createElement("h4");
+    warningsHeading.textContent = "Warnings before Confirm";
+    const warnings = document.createElement("ul");
+    warnings.className = "host-review-warning";
+    for (const value of review.warnings ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      warnings.append(item);
+    }
+    content.append(warningsHeading, warnings);
+    return content;
+  }
   const details = document.createElement("dl");
   const values = [
     ["Operation", review.operation],
@@ -653,7 +814,8 @@ function openHostReview(invoke, prepared, kind) {
   const cancel = document.createElement("button");
   title.textContent = kind === "patch"
     ? "Review Host patch"
-    : kind === "multi_file_edit" ? "Review Host multi-file edit" : "Review Host action";
+    : kind === "multi_file_edit" ? "Review Host multi-file edit"
+      : kind === "create_file" ? "Review Host new-file creation" : "Review Host action";
   confirm.type = "button";
   confirm.textContent = "Confirm Host action";
   cancel.type = "button";
@@ -710,6 +872,16 @@ async function submitHostForm(invoke, form) {
   if (kind === "repo_edit_files") {
     const prepared = await invoke("host_prepare_repo_edit_files", { request: readMultiFileRequest(form) });
     openHostReview(invoke, prepared, "multi_file_edit");
+    return;
+  }
+  const isCreateFile = kind === "repo_create_file";
+  if (isCreateFile) {
+    const request = {
+      path: form.querySelector('[data-host-input="path"]').value,
+      content: form.querySelector('[data-host-input="content"]').value,
+    };
+    const prepared = await invoke("host_prepare_repo_create_file", { request });
+    openHostReview(invoke, prepared, "create_file");
     return;
   }
   const request = { kind };
