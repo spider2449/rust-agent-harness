@@ -1,5 +1,103 @@
 # Changelog
 
+## v0.22.0 — release preparation (2026-09-09)
+
+RAH v0.22.0 is prepared as a candidate immutable source commit, but is not
+yet tagged, published, or accompanied by a GitHub Release. v0.21.0 remains the
+current immutable published release.
+
+### Release-preparation record
+
+- Task 264 verdict: **A — v0.22 MILESTONE COMPLETE — RELEASE PREPARATION MAY
+  BEGIN**.
+- Preparation baseline: `43dce0c505a39975b28f9a0be25aeec4ade1a88b`.
+- Workspace version: `0.21.0` -> `0.22.0`; all 13 packages remain edition 2024.
+- No tag, GitHub Release, artifact publication, or live certification rerun is
+  part of this preparation.
+
+### Added
+
+- **HostExplicit Reviewed Multi-File Edit Authoring** through the existing
+  `repo.edit-files` capability:
+
+  ```text
+  typed bounded multi-file request
+   -> zero-effect Prepare
+   -> complete backend-derived ordered review
+   -> opaque ticket-only Confirm
+   -> shared revalidation / D2
+   -> HostExplicit Started
+   -> authorized_tool_dispatch
+   -> ToolRegistry
+   -> existing repo.edit-files / ADR 0014
+   -> strict result classification / descriptive repository refresh
+  ```
+
+- ADR 0023's capability-specific reviewed HostExplicit workflow, reusing ADR
+  0014's existing `RepositoryMultiFileMutationPolicy` and ADR 0021's general
+  HostExplicit coordinator, currentness, and D2 boundaries.
+- Typed Desktop review over 1–4 existing clean HEAD-tracked regular strict-
+  UTF-8 files, with 1–16 exact literal replacements per target and at most 64
+  replacements total. The host derives preimages, postimages, hashes, lengths,
+  and canonical path order; caller order is not execution order.
+
+### Security
+
+- The exact HostExplicit allowlist is `fs.read`, `repo.file-info`,
+  `repo.status`, `repo.diff`, `repo.diff-staged`, `repo.create-branch`,
+  `repo.patch`, and `repo.edit-files`. `repo.create-file`,
+  `repo.delete-file`, `repo.rename-file`, `repo.create-directory`,
+  `repo.commit`, MCP Tools, Process Plugin Tools, and unknown Tools remain
+  ineligible.
+- Preparation is zero-effect and review is complete and backend-derived;
+  `review_too_large` fails closed. Confirm/Cancel receive only a process-local,
+  in-memory, single-use opaque ticket with an inclusive five-minute TTL,
+  exact-change/currentness binding, and no persistence or resume.
+- Generic HostExplicit activity uses a separate RAH-generated activity ID. It
+  is not the ticket, is not derived from the ticket, cannot Confirm or Cancel,
+  and the actual ticket and source-bearing review content are absent from
+  generic activity. Task 263 Attempt 1 discovered the ticket-under-
+  `invocationId` leak before Confirm with zero effect; Attempt 2 corrected it
+  and passed on a fresh repository.
+- ADR 0014's six result classes remain distinct: `ok`, `invalid_target`,
+  `precondition_failed`, `failed_known_no_effect`, `partial_effect`, and
+  `uncertain`. The operation is explicitly non-atomic: only a verified
+  committed prefix is reported, uncertainty is preserved, and there is no
+  retry, replay, prefix continuation, rollback, restore-preimage, transaction,
+  automatic Stage, or automatic Commit.
+- Model output is never authorization. Frontend input and presentation,
+  permission classification, Trusted Profile composition, and provider
+  metadata cannot create mutation authority or enable HostExplicit.
+
+### Validation and evidence
+
+- Task 262 provides deterministic fault, privacy, result, currentness,
+  invalidation, and no-replay evidence. Task 263's final Attempt 2 provides
+  the connected-current Windows production certification without a model
+  prompt or model lifecycle.
+- Task 263 evidence: Windows 11 IoT Enterprise LTSC x64; Codex `0.149.0`;
+  SHA-256
+  `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`;
+  model `gpt-5.6-terra`, reasoning `medium`; caller order `d.txt, b.txt,
+  a.txt, c.txt`; backend/effect order `a.txt, b.txt, c.txt, d.txt`; Prepare
+  `0` Tool/native attempts; Confirm `1` Tool and native attempts `1/1/1/1`;
+  final generations `[1, 0, 0, 1]`; coordinator and chat Idle; model lifecycle,
+  MCP, and Process Plugin counts all zero; marker
+  `RAH_MULTI_FILE_HOSTEXPLICIT_LIVE_OK`.
+- The v0.22 release gate is `PREPARED / NOT YET PUBLISHED`. Unix deterministic
+  or platform-gated testing is not Windows-equivalent live certification.
+
+### Limitations and nonclaims
+
+- `repo.edit-files` is non-atomic; `partial_effect` and `uncertain` may occur.
+  There is no race-free TOCTOU, network isolation, OS sandbox, rollback,
+  replay, or automatic recovery guarantee; process supervision is not OS
+  sandboxing.
+- No generic `fs.write`, `shell.exec`, structural HostExplicit authoring,
+  HostExplicit `repo.commit`, MCP or Process Plugin HostExplicit, model-
+  selected HostExplicit certification, authority-ticket persistence/resume,
+  or automatic Stage/Commit is claimed.
+
 ## v0.21.0 — 2026-09-08
 
 RAH v0.21.0 is released and is the current immutable published release.

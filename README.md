@@ -5,10 +5,84 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.22.0 prepared — not yet published
+
+RAH v0.22.0 is the prepared candidate immutable source state for **HostExplicit
+Reviewed Multi-File Edit Authoring**. It has not been tagged, published, or
+released as a GitHub Release. The current immutable published baseline remains
+v0.21.0.
+
+The connected-current Desktop human workflow is:
+
+```text
+typed bounded multi-file request
+ -> zero-effect Prepare
+ -> complete backend-derived ordered review
+ -> opaque ticket-only Confirm
+ -> shared revalidation / D2
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> ToolRegistry
+ -> existing repo.edit-files / ADR 0014
+ -> strict result classification / descriptive repository refresh
+```
+
+The request is closed and typed: 1–4 existing clean HEAD-tracked regular
+strict-UTF-8 files, 1–16 exact literal replacements per target, and at most 64
+replacements total. The host derives exact original-snapshot matching,
+preimages, postimages, hashes, lengths, and deterministic canonical path order;
+frontend input order is not execution order. The operation is explicitly
+non-atomic and preserves `ok`, `invalid_target`, `precondition_failed`,
+`failed_known_no_effect`, `partial_effect`, and `uncertain` results.
+
+The exact v0.22 HostExplicit eligibility is:
+`fs.read`, `repo.file-info`, `repo.status`, `repo.diff`, `repo.diff-staged`,
+`repo.create-branch`, `repo.patch`, and `repo.edit-files`. The ineligible set is
+`repo.create-file`, `repo.delete-file`, `repo.rename-file`,
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools, and
+unknown Tools. There is no wildcard or category-based eligibility.
+
+ADR 0014 remains the existing underlying `RepositoryMultiFileMutationPolicy`;
+ADR 0023 defines this capability-specific reviewed HostExplicit route; and ADR
+0021 remains the general HostExplicit coordinator/currentness/D2 boundary.
+Model output is never authorization. Frontend state is presentation and typed
+input only. Permission classification, Trusted Profile composition, and
+provider metadata cannot create mutation authority or self-enable HostExplicit.
+
+Prepare is zero-effect. Confirm and Cancel receive only a process-local,
+in-memory, single-use opaque ticket with an inclusive five-minute TTL bound to
+the exact change and currentness. Generic HostExplicit activity carries a
+separate RAH-generated activity ID: it is not the ticket, is not derived from
+the ticket, cannot Confirm or Cancel, and the actual ticket and source-bearing
+review content are excluded. Task 263 Attempt 1 discovered the ticket leak
+under `invocationId` before Confirm with zero effect; Attempt 2 corrected it and
+passed on a fresh repository.
+
+The workflow never retries, replays, continues a prefix, rolls back, restores
+preimages, stages, or commits automatically. `repo.patch` and `repo.edit-files`
+invalidate stale reviewed Commit authorization at the Started boundary; fresh
+repository refresh is descriptive only. A narrow empty-index Commit-review
+fallback keeps descriptive status/diff refresh available without fabricating or
+granting Commit authority.
+
+Task 263 final Attempt 2 is the carried-forward Windows connected-current
+production evidence: Windows 11 IoT Enterprise LTSC x64, Codex `0.149.0`,
+SHA-256 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`,
+model `gpt-5.6-terra`, medium reasoning, caller order `d.txt, b.txt, a.txt,
+c.txt`, backend/effect order `a.txt, b.txt, c.txt, d.txt`, Prepare `0/0`,
+Confirm `1` Tool, native attempts `1/1/1/1`, final generations `[1, 0, 0, 1]`,
+Idle coordinator/chat, zero model lifecycle/MCP/Process Plugin activity, and
+marker `RAH_MULTI_FILE_HOSTEXPLICIT_LIVE_OK`. This is host-driven evidence,
+not a model-selected HostExplicit execution claim.
+
+Known nonclaims include Unix live parity, generic filesystem writing,
+structural HostExplicit authoring, HostExplicit `repo.commit`, MCP or Process
+Plugin HostExplicit, network isolation, race-free TOCTOU, OS sandboxing, and
+automatic recovery. Process supervision is not OS sandboxing.
+
 ## RAH v0.21.0 released
 
-v0.21.0 is the current immutable published release. v0.20.0 is the prior
-release.
+v0.21.0 is the previous immutable published release. v0.20.0 preceded it.
 
 RAH v0.21 adds HostExplicit Reviewed Single-File Patch Authoring:
 

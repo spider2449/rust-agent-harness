@@ -1,12 +1,115 @@
-# RAH v0.21.0 Security Model
+# RAH v0.22.0 Security Model
 
-This document describes the released v0.21.0 security model.
+This document describes the prepared v0.22.0 security model. The v0.22.0
+source commit is not yet tagged or published; v0.21.0 remains the current
+immutable release.
 
-v0.21.0 is the current immutable published release.
-
-v0.20.0 is the prior release.
+v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0023 reviewed HostExplicit multi-file authoring boundary
+
+The v0.22 capability is **HostExplicit Reviewed Multi-File Edit Authoring**.
+It binds a typed Desktop human request to the existing ADR 0014
+`RepositoryMultiFileMutationPolicy`:
+
+```text
+typed bounded request
+ -> zero-effect Prepare
+ -> complete backend-derived ordered review
+ -> opaque ticket-only Confirm
+ -> shared revalidation / D2
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> ToolRegistry
+ -> existing repo.edit-files / ADR 0014
+ -> strict result classification / descriptive refresh
+```
+
+The closed request allows 1–4 existing clean HEAD-tracked regular strict-UTF-8
+files, 1–16 exact literal replacements per target, and 64 replacements total.
+The host derives exact original-snapshot matching, preimages, postimages,
+hashes, lengths, and canonical path order. The frontend is presentation and
+typed input only; it cannot provide Tool JSON, authority, permission,
+repository, native paths, hashes, postimages, or execution order. Complete
+mutation-relevant review is required, and `review_too_large` fails closed.
+
+The exact HostExplicit allowlist is:
+
+- `fs.read`
+- `repo.file-info`
+- `repo.status`
+- `repo.diff`
+- `repo.diff-staged`
+- `repo.create-branch`
+- `repo.patch`
+- `repo.edit-files`
+
+Only these eight names are eligible. `repo.create-file`, `repo.delete-file`,
+`repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools, Process
+Plugin Tools, and unknown Tools are not eligible. There is no wildcard or
+category-based eligibility. ADR 0023 adds the reviewed workflow boundary;
+ADR 0014 remains the underlying mutation authority and ADR 0021 remains the
+general HostExplicit coordinator/currentness/D2 boundary. Model output is
+never authorization. Permission classification does not create mutation
+authority, and Trusted Profile/provider metadata cannot self-enable
+HostExplicit.
+
+Prepare performs zero Tool executions, native attempts, repository effects, or
+authority persistence. The opaque ticket is process-local, in-memory,
+single-use, exact-change/currentness-bound, and valid for an inclusive
+five-minute TTL. Confirm and Cancel accept only `{ ticketId }`; they do not
+accept trusted bindings from the frontend. Revalidation and D2 occur before
+`Started`, and dispatch then follows the existing ToolRegistry path. Restart,
+disconnect, expiry, cancellation, stale currentness, or consumption never
+restores or replaces a ticket.
+
+Generic HostExplicit activity uses a separate RAH-generated non-authority
+activity ID. It is not the ticket, is not derived from the ticket, cannot
+Confirm or Cancel, and the actual ticket is absent from generic activity.
+Generic activity also excludes source-bearing review material, raw Tool input
+or output, native/absolute paths, and source errors. Task 263 Attempt 1
+discovered the actual ticket leak under `invocationId` before Confirm with
+zero effect. Task 263 Attempt 2 corrected the privacy separation and passed on
+a fresh repository; the failed attempt remains historical security evidence.
+
+The operation is explicitly non-atomic. ADR 0014's six result classes remain
+distinct: `ok`, `invalid_target`, `precondition_failed`,
+`failed_known_no_effect`, `partial_effect`, and `uncertain`. A
+`partial_effect` reports only the verified committed prefix; `uncertain` does
+not infer unchanged state. Timeout, cancellation, disconnect, crash, or lost
+response does not imply rollback. There is no retry, replay, prefix
+continuation, rollback, restore-preimage, compensation, or transaction.
+
+Effectful `repo.patch` and `repo.edit-files` start invalidate repository-bound
+reviewed Commit authorization, including rejected post-Started dispatch paths.
+Refresh is descriptive observation only. When optional reviewed-Commit
+preparation is unavailable because the staged index is empty, the narrow
+fallback retains status/diff refresh, returns no staged changes, and does not
+fabricate or grant Commit authority. Stage and Commit remain separate explicit
+actions.
+
+## v0.22 live evidence boundary
+
+Task 263 final Attempt 2 is the carried-forward connected-current production
+evidence on Windows 11 IoT Enterprise LTSC x64. It used Codex `0.149.0`,
+SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, model
+`gpt-5.6-terra`, and medium reasoning. Caller order was `d.txt, b.txt, a.txt,
+c.txt`; backend/effect order was `a.txt, b.txt, c.txt, d.txt`. Prepare had
+zero Tool/native attempts; Confirm had one Tool and native attempts `1/1/1/1`.
+Final generations were `[1, 0, 0, 1]`; coordinator and chat were Idle; model
+lifecycle, MCP, and Process Plugin counts were zero; and the marker was
+`RAH_MULTI_FILE_HOSTEXPLICIT_LIVE_OK`.
+
+This is host-driven connected-current evidence, not model-selected
+HostExplicit certification. Unix deterministic or platform-gated testing is
+not Windows-equivalent live certification. The evidence does not claim
+atomicity, rollback, race-free TOCTOU, network isolation, OS sandboxing,
+generic filesystem write, structural HostExplicit authoring, HostExplicit
+`repo.commit`, MCP/Process Plugin HostExplicit, ticket persistence/resume, or
+automatic Stage/Commit. Process supervision is not OS sandboxing.
 
 ## ADR 0022 reviewed HostExplicit authoring boundary
 

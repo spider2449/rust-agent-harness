@@ -1,12 +1,85 @@
-# RAH v0.21.0 Architecture
+# RAH v0.22.0 Architecture
 
-This document describes the released v0.21.0 architecture.
+This document describes the prepared v0.22.0 architecture. The v0.22.0 source
+commit is not yet tagged or published; v0.21.0 remains the current immutable
+release.
 
-v0.21.0 is the current immutable published release.
-
-v0.20.0 is the prior release.
+v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
+
+## ADR 0023 reviewed HostExplicit multi-file authoring path
+
+The v0.22 milestone is **HostExplicit Reviewed Multi-File Edit Authoring**.
+The connected-current Desktop human route is:
+
+```text
+typed human request
+ -> HostExplicit zero-effect Prepare
+ -> complete backend-derived ordered review
+ -> opaque ticket-only Confirm
+ -> shared revalidation / D2
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> ToolRegistry
+ -> existing repo.edit-files / ADR 0014
+ -> strict result classification / descriptive repository refresh
+```
+
+The request is closed and typed. It is bounded to 1–4 existing clean
+HEAD-tracked regular strict-UTF-8 files, 1–16 exact literal replacements per
+target, and 64 replacements total. The host derives exact original-snapshot
+matching, preimages, postimages, hashes, lengths, and canonical ascending
+UTF-8-byte-order paths. Caller input order is not execution order. Complete
+mutation-relevant review is required; `review_too_large` fails closed.
+
+ADR 0014's private `RepositoryMultiFileMutationPolicy` remains the underlying
+mutation authority. ADR 0023 defines only this capability-specific reviewed
+HostExplicit binding. ADR 0021 remains the general HostExplicit
+coordinator/currentness/D2 boundary. HostExplicit reaches the existing
+`repo.edit-files` Tool through `authorized_tool_dispatch` and `ToolRegistry`; it
+does not bypass them or create generic repository authority.
+
+The exact HostExplicit allowlist is:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+```
+
+`repo.create-file`, `repo.delete-file`, `repo.rename-file`,
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools, and
+unknown Tools remain ineligible. Eligibility is an exact eight-name list, not
+a wildcard or category rule. Permission classification, Trusted Profile or
+provider metadata, frontend state, and human review do not create mutation
+authority; model output is never authorization.
+
+Prepare has zero Tool and native mutation effects. The ticket is process-local,
+in-memory, opaque, single-use, exact-change/currentness-bound, and valid for an
+inclusive five-minute TTL. Confirm and Cancel receive only `{ ticketId }`.
+Generic HostExplicit activity uses a separately generated RAH activity ID. It
+is not the ticket, is not derived from the ticket, cannot Confirm or Cancel,
+and generic activity excludes the ticket and source-bearing review content.
+Task 263 Attempt 1 recorded the historical ticket-under-`invocationId` leak
+before Confirm with zero effect; Attempt 2 corrected the separation and passed
+in a fresh Windows repository.
+
+The operation is explicitly non-atomic and preserves the six ADR 0014 result
+classes: `ok`, `invalid_target`, `precondition_failed`,
+`failed_known_no_effect`, `partial_effect`, and `uncertain`. Verified committed
+prefixes and uncertainty are reported conservatively. There is no retry,
+replay, prefix continuation, rollback, restore-preimage, transaction claim,
+automatic Stage, or automatic Commit. `repo.patch` and `repo.edit-files`
+invalidate reviewed Commit authorization at Started; refresh is descriptive
+and does not grant Commit authority. The narrow empty-index refresh fallback
+preserves descriptive status/diff observation without fabricating Commit
+authority.
 
 ## ADR 0022 reviewed HostExplicit worktree-authoring path
 
