@@ -1,8 +1,12 @@
 # RAH v0.22.0 Architecture
 
-This document describes the prepared v0.22.0 architecture. The v0.22.0 source
-commit is not yet tagged or published; v0.21.0 remains the current immutable
-release.
+This document describes the released v0.22.0 architecture. RAH v0.22.0 is
+released and is the current immutable published release; v0.21.0 is the prior
+immutable release. The immutable v0.22.0 release source is
+`76895b4067c38167f3c41a3536f6616cffa8293a`.
+
+The later Task 267 documentation cleanup commit is not the v0.22.0 release
+source.
 
 v0.20.0 preceded v0.21.0.
 

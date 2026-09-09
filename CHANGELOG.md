@@ -1,12 +1,20 @@
 # Changelog
 
-## v0.22.0 — release preparation (2026-09-09)
+## v0.22.0 — released (2026-09-09)
 
-RAH v0.22.0 is prepared as a candidate immutable source commit, but is not
-yet tagged, published, or accompanied by a GitHub Release. v0.21.0 remains the
-current immutable published release.
+RAH v0.22.0 is released and is the current immutable published release.
+v0.21.0 is the prior immutable published release.
 
-### Release-preparation record
+### Release record
+
+- Immutable release source: `76895b4067c38167f3c41a3536f6616cffa8293a`.
+- Annotated tag: `v0.22.0`.
+- Tag object: `eb91039521eac190efc85ef57ee2a5c28ca4e9fe`.
+- Tag CI: `34301369809` PASS.
+- GitHub Release ID: `385176161` (`RAH v0.22.0`).
+- Published: `2026-09-09T02:02:09Z`.
+
+### Historical release-preparation record
 
 - Task 264 verdict: **A — v0.22 MILESTONE COMPLETE — RELEASE PREPARATION MAY
   BEGIN**.
@@ -84,8 +92,9 @@ current immutable published release.
   final generations `[1, 0, 0, 1]`; coordinator and chat Idle; model lifecycle,
   MCP, and Process Plugin counts all zero; marker
   `RAH_MULTI_FILE_HOSTEXPLICIT_LIVE_OK`.
-- The v0.22 release gate is `PREPARED / NOT YET PUBLISHED`. Unix deterministic
-  or platform-gated testing is not Windows-equivalent live certification.
+- During Task 265, the v0.22 release gate was `PREPARED / NOT YET PUBLISHED`.
+  Unix deterministic or platform-gated testing is not Windows-equivalent live
+  certification.
 
 ### Limitations and nonclaims
 

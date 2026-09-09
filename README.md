@@ -5,12 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.22.0 prepared — not yet published
+## RAH v0.22.0 released
 
-RAH v0.22.0 is the prepared candidate immutable source state for **HostExplicit
-Reviewed Multi-File Edit Authoring**. It has not been tagged, published, or
-released as a GitHub Release. The current immutable published baseline remains
-v0.21.0.
+RAH v0.22.0 is the current immutable published release for **HostExplicit
+Reviewed Multi-File Edit Authoring**. v0.21.0 is the prior immutable published
+release.
 
 The connected-current Desktop human workflow is:
 

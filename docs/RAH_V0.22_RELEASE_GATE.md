@@ -2,13 +2,13 @@
 
 ## Status
 
-**PREPARED / NOT YET PUBLISHED**
+**RELEASED — HISTORICAL RECORD**
 
-Task 265 prepares the candidate immutable source commit. The `v0.22.0` tag,
-GitHub Release, and artifact publication are deliberately not created by this
-task. v0.21.0 remains the current immutable published release.
+RAH v0.22.0 is the current immutable published release. v0.21.0 is the prior
+immutable published release. This gate is now a historical record; the later
+Task 267 documentation cleanup is not the v0.22.0 release source.
 
-## Release identity and preparation baseline
+## Release identity and chronology
 
 - Task 264 verdict: **A — v0.22 MILESTONE COMPLETE — RELEASE PREPARATION MAY
   BEGIN**.
@@ -17,11 +17,18 @@ task. v0.21.0 remains the current immutable published release.
   `43dce0c505a39975b28f9a0be25aeec4ade1a88b`.
 - Workspace version: `0.21.0` -> `0.22.0`.
 - Workspace packages: 13; every package uses Rust edition 2024.
-- Candidate preparation commit: to be recorded after commit.
-- Preparation exact-head CI: to be recorded after the candidate commit is
-  pushed and its push-triggered CI passes.
-- `v0.22.0` tag object and peeled target: not applicable until publication.
-- GitHub Release ID: not applicable until publication.
+- Task 265 release-preparation commit / immutable release source:
+  `76895b4067c38167f3c41a3536f6616cffa8293a`.
+- Task 265 exact-head CI: `34300321835` PASS.
+- Annotated tag: `v0.22.0`.
+- Tag object: `eb91039521eac190efc85ef57ee2a5c28ca4e9fe`.
+- Peeled target: `76895b4067c38167f3c41a3536f6616cffa8293a`.
+- Tag CI: `34301369809` PASS.
+- GitHub Release: `RAH v0.22.0`.
+- GitHub Release ID: `385176161`.
+- Published: `2026-09-09T02:02:09Z`.
+- Draft/prerelease: `false / false`.
+- Assets: `0`.
 
 ## Milestone capability
 
@@ -83,8 +90,8 @@ with no wildcard or category-based rule.
   HostExplicit.
 - HostExplicit uses `authorized_tool_dispatch` and `ToolRegistry`; it does
   not bypass the existing Tool or policy.
-- Stage, Unstage, and reviewed Commit remain separate explicit operations. No
-  automatic Stage or Commit is part of this release preparation.
+- Stage, Unstage, and reviewed Commit remain separate explicit operations. This
+  release includes no automatic Stage or Commit.
 
 ## Security contract
 
@@ -173,7 +180,7 @@ generic filesystem write, structural HostExplicit authoring, HostExplicit
 `repo.commit`, MCP/Process Plugin HostExplicit, ticket persistence/resume, or
 automatic Stage/Commit. Process supervision is not OS sandboxing.
 
-## Release-preparation checklist
+## Publication checklist
 
 - [x] Task 264 milestone audit accepted with Verdict A.
 - [x] Starting baseline and clean worktree verified.
@@ -183,22 +190,27 @@ automatic Stage/Commit. Process supervision is not OS sandboxing.
 - [x] Documentation updated within the authorized preparation scope.
 - [x] No Rust source, frontend source, tests, scripts, workflows, ADRs,
       permissions, profiles, providers, or dependency definitions changed.
-- [ ] Preparation commit recorded and pushed.
-- [ ] Exact-head push CI completed successfully for the preparation commit.
-- [ ] `HEAD == origin/master` at the preparation commit and worktree clean.
-- [ ] `v0.22.0` tag created by the separate publication task.
-- [ ] Tag CI and GitHub Release recorded by the separate publication task.
+- [x] Preparation commit recorded and pushed.
+- [x] Exact-head push CI completed successfully for the preparation commit.
+- [x] `HEAD == origin/master` at the preparation commit and worktree clean
+      before publication.
+- [x] `v0.22.0` annotated tag created and verified immutable.
+- [x] Tag CI completed successfully for `v0.22.0`.
+- [x] GitHub Release published and verified as non-draft, non-prerelease, with
+      zero assets.
 
-## Publication boundary
+## Historical publication boundary
 
-Task 265 stops after exact-head CI for the preparation commit. It does not
-create or push `v0.22.0`, create a GitHub Release, publish artifacts, modify
-a release commit after publication, or start the publication or cleanup task.
+Task 265 stopped after exact-head CI for the preparation commit. At that time
+it did not create or push `v0.22.0`, create a GitHub Release, publish artifacts,
+modify a release commit after publication, or start the publication or cleanup
+task. Publication occurred subsequently under the immutable release identity
+recorded above.
 
-The next task, only after independent verification, is the separate immutable
-publication step.
+The later Task 267 cleanup changes documentation only. It does not change the
+tag, GitHub Release, or release source.
 
-## Current immutable baseline
+## Prior immutable published release
 
 - v0.21.0 annotated tag object:
   `aa178f05d12d881745932800e8fc40a7431ce7b9`.
