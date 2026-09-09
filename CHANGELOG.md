@@ -1,14 +1,31 @@
 # Changelog
 
-## v0.23.0 — release preparation (2026-09-09)
+## v0.23.0 — released (2026-09-09)
 
-RAH v0.23.0 is **PREPARED, NOT PUBLISHED**. v0.22.0 remains the current
-immutable published release. Task 275 authorized preparation with verdict
-**A — v0.23 NEW-FILE HOSTEXPLICIT MILESTONE COMPLETE — RELEASE PREPARATION MAY
-BEGIN**. The preparation baseline is `533b0769618d25c1b9673a27c3e21af7a48809ca`.
-The workspace version moves from `0.22.0` to `0.23.0` across 13 packages,
-all edition 2024. Task 276 creates no `v0.23.0` tag, GitHub Release, artifact,
-or other publication.
+RAH v0.23.0 is released and is the current immutable published release.
+v0.22.0 is the prior immutable published release. The workspace version is
+`0.23.0` across 13 packages, all edition 2024.
+
+### Release record
+
+- Immutable release source: `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+- Annotated tag: `v0.23.0`.
+- Tag object: `5a27d84c269a0d57a8a6ad5f0fca89c06379e711`.
+- Peeled target: `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+- Release-preparation exact-head CI: `34326184721` PASS.
+- Tag CI: `34330434792` PASS.
+- GitHub Release: `385352229` — `RAH v0.23.0`.
+- Published: `2026-09-09T08:43:12Z`.
+
+### Historical release-preparation record
+
+During Task 276, the v0.23 release gate was **PREPARED / NOT YET PUBLISHED**.
+Task 275 authorized preparation with verdict **A — v0.23 NEW-FILE HOSTEXPLICIT
+MILESTONE COMPLETE — RELEASE PREPARATION MAY BEGIN**. The preparation baseline
+was `533b0769618d25c1b9673a27c3e21af7a48809ca`. Task 276 itself deliberately
+created no `v0.23.0` tag, GitHub Release, artifact, or other publication.
+Publication was completed later in Task 277. Task 278 records this state in a
+later documentation-only descendant; it is not the v0.23.0 release source.
 
 ### Added
 

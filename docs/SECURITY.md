@@ -1,11 +1,15 @@
-# RAH v0.23.0 Security Model — prepared, not yet published
+# RAH v0.23.0 Security Model — released
 
-This document describes the prepared v0.23.0 security model. RAH v0.23.0 is
-prepared but not yet published. v0.22.0 remains the current immutable
-published release; v0.21.0 is the prior immutable release. The immutable
-v0.22.0 release source is `76895b4067c38167f3c41a3536f6616cffa8293a`.
+This document describes the released v0.23.0 security model.
 
-The later Task 267 documentation cleanup commit is not the v0.22.0 release
+RAH v0.23.0 is the current immutable published release.
+
+v0.22.0 is the prior immutable release.
+
+The immutable v0.23.0 release source is:
+`05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+
+The later Task 278 documentation cleanup commit is not the v0.23.0 release
 source.
 
 v0.20.0 preceded v0.21.0.

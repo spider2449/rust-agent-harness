@@ -5,11 +5,11 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.23.0 prepared — not yet published
+## RAH v0.23.0 released
 
-RAH v0.23.0 is prepared but not yet published. v0.22.0 remains the current
-immutable published release. The milestone is **HostExplicit Reviewed New-File
-Authoring (`repo.create-file`)**:
+RAH v0.23.0 is the current immutable published release for **HostExplicit
+Reviewed New-File Authoring (`repo.create-file`)**. v0.22.0 is the prior
+immutable published release.
 
 ```text
 typed human {path, content}

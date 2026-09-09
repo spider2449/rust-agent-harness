@@ -2,11 +2,34 @@
 
 ## Status
 
-PREPARED / NOT YET PUBLISHED
+RELEASED — HISTORICAL RECORD
 
-This gate records Task 276 release preparation only. No v0.23.0 tag, GitHub
-Release, artifact publication, or post-release cleanup is part of this task.
-v0.22.0 remains the current immutable published release.
+This gate records the accepted Task 275 milestone, Task 276 release
+preparation, the immutable Task 277 publication, and the Task 278
+documentation-only cleanup. RAH v0.23.0 is the current immutable published
+release. v0.22.0 is the prior immutable published release.
+
+## Release chronology
+
+- Task 275: v0.23 milestone audit accepted.
+- Task 276: release preparation.
+- Immutable release source:
+  `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+- Task 276 exact-head CI: `34326184721` PASS.
+- Task 277: immutable publication.
+- Annotated tag: `v0.23.0`.
+- Tag object: `5a27d84c269a0d57a8a6ad5f0fca89c06379e711`.
+- Peeled target: `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+- Tag CI: `34330434792` PASS.
+- GitHub Release: `RAH v0.23.0`, ID `385352229`.
+- Published: `2026-09-09T08:43:12Z`.
+- Draft/prerelease: `false / false`.
+- Assets: `0`.
+
+Task 276 itself stopped before tag and Release creation. Publication happened
+later in Task 277. Task 278 is documentation cleanup only and does not change
+the release source, tag, or GitHub Release identity. Its cleanup commit is a
+later documentation-only descendant, not the v0.23.0 release source.
 
 ## Decision and release identity
 
@@ -257,24 +280,30 @@ sources, checksums, features, edges, additions, and removals must be
 unchanged. The final changed-file list must be exactly the eight authorized
 paths, with no Rust/frontend/test/workflow/ADR changes.
 
-## Candidate commit and exact-head CI
+## Historical Task 276 preparation and exact-head CI
 
-- Candidate release-preparation commit: **to be recorded externally after the
-  commit exists**.
+- Immutable release-preparation source:
+  `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
 - Required commit message: `docs: prepare RAH v0.23.0 release`.
 - Required direct parent: `533b0769618d25c1b9673a27c3e21af7a48809ca`.
-- Before push, fetch origin and require `origin/master` is still that baseline.
-- Push normally; no amend after push.
-- Exact-head CI must be recorded externally for the final Task 276 SHA with
-  `head_branch=master`, `event=push`, `status=completed`, and
-  `conclusion=success`.
-- After CI, require `HEAD == origin/master` at the final Task 276 SHA and a
-  clean worktree.
+- Task 276 exact-head CI: `34326184721`, `master`,
+  `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`, push event, completed, success.
+- Task 276 stopped after its exact-head CI; it did not create or push the tag,
+  create the Release, upload assets, or begin post-release cleanup.
 
-## Publication boundary
+## Publication checklist
 
-After exact-head CI succeeds, Task 276 stops. A future separately reviewed
-publication task may create the v0.23.0 annotated tag and GitHub Release. Task
-276 does not create or push a tag, create a Release, upload assets, modify the
-candidate source commit, or begin post-release cleanup. No v0.23.0 tag object
-is invented in this gate.
+- [x] Task 275 milestone audit accepted.
+- [x] Task 276 release preparation completed at the immutable source.
+- [x] Task 276 exact-head CI completed successfully.
+- [x] Task 277 created the annotated `v0.23.0` tag.
+- [x] The tag object and peeled target match the immutable release identity.
+- [x] Tag CI completed successfully for the exact v0.23.0 source.
+- [x] GitHub Release `385352229` is published, non-draft, non-prerelease, and
+  has zero assets.
+- [x] Task 278 records the post-release state without mutating publication
+  identity.
+
+The immutable v0.23.0 release source forever remains
+`05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`. The later Task 278 cleanup commit
+is not the release source.
