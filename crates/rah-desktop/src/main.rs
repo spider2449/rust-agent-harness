@@ -41,10 +41,10 @@ use host_invocation::{
     BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
     HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
     HostInvocationResponse, HostInvocationReview, HostInvocationUnavailableReason,
-    HostPrepareBranchRequest, HostPrepareMultiFileEditRequest, HostPreparePatchRequest,
-    HostReadRequest, PreparedBranchResponse, PreparedHostInvocation, PreparedHostPayload,
-    PreparedMultiFileEditResponse, PreparedPatchResponse, host_descriptor, host_kind, read_request,
-    validate_bounded_string,
+    HostPrepareBranchRequest, HostPrepareCreateFileRequest, HostPrepareMultiFileEditRequest,
+    HostPreparePatchRequest, HostReadRequest, PreparedBranchResponse, PreparedCreateFileResponse,
+    PreparedHostInvocation, PreparedHostPayload, PreparedMultiFileEditResponse,
+    PreparedPatchResponse, host_descriptor, host_kind, read_request, validate_bounded_string,
 };
 #[cfg(target_os = "windows")]
 use provider_composition::{
@@ -69,7 +69,8 @@ use rah_tools::{
     AuthorizedDispatchError, AuthorizedDispatchRejection, EchoTool, FsReadTool, GitStageTool,
     GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryBranchCreationAuthority,
     RepositoryBranchCreationTool, RepositoryCommitControl, RepositoryCommitReview,
-    RepositoryCommitTool, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryCommitTool, RepositoryCreateFilePreparationError,
+    RepositoryCreateFilePreparationRequest, RepositoryDiffStagedTool, RepositoryDiffTool,
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
@@ -2183,6 +2184,9 @@ fn get_effective_authority_snapshot(
             composition
                 .as_ref()
                 .is_some_and(|value| value.repository_multi_file_edit_preparer.is_some()),
+            composition
+                .as_ref()
+                .is_some_and(|value| value.repository_create_file_preparer.is_some()),
             coordinator_state,
         );
     }
@@ -2261,6 +2265,7 @@ struct CurrentHostComposition {
     repository: Option<Arc<DesktopRepository>>,
     repository_patch_preparer: Option<Arc<rah_tools::RepositoryPatchPreparer>>,
     repository_multi_file_edit_preparer: Option<Arc<rah_tools::RepositoryMultiFileEditPreparer>>,
+    repository_create_file_preparer: Option<Arc<rah_tools::RepositoryCreateFilePreparer>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2319,6 +2324,7 @@ fn current_host_composition(
         repository_multi_file_edit_preparer: composition
             .repository_multi_file_edit_preparer
             .clone(),
+        repository_create_file_preparer: composition.repository_create_file_preparer.clone(),
     })
 }
 
@@ -2352,6 +2358,10 @@ fn host_tool_definition(
                 effective_authority::EffectClass::RepositoryMutation,
                 effective_authority::AuthorityCategory::RepositoryContentMutation,
             ),
+            "repo.create-file" => (
+                effective_authority::EffectClass::RepositoryMutation,
+                effective_authority::AuthorityCategory::RepositoryFileCreation,
+            ),
             _ => (
                 effective_authority::EffectClass::ReadOnly,
                 effective_authority::AuthorityCategory::RepositoryObservation,
@@ -2375,15 +2385,16 @@ fn host_tool_definition(
     };
     let descriptor = host_descriptor(
         &effective,
-        current.allowed_permissions.contains(&entry.permission),
-        current.repository.is_some(),
         true,
+        current.repository.is_some(),
+        current.allowed_permissions.contains(&entry.permission),
         current
             .repository
             .as_ref()
             .is_some_and(|value| value.branch_creation_authority.is_some()),
         current.repository_patch_preparer.is_some(),
         current.repository_multi_file_edit_preparer.is_some(),
+        current.repository_create_file_preparer.is_some(),
         coordinator_state,
     );
     if !descriptor.eligible {
@@ -2442,6 +2453,112 @@ fn host_call(name: ToolName, input: ToolInput) -> ToolCall {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreateFileExpectedOutput {
+    path: String,
+    length: usize,
+    sha256: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateFileResultClassification {
+    Ok,
+    InvalidTarget,
+    PreconditionFailed,
+    CreateFailedKnown,
+    WriteFailedKnown,
+    Uncertain,
+    Malformed,
+}
+
+#[cfg(target_os = "windows")]
+fn classify_repository_create_file_output(
+    output: &ToolOutput,
+    expected: &CreateFileExpectedOutput,
+) -> CreateFileResultClassification {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return CreateFileResultClassification::Malformed;
+    };
+    let Some(object) = value.as_object() else {
+        return CreateFileResultClassification::Malformed;
+    };
+    let exact_keys = |keys: &[&str]| {
+        object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
+    };
+    let Some(status) = object.get("status").and_then(serde_json::Value::as_str) else {
+        return CreateFileResultClassification::Malformed;
+    };
+    if status == "ok" {
+        let length_matches = object
+            .get("length")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|length| usize::try_from(length).ok())
+            == Some(expected.length);
+        let valid = !output.is_error
+            && exact_keys(&["status", "path", "length", "sha256"])
+            && object.get("path").and_then(serde_json::Value::as_str)
+                == Some(expected.path.as_str())
+            && length_matches
+            && object.get("sha256").and_then(serde_json::Value::as_str)
+                == Some(expected.sha256.as_str());
+        return if valid {
+            CreateFileResultClassification::Ok
+        } else {
+            CreateFileResultClassification::Malformed
+        };
+    }
+    let classification = match status {
+        "invalid_target" => CreateFileResultClassification::InvalidTarget,
+        "precondition_failed" => CreateFileResultClassification::PreconditionFailed,
+        "create_failed_known" => CreateFileResultClassification::CreateFailedKnown,
+        "write_failed_known" => CreateFileResultClassification::WriteFailedKnown,
+        "uncertain" => CreateFileResultClassification::Uncertain,
+        _ => return CreateFileResultClassification::Malformed,
+    };
+    if output.is_error && exact_keys(&["status"]) {
+        classification
+    } else {
+        CreateFileResultClassification::Malformed
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn create_file_host_terminal_state(
+    classification: CreateFileResultClassification,
+) -> HostActivityState {
+    match classification {
+        CreateFileResultClassification::Ok => HostActivityState::ToolCompleted,
+        CreateFileResultClassification::InvalidTarget
+        | CreateFileResultClassification::PreconditionFailed
+        | CreateFileResultClassification::CreateFailedKnown => HostActivityState::ToolError,
+        CreateFileResultClassification::WriteFailedKnown => HostActivityState::PartialEffect,
+        CreateFileResultClassification::Uncertain | CreateFileResultClassification::Malformed => {
+            HostActivityState::PossibleEffectUnknown
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn safe_create_file_activity_result(
+    classification: CreateFileResultClassification,
+) -> Option<ToolOutput> {
+    let status = match classification {
+        CreateFileResultClassification::Ok => "ok",
+        CreateFileResultClassification::InvalidTarget => "invalid_target",
+        CreateFileResultClassification::PreconditionFailed => "precondition_failed",
+        CreateFileResultClassification::CreateFailedKnown => "create_failed_known",
+        CreateFileResultClassification::WriteFailedKnown => "write_failed_known",
+        CreateFileResultClassification::Uncertain => "uncertain",
+        CreateFileResultClassification::Malformed => return None,
+    };
+    Some(ToolOutput {
+        content: vec![ToolContent::Json(serde_json::json!({"status": status}))],
+        is_error: classification != CreateFileResultClassification::Ok,
+    })
+}
+
+#[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 async fn run_host_tool(
     app: AppHandle,
@@ -2454,6 +2571,7 @@ async fn run_host_tool(
     repository_identity: Option<String>,
     generations: [u64; 4],
     multi_file_target_order: Option<Vec<String>>,
+    create_file_expected_output: Option<CreateFileExpectedOutput>,
 ) {
     let tool_name = call.name.to_string();
     let result = authorized_tool_dispatch(
@@ -2500,6 +2618,25 @@ async fn run_host_tool(
                 (
                     multi_file_host_terminal_state(classification),
                     safe_multi_file_activity_result(output, classification),
+                )
+            } else if kind == HostInvocationKind::RepoCreateFile {
+                let classification = create_file_expected_output
+                    .as_ref()
+                    .map_or(CreateFileResultClassification::Malformed, |expected| {
+                        classify_repository_create_file_output(&output, expected)
+                    });
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    create_file_host_terminal_state(classification),
+                    safe_create_file_activity_result(classification),
                 )
             } else {
                 if kind == HostInvocationKind::RepoCreateBranch
@@ -2571,6 +2708,16 @@ async fn run_host_tool(
                 ) {
                     emit_repository_refresh(&app);
                 }
+            } else if kind == HostInvocationKind::RepoCreateFile {
+                invalidate_repository_commit_review(state.inner()).await;
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
             }
             (HostActivityState::PossibleEffectUnknown, None)
         }
@@ -2597,7 +2744,9 @@ async fn run_host_tool(
 fn repository_bound_authoring_kind(kind: HostInvocationKind) -> bool {
     matches!(
         kind,
-        HostInvocationKind::RepoPatch | HostInvocationKind::RepoEditFiles
+        HostInvocationKind::RepoPatch
+            | HostInvocationKind::RepoEditFiles
+            | HostInvocationKind::RepoCreateFile
     )
 }
 
@@ -2694,6 +2843,7 @@ async fn host_invoke_read(
         invocation_id.clone(),
         current.repository_identity,
         current.generations,
+        None,
         None,
     ));
     Ok(HostInvocationResponse { invocation_id })
@@ -2947,6 +3097,24 @@ fn multi_file_edit_preparation_frontend_error(
 }
 
 #[cfg(target_os = "windows")]
+fn create_file_preparation_frontend_error(
+    error: RepositoryCreateFilePreparationError,
+) -> FrontendError {
+    match error {
+        RepositoryCreateFilePreparationError::InvalidInput { .. } => {
+            FrontendError::HostInvocationInvalidInput
+        }
+        RepositoryCreateFilePreparationError::PreconditionFailed { .. } => {
+            FrontendError::HostInvocationPreconditionChanged
+        }
+        RepositoryCreateFilePreparationError::ReviewTooLarge => {
+            FrontendError::HostInvocationReviewTooLarge
+        }
+        RepositoryCreateFilePreparationError::Stale => FrontendError::HostInvocationStale,
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn abort_host_patch_prepare(state: &DesktopAppState) {
     state
         .host_invocation
@@ -3188,6 +3356,113 @@ async fn host_prepare_repo_edit_files(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+async fn host_prepare_repo_create_file(
+    request: HostPrepareCreateFileRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedCreateFileResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let name = ToolName::new("repo.create-file");
+    let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
+        Ok(definition) => definition,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let preparer = match current.repository_create_file_preparer.clone() {
+        Some(preparer) => preparer,
+        None => {
+            abort_host_patch_prepare(state.inner());
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+    };
+    let preflight_call = host_call(name.clone(), ToolInput(serde_json::json!({})));
+    if let Err(rejection) = authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &preflight_call,
+    ) {
+        abort_host_patch_prepare(state.inner());
+        return Err(match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        });
+    }
+    let preparation = match preparer
+        .prepare(RepositoryCreateFilePreparationRequest {
+            path: request.path,
+            content: request.content,
+        })
+        .await
+    {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(create_file_preparation_frontend_error(error));
+        }
+    };
+    let review = preparation.review().clone();
+    let call = host_call(name.clone(), preparation.tool_input().clone());
+    let (ticket_id, activity_id) = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
+        let ticket = PreparedHostInvocation::new(
+            ticket_id.clone(),
+            activity_id.clone(),
+            HostInvocationKind::RepoCreateFile,
+            name,
+            expected_definition,
+            call,
+            current.registry,
+            current.allowed_permissions,
+            current.generations,
+            current.repository_identity,
+            current.composition_identity,
+            PreparedHostPayload::CreateFile {
+                preparation: Box::new(preparation),
+                preparer,
+            },
+        );
+        if coordinator.finalize_prepare(ticket).is_err() {
+            coordinator.abort_prepare();
+            return Err(FrontendError::HostInvocationBusy);
+        }
+        (ticket_id, activity_id)
+    };
+    emit_host_activity(
+        &app,
+        prepared_host_activity(activity_id, "repo.create-file".to_owned(), None),
+    );
+    Ok(PreparedCreateFileResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 async fn host_confirm_tool_invocation(
     request: HostConfirmRequest,
     app: AppHandle,
@@ -3273,6 +3548,19 @@ async fn host_confirm_tool_invocation(
             .finish_host();
         return Err(FrontendError::HostInvocationStale);
     }
+    if let PreparedHostPayload::CreateFile { preparer, .. } = &ticket.payload
+        && current
+            .repository_create_file_preparer
+            .as_ref()
+            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
+    {
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
     if let PreparedHostPayload::Patch {
         preparation,
         preparer,
@@ -3298,6 +3586,19 @@ async fn host_confirm_tool_invocation(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         coordinator.finish_host();
         return Err(multi_file_edit_preparation_frontend_error(error));
+    }
+    if let PreparedHostPayload::CreateFile {
+        preparation,
+        preparer,
+    } = &ticket.payload
+        && let Err(error) = preparer.revalidate(preparation).await
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.finish_host();
+        return Err(create_file_preparation_frontend_error(error));
     }
     authorize_tool_dispatch(
         &current.registry,
@@ -3333,12 +3634,21 @@ async fn host_confirm_tool_invocation(
         ),
         _ => None,
     };
+    let create_file_expected_output = match &ticket.payload {
+        PreparedHostPayload::CreateFile { preparation, .. } => Some(CreateFileExpectedOutput {
+            path: preparation.review().path().to_owned(),
+            length: preparation.content_byte_length(),
+            sha256: preparation.content_sha256().to_owned(),
+        }),
+        _ => None,
+    };
     let review = match &ticket.payload {
         PreparedHostPayload::Branch { review } => {
             Some(HostInvocationReview::Branch(review.clone()))
         }
         PreparedHostPayload::Patch { .. } => None,
         PreparedHostPayload::MultiFileEdit { .. } => None,
+        PreparedHostPayload::CreateFile { .. } => None,
     };
     emit_host_activity(
         &app,
@@ -3362,6 +3672,7 @@ async fn host_confirm_tool_invocation(
         ticket.repository_identity,
         ticket.generations,
         multi_file_target_order,
+        create_file_expected_output,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -3389,6 +3700,7 @@ fn host_cancel_tool_invocation(
             tool: match kind {
                 HostInvocationKind::RepoPatch => "repo.patch".to_owned(),
                 HostInvocationKind::RepoEditFiles => "repo.edit-files".to_owned(),
+                HostInvocationKind::RepoCreateFile => "repo.create-file".to_owned(),
                 _ => REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
             },
             state: HostActivityState::CancelledBeforeStart,
@@ -5973,6 +6285,7 @@ fn empty_composition_metadata() -> DesktopToolComposition {
         unavailable: Vec::new(),
         repository_patch_preparer: None,
         repository_multi_file_edit_preparer: None,
+        repository_create_file_preparer: None,
     }
 }
 
@@ -6845,6 +7158,7 @@ fn main() -> ExitCode {
             host_prepare_repo_create_branch,
             host_prepare_repo_patch,
             host_prepare_repo_edit_files,
+            host_prepare_repo_create_file,
             host_confirm_tool_invocation,
             host_cancel_tool_invocation
         ])
@@ -6895,26 +7209,26 @@ mod tests {
         ActivityEvent, ActivityResult, BranchActivityClassification, CancelRecoveryOutcome,
         ChatEvent, ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
         ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        DESKTOP_TOOL_NAME, DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity,
-        DesktopConversationState, DesktopModelProvider, DesktopModelSelection, DesktopModelState,
-        DesktopRepository, DesktopToolComposition, FrontendError, GracefulCancelOutcome,
-        HardShutdownOutcome, HostActivityEvent, HostActivityState, HostInvocationCoordinator,
-        HostInvocationDescriptor, HostInvocationUnavailableReason, LlamaCppReadinessProbe,
-        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
-        ModelConfigurationPresentation, MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY,
-        PendingConnectedPublication, Preferences, PreferencesWarning, PreparedHostInvocation,
-        PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
-        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
-        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
-        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
-        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
-        activity_event, activity_event_with_composition, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, branch_result_classification,
-        classify_repository_multi_file_output, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
-        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
-        current_host_generation_tuple, desktop_repository_snapshot,
+        CreateFileResultClassification, DESKTOP_TOOL_NAME, DesktopAppState,
+        DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
+        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
+        HostActivityEvent, HostActivityState, HostInvocationCoordinator, HostInvocationDescriptor,
+        HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
+        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
+        Preferences, PreferencesWarning, PreparedHostInvocation, PreparedHostPayload,
+        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
+        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
+        StartupActivationCounters, TerminalOwnership, activity_event,
+        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        branch_result_classification, classify_repository_multi_file_output,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
+        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
+        current_app_status, current_host_generation_tuple, desktop_repository_snapshot,
         desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
         desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_cancel_tool_invocation,
@@ -6934,6 +7248,7 @@ mod tests {
         startup_activation_snapshot, uncertain_repository_effect_pending,
         uncertain_repository_effect_requires_refresh, validate_prompt,
     };
+    use async_trait::async_trait;
     use futures::StreamExt;
     use rah_protocol::{
         AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, PermissionLevel,
@@ -6946,13 +7261,13 @@ mod tests {
     };
     use rah_tools::{
         RepositoryBranchCreationAuthority, RepositoryCommitTool,
-        RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
-        RepositoryFileRenameAuthority, RepositoryMultiFileEditPreparationRequest,
-        RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditPreparer,
-        RepositoryMultiFileEditTextReplacement, RepositoryPatchResultClassification, ToolContext,
-        classify_repository_patch_output, clear_live_test_multi_file_native_attempts,
-        clear_live_test_multi_file_tool_executions, live_test_multi_file_native_attempts,
-        live_test_multi_file_tool_executions,
+        RepositoryDirectoryCreationAuthority, RepositoryFileCreationTool,
+        RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority,
+        RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
+        RepositoryMultiFileEditPreparer, RepositoryMultiFileEditTextReplacement,
+        RepositoryPatchResultClassification, ToolContext, classify_repository_patch_output,
+        clear_live_test_multi_file_native_attempts, clear_live_test_multi_file_tool_executions,
+        live_test_multi_file_native_attempts, live_test_multi_file_tool_executions,
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -6967,7 +7282,7 @@ mod tests {
         process::Command,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -6979,6 +7294,27 @@ mod tests {
 
     #[derive(Debug)]
     struct RuntimeMarker;
+
+    struct CountingCreateFileTool {
+        inner: RepositoryFileCreationTool,
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl rah_tools::Tool for CountingCreateFileTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            self.inner.definition()
+        }
+
+        async fn execute(
+            &self,
+            input: ToolInput,
+            context: ToolContext,
+        ) -> Result<ToolOutput, rah_tools::ToolError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            self.inner.execute(input, context).await
+        }
+    }
 
     fn default_test_endpoint() -> ProviderEndpoint {
         ProviderEndpoint::parse(ProviderEndpointInput {
@@ -11985,6 +12321,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
@@ -12137,10 +12474,203 @@ mod tests {
                 false,
                 true,
                 true,
+                false,
                 CoordinatorState::Idle
             )
             .eligible
         );
+    }
+
+    #[test]
+    fn create_file_is_the_ninth_host_tool_and_retains_its_shared_preparer() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.desktop_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&repository), None).expect("registry should build"),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("create-file composition should build");
+        let create_file = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.create-file")
+            .expect("repo.create-file should be composed");
+        assert_eq!(create_file.source_kind, SourceKind::RepositoryHost);
+        assert_eq!(create_file.effect_class, EffectClass::RepositoryMutation);
+        assert_eq!(
+            create_file.authority_category,
+            super::effective_authority::AuthorityCategory::RepositoryFileCreation
+        );
+        assert!(create_file.repository_bound);
+        assert_eq!(
+            create_file.host_invocation.kind,
+            Some(HostInvocationKind::RepoCreateFile)
+        );
+        assert!(composition.repository_create_file_preparer.is_some());
+        assert!(
+            host_descriptor(
+                create_file,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deterministic_create_file_dispatch_runs_the_real_tool_once() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let target = fixture.0.join("host-created.rs");
+        let content = "RAH_SECRET_CREATE_FILE_CONTENT_SENTINEL\n";
+        let index_before = fs::read(fixture.0.join(".git/index")).expect("index reads");
+        let git_text = |args: &[&str]| {
+            String::from_utf8(
+                Command::new(TestRepository::native_git())
+                    .args(args)
+                    .current_dir(&fixture.0)
+                    .output()
+                    .expect("Git observation starts")
+                    .stdout,
+            )
+            .expect("Git observation is UTF-8")
+        };
+        let head_before = git_text(&["rev-parse", "HEAD"]);
+        let refs_before = git_text(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"]);
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool = RepositoryFileCreationTool::new(TestRepository::native_git(), &fixture.0)
+            .expect("real create-file Tool constructs");
+        let mut registry = super::ToolRegistry::new();
+        registry
+            .register(Arc::new(CountingCreateFileTool {
+                inner: tool,
+                executions: Arc::clone(&executions),
+            }))
+            .expect("counting wrapper registers the real Tool");
+        let registry = Arc::new(registry);
+        let preparer = Arc::new(
+            rah_tools::RepositoryCreateFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("shared create-file preparer constructs"),
+        );
+        let preparation = preparer
+            .prepare(super::RepositoryCreateFilePreparationRequest {
+                path: "host-created.rs".to_owned(),
+                content: content.to_owned(),
+            })
+            .await
+            .expect("shared preparation succeeds");
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read(fixture.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(git_text(&["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            git_text(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"]),
+            refs_before
+        );
+
+        let definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.create-file")
+            .expect("current registry contains create-file");
+        let mut coordinator = HostInvocationCoordinator::default();
+        coordinator
+            .begin_prepare()
+            .expect("preparation reserves slot");
+        let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
+        coordinator
+            .finalize_prepare(PreparedHostInvocation::new(
+                ticket_id.clone(),
+                activity_id.clone(),
+                HostInvocationKind::RepoCreateFile,
+                ToolName::new("repo.create-file"),
+                definition.clone(),
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("repo.create-file"),
+                    input: preparation.tool_input().clone(),
+                },
+                Arc::clone(&registry),
+                vec![PermissionLevel::Execute],
+                [0; 4],
+                None,
+                0,
+                PreparedHostPayload::CreateFile {
+                    preparation: Box::new(preparation),
+                    preparer: Arc::clone(&preparer),
+                },
+            ))
+            .expect("prepared create-file ticket finalizes");
+        let ticket = coordinator
+            .take_prepared(&ticket_id, std::time::Instant::now())
+            .expect("exact ticket confirms once");
+        let expected = match &ticket.payload {
+            PreparedHostPayload::CreateFile {
+                preparation,
+                preparer: retained,
+            } => {
+                assert!(Arc::ptr_eq(retained, &preparer));
+                preparer
+                    .revalidate(preparation)
+                    .await
+                    .expect("preparer revalidation succeeds");
+                super::CreateFileExpectedOutput {
+                    path: preparation.review().path().to_owned(),
+                    length: preparation.content_byte_length(),
+                    sha256: preparation.content_sha256().to_owned(),
+                }
+            }
+            _ => panic!("wrong prepared payload kind"),
+        };
+        super::authorize_tool_dispatch(
+            &ticket.registry,
+            &ticket.expected_definition,
+            &ticket.allowed_permissions,
+            &ticket.call,
+        )
+        .expect("D2 preflight admits exact current registry call");
+        let output = super::authorized_tool_dispatch(
+            &ticket.registry,
+            &ticket.expected_definition,
+            &ticket.allowed_permissions,
+            ticket.call,
+            ToolContext::default(),
+        )
+        .await
+        .expect("current ToolRegistry dispatch succeeds");
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            super::classify_repository_create_file_output(&output, &expected),
+            CreateFileResultClassification::Ok
+        );
+        assert_eq!(
+            fs::read(&target).expect("created target reads"),
+            content.as_bytes()
+        );
+        assert_eq!(
+            fs::read(fixture.0.join(".git/index")).unwrap(),
+            index_before
+        );
+        assert_eq!(git_text(&["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            git_text(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"]),
+            refs_before
+        );
+        let status = git_text(&["status", "--porcelain=v1", "--", "host-created.rs"]);
+        assert_eq!(status, "?? host-created.rs\n");
+        coordinator.finish_host();
+        assert_eq!(coordinator.state(), CoordinatorState::Idle);
     }
 
     #[test]
@@ -12326,12 +12856,180 @@ mod tests {
         assert!(super::repository_bound_authoring_kind(
             HostInvocationKind::RepoEditFiles
         ));
+        assert!(super::repository_bound_authoring_kind(
+            HostInvocationKind::RepoCreateFile
+        ));
         assert!(!super::repository_bound_authoring_kind(
             HostInvocationKind::RepoCreateBranch
         ));
         assert!(!super::repository_bound_authoring_kind(
             HostInvocationKind::FsRead
         ));
+    }
+
+    #[test]
+    fn create_file_result_classification_is_strict_and_redacted() {
+        let content = "RAH_SECRET_CREATE_FILE_CONTENT_SENTINEL";
+        let expected = super::CreateFileExpectedOutput {
+            path: "src/new.rs".to_owned(),
+            length: content.len(),
+            sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+        };
+        let output = |value: Value, is_error| ToolOutput {
+            content: vec![ToolContent::Json(value)],
+            is_error,
+        };
+        let success = output(
+            serde_json::json!({
+                "status": "ok",
+                "path": expected.path.clone(),
+                "length": expected.length,
+                "sha256": expected.sha256.clone(),
+            }),
+            false,
+        );
+        assert_eq!(
+            super::classify_repository_create_file_output(&success, &expected),
+            CreateFileResultClassification::Ok
+        );
+        for (status, expected_classification) in [
+            (
+                "invalid_target",
+                CreateFileResultClassification::InvalidTarget,
+            ),
+            (
+                "precondition_failed",
+                CreateFileResultClassification::PreconditionFailed,
+            ),
+            (
+                "create_failed_known",
+                CreateFileResultClassification::CreateFailedKnown,
+            ),
+            (
+                "write_failed_known",
+                CreateFileResultClassification::WriteFailedKnown,
+            ),
+            ("uncertain", CreateFileResultClassification::Uncertain),
+        ] {
+            assert_eq!(
+                super::classify_repository_create_file_output(
+                    &output(serde_json::json!({"status": status}), true),
+                    &expected,
+                ),
+                expected_classification
+            );
+        }
+        assert_eq!(
+            super::create_file_host_terminal_state(
+                CreateFileResultClassification::WriteFailedKnown
+            ),
+            HostActivityState::PartialEffect
+        );
+        for malformed in [
+            output(serde_json::json!({"status": "ok"}), false),
+            output(serde_json::json!({"status": "unknown"}), true),
+            output(
+                serde_json::json!({
+                    "status": "ok",
+                    "path": expected.path.clone(),
+                    "length": expected.length,
+                    "sha256": expected.sha256.clone(),
+                }),
+                true,
+            ),
+            output(
+                serde_json::json!({"status": "invalid_target", "path": "src/new.rs"}),
+                true,
+            ),
+            output(
+                serde_json::json!({
+                    "status": "ok",
+                    "path": "wrong.rs",
+                    "length": expected.length,
+                    "sha256": expected.sha256.clone(),
+                }),
+                false,
+            ),
+            output(
+                serde_json::json!({
+                    "status": "ok",
+                    "path": expected.path.clone(),
+                    "length": expected.length + 1,
+                    "sha256": expected.sha256.clone(),
+                }),
+                false,
+            ),
+            output(
+                serde_json::json!({
+                    "status": "ok",
+                    "path": expected.path.clone(),
+                    "length": expected.length,
+                    "sha256": "RAH_SECRET_CREATE_FILE_HASH_SENTINEL",
+                }),
+                false,
+            ),
+            output(
+                serde_json::json!({
+                    "status": "write_failed_known",
+                    "path": expected.path.clone(),
+                    "length": expected.length,
+                    "sha256": expected.sha256.clone(),
+                }),
+                true,
+            ),
+            ToolOutput {
+                content: vec![ToolContent::Text("not-json".to_owned())],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![
+                    ToolContent::Json(serde_json::json!({"status": "ok"})),
+                    ToolContent::Json(serde_json::json!({"status": "ok"})),
+                ],
+                is_error: false,
+            },
+        ] {
+            assert_eq!(
+                super::classify_repository_create_file_output(&malformed, &expected),
+                CreateFileResultClassification::Malformed
+            );
+            assert_eq!(
+                super::create_file_host_terminal_state(CreateFileResultClassification::Malformed),
+                HostActivityState::PossibleEffectUnknown
+            );
+        }
+        let activity = HostActivityEvent {
+            source: "host_explicit",
+            invocation_id: "host-explicit-create-file-activity".to_owned(),
+            tool: "repo.create-file".to_owned(),
+            state: HostActivityState::ToolCompleted,
+            result: super::safe_create_file_activity_result(CreateFileResultClassification::Ok),
+            review: None,
+        };
+        let prepared = super::prepared_host_activity(
+            "host-explicit-create-file-activity".to_owned(),
+            "repo.create-file".to_owned(),
+            None,
+        );
+        let serialized = format!(
+            "{}{}",
+            serde_json::to_string(&prepared).unwrap(),
+            serde_json::to_string(&activity).unwrap()
+        );
+        for secret in [
+            "RAH_SECRET_CREATE_FILE_TICKET_SENTINEL",
+            content,
+            expected.sha256.as_str(),
+            "native-path-sentinel",
+            "parent-identity-sentinel",
+            "raw-tool-input-sentinel",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "privacy sentinel leaked: {secret}"
+            );
+        }
+        assert!(serialized.contains("host-explicit-create-file-activity"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13529,6 +14227,7 @@ mod tests {
             ),
             ("repo.patch", None),
             ("repo.edit-files", None),
+            ("repo.create-file", None),
         ];
         for (tool, review) in cases {
             let activity_id = format!("host-explicit-activity-{tool}");
@@ -13801,6 +14500,7 @@ mod tests {
             unavailable: Vec::new(),
             repository_patch_preparer: None,
             repository_multi_file_edit_preparer: None,
+            repository_create_file_preparer: None,
         }
     }
 

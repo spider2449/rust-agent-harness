@@ -9,6 +9,7 @@ use std::{
 
 use rah_protocol::{PermissionLevel, ToolCall, ToolDefinition, ToolInput, ToolName};
 use rah_tools::{
+    RepositoryCreateFilePreparation, RepositoryCreateFilePreparer, RepositoryCreateFileReview,
     RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparer,
     RepositoryMultiFileEditReview, RepositoryPatchPreparation, RepositoryPatchPreparer,
     RepositoryPatchReview, ToolRegistry,
@@ -32,6 +33,7 @@ pub(crate) enum HostInvocationKind {
     RepoCreateBranch,
     RepoPatch,
     RepoEditFiles,
+    RepoCreateFile,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -120,6 +122,13 @@ pub(crate) struct HostPrepareMultiFileEditReplacement {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostPrepareCreateFileRequest {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HostConfirmRequest {
     pub ticket_id: String,
@@ -154,6 +163,13 @@ pub(crate) struct PreparedMultiFileEditResponse {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedCreateFileResponse {
+    pub ticket_id: String,
+    pub review: RepositoryCreateFileReview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BranchReview {
     pub operation: &'static str,
     pub branch: String,
@@ -181,6 +197,10 @@ pub(crate) enum PreparedHostPayload {
     MultiFileEdit {
         preparation: Box<RepositoryMultiFileEditPreparation>,
         preparer: Arc<RepositoryMultiFileEditPreparer>,
+    },
+    CreateFile {
+        preparation: Box<RepositoryCreateFilePreparation>,
+        preparer: Arc<RepositoryCreateFilePreparer>,
     },
 }
 
@@ -471,6 +491,7 @@ pub(crate) fn host_kind(name: &str) -> Option<HostInvocationKind> {
         "repo.create-branch" => HostInvocationKind::RepoCreateBranch,
         "repo.patch" => HostInvocationKind::RepoPatch,
         "repo.edit-files" => HostInvocationKind::RepoEditFiles,
+        "repo.create-file" => HostInvocationKind::RepoCreateFile,
         _ => return None,
     })
 }
@@ -484,6 +505,7 @@ pub(crate) fn host_descriptor(
     branch_authority_present: bool,
     patch_preparer_present: bool,
     multi_file_edit_preparer_present: bool,
+    create_file_preparer_present: bool,
     coordinator_state: CoordinatorState,
 ) -> HostInvocationDescriptor {
     let kind = host_kind(&entry.public_tool_name);
@@ -507,6 +529,7 @@ pub(crate) fn host_descriptor(
     } else if (entry.public_tool_name == "repo.create-branch" && !branch_authority_present)
         || (entry.public_tool_name == "repo.patch" && !patch_preparer_present)
         || (entry.public_tool_name == "repo.edit-files" && !multi_file_edit_preparer_present)
+        || (entry.public_tool_name == "repo.create-file" && !create_file_preparer_present)
     {
         HostInvocationUnavailableReason::AuthorityNotGranted
     } else {
@@ -584,13 +607,13 @@ mod tests {
             "repo.create-branch",
             "repo.patch",
             "repo.edit-files",
+            "repo.create-file",
         ];
         for name in supported {
             assert!(host_kind(name).is_some());
         }
         for name in [
             "repo.commit",
-            "repo.create-file",
             "repo.delete-file",
             "repo.rename-file",
             "repo.create-directory",
@@ -629,6 +652,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             CoordinatorState::Idle,
         );
         assert!(!unavailable.eligible);
@@ -644,6 +668,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 false,
                 CoordinatorState::Idle,
             )
@@ -678,6 +703,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
@@ -691,10 +717,60 @@ mod tests {
                 false,
                 true,
                 true,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
         );
+    }
+
+    #[test]
+    fn create_file_host_descriptor_requires_the_retained_preparer() {
+        let entry = EffectiveToolEntry {
+            public_tool_name: "repo.create-file".to_owned(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: crate::effective_authority::EffectClass::RepositoryMutation,
+            authority_category:
+                crate::effective_authority::AuthorityCategory::RepositoryFileCreation,
+            permission: PermissionLevel::Execute,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        };
+        let unavailable = host_descriptor(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            CoordinatorState::Idle,
+        );
+        assert!(!unavailable.eligible);
+        assert_eq!(
+            unavailable.unavailable_reason,
+            Some(HostInvocationUnavailableReason::AuthorityNotGranted)
+        );
+        let eligible = host_descriptor(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            CoordinatorState::Idle,
+        );
+        assert_eq!(eligible.kind, Some(HostInvocationKind::RepoCreateFile));
+        assert!(eligible.eligible);
     }
 
     #[test]
@@ -883,6 +959,13 @@ mod tests {
         .expect("typed multi-file request should deserialize");
         assert_eq!(multi.targets.len(), 1);
         assert_eq!(multi.targets[0].replacements[0].expected_old_text, "old");
+        let create = serde_json::from_value::<HostPrepareCreateFileRequest>(serde_json::json!({
+            "path": "src/new.rs",
+            "content": "RAH_SECRET_CREATE_FILE_CONTENT_SENTINEL"
+        }))
+        .expect("typed create-file request should deserialize");
+        assert_eq!(create.path, "src/new.rs");
+        assert_eq!(create.content, "RAH_SECRET_CREATE_FILE_CONTENT_SENTINEL");
         for field in [
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","hash":"x"}),
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","toolName":"repo.patch"}),
@@ -896,6 +979,23 @@ mod tests {
             serde_json::json!({"targets": [{"path":"a","replacements":[{"expectedOldText":"b","replacementText":"c","order":1}]}]}),
         ] {
             assert!(serde_json::from_value::<HostPrepareMultiFileEditRequest>(field).is_err());
+        }
+        for field in [
+            serde_json::json!({"path":"a","content":"b","repository":"repo"}),
+            serde_json::json!({"path":"a","content":"b","nativePath":"x"}),
+            serde_json::json!({"path":"a","content":"b","toolName":"repo.create-file"}),
+            serde_json::json!({"path":"a","content":"b","input":{}}),
+            serde_json::json!({"path":"a","content":"b","hash":"x"}),
+            serde_json::json!({"path":"a","content":"b","length":1}),
+            serde_json::json!({"path":"a","content":"b","permission":"execute"}),
+            serde_json::json!({"path":"a","content":"b","authority":true}),
+            serde_json::json!({"path":"a","content":"b","retry":true}),
+            serde_json::json!({"path":"a","content":"b","stage":true}),
+            serde_json::json!({"path":"a","content":"b","commit":true}),
+            serde_json::json!({"path":"a","content":"b","ticketId":"x"}),
+            serde_json::json!({"path":"a","content":"b","activityId":"x"}),
+        ] {
+            assert!(serde_json::from_value::<HostPrepareCreateFileRequest>(field).is_err());
         }
     }
 
