@@ -9277,8 +9277,8 @@ mod tests {
             || facts.carriage_returns != 0
             || facts.line_feeds != 2
             || facts.crlf_pairs != 0
-            || !facts.ends_with_newline
-            || facts.final_eof != "final_newline"
+            || facts.ends_with_newline
+            || facts.final_eof != "no_final_newline"
             || facts.contains_tab
             || facts.contains_trailing_space
             || facts.contains_control_or_format_escape
