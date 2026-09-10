@@ -45,6 +45,14 @@ const createFileResultLabels = {
   uncertain: "Uncertain — final file effect cannot be determined",
 };
 
+const deleteFileResultLabels = {
+  deleted_verified: "Verified — reviewed file deleted",
+  known_no_effect: "Delete failed — reviewed file proven unchanged",
+  invalid_input: "Rejected — invalid deletion input; no deletion effect",
+  precondition_failed: "Rejected — deletion precondition failed; no deletion effect",
+  uncertain: "Uncertain — final file state cannot be proven",
+};
+
 const authorityStatusLabels = {
   no_repository: "No repository selected",
   disconnected: "Runtime disconnected",
@@ -261,6 +269,7 @@ function renderEffectiveTool(tool) {
     const isPatch = host.kind === "repo_patch";
     const isMultiFileEdit = host.kind === "repo_edit_files";
     const isCreateFile = host.kind === "repo_create_file";
+    const isDeleteFile = host.kind === "repo_delete_file";
     if (needsPath || isBranch || isPatch) {
       const input = document.createElement("input");
       input.type = "text";
@@ -304,6 +313,31 @@ function renderEffectiveTool(tool) {
       }
       form.append(guidance);
     }
+    if (isDeleteFile) {
+      const pathLabel = document.createElement("label");
+      pathLabel.textContent = "Repository-relative path";
+      const path = document.createElement("input");
+      path.type = "text";
+      path.required = true;
+      path.maxLength = 1024;
+      path.placeholder = "Relative path";
+      path.dataset.hostInput = "path";
+      pathLabel.append(path);
+      form.append(pathLabel);
+
+      const guidance = document.createElement("ul");
+      for (const text of [
+        "Deletes exactly one reviewed existing tracked repository file.",
+        "Prepare itself deletes nothing; the backend provides the complete exact preimage before Confirm.",
+        "A verified deletion is an unstaged worktree deletion; no automatic Stage or Commit is performed.",
+        "There is no Trash or Recycle Bin guarantee, backup, or restore.",
+      ]) {
+        const item = document.createElement("li");
+        item.textContent = text;
+        guidance.append(item);
+      }
+      form.append(guidance);
+    }
     if (isPatch) {
       const oldText = document.createElement("textarea");
       oldText.required = true;
@@ -340,7 +374,7 @@ function renderEffectiveTool(tool) {
     }
     const button = document.createElement("button");
     button.type = "submit";
-    button.textContent = isBranch || isPatch || isMultiFileEdit || isCreateFile ? "Prepare" : "Invoke";
+    button.textContent = isBranch || isPatch || isMultiFileEdit || isCreateFile || isDeleteFile ? "Prepare" : "Invoke";
     if (isMultiFileEdit) button.dataset.multiFileAction = "prepare";
     form.append(button);
     hostBox.append(form);
@@ -468,7 +502,8 @@ function renderHostResult(payload) {
   const result = hostResultValue(payload.result);
   const status = result?.status;
   const isCreateFile = payload.tool === "repo.create-file";
-  const resultLabels = isCreateFile ? createFileResultLabels : multiFileResultLabels;
+  const isDeleteFile = payload.tool === "repo.delete-file";
+  const resultLabels = isCreateFile ? createFileResultLabels : isDeleteFile ? deleteFileResultLabels : multiFileResultLabels;
   const box = document.createElement("div");
   box.className = "host-result";
   const title = document.createElement("strong");
@@ -492,6 +527,23 @@ function renderHostResult(payload) {
       explanation.textContent = "Exclusive create may already have succeeded. An empty or partial file may remain; this is not a known-no-effect failure. No cleanup or retry/replay occurred. Inspect the current repository state.";
     } else if (status === "uncertain") {
       explanation.textContent = "The final target state may be unknown. Do not infer unchanged state; do not retry automatically. Inspect the refreshed repository state manually.";
+    }
+    box.append(explanation);
+    return box;
+  }
+
+  if (isDeleteFile) {
+    const explanation = document.createElement("p");
+    if (status === "deleted_verified") {
+      explanation.textContent = "The backend independently verified that the reviewed target is absent. The deletion is an unstaged worktree deletion. No Stage or Commit was performed.";
+    } else if (status === "known_no_effect") {
+      explanation.textContent = "The deletion attempt did not produce a RAH deletion effect and the backend independently proved that the exact reviewed file remains intact.";
+    } else if (status === "invalid_input") {
+      explanation.textContent = "The backend rejected the deletion request as invalid; no verified deletion effect occurred.";
+    } else if (status === "precondition_failed") {
+      explanation.textContent = "A required deletion precondition failed; no verified deletion effect occurred. Prepare a fresh review if the human still intends to delete the current file.";
+    } else if (status === "uncertain") {
+      explanation.textContent = "The final target state cannot be safely proven. Inspect the refreshed repository state manually. Do not retry automatically.";
     }
     box.append(explanation);
     return box;
@@ -550,6 +602,8 @@ function appendHostActivity(payload) {
   const result = hostResultValue(payload.result);
   const createFileStatus = payload.tool === "repo.create-file" ? result?.status : null;
   const createFileLabel = createFileStatus ? createFileResultLabels[createFileStatus] : null;
+  const deleteFileStatus = payload.tool === "repo.delete-file" ? result?.status : null;
+  const deleteFileLabel = deleteFileStatus ? deleteFileResultLabels[deleteFileStatus] : null;
   const activityLabel = payload.tool === "repo.create-file"
     ? (createFileLabel ?? (payload.state === "partial_effect"
       ? "Partial effect — inspect current repository state"
@@ -558,6 +612,14 @@ function appendHostActivity(payload) {
         : payload.state === "cancelled_before_start"
           ? "Cancelled without effect"
           : labels[payload.state] ?? "Host action state unavailable"))
+    : payload.tool === "repo.delete-file"
+      ? (deleteFileLabel ?? (payload.state === "possible_effect_unknown"
+        ? "Uncertain — inspect the refreshed repository state manually; do not retry"
+        : payload.state === "cancelled_before_start"
+          ? "Cancelled without effect"
+          : payload.state === "rejected_stale"
+            ? "Rejected stale — no deletion effect from this review"
+            : labels[payload.state] ?? "Host action state unavailable"))
     : labels[payload.state] ?? "Host action state unavailable";
   state.textContent = `${payload.tool}: ${activityLabel}`;
   entry.append(title, state);
@@ -753,6 +815,88 @@ function renderHostReview(review, kind) {
     content.append(warningsHeading, warnings);
     return content;
   }
+  if (kind === "delete_file") {
+    const details = document.createElement("dl");
+    const values = [
+      ["Operation", review.operation],
+      ["Target count", review.target_count],
+      ["Relative path", review.path],
+      ["Tracked state", review.tracked_state],
+      ["File mode", review.file_mode],
+      ["File intent", review.file_intent],
+      ["Preimage encoding", review.preimage_encoding],
+      ["Content byte length", review.content_byte_length],
+      ["Content SHA-256", review.content_sha256],
+      ["BOM state", review.bom],
+      ["HEAD/blob relationship", review.head_blob_relationship],
+      ["Index relationship", review.index_relationship],
+      ["Expected effect", review.expected_effect],
+      ["Post-delete Git meaning", review.post_delete_git_meaning],
+    ];
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      details.append(term, detail);
+    }
+    content.append(details);
+
+    const preimageHeading = document.createElement("h4");
+    preimageHeading.textContent = "Complete escaped file content to be deleted";
+    const pre = document.createElement("pre");
+    pre.textContent = String(review.preimage ?? "");
+    content.append(preimageHeading, pre);
+
+    const factsHeading = document.createElement("h4");
+    factsHeading.textContent = "Content facts";
+    const facts = review.content_facts ?? {};
+    const factsDetails = document.createElement("dl");
+    for (const [label, value] of [
+      ["Carriage returns", facts.carriage_returns],
+      ["Line feeds", facts.line_feeds],
+      ["CRLF pairs", facts.crlf_pairs],
+      ["Contains CR", facts.contains_cr],
+      ["Contains LF", facts.contains_lf],
+      ["Ends with newline", facts.ends_with_newline],
+      ["Final EOF", facts.final_eof],
+      ["Contains tab", facts.contains_tab],
+      ["Contains trailing space", facts.contains_trailing_space],
+      ["Contains control or format escape", facts.contains_control_or_format_escape],
+      ["Control characters", facts.control_characters],
+      ["Format characters", facts.format_characters],
+      ["Empty", facts.empty],
+    ]) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      factsDetails.append(term, detail);
+    }
+    content.append(factsHeading, factsDetails);
+
+    const nonEffectsHeading = document.createElement("h4");
+    nonEffectsHeading.textContent = "Explicit non-effects";
+    const nonEffects = document.createElement("ul");
+    for (const value of review.non_effects ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      nonEffects.append(item);
+    }
+    content.append(nonEffectsHeading, nonEffects);
+
+    const warningsHeading = document.createElement("h4");
+    warningsHeading.textContent = "Warnings before Confirm";
+    const warnings = document.createElement("ul");
+    warnings.className = "host-review-warning";
+    for (const value of review.warnings ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      warnings.append(item);
+    }
+    content.append(warningsHeading, warnings);
+    return content;
+  }
   const details = document.createElement("dl");
   const values = [
     ["Operation", review.operation],
@@ -815,7 +959,8 @@ function openHostReview(invoke, prepared, kind) {
   title.textContent = kind === "patch"
     ? "Review Host patch"
     : kind === "multi_file_edit" ? "Review Host multi-file edit"
-      : kind === "create_file" ? "Review Host new-file creation" : "Review Host action";
+      : kind === "create_file" ? "Review Host new-file creation"
+        : kind === "delete_file" ? "Review Host file deletion" : "Review Host action";
   confirm.type = "button";
   confirm.textContent = "Confirm Host action";
   cancel.type = "button";
@@ -882,6 +1027,14 @@ async function submitHostForm(invoke, form) {
     };
     const prepared = await invoke("host_prepare_repo_create_file", { request });
     openHostReview(invoke, prepared, "create_file");
+    return;
+  }
+  if (kind === "repo_delete_file") {
+    const request = {
+      path: form.querySelector('[data-host-input="path"]').value,
+    };
+    const prepared = await invoke("host_prepare_repo_delete_file", { request });
+    openHostReview(invoke, prepared, "delete_file");
     return;
   }
   const request = { kind };

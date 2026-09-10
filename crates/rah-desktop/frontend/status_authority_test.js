@@ -44,6 +44,7 @@ for (const unavailableReason of [
 assert.match(source, /const isPatch = host\.kind === "repo_patch"/);
 assert.match(source, /const isMultiFileEdit = host\.kind === "repo_edit_files"/);
 assert.match(source, /const isCreateFile = host\.kind === "repo_create_file"/);
+assert.match(source, /const isDeleteFile = host\.kind === "repo_delete_file"/);
 assert.match(source, /input\.dataset\.hostInput = isPatch \? "path"/);
 assert.match(source, /path\.dataset\.hostInput = "path"/);
 assert.match(source, /fileContent\.dataset\.hostInput = "content"/);
@@ -61,6 +62,25 @@ assert.match(createFileSubmit, /path: form\.querySelector\('\[data-host-input="p
 assert.match(createFileSubmit, /content: form\.querySelector\('\[data-host-input="content"\]'\)\.value/);
 for (const forbiddenCreateField of ["repository", "root", "nativePath", "ToolName", "ToolInput", "hash", "length", "permission", "authority", "retry", "stage", "commit", "ticketId", "activityId"]) {
   assert.equal(createFileSubmit.includes(forbiddenCreateField), false, `create-file DTO field: ${forbiddenCreateField}`);
+}
+const deleteForm = source.slice(source.indexOf("if (isDeleteFile)"), source.indexOf("if (isPatch)"));
+assert.match(deleteForm, /path\.dataset\.hostInput = "path"/);
+assert.match(deleteForm, /path\.required = true/);
+assert.match(deleteForm, /path\.maxLength = 1024/);
+assert.match(deleteForm, /Deletes exactly one reviewed existing tracked repository file/);
+assert.match(deleteForm, /Prepare itself deletes nothing/);
+assert.match(deleteForm, /no automatic Stage or Commit/);
+assert.equal(deleteForm.includes("Delete Again"), false);
+assert.equal(deleteForm.includes("Restore"), false);
+assert.equal(deleteForm.includes('button.textContent = "Delete"'), false);
+assert.equal(deleteForm.includes('button.textContent = "Restore"'), false);
+assert.match(source, /button\.textContent = .*isDeleteFile.*\? "Prepare"/);
+assert.match(source, /host_prepare_repo_delete_file/);
+const deleteSubmit = source.slice(source.indexOf('if (kind === "repo_delete_file")'), source.indexOf("const request = { kind }"));
+assert.match(deleteSubmit, /const request = \{\s*path: form\.querySelector\('\[data-host-input="path"\]'\)\.value,\s*\}/);
+assert.match(deleteSubmit, /invoke\("host_prepare_repo_delete_file", \{ request \}\)/);
+for (const forbiddenDeleteField of ["expected_file_sha256", "expected_file_byte_length", "hash", "length", "nativePath", "repository", "root", "FileIdentity", "permission", "authority", "ToolName", "ToolInput", "retry", "restore", "stage", "commit", "ticketId", "activityId"]) {
+  assert.equal(deleteSubmit.includes(forbiddenDeleteField), false, `delete-file DTO field: ${forbiddenDeleteField}`);
 }
 assert.equal(source.includes("createHash"), false);
 assert.equal(source.includes("crypto."), false);
@@ -169,12 +189,16 @@ for (const field of [
 
 const hostActivityRenderer = source.slice(source.indexOf("function appendHostActivity"), source.indexOf("function renderHostReview"));
 assert.equal(hostActivityRenderer.includes("payload.review"), false);
+assert.equal(hostActivityRenderer.includes("preimage"), false);
+assert.equal(hostActivityRenderer.includes("content_sha256"), false);
+assert.equal(hostActivityRenderer.includes("content_byte_length"), false);
 assert.match(source, /activePreparedHostReview/);
 assert.match(source, /hostResultValue/);
 assert.match(source, /ticketId: active\.ticketId/);
 assert.match(source, /host_cancel_tool_invocation/);
 assert.match(source, /void refreshEffectiveAuthority\(invoke\)/);
 assert.match(source, /kind === "create_file"/);
+assert.match(source, /kind === "delete_file"/);
 for (const reviewField of [
   "target_count",
   "parent_path",
@@ -228,6 +252,72 @@ assert.match(source, /status === "uncertain"[\s\S]*do not retry automatically/);
 assert.match(source, /create_failed_known[\s\S]*no RAH creation effect/);
 assert.match(source, /payload\.tool === "repo\.create-file"/);
 
+const deleteReviewStart = source.indexOf('if (kind === "delete_file")');
+const deleteReview = source.slice(deleteReviewStart, source.indexOf('\n  const details = document.createElement("dl")', deleteReviewStart));
+for (const reviewField of [
+  "operation",
+  "target_count",
+  "path",
+  "tracked_state",
+  "file_mode",
+  "file_intent",
+  "preimage_encoding",
+  "preimage",
+  "content_byte_length",
+  "content_sha256",
+  "bom",
+  "head_blob_relationship",
+  "index_relationship",
+  "expected_effect",
+  "post_delete_git_meaning",
+  "non_effects",
+  "warnings",
+]) {
+  assert.match(deleteReview, new RegExp(`review\\.${reviewField}`));
+}
+for (const contentFact of [
+  "carriage_returns",
+  "line_feeds",
+  "crlf_pairs",
+  "ends_with_newline",
+  "final_eof",
+  "contains_tab",
+  "contains_trailing_space",
+  "contains_control_or_format_escape",
+  "control_characters",
+  "format_characters",
+  "empty",
+]) {
+  assert.match(deleteReview, new RegExp(`facts\\.${contentFact}`));
+}
+assert.match(source, /preimageHeading\.textContent = "Complete escaped file content to be deleted"/);
+assert.match(source, /pre\.textContent = String\(review\.preimage \?\? ""\)/);
+assert.match(source, /Review Host file deletion/);
+const deleteLabels = source.slice(source.indexOf("const deleteFileResultLabels"), source.indexOf("const authorityStatusLabels"));
+for (const result of [
+  "deleted_verified",
+  "known_no_effect",
+  "invalid_input",
+  "precondition_failed",
+  "uncertain",
+]) {
+  assert.match(deleteLabels, new RegExp(`${result}:`));
+}
+assert.match(deleteLabels, /known_no_effect: "Delete failed — reviewed file proven unchanged"/);
+assert.match(source, /status === "deleted_verified"[\s\S]*unstaged worktree deletion[\s\S]*No Stage or Commit/);
+assert.match(source, /status === "known_no_effect"[\s\S]*exact reviewed file remains intact/);
+assert.match(source, /status === "uncertain"[\s\S]*manual[\s\S]*Do not retry automatically/);
+const deleteActivityRenderer = source.slice(source.indexOf("const deleteFileStatus"), source.indexOf("entry.append(title, state)"));
+assert.match(deleteActivityRenderer, /payload\.tool === "repo\.delete-file"/);
+assert.match(deleteActivityRenderer, /rejected_stale/);
+assert.match(deleteActivityRenderer, /cancelled_before_start/);
+assert.match(deleteActivityRenderer, /do not retry/);
+assert.equal(deleteActivityRenderer.includes("Delete Again"), false);
+assert.equal(deleteActivityRenderer.includes("Restore"), false);
+assert.equal(deleteActivityRenderer.includes("Stage"), false);
+assert.equal(deleteActivityRenderer.includes("Commit"), false);
+assert.equal(deleteActivityRenderer.includes("activityId"), false);
+
 const hostileReviewValues = [
   "<script>alert(1)</script>",
   "<img src=x onerror=alert(1)>",
@@ -237,6 +327,7 @@ const hostileReviewValues = [
   "tauri://invoke('run_command')",
   "\u202Epath\u200Bwith\u0000controls",
   "quotes / braces / JSON-looking source",
+  "\\u{202e}path\\u{200b}with\\u{0000}escapes",
 ];
 function textNodeValue(value) {
   return String(value ?? "");
@@ -245,6 +336,7 @@ for (const hostile of hostileReviewValues) {
   assert.equal(textNodeValue(hostile), hostile);
 }
 assert.match(source, /pre\.textContent = String\(value \?\? ""\)/);
+assert.match(source, /pre\.textContent = String\(review\.preimage \?\? ""\)/);
 assert.equal(hostActivityRenderer.includes("textContent = payload"), false);
 
 console.log("effective authority frontend static tests passed");
