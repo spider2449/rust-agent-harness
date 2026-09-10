@@ -9001,12 +9001,14 @@ mod tests {
 
         clear_live_test_delete_file_tool_executions(&fixture.0);
         clear_live_test_delete_file_native_attempts(&fixture.0);
+        let branch_authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
         let deletion_authority = RepositoryFileDeletionAuthority::new(&git, &fixture.0)
             .map_err(|error| format!("deletion authority construction failed: {error}"))?;
         let repository = DesktopRepository::new_with_authorities(
             &git,
             &fixture.0,
-            None,
+            Some(branch_authority),
             Some(deletion_authority),
             None,
             None,
