@@ -9281,8 +9281,8 @@ mod tests {
             || facts.final_eof != "no_final_newline"
             || facts.contains_tab
             || facts.contains_trailing_space
-            || facts.contains_control_or_format_escape
-            || facts.control_characters != 0
+            || !facts.contains_control_or_format_escape
+            || facts.control_characters != 2
             || facts.format_characters != 0
             || facts.empty
             || prepared.review.head_blob_relationship() != "worktree bytes equal current HEAD blob"
