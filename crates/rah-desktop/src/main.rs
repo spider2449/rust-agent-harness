@@ -9008,10 +9008,10 @@ mod tests {
         let repository = DesktopRepository::new_with_authorities(
             &git,
             &fixture.0,
-            Some(branch_authority),
+            None,
             Some(deletion_authority),
             None,
-            None,
+            Some(branch_authority),
         )
         .map_err(|error| format!("Desktop repository construction failed: {error:?}"))?;
         let app = tauri::Builder::default()
