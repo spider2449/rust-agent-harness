@@ -389,6 +389,79 @@ impl RepositoryDeleteFilePreparer {
         }
         Ok(())
     }
+
+    /// Independently proves that the reviewed target remains the exact protected preimage.
+    pub async fn prove_known_no_effect(
+        &self,
+        preparation: &RepositoryDeleteFilePreparation,
+    ) -> bool {
+        let _lease = self.policy.lease.lock().await;
+        if !self.preparation_resources_match(preparation) {
+            return false;
+        }
+        let Ok(request) = DeleteRequest::parse(&preparation.tool_input) else {
+            return false;
+        };
+        let Ok(current) = self
+            .policy
+            .capture_reviewed(&request.path, &request.logical_path)
+            .await
+        else {
+            return false;
+        };
+        current == preparation.pre
+            && current.identity.same_object(&preparation.pre.identity)
+            && current.identity.link_count == preparation.pre.identity.link_count
+    }
+
+    /// Independently proves one immediate confirmed-absence postcondition after deletion.
+    pub async fn prove_deleted_verified(
+        &self,
+        preparation: &RepositoryDeleteFilePreparation,
+    ) -> bool {
+        let _lease = self.policy.lease.lock().await;
+        if !self.preparation_resources_match(preparation) || self.policy.repository_ok().is_err() {
+            return false;
+        }
+        let Some(parent) = preparation.pre.path.parent() else {
+            return false;
+        };
+        if validate_directory_path(&self.policy.root, parent, "target parent").is_err()
+            || !matches!(
+                preparation.pre.parent_identity.as_ref(),
+                Some(expected)
+                    if FileIdentity::capture(parent)
+                        .map(|current| current == *expected && current.same_object(expected))
+                        .unwrap_or(false)
+            )
+        {
+            return false;
+        }
+        if !confirmed_target_absence(&preparation.pre.path)
+            || same_name_entry_exists(parent, preparation.pre.path.file_name())
+        {
+            return false;
+        }
+        if fs::read(self.policy.root.join(".git/index")).ok() != Some(preparation.pre.index.clone())
+        {
+            return false;
+        }
+        let Ok(current_git) = self
+            .policy
+            .git_state(Path::new(&preparation.pre.git_path), false)
+            .await
+        else {
+            return false;
+        };
+        current_git == preparation.pre.git
+    }
+
+    fn preparation_resources_match(&self, preparation: &RepositoryDeleteFilePreparation) -> bool {
+        preparation.preparer_identity == self.identity
+            && preparation.root_identity == self.policy.root_identity
+            && preparation.dot_git_identity == self.policy.dot_git_identity
+            && preparation.git_identity == self.policy.git_identity
+    }
 }
 
 /// Host-constructed authority for exactly one protected repository file.
@@ -616,6 +689,12 @@ impl RepositoryFileDeletionPolicy {
         if git.blob != bytes {
             return Err(());
         }
+        let parent_identity = if reviewed {
+            let parent = path.parent().ok_or(())?;
+            Some(FileIdentity::capture(parent).map_err(|_| ())?)
+        } else {
+            None
+        };
         Ok(Preimage {
             path,
             git_path: logical_path.to_owned(),
@@ -623,6 +702,7 @@ impl RepositoryFileDeletionPolicy {
             bytes,
             git,
             index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
+            parent_identity,
         })
     }
 
@@ -830,6 +910,7 @@ struct Preimage {
     bytes: Vec<u8>,
     git: GitState,
     index: Vec<u8>,
+    parent_identity: Option<FileIdentity>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GitState {
@@ -1191,6 +1272,37 @@ fn serialized_preparation_size(preparation: &RepositoryDeleteFilePreparation) ->
         .saturating_add(preparation.pre.path.to_string_lossy().len())
         .saturating_add(preparation.pre.git_path.len())
         .saturating_add(4096)
+}
+
+fn confirmed_target_absence(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+fn same_name_entry_exists(parent: &Path, target_name: Option<&std::ffi::OsStr>) -> bool {
+    let Some(target_name) = target_name else {
+        return true;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        #[cfg(windows)]
+        let same_name =
+            name.to_string_lossy().to_lowercase() == target_name.to_string_lossy().to_lowercase();
+        #[cfg(not(windows))]
+        let same_name = name == target_name;
+        if same_name {
+            return true;
+        }
+    }
+    false
 }
 
 fn index_to_tree(index: &[u8], target: &str) -> Option<Vec<u8>> {

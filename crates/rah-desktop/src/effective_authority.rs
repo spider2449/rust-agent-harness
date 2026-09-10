@@ -2,8 +2,8 @@
 
 use rah_protocol::PermissionLevel;
 use rah_tools::{
-    RepositoryCreateFilePreparer, RepositoryMultiFileEditPreparer, RepositoryPatchPreparer,
-    ToolRegistry, TrustedStaticProfile,
+    RepositoryCreateFilePreparer, RepositoryDeleteFilePreparer, RepositoryMultiFileEditPreparer,
+    RepositoryPatchPreparer, ToolRegistry, TrustedStaticProfile,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -226,6 +226,7 @@ pub(crate) struct DesktopToolComposition {
     pub repository_patch_preparer: Option<Arc<RepositoryPatchPreparer>>,
     pub repository_multi_file_edit_preparer: Option<Arc<RepositoryMultiFileEditPreparer>>,
     pub repository_create_file_preparer: Option<Arc<RepositoryCreateFilePreparer>>,
+    pub repository_delete_file_preparer: Option<Arc<RepositoryDeleteFilePreparer>>,
 }
 
 /// Builds only bounded presentation metadata from the validated host profile.
@@ -380,6 +381,19 @@ pub(crate) fn compose(
                 .ok()
                 .map(Arc::new)
         });
+    let repository_delete_file_preparer = repository
+        .filter(|repository| repository.deletion_authority.is_some())
+        .filter(|_| {
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.delete-file")
+        })
+        .and_then(|repository| {
+            RepositoryDeleteFilePreparer::new(&repository.git_executable, &repository.root)
+                .ok()
+                .map(Arc::new)
+        });
     let mut tools = Vec::new();
     let mut matched_external = vec![false; external_descriptors.len()];
     for definition in registry.definitions() {
@@ -434,6 +448,7 @@ pub(crate) fn compose(
                     repository_patch_preparer.is_some(),
                     repository_multi_file_edit_preparer.is_some(),
                     repository_create_file_preparer.is_some(),
+                    repository_delete_file_preparer.is_some(),
                     CoordinatorState::Idle,
                 ),
             }
@@ -542,6 +557,7 @@ pub(crate) fn compose(
         repository_patch_preparer,
         repository_multi_file_edit_preparer,
         repository_create_file_preparer,
+        repository_delete_file_preparer,
     })
 }
 

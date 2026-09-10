@@ -41,8 +41,9 @@ use host_invocation::{
     BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
     HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
     HostInvocationResponse, HostInvocationReview, HostInvocationUnavailableReason,
-    HostPrepareBranchRequest, HostPrepareCreateFileRequest, HostPrepareMultiFileEditRequest,
-    HostPreparePatchRequest, HostReadRequest, PreparedBranchResponse, PreparedCreateFileResponse,
+    HostPrepareBranchRequest, HostPrepareCreateFileRequest, HostPrepareDeleteFileRequest,
+    HostPrepareMultiFileEditRequest, HostPreparePatchRequest, HostReadRequest,
+    PreparedBranchResponse, PreparedCreateFileResponse, PreparedDeleteFileResponse,
     PreparedHostInvocation, PreparedHostPayload, PreparedMultiFileEditResponse,
     PreparedPatchResponse, host_descriptor, host_kind, read_request, validate_bounded_string,
 };
@@ -70,7 +71,8 @@ use rah_tools::{
     GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryBranchCreationAuthority,
     RepositoryBranchCreationTool, RepositoryCommitControl, RepositoryCommitReview,
     RepositoryCommitTool, RepositoryCreateFilePreparationError,
-    RepositoryCreateFilePreparationRequest, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryCreateFilePreparationRequest, RepositoryDeleteFilePreparationError,
+    RepositoryDeleteFilePreparationRequest, RepositoryDiffStagedTool, RepositoryDiffTool,
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
@@ -2187,6 +2189,9 @@ fn get_effective_authority_snapshot(
             composition
                 .as_ref()
                 .is_some_and(|value| value.repository_create_file_preparer.is_some()),
+            composition
+                .as_ref()
+                .is_some_and(|value| value.repository_delete_file_preparer.is_some()),
             coordinator_state,
         );
     }
@@ -2266,6 +2271,7 @@ struct CurrentHostComposition {
     repository_patch_preparer: Option<Arc<rah_tools::RepositoryPatchPreparer>>,
     repository_multi_file_edit_preparer: Option<Arc<rah_tools::RepositoryMultiFileEditPreparer>>,
     repository_create_file_preparer: Option<Arc<rah_tools::RepositoryCreateFilePreparer>>,
+    repository_delete_file_preparer: Option<Arc<rah_tools::RepositoryDeleteFilePreparer>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2325,6 +2331,7 @@ fn current_host_composition(
             .repository_multi_file_edit_preparer
             .clone(),
         repository_create_file_preparer: composition.repository_create_file_preparer.clone(),
+        repository_delete_file_preparer: composition.repository_delete_file_preparer.clone(),
     })
 }
 
@@ -2362,6 +2369,10 @@ fn host_tool_definition(
                 effective_authority::EffectClass::RepositoryMutation,
                 effective_authority::AuthorityCategory::RepositoryFileCreation,
             ),
+            "repo.delete-file" => (
+                effective_authority::EffectClass::RepositoryMutation,
+                effective_authority::AuthorityCategory::RepositoryFileDeletion,
+            ),
             _ => (
                 effective_authority::EffectClass::ReadOnly,
                 effective_authority::AuthorityCategory::RepositoryObservation,
@@ -2395,6 +2406,7 @@ fn host_tool_definition(
         current.repository_patch_preparer.is_some(),
         current.repository_multi_file_edit_preparer.is_some(),
         current.repository_create_file_preparer.is_some(),
+        current.repository_delete_file_preparer.is_some(),
         coordinator_state,
     );
     if !descriptor.eligible {
@@ -2449,6 +2461,130 @@ fn host_call(name: ToolName, input: ToolInput) -> ToolCall {
         id: ToolCallId::new(),
         name,
         input,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeleteFileResultClassification {
+    DeletedVerified,
+    KnownNoEffect,
+    InvalidInput,
+    PreconditionFailed,
+    Uncertain,
+    Malformed,
+}
+
+#[cfg(target_os = "windows")]
+fn classify_repository_delete_file_output(
+    output: &ToolOutput,
+    expected_path: &str,
+) -> DeleteFileResultClassification {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return DeleteFileResultClassification::Malformed;
+    };
+    let Some(object) = value.as_object() else {
+        return DeleteFileResultClassification::Malformed;
+    };
+    let Some(status) = object.get("status").and_then(serde_json::Value::as_str) else {
+        return DeleteFileResultClassification::Malformed;
+    };
+    let uncertain = object.get("uncertain").and_then(serde_json::Value::as_bool);
+    let path_matches = object
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| path == expected_path);
+    let exact_keys = |keys: &[&str]| {
+        object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
+    };
+    match status {
+        "deleted_verified" => {
+            if output.is_error
+                || !exact_keys(&["status", "uncertain", "path"])
+                || uncertain != Some(false)
+                || !path_matches
+            {
+                DeleteFileResultClassification::Malformed
+            } else {
+                DeleteFileResultClassification::DeletedVerified
+            }
+        }
+        "known_no_effect" => {
+            if !output.is_error
+                || !exact_keys(&["status", "uncertain", "path"])
+                || uncertain != Some(false)
+                || !path_matches
+            {
+                DeleteFileResultClassification::Malformed
+            } else {
+                DeleteFileResultClassification::KnownNoEffect
+            }
+        }
+        "invalid_input" => {
+            if !output.is_error || !exact_keys(&["status", "uncertain"]) || uncertain != Some(false)
+            {
+                DeleteFileResultClassification::Malformed
+            } else {
+                DeleteFileResultClassification::InvalidInput
+            }
+        }
+        "precondition_failed" => {
+            if !output.is_error
+                || !exact_keys(&["status", "uncertain", "path"])
+                || uncertain != Some(false)
+                || !path_matches
+            {
+                DeleteFileResultClassification::Malformed
+            } else {
+                DeleteFileResultClassification::PreconditionFailed
+            }
+        }
+        "uncertain" => {
+            let valid_path = object.get("path").is_none() || path_matches;
+            if !output.is_error
+                || uncertain != Some(true)
+                || !(exact_keys(&["status", "uncertain"])
+                    || exact_keys(&["status", "uncertain", "path"]))
+                || !valid_path
+            {
+                DeleteFileResultClassification::Malformed
+            } else {
+                DeleteFileResultClassification::Uncertain
+            }
+        }
+        _ => DeleteFileResultClassification::Malformed,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn delete_file_host_terminal_state(
+    classification: DeleteFileResultClassification,
+) -> HostActivityState {
+    match classification {
+        DeleteFileResultClassification::DeletedVerified => HostActivityState::ToolCompleted,
+        DeleteFileResultClassification::KnownNoEffect
+        | DeleteFileResultClassification::InvalidInput
+        | DeleteFileResultClassification::PreconditionFailed => HostActivityState::ToolError,
+        DeleteFileResultClassification::Uncertain | DeleteFileResultClassification::Malformed => {
+            HostActivityState::PossibleEffectUnknown
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn safe_delete_file_activity_result(classification: DeleteFileResultClassification) -> ToolOutput {
+    let (status, is_error) = match classification {
+        DeleteFileResultClassification::DeletedVerified => ("deleted_verified", false),
+        DeleteFileResultClassification::KnownNoEffect => ("known_no_effect", true),
+        DeleteFileResultClassification::InvalidInput => ("invalid_input", true),
+        DeleteFileResultClassification::PreconditionFailed => ("precondition_failed", true),
+        DeleteFileResultClassification::Uncertain | DeleteFileResultClassification::Malformed => {
+            ("uncertain", true)
+        }
+    };
+    ToolOutput {
+        content: vec![ToolContent::Json(serde_json::json!({"status": status}))],
+        is_error,
     }
 }
 
@@ -2572,6 +2708,10 @@ async fn run_host_tool(
     generations: [u64; 4],
     multi_file_target_order: Option<Vec<String>>,
     create_file_expected_output: Option<CreateFileExpectedOutput>,
+    deletion_proof: Option<(
+        Box<rah_tools::RepositoryDeleteFilePreparation>,
+        Arc<rah_tools::RepositoryDeleteFilePreparer>,
+    )>,
 ) {
     let tool_name = call.name.to_string();
     let result = authorized_tool_dispatch(
@@ -2619,6 +2759,61 @@ async fn run_host_tool(
                     multi_file_host_terminal_state(classification),
                     safe_multi_file_activity_result(output, classification),
                 )
+            } else if kind == HostInvocationKind::RepoDeleteFile {
+                let structural = classify_repository_delete_file_output(
+                    &output,
+                    deletion_proof
+                        .as_ref()
+                        .map(|(preparation, _)| preparation.review().path())
+                        .unwrap_or_default(),
+                );
+                let classification = match structural {
+                    DeleteFileResultClassification::DeletedVerified => {
+                        let proven = match deletion_proof.as_ref() {
+                            Some((preparation, preparer)) => {
+                                preparer.prove_deleted_verified(preparation).await
+                            }
+                            None => false,
+                        };
+                        if proven {
+                            structural
+                        } else {
+                            DeleteFileResultClassification::Uncertain
+                        }
+                    }
+                    DeleteFileResultClassification::KnownNoEffect => {
+                        let proven = match deletion_proof.as_ref() {
+                            Some((preparation, preparer)) => {
+                                preparer.prove_known_no_effect(preparation).await
+                            }
+                            None => false,
+                        };
+                        if proven {
+                            structural
+                        } else {
+                            DeleteFileResultClassification::Uncertain
+                        }
+                    }
+                    _ => structural,
+                };
+                if matches!(
+                    classification,
+                    DeleteFileResultClassification::DeletedVerified
+                        | DeleteFileResultClassification::KnownNoEffect
+                        | DeleteFileResultClassification::Uncertain
+                        | DeleteFileResultClassification::Malformed
+                ) && host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    delete_file_host_terminal_state(classification),
+                    Some(safe_delete_file_activity_result(classification)),
+                )
             } else if kind == HostInvocationKind::RepoCreateFile {
                 let classification = create_file_expected_output
                     .as_ref()
@@ -2665,7 +2860,16 @@ async fn run_host_tool(
             }
         }
         Err(AuthorizedDispatchError::Rejected(_)) => {
-            if repository_bound_authoring_kind(kind) {
+            if kind == HostInvocationKind::RepoDeleteFile {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+            } else if repository_bound_authoring_kind(kind) {
                 invalidate_repository_commit_review(state.inner()).await;
                 if host_repository_context_is_current(
                     state.inner(),
@@ -2676,10 +2880,28 @@ async fn run_host_tool(
                     emit_repository_refresh(&app);
                 }
             }
-            (HostActivityState::RejectedStale, None)
+            if kind == HostInvocationKind::RepoDeleteFile {
+                (
+                    HostActivityState::PossibleEffectUnknown,
+                    Some(safe_delete_file_activity_result(
+                        DeleteFileResultClassification::Uncertain,
+                    )),
+                )
+            } else {
+                (HostActivityState::RejectedStale, None)
+            }
         }
         Err(AuthorizedDispatchError::Tool(_)) => {
-            if kind == HostInvocationKind::RepoPatch {
+            if kind == HostInvocationKind::RepoDeleteFile {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+            } else if kind == HostInvocationKind::RepoPatch {
                 if host_repository_context_is_current(
                     state.inner(),
                     repository_identity.as_deref(),
@@ -2719,7 +2941,16 @@ async fn run_host_tool(
                     emit_repository_refresh(&app);
                 }
             }
-            (HostActivityState::PossibleEffectUnknown, None)
+            if kind == HostInvocationKind::RepoDeleteFile {
+                (
+                    HostActivityState::PossibleEffectUnknown,
+                    Some(safe_delete_file_activity_result(
+                        DeleteFileResultClassification::Uncertain,
+                    )),
+                )
+            } else {
+                (HostActivityState::PossibleEffectUnknown, None)
+            }
         }
     };
     state
@@ -2747,6 +2978,7 @@ fn repository_bound_authoring_kind(kind: HostInvocationKind) -> bool {
         HostInvocationKind::RepoPatch
             | HostInvocationKind::RepoEditFiles
             | HostInvocationKind::RepoCreateFile
+            | HostInvocationKind::RepoDeleteFile
     )
 }
 
@@ -2843,6 +3075,7 @@ async fn host_invoke_read(
         invocation_id.clone(),
         current.repository_identity,
         current.generations,
+        None,
         None,
         None,
     ));
@@ -3111,6 +3344,24 @@ fn create_file_preparation_frontend_error(
             FrontendError::HostInvocationReviewTooLarge
         }
         RepositoryCreateFilePreparationError::Stale => FrontendError::HostInvocationStale,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn delete_file_preparation_frontend_error(
+    error: RepositoryDeleteFilePreparationError,
+) -> FrontendError {
+    match error {
+        RepositoryDeleteFilePreparationError::InvalidInput { .. } => {
+            FrontendError::HostInvocationInvalidInput
+        }
+        RepositoryDeleteFilePreparationError::PreconditionFailed { .. } => {
+            FrontendError::HostInvocationPreconditionChanged
+        }
+        RepositoryDeleteFilePreparationError::ReviewTooLarge => {
+            FrontendError::HostInvocationReviewTooLarge
+        }
+        RepositoryDeleteFilePreparationError::Stale => FrontendError::HostInvocationStale,
     }
 }
 
@@ -3463,6 +3714,110 @@ async fn host_prepare_repo_create_file(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+async fn host_prepare_repo_delete_file(
+    request: HostPrepareDeleteFileRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedDeleteFileResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let name = ToolName::new("repo.delete-file");
+    let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
+        Ok(definition) => definition,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    let preparer = match current.repository_delete_file_preparer.clone() {
+        Some(preparer) => preparer,
+        None => {
+            abort_host_patch_prepare(state.inner());
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+    };
+    let preflight_call = host_call(name.clone(), ToolInput(serde_json::json!({})));
+    if let Err(rejection) = authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &preflight_call,
+    ) {
+        abort_host_patch_prepare(state.inner());
+        return Err(match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        });
+    }
+    let preparation = match preparer
+        .prepare(RepositoryDeleteFilePreparationRequest { path: request.path })
+        .await
+    {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(delete_file_preparation_frontend_error(error));
+        }
+    };
+    let review = preparation.review().clone();
+    let call = host_call(name.clone(), preparation.tool_input().clone());
+    let (ticket_id, activity_id) = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
+        let ticket = PreparedHostInvocation::new(
+            ticket_id.clone(),
+            activity_id.clone(),
+            HostInvocationKind::RepoDeleteFile,
+            name,
+            expected_definition,
+            call,
+            current.registry,
+            current.allowed_permissions,
+            current.generations,
+            current.repository_identity,
+            current.composition_identity,
+            PreparedHostPayload::DeleteFile {
+                preparation: Box::new(preparation),
+                preparer,
+            },
+        );
+        if coordinator.finalize_prepare(ticket).is_err() {
+            coordinator.abort_prepare();
+            return Err(FrontendError::HostInvocationBusy);
+        }
+        (ticket_id, activity_id)
+    };
+    emit_host_activity(
+        &app,
+        prepared_host_activity(activity_id, "repo.delete-file".to_owned(), None),
+    );
+    Ok(PreparedDeleteFileResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 async fn host_confirm_tool_invocation(
     request: HostConfirmRequest,
     app: AppHandle,
@@ -3561,6 +3916,19 @@ async fn host_confirm_tool_invocation(
             .finish_host();
         return Err(FrontendError::HostInvocationStale);
     }
+    if let PreparedHostPayload::DeleteFile { preparer, .. } = &ticket.payload
+        && current
+            .repository_delete_file_preparer
+            .as_ref()
+            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
+    {
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        return Err(FrontendError::HostInvocationStale);
+    }
     if let PreparedHostPayload::Patch {
         preparation,
         preparer,
@@ -3599,6 +3967,19 @@ async fn host_confirm_tool_invocation(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         coordinator.finish_host();
         return Err(create_file_preparation_frontend_error(error));
+    }
+    if let PreparedHostPayload::DeleteFile {
+        preparation,
+        preparer,
+    } = &ticket.payload
+        && let Err(error) = preparer.revalidate(preparation).await
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.finish_host();
+        return Err(delete_file_preparation_frontend_error(error));
     }
     authorize_tool_dispatch(
         &current.registry,
@@ -3646,9 +4027,17 @@ async fn host_confirm_tool_invocation(
         PreparedHostPayload::Branch { review } => {
             Some(HostInvocationReview::Branch(review.clone()))
         }
-        PreparedHostPayload::Patch { .. } => None,
-        PreparedHostPayload::MultiFileEdit { .. } => None,
-        PreparedHostPayload::CreateFile { .. } => None,
+        PreparedHostPayload::Patch { .. }
+        | PreparedHostPayload::MultiFileEdit { .. }
+        | PreparedHostPayload::CreateFile { .. }
+        | PreparedHostPayload::DeleteFile { .. } => None,
+    };
+    let deletion_proof = match ticket.payload {
+        PreparedHostPayload::DeleteFile {
+            preparation,
+            preparer,
+        } => Some((preparation, preparer)),
+        _ => None,
     };
     emit_host_activity(
         &app,
@@ -3673,6 +4062,7 @@ async fn host_confirm_tool_invocation(
         ticket.generations,
         multi_file_target_order,
         create_file_expected_output,
+        deletion_proof,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -3701,6 +4091,7 @@ fn host_cancel_tool_invocation(
                 HostInvocationKind::RepoPatch => "repo.patch".to_owned(),
                 HostInvocationKind::RepoEditFiles => "repo.edit-files".to_owned(),
                 HostInvocationKind::RepoCreateFile => "repo.create-file".to_owned(),
+                HostInvocationKind::RepoDeleteFile => "repo.delete-file".to_owned(),
                 _ => REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
             },
             state: HostActivityState::CancelledBeforeStart,
@@ -6286,6 +6677,7 @@ fn empty_composition_metadata() -> DesktopToolComposition {
         repository_patch_preparer: None,
         repository_multi_file_edit_preparer: None,
         repository_create_file_preparer: None,
+        repository_delete_file_preparer: None,
     }
 }
 
@@ -7159,6 +7551,7 @@ fn main() -> ExitCode {
             host_prepare_repo_patch,
             host_prepare_repo_edit_files,
             host_prepare_repo_create_file,
+            host_prepare_repo_delete_file,
             host_confirm_tool_invocation,
             host_cancel_tool_invocation
         ])
@@ -7209,8 +7602,8 @@ mod tests {
         ActivityEvent, ActivityResult, BranchActivityClassification, CancelRecoveryOutcome,
         ChatEvent, ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
         ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        CreateFileResultClassification, DESKTOP_TOOL_NAME, DesktopAppState,
-        DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
+        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
         DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
         HostActivityEvent, HostActivityState, HostInvocationCoordinator, HostInvocationDescriptor,
@@ -12953,6 +13346,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
@@ -13106,6 +13500,7 @@ mod tests {
                 true,
                 true,
                 false,
+                false,
                 CoordinatorState::Idle
             )
             .eligible
@@ -13113,7 +13508,7 @@ mod tests {
     }
 
     #[test]
-    fn create_file_is_the_ninth_host_tool_and_retains_its_shared_preparer() {
+    fn create_file_remains_host_tool_and_retains_its_shared_preparer() {
         let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
         let repository = fixture.desktop_repository();
         let composition = desktop_tool_composition_from_registry(
@@ -13150,9 +13545,64 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
+        );
+    }
+
+    #[test]
+    fn delete_file_is_the_tenth_host_tool_and_requires_deletion_authority() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&repository), None).expect("registry should build"),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("deletion composition should build");
+        let deletion = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.delete-file")
+            .expect("repo.delete-file should be composed");
+        assert_eq!(
+            deletion.host_invocation.kind,
+            Some(HostInvocationKind::RepoDeleteFile)
+        );
+        assert!(composition.repository_delete_file_preparer.is_some());
+        assert!(
+            host_descriptor(
+                deletion,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+
+        let without_authority = fixture.desktop_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&without_authority), None).expect("registry should build"),
+            Some(&without_authority),
+            false,
+            &[],
+        )
+        .expect("composition without deletion authority should build");
+        assert!(composition.repository_delete_file_preparer.is_none());
+        assert!(
+            composition
+                .tools
+                .iter()
+                .all(|entry| entry.public_tool_name != "repo.delete-file")
         );
     }
 
@@ -13490,6 +13940,9 @@ mod tests {
         assert!(super::repository_bound_authoring_kind(
             HostInvocationKind::RepoCreateFile
         ));
+        assert!(super::repository_bound_authoring_kind(
+            HostInvocationKind::RepoDeleteFile
+        ));
         assert!(!super::repository_bound_authoring_kind(
             HostInvocationKind::RepoCreateBranch
         ));
@@ -13661,6 +14114,130 @@ mod tests {
             );
         }
         assert!(serialized.contains("host-explicit-create-file-activity"));
+    }
+
+    #[test]
+    fn delete_file_result_classification_is_strict_and_status_only() {
+        let output = |value: Value, is_error| ToolOutput {
+            content: vec![ToolContent::Json(value)],
+            is_error,
+        };
+        let path = "src/delete.rs";
+        for (status, is_error, uncertain, expected) in [
+            (
+                "deleted_verified",
+                false,
+                false,
+                DeleteFileResultClassification::DeletedVerified,
+            ),
+            (
+                "known_no_effect",
+                true,
+                false,
+                DeleteFileResultClassification::KnownNoEffect,
+            ),
+            (
+                "invalid_input",
+                true,
+                false,
+                DeleteFileResultClassification::InvalidInput,
+            ),
+            (
+                "precondition_failed",
+                true,
+                false,
+                DeleteFileResultClassification::PreconditionFailed,
+            ),
+            (
+                "uncertain",
+                true,
+                true,
+                DeleteFileResultClassification::Uncertain,
+            ),
+        ] {
+            let value = if status == "invalid_input" || status == "uncertain" {
+                serde_json::json!({"status": status, "uncertain": uncertain})
+            } else {
+                serde_json::json!({"status": status, "uncertain": uncertain, "path": path})
+            };
+            assert_eq!(
+                super::classify_repository_delete_file_output(&output(value, is_error), path,),
+                expected
+            );
+        }
+        let uncertain_with_path = output(
+            serde_json::json!({"status":"uncertain","uncertain":true,"path":path}),
+            true,
+        );
+        assert_eq!(
+            super::classify_repository_delete_file_output(&uncertain_with_path, path),
+            DeleteFileResultClassification::Uncertain
+        );
+        for malformed in [
+            output(
+                serde_json::json!({"status":"unknown","uncertain":false}),
+                true,
+            ),
+            output(
+                serde_json::json!({"status":"deleted_verified","uncertain":true,"path":path}),
+                false,
+            ),
+            output(
+                serde_json::json!({"status":"deleted_verified","uncertain":false,"path":"wrong.rs"}),
+                false,
+            ),
+            output(
+                serde_json::json!({"status":"invalid_input","uncertain":false,"path":path}),
+                true,
+            ),
+            output(
+                serde_json::json!({"status":"precondition_failed","uncertain":false}),
+                true,
+            ),
+            output(
+                serde_json::json!({"status":"uncertain","uncertain":false}),
+                true,
+            ),
+            output(
+                serde_json::json!({"status":"uncertain","uncertain":true,"path":"wrong.rs"}),
+                true,
+            ),
+            output(
+                serde_json::json!({"status":"known_no_effect","uncertain":false,"path":path,"extra":true}),
+                true,
+            ),
+            ToolOutput {
+                content: vec![ToolContent::Text("not-json".to_owned())],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![
+                    ToolContent::Json(serde_json::json!({"status":"uncertain","uncertain":true})),
+                    ToolContent::Json(serde_json::json!({"status":"uncertain","uncertain":true})),
+                ],
+                is_error: true,
+            },
+        ] {
+            assert_eq!(
+                super::classify_repository_delete_file_output(&malformed, path),
+                DeleteFileResultClassification::Malformed
+            );
+        }
+        for classification in [
+            DeleteFileResultClassification::Uncertain,
+            DeleteFileResultClassification::Malformed,
+        ] {
+            assert_eq!(
+                super::delete_file_host_terminal_state(classification),
+                HostActivityState::PossibleEffectUnknown
+            );
+            let safe = super::safe_delete_file_activity_result(classification);
+            assert_eq!(
+                safe.content,
+                vec![ToolContent::Json(serde_json::json!({"status":"uncertain"}))]
+            );
+            assert!(safe.is_error);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15132,6 +15709,7 @@ mod tests {
             repository_patch_preparer: None,
             repository_multi_file_edit_preparer: None,
             repository_create_file_preparer: None,
+            repository_delete_file_preparer: None,
         }
     }
 

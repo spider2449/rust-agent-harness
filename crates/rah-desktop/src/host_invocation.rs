@@ -10,6 +10,7 @@ use std::{
 use rah_protocol::{PermissionLevel, ToolCall, ToolDefinition, ToolInput, ToolName};
 use rah_tools::{
     RepositoryCreateFilePreparation, RepositoryCreateFilePreparer, RepositoryCreateFileReview,
+    RepositoryDeleteFilePreparation, RepositoryDeleteFilePreparer, RepositoryDeleteFileReview,
     RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparer,
     RepositoryMultiFileEditReview, RepositoryPatchPreparation, RepositoryPatchPreparer,
     RepositoryPatchReview, ToolRegistry,
@@ -34,6 +35,7 @@ pub(crate) enum HostInvocationKind {
     RepoPatch,
     RepoEditFiles,
     RepoCreateFile,
+    RepoDeleteFile,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -129,6 +131,12 @@ pub(crate) struct HostPrepareCreateFileRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostPrepareDeleteFileRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HostConfirmRequest {
     pub ticket_id: String,
@@ -170,6 +178,13 @@ pub(crate) struct PreparedCreateFileResponse {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedDeleteFileResponse {
+    pub ticket_id: String,
+    pub review: RepositoryDeleteFileReview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BranchReview {
     pub operation: &'static str,
     pub branch: String,
@@ -201,6 +216,10 @@ pub(crate) enum PreparedHostPayload {
     CreateFile {
         preparation: Box<RepositoryCreateFilePreparation>,
         preparer: Arc<RepositoryCreateFilePreparer>,
+    },
+    DeleteFile {
+        preparation: Box<RepositoryDeleteFilePreparation>,
+        preparer: Arc<RepositoryDeleteFilePreparer>,
     },
 }
 
@@ -492,6 +511,7 @@ pub(crate) fn host_kind(name: &str) -> Option<HostInvocationKind> {
         "repo.patch" => HostInvocationKind::RepoPatch,
         "repo.edit-files" => HostInvocationKind::RepoEditFiles,
         "repo.create-file" => HostInvocationKind::RepoCreateFile,
+        "repo.delete-file" => HostInvocationKind::RepoDeleteFile,
         _ => return None,
     })
 }
@@ -506,13 +526,16 @@ pub(crate) fn host_descriptor(
     patch_preparer_present: bool,
     multi_file_edit_preparer_present: bool,
     create_file_preparer_present: bool,
+    delete_file_preparer_present: bool,
     coordinator_state: CoordinatorState,
 ) -> HostInvocationDescriptor {
     let kind = host_kind(&entry.public_tool_name);
-    let reason = if !matches!(
+    let reason = if (!matches!(
         entry.source_kind,
         SourceKind::BuiltIn | SourceKind::RepositoryHost
-    ) {
+    )) || (kind == Some(HostInvocationKind::RepoDeleteFile)
+        && !matches!(entry.source_kind, SourceKind::RepositoryHost))
+    {
         HostInvocationUnavailableReason::ProviderNotSupported
     } else if kind.is_none() {
         HostInvocationUnavailableReason::NotSupported
@@ -530,6 +553,7 @@ pub(crate) fn host_descriptor(
         || (entry.public_tool_name == "repo.patch" && !patch_preparer_present)
         || (entry.public_tool_name == "repo.edit-files" && !multi_file_edit_preparer_present)
         || (entry.public_tool_name == "repo.create-file" && !create_file_preparer_present)
+        || (entry.public_tool_name == "repo.delete-file" && !delete_file_preparer_present)
     {
         HostInvocationUnavailableReason::AuthorityNotGranted
     } else {
@@ -608,13 +632,13 @@ mod tests {
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",
+            "repo.delete-file",
         ];
         for name in supported {
             assert!(host_kind(name).is_some());
         }
         for name in [
             "repo.commit",
-            "repo.delete-file",
             "repo.rename-file",
             "repo.create-directory",
             "echo",
@@ -653,6 +677,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             CoordinatorState::Idle,
         );
         assert!(!unavailable.eligible);
@@ -668,6 +693,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 false,
                 false,
                 CoordinatorState::Idle,
@@ -704,6 +730,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 CoordinatorState::Idle,
             )
             .eligible
@@ -717,6 +744,7 @@ mod tests {
                 false,
                 true,
                 true,
+                false,
                 false,
                 CoordinatorState::Idle,
             )
@@ -751,6 +779,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             CoordinatorState::Idle,
         );
         assert!(!unavailable.eligible);
@@ -767,10 +796,78 @@ mod tests {
             false,
             false,
             true,
+            false,
             CoordinatorState::Idle,
         );
         assert_eq!(eligible.kind, Some(HostInvocationKind::RepoCreateFile));
         assert!(eligible.eligible);
+    }
+
+    #[test]
+    fn deletion_host_descriptor_requires_the_retained_preparer() {
+        let entry = EffectiveToolEntry {
+            public_tool_name: "repo.delete-file".to_owned(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: crate::effective_authority::EffectClass::RepositoryMutation,
+            authority_category:
+                crate::effective_authority::AuthorityCategory::RepositoryFileDeletion,
+            permission: PermissionLevel::Execute,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        };
+        let unavailable = host_descriptor(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            CoordinatorState::Idle,
+        );
+        assert!(!unavailable.eligible);
+        assert_eq!(
+            unavailable.unavailable_reason,
+            Some(HostInvocationUnavailableReason::AuthorityNotGranted)
+        );
+        let eligible = host_descriptor(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            CoordinatorState::Idle,
+        );
+        assert_eq!(eligible.kind, Some(HostInvocationKind::RepoDeleteFile));
+        assert!(eligible.eligible);
+        assert_eq!(
+            host_descriptor(
+                &entry,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .unavailable_reason,
+            Some(HostInvocationUnavailableReason::PermissionDenied)
+        );
     }
 
     #[test]
@@ -966,6 +1063,11 @@ mod tests {
         .expect("typed create-file request should deserialize");
         assert_eq!(create.path, "src/new.rs");
         assert_eq!(create.content, "RAH_SECRET_CREATE_FILE_CONTENT_SENTINEL");
+        let delete = serde_json::from_value::<HostPrepareDeleteFileRequest>(serde_json::json!({
+            "path": "src/delete.rs"
+        }))
+        .expect("typed delete-file request should deserialize");
+        assert_eq!(delete.path, "src/delete.rs");
         for field in [
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","hash":"x"}),
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","toolName":"repo.patch"}),
@@ -996,6 +1098,24 @@ mod tests {
             serde_json::json!({"path":"a","content":"b","activityId":"x"}),
         ] {
             assert!(serde_json::from_value::<HostPrepareCreateFileRequest>(field).is_err());
+        }
+        for field in [
+            serde_json::json!({"path":"a","hash":"x"}),
+            serde_json::json!({"path":"a","length":1}),
+            serde_json::json!({"path":"a","repository":"repo"}),
+            serde_json::json!({"path":"a","nativePath":"x"}),
+            serde_json::json!({"path":"a","toolName":"repo.delete-file"}),
+            serde_json::json!({"path":"a","input":{}}),
+            serde_json::json!({"path":"a","permission":"execute"}),
+            serde_json::json!({"path":"a","authority":true}),
+            serde_json::json!({"path":"a","retry":true}),
+            serde_json::json!({"path":"a","restore":true}),
+            serde_json::json!({"path":"a","stage":true}),
+            serde_json::json!({"path":"a","commit":true}),
+            serde_json::json!({"path":"a","ticketId":"x"}),
+            serde_json::json!({"path":"a","activityId":"x"}),
+        ] {
+            assert!(serde_json::from_value::<HostPrepareDeleteFileRequest>(field).is_err());
         }
     }
 

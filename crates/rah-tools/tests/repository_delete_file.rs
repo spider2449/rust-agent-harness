@@ -138,6 +138,28 @@ fn revalidate(
     runtime.block_on(preparer.revalidate(preparation))
 }
 
+fn prove_known_no_effect(
+    preparer: &RepositoryDeleteFilePreparer,
+    preparation: &rah_tools::RepositoryDeleteFilePreparation,
+) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(preparer.prove_known_no_effect(preparation))
+}
+
+fn prove_deleted_verified(
+    preparer: &RepositoryDeleteFilePreparer,
+    preparation: &rah_tools::RepositoryDeleteFilePreparation,
+) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(preparer.prove_deleted_verified(preparation))
+}
+
 fn execute(tool: &RepositoryFileDeletionTool, input: Value) -> Value {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -224,6 +246,38 @@ fn preparation_and_revalidation_have_zero_effect_and_tool_schema_is_unchanged() 
         tool.definition().input_schema,
         json!({"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":1024},"expected_file_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"expected_file_byte_length":{"type":"integer","minimum":0,"maximum":1024*1024}},"required":["path","expected_file_sha256","expected_file_byte_length"],"additionalProperties":false})
     );
+}
+
+#[test]
+fn reviewed_postcondition_proofs_are_independent_and_identity_bound() {
+    let fixture = Fixture::new();
+    let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let preparation = prepare(&preparer, "target.txt").unwrap();
+    assert!(prove_known_no_effect(&preparer, &preparation));
+
+    let original = fs::read(fixture.root.join("target.txt")).unwrap();
+    fs::rename(
+        fixture.root.join("target.txt"),
+        fixture.root.join("displaced.txt"),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("target.txt"), &original).unwrap();
+    assert!(!prove_known_no_effect(&preparer, &preparation));
+
+    let fixture = Fixture::new();
+    let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+    let preparation = prepare(&preparer, "target.txt").unwrap();
+    let tool = RepositoryFileDeletionTool::new(&fixture.git, &fixture.root).unwrap();
+    let output = execute(
+        &tool,
+        json!({
+            "path": "target.txt",
+            "expected_file_sha256": format!("{:x}", sha2::Sha256::digest(b"protected\n")),
+            "expected_file_byte_length": 10
+        }),
+    );
+    assert_eq!(output["status"], "deleted_verified");
+    assert!(prove_deleted_verified(&preparer, &preparation));
 }
 
 #[test]
