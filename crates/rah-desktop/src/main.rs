@@ -9103,7 +9103,22 @@ mod tests {
             || trusted_profile_present
         {
             shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
-            return Err("connected-current deletion composition was not exact".to_owned());
+            return Err(format!(
+                "connected-current deletion composition was not exact: status={:?} eligible={eligible:?} ineligible_was_eligible={ineligible_was_eligible} delete_eligible={} delete_kind={:?} delete_source={:?} delete_label={} delete_effect={:?} delete_category={:?} delete_permission={:?} delete_repository_bound={} external={} providers={} provider_activation={} trusted_profile={}",
+                connected_snapshot.status,
+                delete_tool.host_invocation.eligible,
+                delete_tool.host_invocation.kind,
+                delete_tool.source_kind,
+                delete_tool.source_label,
+                delete_tool.effect_class,
+                delete_tool.authority_category,
+                delete_tool.permission,
+                delete_tool.repository_bound,
+                external_effective,
+                connected_snapshot.configured.configured_provider_count,
+                provider_activation_present,
+                trusted_profile_present,
+            ));
         }
         let commit_control = app
             .state::<DesktopAppState>()
