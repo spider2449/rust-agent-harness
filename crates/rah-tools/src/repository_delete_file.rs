@@ -9,8 +9,11 @@ use std::{
 use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
@@ -26,6 +29,367 @@ use crate::{
 pub const REPOSITORY_DELETE_FILE_TOOL_NAME: &str = "repo.delete-file";
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
+const MAX_PREPARATION_REQUEST_BYTES: usize = 8192;
+const MAX_REVIEWED_FILE_BYTES: usize = 65536;
+const MAX_SERIALIZED_REVIEW_BYTES: usize = 262144;
+const MAX_PREPARED_REPRESENTATION_BYTES: usize = 524288;
+
+/// Typed host input for reviewed deletion preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryDeleteFilePreparationRequest {
+    /// Validated repository-relative logical path.
+    pub path: String,
+}
+
+/// Sanitized failure classes for reviewed deletion preparation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RepositoryDeleteFilePreparationError {
+    /// The closed request violated an input bound or rule.
+    #[error("invalid repository delete-file preparation input: {reason}")]
+    InvalidInput { reason: &'static str },
+    /// The repository or requested target is not admissible.
+    #[error("repository delete-file preparation precondition failed: {reason}")]
+    PreconditionFailed { reason: &'static str },
+    /// The complete review or retained preparation cannot fit its bound.
+    #[error("repository delete-file review is too large")]
+    ReviewTooLarge,
+    /// The retained preparation no longer matches current host state.
+    #[error("repository delete-file preparation is stale")]
+    Stale,
+}
+
+/// BOM state of the exact protected source bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryDeleteFileBomState {
+    Present,
+    Absent,
+}
+
+/// Deterministic facts about the exact protected source bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryDeleteFileContentFacts {
+    /// Whether the source contains at least one carriage return byte.
+    pub contains_cr: bool,
+    /// Whether the source contains at least one line-feed byte.
+    pub contains_lf: bool,
+    /// Whether the source contains at least one CRLF pair.
+    pub contains_crlf: bool,
+    /// Number of carriage-return bytes.
+    pub carriage_returns: usize,
+    /// Number of line-feed bytes.
+    pub line_feeds: usize,
+    /// Number of CRLF pairs.
+    pub crlf_pairs: usize,
+    /// Whether the source ends in CR or LF.
+    pub ends_with_newline: bool,
+    /// Stable end-of-file marker.
+    pub final_eof: &'static str,
+    /// Whether the source contains a tab.
+    pub contains_tab: bool,
+    /// Whether the source contains a space immediately before a line ending or EOF.
+    pub contains_trailing_space: bool,
+    /// Whether control or Unicode format characters require escapes.
+    pub contains_control_or_format_escape: bool,
+    /// Number of control characters represented by escapes or short escapes.
+    pub control_characters: usize,
+    /// Number of Unicode format characters represented by code-point escapes.
+    pub format_characters: usize,
+    /// Whether the source is empty.
+    pub empty: bool,
+}
+
+/// Complete, deterministic review for one exact tracked-file deletion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryDeleteFileReview {
+    operation: &'static str,
+    target_count: usize,
+    path: String,
+    tracked_state: &'static str,
+    file_mode: &'static str,
+    file_intent: &'static str,
+    preimage_encoding: &'static str,
+    preimage: String,
+    content_byte_length: usize,
+    content_sha256: String,
+    bom: RepositoryDeleteFileBomState,
+    content_facts: RepositoryDeleteFileContentFacts,
+    head_blob_relationship: &'static str,
+    index_relationship: &'static str,
+    expected_effect: &'static str,
+    post_delete_git_meaning: &'static str,
+    non_effects: Vec<&'static str>,
+    warnings: Vec<&'static str>,
+}
+
+impl RepositoryDeleteFileReview {
+    /// Returns the fixed operation name.
+    #[must_use]
+    pub fn operation(&self) -> &str {
+        self.operation
+    }
+
+    /// Returns the fixed target count.
+    #[must_use]
+    pub fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    /// Returns the validated logical path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the protected clean tracked-state description.
+    #[must_use]
+    pub fn tracked_state(&self) -> &str {
+        self.tracked_state
+    }
+
+    /// Returns the derived HEAD file mode.
+    #[must_use]
+    pub fn file_mode(&self) -> &str {
+        self.file_mode
+    }
+
+    /// Returns the deletion intent.
+    #[must_use]
+    pub fn file_intent(&self) -> &str {
+        self.file_intent
+    }
+
+    /// Returns the complete deterministic escaped preimage.
+    #[must_use]
+    pub fn preimage(&self) -> &str {
+        &self.preimage
+    }
+
+    /// Returns the complete escaped preimage under the content-oriented alias.
+    #[must_use]
+    pub fn content_escaped(&self) -> &str {
+        &self.preimage
+    }
+
+    /// Returns the display encoding name.
+    #[must_use]
+    pub fn preimage_encoding(&self) -> &str {
+        self.preimage_encoding
+    }
+
+    /// Returns the exact source byte length.
+    #[must_use]
+    pub fn content_byte_length(&self) -> usize {
+        self.content_byte_length
+    }
+
+    /// Returns the SHA-256 of the exact source bytes.
+    #[must_use]
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    /// Returns the exact source BOM state.
+    #[must_use]
+    pub fn bom(&self) -> RepositoryDeleteFileBomState {
+        self.bom
+    }
+
+    /// Returns deterministic newline and content facts.
+    #[must_use]
+    pub fn content_facts(&self) -> &RepositoryDeleteFileContentFacts {
+        &self.content_facts
+    }
+
+    /// Returns the protected HEAD/blob relationship.
+    #[must_use]
+    pub fn head_blob_relationship(&self) -> &str {
+        self.head_blob_relationship
+    }
+
+    /// Returns the protected index relationship.
+    #[must_use]
+    pub fn index_relationship(&self) -> &str {
+        self.index_relationship
+    }
+
+    /// Returns the expected worktree effect and Git meaning.
+    #[must_use]
+    pub fn expected_effect(&self) -> &str {
+        self.expected_effect
+    }
+
+    /// Returns the post-delete Git meaning.
+    #[must_use]
+    pub fn post_delete_git_meaning(&self) -> &str {
+        self.post_delete_git_meaning
+    }
+
+    /// Returns effects excluded by this review.
+    #[must_use]
+    pub fn non_effects(&self) -> &[&'static str] {
+        &self.non_effects
+    }
+
+    /// Returns warnings that must accompany the destructive review.
+    #[must_use]
+    pub fn warnings(&self) -> &[&'static str] {
+        &self.warnings
+    }
+}
+
+/// Opaque bounded preparation retained by a trusted host.
+pub struct RepositoryDeleteFilePreparation {
+    preparer_identity: Uuid,
+    tool_input: ToolInput,
+    review: RepositoryDeleteFileReview,
+    review_identity: String,
+    source_sha256: String,
+    source_byte_length: usize,
+    root_identity: FileIdentity,
+    dot_git_identity: FileIdentity,
+    git_identity: FileIdentity,
+    pre: Preimage,
+}
+
+impl RepositoryDeleteFilePreparation {
+    /// Returns the exact host-reconstructed ordinary Tool input.
+    #[must_use]
+    pub fn tool_input(&self) -> &ToolInput {
+        &self.tool_input
+    }
+
+    /// Returns the complete bounded destructive review.
+    #[must_use]
+    pub fn review(&self) -> &RepositoryDeleteFileReview {
+        &self.review
+    }
+}
+
+impl std::fmt::Debug for RepositoryDeleteFilePreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryDeleteFilePreparation")
+            .field("preparation", &"redacted")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-bound, non-effectful preparation and revalidation for file deletion.
+pub struct RepositoryDeleteFilePreparer {
+    identity: Uuid,
+    policy: RepositoryFileDeletionPolicy,
+}
+
+impl RepositoryDeleteFilePreparer {
+    /// Creates a preparer bound to one host-selected repository and Git binary.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            identity: Uuid::new_v4(),
+            policy: RepositoryFileDeletionPolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+            )?,
+        })
+    }
+
+    /// Captures a complete review without executing a Tool or deleting anything.
+    pub async fn prepare(
+        &self,
+        request: RepositoryDeleteFilePreparationRequest,
+    ) -> Result<RepositoryDeleteFilePreparation, RepositoryDeleteFilePreparationError> {
+        let request = DeletePreparationRequest::parse(request)?;
+        let _lease = self.policy.lease.lock().await;
+        let pre = self
+            .policy
+            .capture_reviewed(&request.path, &request.logical_path)
+            .await
+            .map_err(
+                |_| RepositoryDeleteFilePreparationError::PreconditionFailed {
+                    reason: "repository_state",
+                },
+            )?;
+        let tool_input = canonical_preparation_tool_input(&request, &pre);
+        let review = build_delete_review(&request.logical_path, &pre)?;
+        let source_sha256 = sha256(&pre.bytes);
+        let source_byte_length = pre.bytes.len();
+        let review_identity = compute_delete_review_identity(
+            self.identity,
+            &self.policy,
+            &request.logical_path,
+            &pre,
+            &tool_input,
+            &review,
+        );
+        let preparation = RepositoryDeleteFilePreparation {
+            preparer_identity: self.identity,
+            tool_input,
+            review,
+            review_identity,
+            source_sha256,
+            source_byte_length,
+            root_identity: self.policy.root_identity.clone(),
+            dot_git_identity: self.policy.dot_git_identity.clone(),
+            git_identity: self.policy.git_identity.clone(),
+            pre,
+        };
+        if serialized_preparation_size(&preparation) > MAX_PREPARED_REPRESENTATION_BYTES {
+            return Err(RepositoryDeleteFilePreparationError::ReviewTooLarge);
+        }
+        Ok(preparation)
+    }
+
+    /// Revalidates the retained preparation without executing a Tool or deleting anything.
+    pub async fn revalidate(
+        &self,
+        preparation: &RepositoryDeleteFilePreparation,
+    ) -> Result<(), RepositoryDeleteFilePreparationError> {
+        let _lease = self.policy.lease.lock().await;
+        if preparation.preparer_identity != self.identity
+            || preparation.root_identity != self.policy.root_identity
+            || preparation.dot_git_identity != self.policy.dot_git_identity
+            || preparation.git_identity != self.policy.git_identity
+        {
+            return Err(RepositoryDeleteFilePreparationError::Stale);
+        }
+        let request = DeleteRequest::parse(&preparation.tool_input)
+            .map_err(|_| RepositoryDeleteFilePreparationError::Stale)?;
+        if canonical_delete_tool_input(&request) != preparation.tool_input {
+            return Err(RepositoryDeleteFilePreparationError::Stale);
+        }
+        let current = self
+            .policy
+            .capture_reviewed(&request.path, &request.logical_path)
+            .await
+            .map_err(|_| RepositoryDeleteFilePreparationError::Stale)?;
+        if current != preparation.pre {
+            return Err(RepositoryDeleteFilePreparationError::Stale);
+        }
+        let review = build_delete_review(&request.logical_path, &current)
+            .map_err(|_| RepositoryDeleteFilePreparationError::Stale)?;
+        if review != preparation.review
+            || sha256(&current.bytes) != preparation.source_sha256
+            || current.bytes.len() != preparation.source_byte_length
+        {
+            return Err(RepositoryDeleteFilePreparationError::Stale);
+        }
+        let identity = compute_delete_review_identity(
+            self.identity,
+            &self.policy,
+            &request.logical_path,
+            &current,
+            &preparation.tool_input,
+            &review,
+        );
+        if identity != preparation.review_identity {
+            return Err(RepositoryDeleteFilePreparationError::Stale);
+        }
+        Ok(())
+    }
+}
 
 /// Host-constructed authority for exactly one protected repository file.
 pub struct RepositoryFileDeletionTool {
@@ -206,8 +570,38 @@ impl RepositoryFileDeletionPolicy {
     }
 
     async fn capture(&self, request: &DeleteRequest) -> Result<Preimage, ()> {
+        let pre = self
+            .capture_path(&request.path, &request.logical_path, false)
+            .await?;
+        if pre.bytes.len() > MAX_FILE_BYTES
+            || pre.bytes.len() != request.length
+            || sha256(&pre.bytes) != request.sha256
+        {
+            return Err(());
+        }
+        Ok(pre)
+    }
+
+    async fn capture_reviewed(&self, path: &Path, logical_path: &str) -> Result<Preimage, ()> {
+        let pre = self.capture_path(path, logical_path, true).await?;
+        if pre.bytes.len() > MAX_REVIEWED_FILE_BYTES
+            || pre.bytes.contains(&0)
+            || std::str::from_utf8(&pre.bytes).is_err()
+            || !reviewed_mode_matches(&pre.path, &pre.git.head_entry)
+        {
+            return Err(());
+        }
+        Ok(pre)
+    }
+
+    async fn capture_path(
+        &self,
+        path: &Path,
+        logical_path: &str,
+        reviewed: bool,
+    ) -> Result<Preimage, ()> {
         self.repository_ok().map_err(|_| ())?;
-        let path = validate_existing_target(&self.root, &request.path).map_err(|_| ())?;
+        let path = validate_existing_target(&self.root, path).map_err(|_| ())?;
         let metadata = fs::metadata(&path).map_err(|_| ())?;
         reject_unsupported_file_attributes(&metadata).map_err(|_| ())?;
         let identity = FileIdentity::capture(&path).map_err(|_| ())?;
@@ -215,19 +609,16 @@ impl RepositoryFileDeletionPolicy {
             return Err(());
         }
         let bytes = fs::read(&path).map_err(|_| ())?;
-        if bytes.len() > MAX_FILE_BYTES
-            || bytes.len() != request.length
-            || sha256(&bytes) != request.sha256
-        {
+        if bytes.len() > MAX_FILE_BYTES {
             return Err(());
         }
-        let git = self.git_state(&request.path).await?;
+        let git = self.git_state(Path::new(logical_path), reviewed).await?;
         if git.blob != bytes {
             return Err(());
         }
         Ok(Preimage {
             path,
-            git_path: request.path.clone(),
+            git_path: logical_path.to_owned(),
             identity,
             bytes,
             git,
@@ -255,12 +646,16 @@ impl RepositoryFileDeletionPolicy {
     async fn deleted_verified(&self, pre: &Preimage) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
         if fs::symlink_metadata(&pre.path).is_ok()
-            || self.git_state(Path::new(&pre.git_path)).await?.blob != pre.bytes
+            || self.git_state(Path::new(&pre.git_path), false).await?.blob != pre.bytes
         {
             return Err(());
         }
         if fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
-            || self.git_state(Path::new(&pre.git_path)).await?.fingerprint != pre.git.fingerprint
+            || self
+                .git_state(Path::new(&pre.git_path), false)
+                .await?
+                .fingerprint
+                != pre.git.fingerprint
         {
             return Err(());
         }
@@ -283,7 +678,10 @@ impl RepositoryFileDeletionPolicy {
         Ok(())
     }
 
-    async fn git_state(&self, path: &Path) -> Result<GitState, ()> {
+    async fn git_state(&self, path: &Path, reviewed: bool) -> Result<GitState, ()> {
+        if reviewed {
+            self.require_supported_repository_state().await?;
+        }
         let target = path.to_string_lossy().replace('\\', "/");
         let head = self
             .git_output(vec!["rev-parse", "--verify", "HEAD"])
@@ -339,10 +737,70 @@ impl RepositoryFileDeletionPolicy {
             ])
             .await?;
         Ok(GitState {
+            head: head.clone(),
+            branch: branch.clone(),
+            head_entry: tree.clone(),
+            index_entry: index.clone(),
             blob,
+            refs: refs.clone(),
             fingerprint: [head, branch, tree, index, refs].concat(),
         })
     }
+
+    async fn require_supported_repository_state(&self) -> Result<(), ()> {
+        let bare = self
+            .git_output(vec!["rev-parse", "--is-bare-repository"])
+            .await?;
+        if bare != b"false\n" && bare != b"false\r\n" {
+            return Err(());
+        }
+        if self
+            .git_optional_output(vec!["config", "--bool", "core.sparseCheckout"])
+            .await?
+            .is_some_and(|output| output == b"true\n" || output == b"true\r\n")
+        {
+            return Err(());
+        }
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "REBASE_HEAD",
+            "BISECT_LOG",
+            "sequencer",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            if self.root.join(".git").join(marker).exists() {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    async fn git_optional_output(&self, args: Vec<&str>) -> Result<Option<Vec<u8>>, ()> {
+        let process = HostExecutionPolicy::new(
+            &self.git,
+            HostArgumentPolicy::Exact(args.into_iter().map(str::to_owned).collect()),
+            &self.root,
+            ".",
+        )
+        .map_err(|_| ())?
+        .with_environment(git_environment())
+        .map_err(|_| ())?
+        .execute_process(&ToolInput(json!({})))
+        .await
+        .map_err(|_| ())?;
+        if process.timed_out || process.overflow.is_some() {
+            return Err(());
+        }
+        match process.exit_code {
+            Some(0) => Ok(Some(process.stdout)),
+            Some(1) => Ok(None),
+            _ => Err(()),
+        }
+    }
+
     async fn git_output(&self, args: Vec<&str>) -> Result<Vec<u8>, ()> {
         let process = HostExecutionPolicy::new(
             &self.git,
@@ -364,21 +822,28 @@ impl RepositoryFileDeletionPolicy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Preimage {
     path: PathBuf,
-    git_path: PathBuf,
+    git_path: String,
     identity: FileIdentity,
     bytes: Vec<u8>,
     git: GitState,
     index: Vec<u8>,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GitState {
+    head: Vec<u8>,
+    branch: Vec<u8>,
+    head_entry: Vec<u8>,
+    index_entry: Vec<u8>,
     blob: Vec<u8>,
+    refs: Vec<u8>,
     fingerprint: Vec<u8>,
 }
 struct DeleteRequest {
     path: PathBuf,
+    logical_path: String,
     sha256: String,
     length: usize,
 }
@@ -388,11 +853,8 @@ impl DeleteRequest {
         if object.len() != 3 {
             return Err(());
         }
-        let path = parse_logical_path(
-            object.get("path").and_then(Value::as_str).ok_or(())?,
-            MAX_PATH_BYTES,
-        )
-        .map_err(|_| ())?;
+        let logical_path = object.get("path").and_then(Value::as_str).ok_or(())?;
+        let path = parse_logical_path(logical_path, MAX_PATH_BYTES).map_err(|_| ())?;
         let sha256 = object
             .get("expected_file_sha256")
             .and_then(Value::as_str)
@@ -414,10 +876,321 @@ impl DeleteRequest {
         }
         Ok(Self {
             path,
+            logical_path: logical_path.to_owned(),
             sha256: sha256.to_owned(),
             length,
         })
     }
+}
+
+struct DeletePreparationRequest {
+    path: PathBuf,
+    logical_path: String,
+}
+
+impl DeletePreparationRequest {
+    fn parse(
+        request: RepositoryDeleteFilePreparationRequest,
+    ) -> Result<Self, RepositoryDeleteFilePreparationError> {
+        let input = json!({"path": request.path});
+        if serde_json::to_vec(&input)
+            .map(|bytes| bytes.len() > MAX_PREPARATION_REQUEST_BYTES)
+            .unwrap_or(true)
+        {
+            return Err(RepositoryDeleteFilePreparationError::InvalidInput {
+                reason: "request_bound",
+            });
+        }
+        let logical_path = input.get("path").and_then(Value::as_str).ok_or(
+            RepositoryDeleteFilePreparationError::InvalidInput {
+                reason: "path_type",
+            },
+        )?;
+        let path = parse_logical_path(logical_path, MAX_PATH_BYTES).map_err(|_| {
+            RepositoryDeleteFilePreparationError::InvalidInput {
+                reason: "path_or_bounds",
+            }
+        })?;
+        Ok(Self {
+            path,
+            logical_path: logical_path.to_owned(),
+        })
+    }
+}
+
+fn canonical_preparation_tool_input(
+    request: &DeletePreparationRequest,
+    pre: &Preimage,
+) -> ToolInput {
+    ToolInput(json!({
+        "path": request.logical_path,
+        "expected_file_sha256": sha256(&pre.bytes),
+        "expected_file_byte_length": pre.bytes.len(),
+    }))
+}
+
+fn canonical_delete_tool_input(request: &DeleteRequest) -> ToolInput {
+    ToolInput(json!({
+        "path": request.logical_path,
+        "expected_file_sha256": request.sha256,
+        "expected_file_byte_length": request.length,
+    }))
+}
+
+fn build_delete_review(
+    logical_path: &str,
+    pre: &Preimage,
+) -> Result<RepositoryDeleteFileReview, RepositoryDeleteFilePreparationError> {
+    let source = std::str::from_utf8(&pre.bytes).map_err(|_| {
+        RepositoryDeleteFilePreparationError::PreconditionFailed {
+            reason: "source_encoding",
+        }
+    })?;
+    let file_mode = match pre.git.head_entry.get(..6) {
+        Some(b"100644") => "100644",
+        Some(b"100755") => "100755",
+        _ => {
+            return Err(RepositoryDeleteFilePreparationError::PreconditionFailed {
+                reason: "file_mode",
+            });
+        }
+    };
+    let review = RepositoryDeleteFileReview {
+        operation: REPOSITORY_DELETE_FILE_TOOL_NAME,
+        target_count: 1,
+        path: logical_path.to_owned(),
+        tracked_state: "clean HEAD-tracked stage-0 regular file",
+        file_mode,
+        file_intent: "permanently remove this existing regular file",
+        preimage_encoding: "complete_utf8_escaped",
+        preimage: escape_delete_review_text(source),
+        content_byte_length: pre.bytes.len(),
+        content_sha256: sha256(&pre.bytes),
+        bom: if pre.bytes.starts_with(b"\xef\xbb\xbf") {
+            RepositoryDeleteFileBomState::Present
+        } else {
+            RepositoryDeleteFileBomState::Absent
+        },
+        content_facts: delete_content_facts(source),
+        head_blob_relationship: "worktree bytes equal current HEAD blob",
+        index_relationship: "exact stage-0 index entry equals HEAD tree entry and worktree",
+        expected_effect: "one worktree file becomes absent; one unstaged deletion",
+        post_delete_git_meaning: "index, HEAD, branch, refs, and history remain unchanged",
+        non_effects: vec![
+            "not Stage",
+            "not Unstage",
+            "not Commit",
+            "does not modify the index",
+            "does not modify HEAD, refs, or history",
+            "does not rename or move",
+            "does not restore or clean up",
+            "does not delete another path",
+        ],
+        warnings: vec![
+            "permanently removes the selected worktree file",
+            "no Trash or Recycle Bin guarantee",
+            "no backup",
+            "no restore",
+            "no rollback",
+            "no retry or replay",
+            "uncertainty may require manual inspection",
+            "timeout, cancellation, or disconnect after a possible effect is not rollback",
+        ],
+    };
+    if serde_json::to_vec(&review)
+        .map(|serialized| serialized.len() <= MAX_SERIALIZED_REVIEW_BYTES)
+        .unwrap_or(false)
+    {
+        Ok(review)
+    } else {
+        Err(RepositoryDeleteFilePreparationError::ReviewTooLarge)
+    }
+}
+
+fn delete_content_facts(source: &str) -> RepositoryDeleteFileContentFacts {
+    let bytes = source.as_bytes();
+    let carriage_returns = bytes.iter().filter(|byte| **byte == b'\r').count();
+    let line_feeds = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let crlf_pairs = bytes.windows(2).filter(|pair| *pair == b"\r\n").count();
+    let contains_trailing_space = bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b' ' && (index + 1 == bytes.len() || matches!(bytes[index + 1], b'\r' | b'\n'))
+    });
+    let contains_control_or_format_escape = source
+        .chars()
+        .any(|character| character.is_control() || delete_is_format_character(character));
+    let control_characters = source
+        .chars()
+        .filter(|character| character.is_control())
+        .count();
+    let format_characters = source
+        .chars()
+        .filter(|character| delete_is_format_character(*character))
+        .count();
+    let ends_with_newline = bytes
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\r' | b'\n'));
+    RepositoryDeleteFileContentFacts {
+        contains_cr: carriage_returns != 0,
+        contains_lf: line_feeds != 0,
+        contains_crlf: crlf_pairs != 0,
+        carriage_returns,
+        line_feeds,
+        crlf_pairs,
+        ends_with_newline,
+        final_eof: if ends_with_newline {
+            "final_newline"
+        } else {
+            "no_final_newline"
+        },
+        contains_tab: bytes.contains(&b'\t'),
+        contains_trailing_space,
+        contains_control_or_format_escape,
+        control_characters,
+        format_characters,
+        empty: bytes.is_empty(),
+    }
+}
+
+fn reviewed_mode_matches(path: &Path, head_entry: &[u8]) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = head_entry.starts_with(b"100755");
+        let mode = match fs::metadata(path) {
+            Ok(metadata) => metadata.permissions().mode() & 0o111 != 0,
+            Err(_) => return false,
+        };
+        mode == executable
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, head_entry);
+        true
+    }
+}
+
+fn escape_delete_review_text(source: &str) -> String {
+    use std::fmt::Write as _;
+    let mut escaped = String::with_capacity(source.len());
+    for character in source.chars() {
+        match character {
+            '\r' => escaped.push_str("\\r"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            ' ' => escaped.push_str("\\u{20}"),
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            character
+                if character.is_control()
+                    || character == '\u{7f}'
+                    || delete_is_format_character(character)
+                    || !character.is_ascii() =>
+            {
+                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn delete_is_format_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x00ad
+            | 0x0600..=0x0605
+            | 0x061c
+            | 0x06dd
+            | 0x070f
+            | 0x0890..=0x0891
+            | 0x08e2
+            | 0x180e
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfeff
+            | 0xfff9..=0xfffb
+            | 0x110bd
+            | 0x110cd
+            | 0x13430..=0x1343f
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0001
+            | 0xe0020..=0xe007f
+    )
+}
+
+fn compute_delete_review_identity(
+    preparer_identity: Uuid,
+    policy: &RepositoryFileDeletionPolicy,
+    logical_path: &str,
+    pre: &Preimage,
+    tool_input: &ToolInput,
+    review: &RepositoryDeleteFileReview,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"rah-repository-delete-file-preparation-v1\0");
+    digest.update(preparer_identity.as_bytes());
+    update_serialized(&mut digest, tool_input);
+    update_serialized(&mut digest, review);
+    digest.update(logical_path.as_bytes());
+    digest.update(&pre.bytes);
+    update_identity(&mut digest, &policy.root_identity);
+    update_identity(&mut digest, &policy.dot_git_identity);
+    update_identity(&mut digest, &policy.git_identity);
+    update_identity(&mut digest, &pre.identity);
+    digest.update(&pre.index);
+    digest.update(&pre.git.head);
+    digest.update(&pre.git.branch);
+    digest.update(&pre.git.head_entry);
+    digest.update(&pre.git.index_entry);
+    digest.update(&pre.git.refs);
+    hex_digest(digest.finalize())
+}
+
+fn update_identity(digest: &mut Sha256, identity: &FileIdentity) {
+    digest.update(format!("{identity:?}").as_bytes());
+}
+
+fn update_serialized<T: Serialize>(digest: &mut Sha256, value: &T) {
+    if let Ok(serialized) = serde_json::to_vec(value) {
+        digest.update(serialized);
+    }
+}
+
+fn hex_digest(bytes: impl IntoIterator<Item = u8>) -> String {
+    use std::fmt::Write as _;
+    let mut result = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
+}
+
+fn serialized_preparation_size(preparation: &RepositoryDeleteFilePreparation) -> usize {
+    let public_size = serde_json::to_vec(&json!({
+        "tool_input": &preparation.tool_input,
+        "review": &preparation.review,
+        "review_identity": &preparation.review_identity,
+        "source_sha256": &preparation.source_sha256,
+        "source_byte_length": preparation.source_byte_length,
+    }))
+    .map(|serialized| serialized.len())
+    .unwrap_or(usize::MAX);
+    public_size
+        .saturating_add(preparation.pre.bytes.len())
+        .saturating_add(preparation.pre.index.len())
+        .saturating_add(preparation.pre.git.head.len())
+        .saturating_add(preparation.pre.git.branch.len())
+        .saturating_add(preparation.pre.git.head_entry.len())
+        .saturating_add(preparation.pre.git.index_entry.len())
+        .saturating_add(preparation.pre.git.blob.len())
+        .saturating_add(preparation.pre.git.refs.len())
+        .saturating_add(preparation.pre.git.fingerprint.len())
+        .saturating_add(preparation.pre.path.to_string_lossy().len())
+        .saturating_add(preparation.pre.git_path.len())
+        .saturating_add(4096)
 }
 
 fn index_to_tree(index: &[u8], target: &str) -> Option<Vec<u8>> {
@@ -709,5 +1482,25 @@ mod tests {
         ] {
             assert!(DeleteRequest::parse(&ToolInput(value)).is_err());
         }
+    }
+
+    #[test]
+    fn prepared_state_size_accounting_rejects_oversized_retained_state() {
+        let fixture = Fixture::new();
+        let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.root).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut preparation = runtime
+            .block_on(preparer.prepare(RepositoryDeleteFilePreparationRequest {
+                path: "target.txt".to_owned(),
+            }))
+            .unwrap();
+        preparation
+            .pre
+            .bytes
+            .resize(MAX_PREPARED_REPRESENTATION_BYTES, 0);
+        assert!(serialized_preparation_size(&preparation) > MAX_PREPARED_REPRESENTATION_BYTES);
     }
 }

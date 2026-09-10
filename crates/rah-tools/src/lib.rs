@@ -78,7 +78,11 @@ pub use repository_create_file::{
     RepositoryCreateFilePreparer, RepositoryCreateFileReview, RepositoryFileCreationTool,
 };
 pub use repository_delete_file::{
-    REPOSITORY_DELETE_FILE_TOOL_NAME, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
+    REPOSITORY_DELETE_FILE_TOOL_NAME, RepositoryDeleteFileBomState,
+    RepositoryDeleteFileContentFacts, RepositoryDeleteFilePreparation,
+    RepositoryDeleteFilePreparationError, RepositoryDeleteFilePreparationRequest,
+    RepositoryDeleteFilePreparer, RepositoryDeleteFileReview, RepositoryFileDeletionAuthority,
+    RepositoryFileDeletionTool,
 };
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};
