@@ -1,5 +1,142 @@
 # Changelog
 
+## v0.24.0 — release preparation (2026-09-10)
+
+RAH v0.24.0 is **PREPARED, NOT PUBLISHED**. v0.23.0 remains the current
+immutable published release. This preparation is based on Task 286's accepted
+verdict:
+
+> RAH v0.24 REVIEWED DELETION MILESTONE READY FOR RELEASE PREPARATION
+
+The preparation baseline is `4197d90cd04493b562db7ae9be315074f9320433`.
+The workspace version moves from `0.23.0` to `0.24.0` across 13 packages;
+all remain on Rust edition 2024. No dependency, public API, authority, or
+production behavior change is part of this release preparation.
+
+### Release theme
+
+**HostExplicit Reviewed File Deletion (`repo.delete-file`)** is the reviewed
+human capability added by the accepted v0.24 milestone. Its route is:
+
+```text
+typed human {path}
+ -> zero-effect deletion Prepare
+ -> complete bounded backend-derived destructive review
+ -> opaque process-local single-use ticket
+ -> ticket-only Confirm
+ -> connected-current/currentness checks
+ -> retained deletion-preparer revalidation
+ -> exact ToolDefinition / permission membership
+ -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> current ToolRegistry
+ -> existing repo.delete-file
+ -> ADR 0017 RepositoryFileDeletionPolicy
+ -> strict five-status parsing
+ -> independent reviewed-route effect proof
+ -> status-only terminal HostActivity
+ -> descriptive repository refresh
+```
+
+ADR 0017 remains the sole underlying repository file-deletion mutation
+authority. ADR 0021 remains the generic HostExplicit
+coordinator/currentness/ticket/D2/provenance boundary. ADR 0025 remains the
+capability-specific reviewed human deletion HostExplicit boundary. Human
+confirmation, model output, frontend state, `PermissionLevel::Execute`, Tool
+presence, provider metadata, Trusted Profile metadata, MCP, and Process Plugin
+metadata do not create deletion authority.
+
+The exact ten production HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+```
+
+`repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools, Process
+Plugin Tools, fixture/diagnostic Tools, and unknown Tools remain ineligible.
+There is no wildcard, prefix, effect-category, permission-derived, or
+provider-derived admission.
+
+The closed human request is `{path}`. Its bounds are a canonical serialized
+request of at most 8192 bytes, a logical path of 1..=1024 UTF-8 bytes, a
+reviewed source of 0..=65536 raw bytes with strict UTF-8 and no NUL, a complete
+serialized review of at most 262144 bytes, and retained private preparation of
+at most 524288 bytes. The complete escaped source is the review surface;
+truncation is not permitted. The ordinary ADR 0017 Tool remains broader: its
+input remains `path`, `expected_file_sha256`, and
+`expected_file_byte_length`, with a 1 MiB ordinary-file bound and binary
+ordinary deletion still allowed.
+
+Prepare has zero Tool/native effects. Confirm uses the retained preparation,
+currentness, exact definition/permission membership, and D2 before Started,
+then reaches the current registry through `authorized_tool_dispatch`. A
+verified result means exactly one reviewed worktree file is absent and one
+unstaged Git deletion is present. It does not Stage, Unstage, Commit, mutate
+the index, HEAD, branch, refs, or history; it does not rename, move, restore,
+clean up, or recursively delete.
+
+The exact deletion statuses remain `deleted_verified`, `known_no_effect`,
+`invalid_input`, `precondition_failed`, and `uncertain`. `deleted_verified`
+requires valid Tool output plus independent confirmed-absence proof.
+`known_no_effect` requires valid Tool output plus independent exact-original
+preimage proof. Malformed/contradictory output and post-Started failures remain
+`uncertain` when safe proof is unavailable. The ticket is opaque, process-local,
+in-memory, capability-specific, single-use, nonpersistent, nonresumable, and
+currentness-bound; elapsed time `< 300s` is valid and `>= 300s` is expired.
+The ticket ID is distinct from the non-authority activity ID, and Confirm and
+Cancel are ticket-only. Generic activity is status-only and excludes the
+source-bearing review and private authority values. Effectful Confirm
+invalidates reviewed Commit authorization immediately before Started; no
+automatic Commit occurs.
+
+Windows semantics are one native `DeleteFileW` attempt followed by one
+immediate reviewed proof pass: no polling, sleep/recheck loop, second delete,
+retry, replay, cleanup, restore, or recovery. `DeleteFileW` success is the
+effect commit point, not proof of final absence. Possible effects remain
+uncertain. No race-free TOCTOU, OS sandboxing, network isolation, or rollback
+claim is made; process supervision is not an OS sandbox.
+
+### Evidence and limitations
+
+Task 285's accepted Windows evidence is carried forward without rerunning the
+destructive test. It used Windows 10 Professional `10.0.19045` x64, Rust/Cargo
+`1.96.0`, Git `2.54.0.windows.1`, Codex `0.149.0` with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, model
+`gpt-5.6-terra`, and medium reasoning. The fixture was
+`src/rah-hostexplicit-live-delete.txt`, 80 bytes, SHA-256
+`cdb8ee496bafc4f41bfdac75d37132cb6c1e561703c46b45ede3bfd21396d9fe`.
+Prepare was `0 / 0` Tool/native; Confirm was `1 / 1`; the result was
+`deleted_verified`; the HostActivity sequence was `prepared`, `started`,
+`tool_completed`; the marker was `RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_OK`.
+Index, HEAD, branch, refs, and unrelated staged state were preserved, Commit
+authorization was invalidated before Started, duplicate and activity-ID
+operations were rejected, model/MCP/Process Plugin counts were zero, and
+owned Codex cleanup passed.
+
+The live-certified code/test SHA was `e6cb63436541fe653ba0ea4165466aaa822bc206`;
+the final Task 285 docs evidence SHA was
+`3a465d3b5010f86e606e3e3a0281d20774aacbc8`. Exact CI identities are retained
+in the v0.24 release gate. The evidence is a connected-current human/host
+success path, not model-selected deletion, Linux/macOS parity, or all
+Windows failure modes. v0.24 does not claim generic filesystem deletion,
+recursive/directory/wildcard deletion, untracked cleanup, rename/move,
+HostExplicit directory creation or commit, automatic Stage/Unstage/Commit,
+backup/restore/Trash semantics, retry/replay/rollback/compensation, model or
+provider deletion, generic shell/process authority, or broader platform
+isolation. Timeout, cancellation, disconnect, crash, or lost response after a
+possible effect is not rollback.
+
 ## v0.23.0 — released (2026-09-09)
 
 RAH v0.23.0 is released and is the current immutable published release.

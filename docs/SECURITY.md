@@ -1,10 +1,10 @@
-# RAH v0.23.0 Security Model — released
+# RAH v0.24.0 Security Model — prepared, not yet published
 
-This document describes the released v0.23.0 security model.
+This document describes the prepared v0.24.0 security posture.
 
-RAH v0.23.0 is the current immutable published release.
+RAH v0.24.0 is **PREPARED — NOT PUBLISHED**.
 
-v0.22.0 is the prior immutable release.
+v0.23.0 remains the current immutable published release.
 
 The immutable v0.23.0 release source is:
 `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
@@ -16,7 +16,151 @@ v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
 
-## ADR 0024 reviewed HostExplicit new-file authoring boundary
+## v0.24 HostExplicit reviewed file-deletion security posture
+
+The v0.24 release theme is **HostExplicit Reviewed File Deletion
+(`repo.delete-file`)**. The route is human HostExplicit only. ADR 0017 remains
+the sole underlying repository file-deletion mutation authority; ADR 0021 is
+the generic HostExplicit coordinator/currentness/ticket/D2/provenance boundary;
+and ADR 0025 is the reviewed human deletion boundary. Frontend presentation,
+human confirmation, model request/output, `PermissionLevel::Execute`, Tool
+presence, Trusted Profile metadata, provider metadata, MCP, and Process Plugin
+metadata are not deletion authority.
+
+The security-critical path is:
+
+```text
+typed human {path}
+ -> zero-effect deletion Prepare
+ -> complete bounded backend-derived destructive review
+ -> opaque process-local single-use ticket
+ -> ticket-only Confirm
+ -> connected-current/currentness checks
+ -> retained deletion-preparer revalidation
+ -> exact ToolDefinition / permission membership
+ -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> current ToolRegistry
+ -> existing repo.delete-file
+ -> ADR 0017 RepositoryFileDeletionPolicy
+ -> strict five-status parsing
+ -> independent reviewed-route effect/no-effect proof
+ -> status-only terminal HostActivity
+ -> descriptive repository refresh
+```
+
+The exact ten production HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+```
+
+`repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools, Process
+Plugin Tools, fixture/diagnostic Tools, and unknown Tools remain ineligible.
+The set is exact and host-owned; no wildcard, prefix, effect-category,
+permission-derived, provider-derived, model-derived, or frontend-derived
+admission exists.
+
+The closed Prepare request is exactly `{path}`. The canonical serialized
+request is at most 8192 bytes; the logical path is 1..=1024 UTF-8 bytes; the
+reviewed source is 0..=65536 raw bytes, strict UTF-8, and NUL-free; the
+complete serialized review is at most 262144 bytes; and retained private
+preparation is at most 524288 bytes. The complete deterministic escaped source
+is the review surface, with exact length, SHA-256, BOM/newline/content facts,
+HEAD/blob and index relationships, expected effect, post-delete Git meaning,
+non-effects, and destructive warnings. It is not a preview and cannot be
+truncated. Exact raw bytes remain private preparation state.
+
+The eligible target is exactly one existing regular repository file that is
+current-HEAD tracked through one normal stage-0 entry, equal in worktree bytes
+and index state to HEAD, mode 100644 or 100755, bound to captured FileIdentity
+and link count 1, in a supported ordinary repository state, strict UTF-8,
+NUL-free, and at most 64 KiB. Rejection includes missing/non-file, dirty or
+staged, untracked/ignored, ITA/conflict, submodule, nested/.git, unsupported
+repository state, symlink/junction/reparse, hardlink, unsafe alias/case,
+non-UTF-8/NUL/oversize, and review overflow classes. These are source-policy
+and deterministic evidence classes unless the carried Windows evidence
+specifically says otherwise; they are not all claimed as individually live
+tested.
+
+This is a reviewed-route narrowing only. The ordinary ADR 0017 Tool remains
+unchanged: its input is `path`, `expected_file_sha256`, and
+`expected_file_byte_length`, its ordinary file bound is 1 MiB, and binary
+ordinary deletion remains allowed under ADR 0017.
+
+Prepare has zero Tool/native effects and does not invalidate reviewed Commit
+authorization. The retained `RepositoryDeleteFilePreparer` binds the exact
+preimage, identity, parent, Git/index/HEAD/ref state, canonical Tool input,
+ToolDefinition, permission membership, review identity, and currentness.
+Confirm consumes the opaque RAH-generated ticket and revalidates those values,
+then performs D2 before Started. Immediately before effectful Started it
+invalidates repository-bound reviewed Commit authorization. Refresh is
+descriptive only and cannot create replacement authorization. No automatic
+Commit occurs.
+
+The ticket is opaque, process-local, in-memory, capability-specific,
+single-use, nonpersistent, nonresumable, and currentness-bound. Elapsed time
+`< 300s` is valid and `>= 300s` is expired. Confirm and Cancel are ticket-only;
+`ticket_id != activity_id`, and an activity ID cannot Confirm or Cancel.
+Generic activity, persistence, and logs contain neither the source-bearing
+review nor the private ticket, raw Tool input/output, native paths, identity,
+index, or authority values. The direct Prepare response is the only intended
+Desktop review surface allowed to contain the complete review and ticket.
+
+The exact five statuses are `deleted_verified`, `known_no_effect`,
+`invalid_input`, `precondition_failed`, and `uncertain`. `deleted_verified`
+requires valid underlying Tool output plus independent confirmed-absence proof,
+including retained parent identity, no same-name/case-equivalent replacement,
+and unchanged index and protected Git/HEAD/branch/ref state. `known_no_effect`
+requires valid output plus independent exact-original FileIdentity/link/bytes/
+hash/length and protected Git/index proof. Malformed or contradictory output,
+and post-Started runtime/dispatch failure, remain `uncertain` when proof is
+missing. A verified effect is exactly one absent worktree file and one
+unstaged Git deletion, with no Stage, Unstage, Commit, index/HEAD/ref/history
+mutation, rename, move, restore, cleanup, directory, or recursive deletion.
+
+Windows uses one native `DeleteFileW` attempt and one immediate reviewed
+post-attempt proof pass. There is no polling, sleep/recheck loop, second delete,
+retry, replay, cleanup, restore, or recovery. `DeleteFileW` success is the
+effect commit point but not proof of final absence. Delete-pending visibility,
+replacement, observation failure, and contradictory state remain uncertain
+unless independently proven. This is mitigation, not a race-free TOCTOU
+guarantee. Process supervision is not an OS sandbox, and Windows success-path
+certification is not cross-platform parity.
+
+Task 285's accepted Windows evidence is carried forward without rerunning the
+destructive live test. It covers Windows 10 Professional `10.0.19045` x64,
+Rust/Cargo `1.96.0`, Git `2.54.0.windows.1`, Codex `0.149.0` with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, model
+`gpt-5.6-terra`, medium reasoning, fixture bytes 80 and SHA-256
+`cdb8ee496bafc4f41bfdac75d37132cb6c1e561703c46b45ede3bfd21396d9fe`, Prepare
+`0/0`, Confirm `1/1`, terminal `deleted_verified`, marker
+`RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_OK`, preserved Git state, Commit
+authorization invalidation before Started, rejected duplicate/activity-ID
+operations, zero model/MCP/Process Plugin activity, and owned cleanup PASS.
+
+The release does not claim generic fs.write/delete/unlink, directory or
+recursive/wildcard deletion, untracked/ignored cleanup, rename/move,
+HostExplicit directory creation or commit, automatic Stage/Unstage/Commit,
+backup/restore/Trash semantics, retry/replay/rollback/compensation/recovery
+journal, model/provider/MCP/Process Plugin deletion, network/provider deletion,
+generic shell/process authority, race-free TOCTOU, OS sandboxing, network
+isolation, Linux/macOS production live parity, or all Windows failure modes
+live. Timeout, cancellation, disconnect, crash, or a lost response after
+possible effect is not rollback.
+
+## Historical v0.23 ADR 0024 reviewed HostExplicit new-file authoring boundary
 
 The v0.23 capability is **HostExplicit Reviewed New-File Authoring** through
 the existing `repo.create-file` Tool. The security route is:

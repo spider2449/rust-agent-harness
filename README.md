@@ -5,9 +5,88 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.23.0 released
+## RAH v0.24.0 prepared — not yet published
 
-RAH v0.23.0 is the current immutable published release for **HostExplicit
+RAH v0.24.0 is **PREPARED, NOT PUBLISHED**, with the release theme
+**HostExplicit Reviewed File Deletion (`repo.delete-file`)**. v0.23.0 remains
+the current immutable published release.
+
+The accepted reviewed human workflow is:
+
+```text
+typed human {path}
+ -> zero-effect deletion Prepare
+ -> complete bounded backend-derived destructive review
+ -> opaque process-local single-use ticket
+ -> ticket-only Confirm
+ -> connected-current/currentness checks
+ -> retained deletion-preparer revalidation
+ -> exact ToolDefinition / permission membership -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started -> authorized_tool_dispatch
+ -> current ToolRegistry -> existing repo.delete-file
+ -> ADR 0017 RepositoryFileDeletionPolicy
+ -> strict five-status parsing -> independent reviewed-route proof
+ -> status-only terminal HostActivity -> descriptive repository refresh
+```
+
+ADR 0017 remains the sole underlying repository file-deletion mutation
+authority. ADR 0021 is the generic HostExplicit coordinator/currentness,
+ticket, D2, and provenance boundary. ADR 0025 is the reviewed human deletion
+HostExplicit boundary. The frontend is presentation and typed input only;
+model output, human confirmation, `PermissionLevel::Execute`, Tool presence,
+Trusted Profile/provider metadata, MCP, and Process Plugin metadata are not
+authorization. There is no Desktop direct delete path.
+
+The exact ten production HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+```
+
+`repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools, Process
+Plugin Tools, fixture/diagnostic Tools, and unknown Tools remain ineligible.
+Admission is exact and host-owned, with no wildcard, prefix, effect-category,
+permission-derived, or provider-derived rule.
+
+The closed Prepare request is `{path}`. The reviewed route bounds the
+canonical request to 8192 bytes, the logical path to 1..=1024 UTF-8 bytes, the
+source to 0..=65536 raw bytes of strict UTF-8 with no NUL, the complete
+serialized review to 262144 bytes, and retained private preparation to
+524288 bytes. The complete escaped source is shown; it is not a preview and
+is never truncated. The ordinary ADR 0017 Tool remains broader: it retains
+`path`, `expected_file_sha256`, and `expected_file_byte_length`, a 1 MiB
+ordinary-file bound, and binary ordinary deletion.
+
+The reviewed target is exactly one existing clean HEAD-tracked regular file
+with one normal stage-0 entry, HEAD/worktree/index equality, mode 100644 or
+100755, captured FileIdentity, link count 1, supported repository state,
+strict UTF-8, no NUL, and at most 64 KiB. A verified deletion leaves one
+unstaged Git deletion only; it does not Stage, Unstage, Commit, mutate the
+index/HEAD/refs/history, rename, move, restore, clean up, or recurse.
+
+The five statuses are `deleted_verified`, `known_no_effect`, `invalid_input`,
+`precondition_failed`, and `uncertain`. The first requires valid Tool output
+and independent confirmed-absence proof; the second requires valid Tool
+output and independent exact-original-preimage proof. Malformed,
+contradictory, or post-Started failures remain uncertain when proof is
+insufficient. Windows uses one native `DeleteFileW` attempt and one immediate
+proof pass, with no polling, retry, replay, cleanup, or rollback. The accepted
+Task 285 Windows success evidence is carried forward and the destructive live
+test is not rerun.
+
+## RAH v0.23.0 released — previous immutable release
+
+RAH v0.23.0 is the previous immutable published release for **HostExplicit
 Reviewed New-File Authoring (`repo.create-file`)**. v0.22.0 is the prior
 immutable published release.
 
@@ -85,9 +164,9 @@ deterministic cancellation evidence was accepted by Task 275. The release
 preparation baseline is `533b0769618d25c1b9673a27c3e21af7a48809ca`, and this
 preparation creates no tag, GitHub Release, or published artifact.
 
-## RAH v0.22.0 released
+## RAH v0.22.0 released — historical
 
-RAH v0.22.0 is the current immutable published release for **HostExplicit
+RAH v0.22.0 is an older immutable published release for **HostExplicit
 Reviewed Multi-File Edit Authoring**. v0.21.0 is the prior immutable published
 release.
 

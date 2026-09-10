@@ -1,10 +1,10 @@
-# RAH v0.23.0 Architecture — released
+# RAH v0.24.0 Architecture — prepared, not yet published
 
-This document describes the released v0.23.0 architecture.
+This document describes the prepared v0.24.0 architecture.
 
-RAH v0.23.0 is the current immutable published release.
+RAH v0.24.0 is **PREPARED — NOT PUBLISHED**.
 
-v0.22.0 is the prior immutable release.
+v0.23.0 remains the current immutable published release.
 
 The immutable v0.23.0 release source is:
 `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
@@ -16,7 +16,113 @@ v0.20.0 preceded v0.21.0.
 
 v0.18.0 preceded v0.19.0.
 
-## ADR 0024 reviewed HostExplicit new-file authoring path
+## v0.24 reviewed HostExplicit file deletion
+
+The v0.24 release theme is **HostExplicit Reviewed File Deletion
+(`repo.delete-file`)**. It adds no new generic filesystem boundary. ADR 0017
+remains the sole underlying repository file-deletion mutation authority, ADR
+0021 remains the generic HostExplicit coordinator/currentness/ticket/D2/
+provenance boundary, and ADR 0025 remains the capability-specific reviewed
+human deletion HostExplicit boundary.
+
+The connected-current Desktop flow is:
+
+```text
+typed human {path}
+ -> zero-effect deletion Prepare
+ -> complete bounded backend-derived destructive review
+ -> opaque process-local single-use ticket
+ -> ticket-only Confirm
+ -> connected-current/currentness checks
+ -> retained deletion-preparer revalidation
+ -> exact ToolDefinition / permission membership
+ -> D2
+ -> reviewed Commit authorization invalidation
+ -> HostExplicit Started
+ -> authorized_tool_dispatch
+ -> current ToolRegistry
+ -> existing repo.delete-file
+ -> ADR 0017 RepositoryFileDeletionPolicy
+ -> strict five-status parsing
+ -> independent reviewed-route effect proof
+ -> status-only terminal HostActivity
+ -> descriptive repository refresh
+```
+
+The shared `RepositoryDeleteFilePreparer` performs zero-effect preparation and
+retains the exact bounded preimage, FileIdentity, link count, parent identity,
+Git/index/HEAD state, canonical Tool input, exact ToolDefinition and
+permission membership, review identity, and currentness-bound private state.
+Confirm revalidates that retained preparation immediately before D2 and
+effectful dispatch. The route reaches the existing Tool only through
+`authorized_tool_dispatch` and the current `ToolRegistry`; Desktop has no
+direct native deletion path. The frontend remains presentation-only and sends
+only the typed human path and ticket-only Confirm/Cancel values.
+
+The exact ten production HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+```
+
+`repo.rename-file`, `repo.create-directory`, `repo.commit`, MCP Tools, Process
+Plugin Tools, fixture/diagnostic Tools, and unknown Tools remain ineligible.
+Eligibility is an exact host-owned set, not wildcard, prefix,
+effect-category, permission-derived, provider-derived, model-derived, or
+frontend-derived admission.
+
+The reviewed request is closed to `{path}`. The canonical serialized request
+is at most 8192 bytes; the logical path is 1..=1024 UTF-8 bytes; the reviewed
+source is 0..=65536 raw bytes, strict UTF-8, with NUL rejected; the complete
+serialized review is at most 262144 bytes; and retained private preparation is
+at most 524288 bytes. The complete deterministic escaped source, including
+byte length, SHA-256, BOM/newline/content facts, HEAD/blob and index
+relationships, expected effect, Git meaning, non-effects, and destructive
+warnings, is the review surface. It is not a preview and may not be
+truncated. Exact raw bytes remain private preparation state.
+
+The reviewed target is exactly one existing regular repository file that is
+current-HEAD tracked through one normal stage-0 entry, equal in worktree bytes
+and index state to HEAD, mode 100644 or 100755, bound to its captured
+FileIdentity with link count 1, in a supported ordinary repository state,
+strict UTF-8, NUL-free, and no larger than 64 KiB. A verified effect means one
+reviewed worktree file is absent and one unstaged Git deletion is present. It
+does not Stage, Unstage, Commit, mutate the index, HEAD, branch, refs, or
+history, and it does not rename, move, restore, clean up, or recursively
+delete.
+
+This reviewed narrowing does not alter the ordinary ADR 0017 Tool. Its closed
+input remains `path`, `expected_file_sha256`, and
+`expected_file_byte_length`; its ordinary file bound remains 1 MiB, and binary
+ordinary deletion remains allowed under ADR 0017.
+
+The five deletion statuses remain exactly `deleted_verified`,
+`known_no_effect`, `invalid_input`, `precondition_failed`, and `uncertain`.
+`deleted_verified` requires strict valid underlying Tool output plus
+independent confirmed absence, retained parent identity, no same-name or
+case-equivalent replacement, and unchanged protected Git/index/HEAD/ref
+state. `known_no_effect` requires strict valid output plus independent exact
+original FileIdentity/link/bytes/hash/length and protected Git/index proof.
+Malformed or contradictory output and post-Started dispatch/runtime failure
+remain `uncertain` when safe proof is unavailable.
+
+Windows accepts one native `DeleteFileW` attempt followed by one immediate
+reviewed post-attempt proof pass. There is no polling, sleep/recheck loop,
+second delete, retry, replay, cleanup, restore, or recovery. `DeleteFileW`
+success is the filesystem effect commit point, not proof of final absence.
+The architecture claims neither race-free TOCTOU, OS sandboxing, network
+isolation, nor rollback; process supervision is not an OS sandbox.
+
+## Historical v0.23 ADR 0024 reviewed HostExplicit new-file authoring path
 
 The v0.23 milestone is **HostExplicit Reviewed New-File Authoring** through
 the existing `repo.create-file` Tool. The connected-current Desktop human
