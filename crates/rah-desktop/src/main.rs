@@ -15079,6 +15079,43 @@ mod tests {
             .await,
             DeleteFileResultClassification::Uncertain
         );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("parent replacement preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "nested/ordinary.txt".to_owned(),
+                })
+                .await
+                .expect("parent replacement preparation should succeed"),
+        );
+        fs::remove_file(fixture.0.join("nested/ordinary.txt"))
+            .expect("parent replacement target should be removed");
+        fs::rename(fixture.0.join("nested"), fixture.0.join("nested-old"))
+            .expect("original parent should be replaced");
+        fs::create_dir(fixture.0.join("nested")).expect("replacement parent should be created");
+        let parent_replacement_output = ToolOutput {
+            content: vec![ToolContent::Json(serde_json::json!({
+                "status": "deleted_verified",
+                "uncertain": false,
+                "path": "nested/ordinary.txt"
+            }))],
+            is_error: false,
+        };
+        let proof = (preparation, Arc::clone(&preparer));
+        assert_eq!(
+            classify_repository_delete_file_result(
+                &parent_replacement_output,
+                "nested/ordinary.txt",
+                Some(&proof),
+            )
+            .await,
+            DeleteFileResultClassification::Uncertain
+        );
         assert_eq!(
             safe_delete_file_activity_result(DeleteFileResultClassification::Uncertain).content,
             vec![ToolContent::Json(serde_json::json!({"status":"uncertain"}))]
