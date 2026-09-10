@@ -2260,6 +2260,7 @@ fn get_effective_authority_snapshot(
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone)]
 struct CurrentHostComposition {
     registry: Arc<ToolRegistry>,
     expected_definitions: Vec<ToolDefinition>,
@@ -2760,42 +2761,15 @@ async fn run_host_tool(
                     safe_multi_file_activity_result(output, classification),
                 )
             } else if kind == HostInvocationKind::RepoDeleteFile {
-                let structural = classify_repository_delete_file_output(
+                let classification = classify_repository_delete_file_result(
                     &output,
                     deletion_proof
                         .as_ref()
                         .map(|(preparation, _)| preparation.review().path())
                         .unwrap_or_default(),
-                );
-                let classification = match structural {
-                    DeleteFileResultClassification::DeletedVerified => {
-                        let proven = match deletion_proof.as_ref() {
-                            Some((preparation, preparer)) => {
-                                preparer.prove_deleted_verified(preparation).await
-                            }
-                            None => false,
-                        };
-                        if proven {
-                            structural
-                        } else {
-                            DeleteFileResultClassification::Uncertain
-                        }
-                    }
-                    DeleteFileResultClassification::KnownNoEffect => {
-                        let proven = match deletion_proof.as_ref() {
-                            Some((preparation, preparer)) => {
-                                preparer.prove_known_no_effect(preparation).await
-                            }
-                            None => false,
-                        };
-                        if proven {
-                            structural
-                        } else {
-                            DeleteFileResultClassification::Uncertain
-                        }
-                    }
-                    _ => structural,
-                };
+                    deletion_proof.as_ref(),
+                )
+                .await;
                 if matches!(
                     classification,
                     DeleteFileResultClassification::DeletedVerified
@@ -2969,6 +2943,43 @@ async fn run_host_tool(
             review: None,
         },
     );
+}
+
+#[cfg(target_os = "windows")]
+async fn classify_repository_delete_file_result(
+    output: &ToolOutput,
+    expected_path: &str,
+    deletion_proof: Option<&(
+        Box<rah_tools::RepositoryDeleteFilePreparation>,
+        Arc<rah_tools::RepositoryDeleteFilePreparer>,
+    )>,
+) -> DeleteFileResultClassification {
+    let structural = classify_repository_delete_file_output(output, expected_path);
+    match structural {
+        DeleteFileResultClassification::DeletedVerified => {
+            let proven = match deletion_proof {
+                Some((preparation, preparer)) => preparer.prove_deleted_verified(preparation).await,
+                None => false,
+            };
+            if proven {
+                structural
+            } else {
+                DeleteFileResultClassification::Uncertain
+            }
+        }
+        DeleteFileResultClassification::KnownNoEffect => {
+            let proven = match deletion_proof {
+                Some((preparation, preparer)) => preparer.prove_known_no_effect(preparation).await,
+                None => false,
+            };
+            if proven {
+                structural
+            } else {
+                DeleteFileResultClassification::Uncertain
+            }
+        }
+        _ => structural,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3713,42 +3724,24 @@ async fn host_prepare_repo_create_file(
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
-async fn host_prepare_repo_delete_file(
+async fn prepare_repo_delete_file_with_current(
     request: HostPrepareDeleteFileRequest,
-    app: AppHandle,
-    state: State<'_, DesktopAppState>,
+    app: &AppHandle,
+    state: &DesktopAppState,
+    current: CurrentHostComposition,
 ) -> Result<PreparedDeleteFileResponse, FrontendError> {
-    {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.reap_expired(std::time::Instant::now());
-        coordinator
-            .begin_prepare()
-            .map_err(|_| FrontendError::HostInvocationBusy)?;
-    }
-
-    let current = match current_host_composition(state.inner()) {
-        Ok(current) => current,
-        Err(error) => {
-            abort_host_patch_prepare(state.inner());
-            return Err(error);
-        }
-    };
     let name = ToolName::new("repo.delete-file");
     let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
         Ok(definition) => definition,
         Err(error) => {
-            abort_host_patch_prepare(state.inner());
+            abort_host_patch_prepare(state);
             return Err(error);
         }
     };
     let preparer = match current.repository_delete_file_preparer.clone() {
         Some(preparer) => preparer,
         None => {
-            abort_host_patch_prepare(state.inner());
+            abort_host_patch_prepare(state);
             return Err(FrontendError::HostInvocationNotEligible);
         }
     };
@@ -3759,7 +3752,7 @@ async fn host_prepare_repo_delete_file(
         &current.allowed_permissions,
         &preflight_call,
     ) {
-        abort_host_patch_prepare(state.inner());
+        abort_host_patch_prepare(state);
         return Err(match rejection {
             AuthorizedDispatchRejection::PermissionDenied { .. } => {
                 FrontendError::HostInvocationPermissionDenied
@@ -3773,7 +3766,7 @@ async fn host_prepare_repo_delete_file(
     {
         Ok(preparation) => preparation,
         Err(error) => {
-            abort_host_patch_prepare(state.inner());
+            abort_host_patch_prepare(state);
             return Err(delete_file_preparation_frontend_error(error));
         }
     };
@@ -3810,10 +3803,136 @@ async fn host_prepare_repo_delete_file(
         (ticket_id, activity_id)
     };
     emit_host_activity(
-        &app,
+        app,
         prepared_host_activity(activity_id, "repo.delete-file".to_owned(), None),
     );
     Ok(PreparedDeleteFileResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn host_prepare_repo_delete_file(
+    request: HostPrepareDeleteFileRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedDeleteFileResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    prepare_repo_delete_file_with_current(request, &app, state.inner(), current).await
+}
+
+#[cfg(target_os = "windows")]
+async fn validate_host_confirmation_ticket(
+    ticket: &PreparedHostInvocation,
+    current: &CurrentHostComposition,
+) -> Result<(), FrontendError> {
+    if ticket.generations != current.generations
+        || ticket.composition_identity != current.composition_identity
+        || ticket.repository_identity != current.repository_identity
+    {
+        return Err(FrontendError::HostInvocationStale);
+    }
+    let current_definition =
+        host_tool_definition(current, &ticket.tool_name, CoordinatorState::Idle)?;
+    if current_definition != ticket.expected_definition
+        || current.allowed_permissions != ticket.allowed_permissions
+    {
+        return Err(FrontendError::HostInvocationStale);
+    }
+    match &ticket.payload {
+        PreparedHostPayload::Patch { preparer, .. }
+            if current
+                .repository_patch_preparer
+                .as_ref()
+                .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer)) =>
+        {
+            return Err(FrontendError::HostInvocationStale);
+        }
+        PreparedHostPayload::MultiFileEdit { preparer, .. }
+            if current
+                .repository_multi_file_edit_preparer
+                .as_ref()
+                .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer)) =>
+        {
+            return Err(FrontendError::HostInvocationStale);
+        }
+        PreparedHostPayload::CreateFile { preparer, .. }
+            if current
+                .repository_create_file_preparer
+                .as_ref()
+                .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer)) =>
+        {
+            return Err(FrontendError::HostInvocationStale);
+        }
+        PreparedHostPayload::DeleteFile { preparer, .. }
+            if current
+                .repository_delete_file_preparer
+                .as_ref()
+                .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer)) =>
+        {
+            return Err(FrontendError::HostInvocationStale);
+        }
+        _ => {}
+    }
+    match &ticket.payload {
+        PreparedHostPayload::Patch {
+            preparation,
+            preparer,
+        } => preparer
+            .revalidate(preparation)
+            .await
+            .map_err(patch_preparation_frontend_error),
+        PreparedHostPayload::MultiFileEdit {
+            preparation,
+            preparer,
+        } => preparer
+            .revalidate(preparation)
+            .await
+            .map_err(multi_file_edit_preparation_frontend_error),
+        PreparedHostPayload::CreateFile {
+            preparation,
+            preparer,
+        } => preparer
+            .revalidate(preparation)
+            .await
+            .map_err(create_file_preparation_frontend_error),
+        PreparedHostPayload::DeleteFile {
+            preparation,
+            preparer,
+        } => preparer
+            .revalidate(preparation)
+            .await
+            .map_err(delete_file_preparation_frontend_error),
+        PreparedHostPayload::Branch { .. } => Ok(()),
+    }?;
+    authorize_tool_dispatch(
+        &current.registry,
+        &ticket.expected_definition,
+        &current.allowed_permissions,
+        &ticket.call,
+    )
+    .map_err(|rejection| match rejection {
+        AuthorizedDispatchRejection::PermissionDenied { .. } => {
+            FrontendError::HostInvocationPermissionDenied
+        }
+        _ => FrontendError::HostInvocationStale,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -3844,162 +3963,14 @@ async fn host_confirm_tool_invocation(
             return Err(error);
         }
     };
-    if ticket.generations != current.generations
-        || ticket.composition_identity != current.composition_identity
-        || ticket.repository_identity != current.repository_identity
-    {
+    if let Err(error) = validate_host_confirmation_ticket(&ticket, &current).await {
         state
             .host_invocation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .finish_host();
-        return Err(FrontendError::HostInvocationStale);
+        return Err(error);
     }
-    let current_definition =
-        match host_tool_definition(&current, &ticket.tool_name, CoordinatorState::Idle) {
-            Ok(definition) => definition,
-            Err(error) => {
-                state
-                    .host_invocation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .finish_host();
-                return Err(error);
-            }
-        };
-    if current_definition != ticket.expected_definition
-        || current.allowed_permissions != ticket.allowed_permissions
-    {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        return Err(FrontendError::HostInvocationStale);
-    }
-    if let PreparedHostPayload::Patch { preparer, .. } = &ticket.payload
-        && current
-            .repository_patch_preparer
-            .as_ref()
-            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
-    {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        return Err(FrontendError::HostInvocationStale);
-    }
-    if let PreparedHostPayload::MultiFileEdit { preparer, .. } = &ticket.payload
-        && current
-            .repository_multi_file_edit_preparer
-            .as_ref()
-            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
-    {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        return Err(FrontendError::HostInvocationStale);
-    }
-    if let PreparedHostPayload::CreateFile { preparer, .. } = &ticket.payload
-        && current
-            .repository_create_file_preparer
-            .as_ref()
-            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
-    {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        return Err(FrontendError::HostInvocationStale);
-    }
-    if let PreparedHostPayload::DeleteFile { preparer, .. } = &ticket.payload
-        && current
-            .repository_delete_file_preparer
-            .as_ref()
-            .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer))
-    {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        return Err(FrontendError::HostInvocationStale);
-    }
-    if let PreparedHostPayload::Patch {
-        preparation,
-        preparer,
-    } = &ticket.payload
-        && let Err(error) = preparer.revalidate(preparation).await
-    {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.finish_host();
-        return Err(patch_preparation_frontend_error(error));
-    }
-    if let PreparedHostPayload::MultiFileEdit {
-        preparation,
-        preparer,
-    } = &ticket.payload
-        && let Err(error) = preparer.revalidate(preparation).await
-    {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.finish_host();
-        return Err(multi_file_edit_preparation_frontend_error(error));
-    }
-    if let PreparedHostPayload::CreateFile {
-        preparation,
-        preparer,
-    } = &ticket.payload
-        && let Err(error) = preparer.revalidate(preparation).await
-    {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.finish_host();
-        return Err(create_file_preparation_frontend_error(error));
-    }
-    if let PreparedHostPayload::DeleteFile {
-        preparation,
-        preparer,
-    } = &ticket.payload
-        && let Err(error) = preparer.revalidate(preparation).await
-    {
-        let mut coordinator = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.finish_host();
-        return Err(delete_file_preparation_frontend_error(error));
-    }
-    authorize_tool_dispatch(
-        &current.registry,
-        &ticket.expected_definition,
-        &current.allowed_permissions,
-        &ticket.call,
-    )
-    .map_err(|rejection| {
-        state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_host();
-        match rejection {
-            AuthorizedDispatchRejection::PermissionDenied { .. } => {
-                FrontendError::HostInvocationPermissionDenied
-            }
-            _ => FrontendError::HostInvocationStale,
-        }
-    })?;
     if repository_bound_authoring_kind(ticket.kind) {
         invalidate_repository_commit_review(state.inner()).await;
     }
@@ -7594,8 +7565,9 @@ mod tests {
     use super::host_invocation::{
         BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
         HostInvocationReview, HostPrepareBranchRequest, HostPrepareCreateFileRequest,
-        HostPrepareMultiFileEditReplacement, HostPrepareMultiFileEditRequest,
-        HostPrepareMultiFileEditTarget, HostPreparePatchRequest, HostReadRequest,
+        HostPrepareDeleteFileRequest, HostPrepareMultiFileEditReplacement,
+        HostPrepareMultiFileEditRequest, HostPrepareMultiFileEditTarget, HostPreparePatchRequest,
+        HostReadRequest,
     };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -7610,36 +7582,40 @@ mod tests {
         HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
         MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
-        Preferences, PreferencesWarning, PreparedHostInvocation, PreparedHostPayload,
-        ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-        ReadinessState, RepositoryIndexActionKind, RepositoryObservationStage,
-        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
-        StartupActivationCounters, TerminalOwnership, activity_event,
-        activity_event_with_composition, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        branch_result_classification, classify_repository_multi_file_output,
+        Preferences, PreferencesWarning, PreparedDeleteFileResponse, PreparedHostInvocation,
+        PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
+        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
+        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
+        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
+        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
+        activity_event, activity_event_with_composition, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, branch_result_classification,
+        classify_repository_delete_file_result, classify_repository_multi_file_output,
         clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
         connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
-        current_app_status, current_host_generation_tuple, desktop_repository_snapshot,
-        desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
-        desktop_tool_registry, empty_composition_metadata, forget_trusted_profile_preference,
-        frontend_error, get_effective_authority_snapshot, host_cancel_tool_invocation,
+        current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
+        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
+        empty_composition_metadata, forget_trusted_profile_preference, frontend_error,
+        get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
         host_confirm_tool_invocation, host_descriptor, host_invoke_read,
         host_prepare_repo_create_branch, host_prepare_repo_create_file,
         host_prepare_repo_edit_files, host_prepare_repo_patch, install_repository_workflow,
         invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
-        prepare_codex_connection, prepared_host_activity, publish_connected_provider_state,
-        publish_readiness_result, publish_trusted_profile_selection, refresh_repository_workflow,
+        prepare_codex_connection, prepare_repo_delete_file_with_current, prepared_host_activity,
+        publish_connected_provider_state, publish_readiness_result,
+        publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot,
         repository_tool_authority, request_connect, reset_startup_activation_counters,
         resolve_codex_executable, resolve_prepare_and_connect_codex,
-        restore_trusted_profile_selection, revoke_repository_commit_context, same_arc,
-        save_trusted_profile_preference, selected_git_executable, set_commit_identity,
-        startup_activation_snapshot, uncertain_repository_effect_pending,
-        uncertain_repository_effect_requires_refresh, validate_prompt,
+        restore_trusted_profile_selection, revoke_repository_commit_context, run_host_tool,
+        safe_delete_file_activity_result, same_arc, save_trusted_profile_preference,
+        selected_git_executable, set_commit_identity, startup_activation_snapshot,
+        uncertain_repository_effect_pending, uncertain_repository_effect_requires_refresh,
+        validate_host_confirmation_ticket, validate_prompt,
     };
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -7653,16 +7629,17 @@ mod tests {
         CodexRuntime,
     };
     use rah_tools::{
-        RepositoryBranchCreationAuthority, RepositoryCommitTool,
+        RepositoryBranchCreationAuthority, RepositoryCommitControl, RepositoryCommitTool,
         RepositoryDirectoryCreationAuthority, RepositoryFileCreationTool,
-        RepositoryFileDeletionAuthority, RepositoryFileRenameAuthority,
+        RepositoryFileDeletionAuthority, RepositoryFileDeletionTool, RepositoryFileRenameAuthority,
         RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
         RepositoryMultiFileEditPreparer, RepositoryMultiFileEditTextReplacement,
-        RepositoryPatchResultClassification, ToolContext, classify_repository_patch_output,
-        clear_live_test_create_file_native_attempts, clear_live_test_create_file_tool_executions,
-        clear_live_test_multi_file_native_attempts, clear_live_test_multi_file_tool_executions,
-        live_test_create_file_native_attempts, live_test_create_file_tool_executions,
-        live_test_multi_file_native_attempts, live_test_multi_file_tool_executions,
+        RepositoryPatchResultClassification, Tool, ToolContext, ToolRegistry,
+        classify_repository_patch_output, clear_live_test_create_file_native_attempts,
+        clear_live_test_create_file_tool_executions, clear_live_test_multi_file_native_attempts,
+        clear_live_test_multi_file_tool_executions, live_test_create_file_native_attempts,
+        live_test_create_file_tool_executions, live_test_multi_file_native_attempts,
+        live_test_multi_file_tool_executions,
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -7693,6 +7670,50 @@ mod tests {
     struct CountingCreateFileTool {
         inner: RepositoryFileCreationTool,
         executions: Arc<AtomicUsize>,
+    }
+
+    struct CountingDeleteFileTool {
+        inner: RepositoryFileDeletionTool,
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl rah_tools::Tool for CountingDeleteFileTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            self.inner.definition()
+        }
+
+        async fn execute(
+            &self,
+            input: ToolInput,
+            context: ToolContext,
+        ) -> Result<ToolOutput, rah_tools::ToolError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            self.inner.execute(input, context).await
+        }
+    }
+
+    struct FailingDeleteFileTool {
+        inner: RepositoryFileDeletionTool,
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl rah_tools::Tool for FailingDeleteFileTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            self.inner.definition()
+        }
+
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            _context: ToolContext,
+        ) -> Result<ToolOutput, rah_tools::ToolError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Err(rah_tools::ToolError::Execution {
+                message: "RAH_RAW_DELETE_RUNTIME_FAILURE_SENTINEL".to_owned(),
+            })
+        }
     }
 
     #[async_trait]
@@ -8068,6 +8089,170 @@ mod tests {
         Untracked,
         Modified,
         Staged,
+    }
+
+    fn counting_delete_registry(
+        repository: &DesktopRepository,
+        executions: Arc<AtomicUsize>,
+    ) -> Arc<ToolRegistry> {
+        let authority = repository
+            .deletion_authority
+            .clone()
+            .expect("deletion authority should be present");
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(CountingDeleteFileTool {
+                inner: RepositoryFileDeletionTool::from_authority(authority),
+                executions,
+            }))
+            .expect("counting deletion tool should register");
+        Arc::new(registry)
+    }
+
+    fn current_delete_composition(
+        state: &DesktopAppState,
+        registry: Arc<ToolRegistry>,
+    ) -> super::CurrentHostComposition {
+        let repository = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("repository should be selected");
+        let composition = desktop_tool_composition_from_registry(
+            Arc::clone(&registry),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("deletion composition should be classified");
+        super::CurrentHostComposition {
+            registry,
+            expected_definitions: composition.expected_definitions.clone(),
+            composition_identity: composition.registry.as_ref() as *const ToolRegistry as usize,
+            allowed_permissions: vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            generations: current_host_generation_tuple(state),
+            repository_identity: Some(repository_context_fingerprint(&repository.root)),
+            repository: Some(repository),
+            repository_patch_preparer: None,
+            repository_multi_file_edit_preparer: None,
+            repository_create_file_preparer: None,
+            repository_delete_file_preparer: composition.repository_delete_file_preparer.clone(),
+        }
+    }
+
+    async fn prepare_real_delete_ticket(
+        app: &tauri::AppHandle,
+        state: &DesktopAppState,
+        registry: Arc<ToolRegistry>,
+    ) -> PreparedDeleteFileResponse {
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_prepare()
+            .expect("deletion preparation should reserve the coordinator");
+        prepare_repo_delete_file_with_current(
+            HostPrepareDeleteFileRequest {
+                path: "tracked.txt".to_owned(),
+            },
+            app,
+            state,
+            current_delete_composition(state, registry),
+        )
+        .await
+        .expect("deletion preparation should succeed")
+    }
+
+    async fn prepare_real_delete_ticket_with_activity(
+        app: &tauri::AppHandle,
+        state: &DesktopAppState,
+        registry: Arc<ToolRegistry>,
+        events: &Arc<Mutex<Vec<String>>>,
+        event_number: usize,
+    ) -> (PreparedDeleteFileResponse, String) {
+        let prepared = prepare_real_delete_ticket(app, state, registry).await;
+        let events = wait_for_test_events(events, event_number)
+            .await
+            .expect("real deletion Prepare should emit activity");
+        let activity = events[event_number - 1]
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .expect("activity ID should be present")
+            .to_owned();
+        (prepared, activity)
+    }
+
+    async fn authorize_test_commit(
+        state: &DesktopAppState,
+        repository: Arc<DesktopRepository>,
+    ) -> Arc<RepositoryCommitControl> {
+        *state
+            .commit_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DesktopCommitIdentity {
+            name: "RAH Delete Test".to_owned(),
+            email: "rah-delete@example.invalid".to_owned(),
+        });
+        let (tool, control) = RepositoryCommitTool::compose(
+            &repository.git_executable,
+            &repository.root,
+            "RAH Delete Test".to_owned(),
+            "rah-delete@example.invalid".to_owned(),
+        )
+        .expect("commit capability should compose");
+        let control = Arc::new(control);
+        let repository_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model_generation = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
+        let identity_generation = *state
+            .commit_identity_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: Arc::new(tool),
+            control: Arc::clone(&control),
+        });
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&repository, Some(Arc::clone(&control)))
+                .await
+                .expect("commit review should be observed");
+        let snapshot = install_repository_workflow(
+            state,
+            &repository,
+            repository_generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(review_id),
+            ..
+        } = snapshot.review
+        else {
+            panic!("commit review should be available");
+        };
+        authorize_repository_commit_review(state, &review_id)
+            .await
+            .expect("commit review should authorize");
+        assert!(control.has_pending_authorization().await);
+        control
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14292,6 +14477,997 @@ mod tests {
                 "type": "object", "properties": {"message": {"type": "string", "maxLength": 16 * 1024}},
                 "required": ["message"], "additionalProperties": false
             })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_host_prepare_path_is_zero_effect_complete_and_private() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let source = b"RAH_DELETE_SOURCE_SENTINEL\nline-two\n";
+        fs::write(fixture.0.join("tracked.txt"), source).expect("source should be replaced");
+        assert!(
+            Command::new(&git)
+                .args(["add", "tracked.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("Git add should start")
+                .success()
+        );
+        assert!(
+            Command::new(&git)
+                .args(["commit", "--quiet", "-m", "deletion sentinel"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("Git commit should start")
+                .success()
+        );
+        fs::write(fixture.0.join("nested/ordinary.txt"), b"reviewed commit\n")
+            .expect("reviewed Commit fixture should be written");
+        assert!(
+            Command::new(&git)
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("reviewed Commit fixture should stage")
+                .success()
+        );
+        let repository = fixture.deletion_repository();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let selected = app
+            .state::<DesktopAppState>()
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("selected repository should be retained");
+        let commit_control = authorize_test_commit(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&selected),
+        )
+        .await;
+        let before_bytes = fs::read(selected.root.join("tracked.txt")).expect("target should read");
+        let before_identity = live_file_identity(&selected.root.join("tracked.txt"))
+            .expect("target identity should read");
+        let before_index = fs::read(selected.root.join(".git/index")).expect("index should read");
+        let before_git = live_git_state(&git, &selected.root, "__rah_no_excluded_branch__")
+            .expect("Git baseline should read");
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let prepared = prepare_real_delete_ticket(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        )
+        .await;
+        let events = wait_for_test_events(&host_activity.0, 1)
+            .await
+            .expect("Prepare activity should be emitted");
+        let activity_id = events[0]
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .expect("Prepare activity should have an activity ID");
+        let serialized_activity = serde_json::to_string(&events[0]).expect("activity serializes");
+        let source_text = String::from_utf8(source.to_vec()).expect("source sentinel is UTF-8");
+        let source_escaped = source_text.replace('\n', "\\n");
+        let source_hash = live_sha256(source);
+        let source_length = source.len().to_string();
+        let native_path = selected.root.join("tracked.txt").display().to_string();
+        let raw_input = serde_json::to_string(&serde_json::json!({
+            "path": "tracked.txt",
+            "expected_file_sha256": source_hash,
+            "expected_file_byte_length": source.len()
+        }))
+        .expect("raw deletion input serializes");
+        let identity_marker = format!("{before_identity:?}");
+        for forbidden in [
+            prepared.ticket_id.as_str(),
+            source_text.as_str(),
+            source_escaped.as_str(),
+            source_hash.as_str(),
+            source_length.as_str(),
+            native_path.as_str(),
+            raw_input.as_str(),
+            identity_marker.as_str(),
+        ] {
+            assert!(
+                !serialized_activity.contains(forbidden),
+                "Prepared activity leaked sentinel {forbidden}"
+            );
+        }
+        assert_eq!(events[0]["state"], "prepared");
+        assert!(events[0].get("review").is_none());
+        assert!(events[0].get("result").is_none());
+        assert_ne!(prepared.ticket_id, activity_id);
+        assert_eq!(prepared.review.operation(), "repo.delete-file");
+        assert_eq!(prepared.review.target_count(), 1);
+        assert_eq!(prepared.review.path(), "tracked.txt");
+        assert_eq!(prepared.review.preimage(), source_escaped);
+        assert_eq!(prepared.review.content_sha256(), live_sha256(source));
+        assert_eq!(prepared.review.content_byte_length(), source.len());
+        assert!(!prepared.review.non_effects().is_empty());
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(selected.root.join("tracked.txt")).unwrap(),
+            before_bytes
+        );
+        assert_eq!(
+            live_file_identity(&selected.root.join("tracked.txt")).unwrap(),
+            before_identity
+        );
+        assert_eq!(
+            fs::read(selected.root.join(".git/index")).unwrap(),
+            before_index
+        );
+        assert_eq!(
+            live_git_state(&git, &selected.root, "__rah_no_excluded_branch__").unwrap(),
+            before_git
+        );
+        assert!(commit_control.has_pending_authorization().await);
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state(),
+            CoordinatorState::HostPrepared
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_hostexplicit_ticket_boundaries_use_real_preparation() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let (prepared, activity) = prepare_real_delete_ticket_with_activity(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+            &host_activity.0,
+            1,
+        )
+        .await;
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_prepared(&activity, std::time::Instant::now())
+                .is_err()
+        );
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
+        );
+        assert!(fs::read(fixture.0.join("tracked.txt")).is_ok());
+        let _ = prepared;
+
+        let (prepared, activity) = prepare_real_delete_ticket_with_activity(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+            &host_activity.0,
+            2,
+        )
+        .await;
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(&activity)
+                .is_err()
+        );
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::HostPrepared
+        );
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(&prepared.ticket_id)
+                .is_ok()
+        );
+
+        let (prepared, _) = prepare_real_delete_ticket_with_activity(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+            &host_activity.0,
+            3,
+        )
+        .await;
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_prepared(
+                    "RAH_WRONG_DELETE_TICKET_SENTINEL",
+                    std::time::Instant::now()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
+        );
+        assert!(fs::read(fixture.0.join("tracked.txt")).is_ok());
+        let _ = prepared;
+
+        let (prepared, _) = prepare_real_delete_ticket_with_activity(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+            &host_activity.0,
+            4,
+        )
+        .await;
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_prepared(
+                    &prepared.ticket_id,
+                    std::time::Instant::now() + Duration::from_secs(300),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
+        );
+
+        let (prepared, _) = prepare_real_delete_ticket_with_activity(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+            &host_activity.0,
+            5,
+        )
+        .await;
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+                .is_ok()
+        );
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        assert!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+                .is_err()
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_hostexplicit_rejects_stale_before_started_for_git_and_desktop_drift() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        fs::write(fixture.0.join("nested/ordinary.txt"), b"reviewed commit\n")
+            .expect("reviewed Commit fixture should be written");
+        assert!(
+            Command::new(TestRepository::native_git())
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("reviewed Commit fixture should stage")
+                .success()
+        );
+        let repository = fixture.deletion_repository();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let selected = app
+            .state::<DesktopAppState>()
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("selected repository should be retained");
+        let commit_control =
+            authorize_test_commit(app.state::<DesktopAppState>().inner(), selected).await;
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_prepare()
+            .expect("success Prepare should reserve the coordinator");
+        let current = current_delete_composition(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        );
+        let prepared = prepare_repo_delete_file_with_current(
+            HostPrepareDeleteFileRequest {
+                path: "tracked.txt".to_owned(),
+            },
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            current,
+        )
+        .await
+        .expect("success Prepare should succeed");
+        let ticket = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+            .expect("ticket should be consumed once");
+        let target = fixture.0.join("tracked.txt");
+        let bytes = fs::read(&target).expect("target should read");
+        let identity = live_file_identity(&target).expect("identity should read");
+        fs::remove_file(&target).expect("same-byte replacement should remove target");
+        fs::write(&target, &bytes).expect("same-byte replacement should be written");
+        assert_ne!(live_file_identity(&target).unwrap(), identity);
+        let current = current_delete_composition(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        );
+        assert_eq!(
+            validate_host_confirmation_ticket(&ticket, &current).await,
+            Err(FrontendError::HostInvocationStale)
+        );
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        assert!(commit_control.has_pending_authorization().await);
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("second deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let prepared = prepare_real_delete_ticket(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        )
+        .await;
+        let target = fixture.0.join("nested/ordinary.txt");
+        fs::write(&target, b"index drift\n").expect("index drift should be written");
+        assert!(
+            Command::new(TestRepository::native_git())
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("index drift should stage")
+                .success()
+        );
+        let ticket = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+            .expect("second ticket should be consumed once");
+        let current = current_delete_composition(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        );
+        assert!(
+            validate_host_confirmation_ticket(&ticket, &current)
+                .await
+                .is_err()
+        );
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("third deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let prepared = prepare_real_delete_ticket(
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        )
+        .await;
+        let ticket = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+            .expect("third ticket should be consumed once");
+        let mut current = current_delete_composition(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        );
+        current.generations[1] += 1;
+        assert!(
+            validate_host_confirmation_ticket(&ticket, &current)
+                .await
+                .is_err()
+        );
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_host();
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_hostexplicit_proof_coupling_requires_independent_postcondition() {
+        let output = |status: &str, is_error: bool| ToolOutput {
+            content: vec![ToolContent::Json(serde_json::json!({
+                "status": status,
+                "uncertain": status == "uncertain",
+                "path": "tracked.txt"
+            }))],
+            is_error,
+        };
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("proof preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "tracked.txt".to_owned(),
+                })
+                .await
+                .expect("proof preparation should succeed"),
+        );
+        fs::remove_file(fixture.0.join("tracked.txt")).expect("verified absence should be created");
+        let proof = (preparation, Arc::clone(&preparer));
+        assert_eq!(
+            classify_repository_delete_file_result(
+                &output("deleted_verified", false),
+                "tracked.txt",
+                Some(&proof),
+            )
+            .await,
+            DeleteFileResultClassification::DeletedVerified
+        );
+        assert_eq!(
+            delete_file_host_terminal_state(DeleteFileResultClassification::DeletedVerified),
+            HostActivityState::ToolCompleted
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("second proof preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "tracked.txt".to_owned(),
+                })
+                .await
+                .expect("second proof preparation should succeed"),
+        );
+        let proof = (preparation, Arc::clone(&preparer));
+        assert_eq!(
+            classify_repository_delete_file_result(
+                &output("deleted_verified", false),
+                "tracked.txt",
+                Some(&proof),
+            )
+            .await,
+            DeleteFileResultClassification::Uncertain
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("third proof preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "tracked.txt".to_owned(),
+                })
+                .await
+                .expect("third proof preparation should succeed"),
+        );
+        let proof = (preparation, Arc::clone(&preparer));
+        assert_eq!(
+            classify_repository_delete_file_result(
+                &output("known_no_effect", true),
+                "tracked.txt",
+                Some(&proof),
+            )
+            .await,
+            DeleteFileResultClassification::KnownNoEffect
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("fourth proof preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "tracked.txt".to_owned(),
+                })
+                .await
+                .expect("fourth proof preparation should succeed"),
+        );
+        let bytes = fs::read(fixture.0.join("tracked.txt")).expect("replacement bytes should read");
+        fs::remove_file(fixture.0.join("tracked.txt")).expect("replacement should remove target");
+        fs::write(fixture.0.join("tracked.txt"), bytes)
+            .expect("replacement should recreate target");
+        let proof = (preparation, Arc::clone(&preparer));
+        assert_eq!(
+            classify_repository_delete_file_result(
+                &output("known_no_effect", true),
+                "tracked.txt",
+                Some(&proof),
+            )
+            .await,
+            DeleteFileResultClassification::Uncertain
+        );
+        assert_eq!(
+            safe_delete_file_activity_result(DeleteFileResultClassification::Uncertain).content,
+            vec![ToolContent::Json(serde_json::json!({"status":"uncertain"}))]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_hostexplicit_success_dispatches_once_and_invalidates_commit_review() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        fs::write(fixture.0.join("nested/ordinary.txt"), b"reviewed commit\n")
+            .expect("reviewed Commit fixture should be written");
+        assert!(
+            Command::new(TestRepository::native_git())
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("reviewed Commit fixture should stage")
+                .success()
+        );
+        let repository = fixture.deletion_repository();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("deterministic Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let selected = app
+            .state::<DesktopAppState>()
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("selected repository should be retained");
+        let commit_control = authorize_test_commit(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&selected),
+        )
+        .await;
+        let before = live_git_state(
+            &TestRepository::native_git(),
+            &fixture.0,
+            "__rah_no_excluded_branch__",
+        )
+        .expect("Git baseline should read");
+        let before_index = fs::read(selected.root.join(".git/index")).expect("index should read");
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_prepare()
+            .expect("success Prepare should reserve the coordinator");
+        let current = current_delete_composition(
+            app.state::<DesktopAppState>().inner(),
+            Arc::clone(&registry),
+        );
+        let prepared = prepare_repo_delete_file_with_current(
+            HostPrepareDeleteFileRequest {
+                path: "tracked.txt".to_owned(),
+            },
+            app.handle(),
+            app.state::<DesktopAppState>().inner(),
+            current.clone(),
+        )
+        .await;
+        let prepared = prepared.expect("success Prepare should succeed");
+        let _prepare_events = wait_for_test_events(&host_activity.0, 1)
+            .await
+            .expect("Prepare event should arrive");
+        let ticket = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+            .expect("prepared deletion ticket should be consumed");
+        validate_host_confirmation_ticket(&ticket, &current)
+            .await
+            .expect("current deletion ticket should pass production validation");
+        assert!(commit_control.has_pending_authorization().await);
+        let started_id = ticket.activity_id.clone();
+        invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
+        assert!(!commit_control.has_pending_authorization().await);
+        emit_host_activity(
+            app.handle(),
+            HostActivityEvent {
+                source: "host_explicit",
+                invocation_id: started_id,
+                tool: "repo.delete-file".to_owned(),
+                state: HostActivityState::Started,
+                result: None,
+                review: None,
+            },
+        );
+        let PreparedHostInvocation {
+            registry,
+            expected_definition,
+            call,
+            allowed_permissions,
+            kind,
+            activity_id,
+            repository_identity,
+            generations,
+            payload,
+            ..
+        } = ticket;
+        let deletion_proof = match payload {
+            PreparedHostPayload::DeleteFile {
+                preparation,
+                preparer,
+            } => Some((preparation, preparer)),
+            _ => panic!("ticket should retain deletion proof"),
+        };
+        run_host_tool(
+            app.handle().clone(),
+            registry,
+            expected_definition,
+            allowed_permissions,
+            call,
+            kind,
+            activity_id,
+            repository_identity,
+            generations,
+            None,
+            None,
+            deletion_proof,
+        )
+        .await;
+        let events = wait_for_test_events(&host_activity.0, 3)
+            .await
+            .expect("Started and terminal events should arrive");
+        require_host_event(&events[1], "started", "repo.delete-file").expect("Started event");
+        require_host_event(&events[2], "tool_completed", "repo.delete-file")
+            .expect("terminal event");
+        assert_eq!(
+            event_tool_output(&events[2]).unwrap().content,
+            vec![ToolContent::Json(
+                serde_json::json!({"status":"deleted_verified"})
+            )]
+        );
+        assert!(!selected.root.join("tracked.txt").exists());
+        let after = live_git_state(
+            &TestRepository::native_git(),
+            &fixture.0,
+            "__rah_no_excluded_branch__",
+        )
+        .expect("Git terminal state should read");
+        assert_eq!(
+            fs::read(selected.root.join(".git/index")).unwrap(),
+            before_index
+        );
+        assert_eq!(after.symbolic_head, before.symbolic_head);
+        assert_eq!(after.head_oid, before.head_oid);
+        assert_eq!(after.current_branch, before.current_branch);
+        assert_eq!(after.index_semantics, before.index_semantics);
+        assert_eq!(after.raw_staged_diff, before.raw_staged_diff);
+        assert_eq!(after.tracking, before.tracking);
+        assert_eq!(after.local_heads, before.local_heads);
+        assert_eq!(after.tags_and_remotes, before.tags_and_remotes);
+        assert_eq!(after.all_refs, before.all_refs);
+        assert!(after.status.contains(" D tracked.txt"));
+        assert!(!after.status.contains("D  tracked.txt"));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(!commit_control.has_pending_authorization().await);
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state(),
+            CoordinatorState::Idle
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deletion_hostexplicit_post_started_failures_are_uncertain_without_replay() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        fs::write(fixture.0.join("nested/ordinary.txt"), b"reviewed commit\n")
+            .expect("reviewed Commit fixture should be written");
+        assert!(
+            Command::new(TestRepository::native_git())
+                .args(["add", "nested/ordinary.txt"])
+                .current_dir(&fixture.0)
+                .status()
+                .expect("reviewed Commit fixture should stage")
+                .success()
+        );
+        let repository = fixture.deletion_repository();
+        let preparer = Arc::new(
+            rah_tools::RepositoryDeleteFilePreparer::new(TestRepository::native_git(), &fixture.0)
+                .expect("failure proof preparer should construct"),
+        );
+        let preparation = Box::new(
+            preparer
+                .prepare(rah_tools::RepositoryDeleteFilePreparationRequest {
+                    path: "tracked.txt".to_owned(),
+                })
+                .await
+                .expect("failure proof preparation should succeed"),
+        );
+        let expected_definition =
+            RepositoryFileDeletionTool::new(TestRepository::native_git(), &fixture.0)
+                .expect("failure tool should construct")
+                .definition();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(FailingDeleteFileTool {
+                inner: RepositoryFileDeletionTool::from_authority(
+                    repository
+                        .deletion_authority
+                        .clone()
+                        .expect("deletion authority should be present"),
+                ),
+                executions: Arc::clone(&executions),
+            }))
+            .expect("failing tool should register");
+        let registry = Arc::new(registry);
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("failure Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let selected = app
+            .state::<DesktopAppState>()
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("selected repository should be retained");
+        let commit_control =
+            authorize_test_commit(app.state::<DesktopAppState>().inner(), selected).await;
+        assert!(commit_control.has_pending_authorization().await);
+        invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
+        assert!(!commit_control.has_pending_authorization().await);
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let generations = current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let repository_identity = Some(repository_context_fingerprint(&fixture.0));
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_read()
+            .expect("post-start failure should own coordinator");
+        emit_host_activity(
+            app.handle(),
+            HostActivityEvent {
+                source: "host_explicit",
+                invocation_id: "RAH_FAILURE_ACTIVITY_SENTINEL".to_owned(),
+                tool: "repo.delete-file".to_owned(),
+                state: HostActivityState::Started,
+                result: None,
+                review: None,
+            },
+        );
+        run_host_tool(
+            app.handle().clone(),
+            registry,
+            expected_definition.clone(),
+            vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            host_call(
+                ToolName::new("repo.delete-file"),
+                ToolInput(serde_json::json!({
+                    "path": "tracked.txt",
+                    "expected_file_sha256": live_sha256(b"base\n"),
+                    "expected_file_byte_length": 5
+                })),
+            ),
+            HostInvocationKind::RepoDeleteFile,
+            "RAH_FAILURE_ACTIVITY_SENTINEL".to_owned(),
+            repository_identity,
+            generations,
+            None,
+            None,
+            Some((preparation, preparer)),
+        )
+        .await;
+        let events = wait_for_test_events(&host_activity.0, 2)
+            .await
+            .expect("runtime failure terminal event should arrive");
+        require_host_event(&events[1], "possible_effect_unknown", "repo.delete-file")
+            .expect("runtime failure should be uncertain");
+        assert_eq!(
+            event_tool_output(&events[1]).unwrap().content,
+            vec![ToolContent::Json(serde_json::json!({"status":"uncertain"}))]
+        );
+        let serialized = serde_json::to_string(&events[1]).unwrap();
+        assert!(!serialized.contains("RAH_RAW_DELETE_RUNTIME_FAILURE_SENTINEL"));
+        assert!(fixture.0.join("tracked.txt").exists());
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
+        );
+
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.deletion_repository();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_delete_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("rejection Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let repository_identity = Some(repository_context_fingerprint(&fixture.0));
+        let generations = current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let mut expected_definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.delete-file")
+            .expect("rejection definition should exist");
+        expected_definition.description = "RAH_REJECTED_DEFINITION_SENTINEL".to_owned();
+        app.state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_read()
+            .expect("rejected dispatch should own coordinator");
+        emit_host_activity(
+            app.handle(),
+            HostActivityEvent {
+                source: "host_explicit",
+                invocation_id: "RAH_REJECTED_ACTIVITY".to_owned(),
+                tool: "repo.delete-file".to_owned(),
+                state: HostActivityState::Started,
+                result: None,
+                review: None,
+            },
+        );
+        run_host_tool(
+            app.handle().clone(),
+            registry,
+            expected_definition,
+            vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            host_call(
+                ToolName::new("repo.delete-file"),
+                ToolInput(serde_json::json!({
+                    "path": "tracked.txt",
+                    "expected_file_sha256": live_sha256(b"base\n"),
+                    "expected_file_byte_length": 5
+                })),
+            ),
+            HostInvocationKind::RepoDeleteFile,
+            "RAH_REJECTED_ACTIVITY".to_owned(),
+            repository_identity,
+            generations,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let events = wait_for_test_events(&host_activity.0, 2)
+            .await
+            .expect("rejected dispatch terminal event should arrive");
+        require_host_event(&events[1], "possible_effect_unknown", "repo.delete-file")
+            .expect("rejected dispatch should be uncertain after Started");
+        assert_eq!(
+            event_tool_output(&events[1]).unwrap().content,
+            vec![ToolContent::Json(serde_json::json!({"status":"uncertain"}))]
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert!(fixture.0.join("tracked.txt").exists());
+        assert_eq!(
+            app.state::<DesktopAppState>()
+                .host_invocation
+                .lock()
+                .unwrap()
+                .state(),
+            CoordinatorState::Idle
         );
     }
 
