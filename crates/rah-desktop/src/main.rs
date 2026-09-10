@@ -7601,9 +7601,10 @@ mod tests {
         get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
         host_confirm_tool_invocation, host_descriptor, host_invoke_read,
         host_prepare_repo_create_branch, host_prepare_repo_create_file,
-        host_prepare_repo_edit_files, host_prepare_repo_patch, install_repository_workflow,
-        invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
-        prepare_codex_connection, prepare_repo_delete_file_with_current, prepared_host_activity,
+        host_prepare_repo_delete_file, host_prepare_repo_edit_files, host_prepare_repo_patch,
+        install_repository_workflow, invalidate_repository_commit_review,
+        model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
+        prepare_repo_delete_file_with_current, prepared_host_activity,
         publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
@@ -7636,9 +7637,11 @@ mod tests {
         RepositoryMultiFileEditPreparer, RepositoryMultiFileEditTextReplacement,
         RepositoryPatchResultClassification, Tool, ToolContext, ToolRegistry,
         classify_repository_patch_output, clear_live_test_create_file_native_attempts,
-        clear_live_test_create_file_tool_executions, clear_live_test_multi_file_native_attempts,
+        clear_live_test_create_file_tool_executions, clear_live_test_delete_file_native_attempts,
+        clear_live_test_delete_file_tool_executions, clear_live_test_multi_file_native_attempts,
         clear_live_test_multi_file_tool_executions, live_test_create_file_native_attempts,
-        live_test_create_file_tool_executions, live_test_multi_file_native_attempts,
+        live_test_create_file_tool_executions, live_test_delete_file_native_attempts,
+        live_test_delete_file_tool_executions, live_test_multi_file_native_attempts,
         live_test_multi_file_tool_executions,
     };
     use serde_json::Value;
@@ -8881,6 +8884,647 @@ mod tests {
         clear_live_test_create_file_tool_executions(&fixture.0);
         clear_live_test_create_file_native_attempts(&fixture.0);
         println!("RAH_CREATE_FILE_HOSTEXPLICIT_LIVE_OK");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the certified Windows Codex live gate"]
+    async fn windows_live_desktop_hostexplicit_delete_file() -> Result<(), String> {
+        let fixture = TestRepository::new();
+        let storage = TestRepository::new();
+        let git = selected_git_executable()
+            .map_err(|error| format!("Git discovery failed: {error:?}"))?;
+        let target = "src/rah-hostexplicit-live-delete.txt";
+        let unrelated = "unrelated-staged.txt";
+        let content =
+            "RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_SOURCE_SENTINEL\nline-two\nfinal-line-no-newline";
+        let expected_bytes = content.as_bytes();
+        let expected_sha256 = live_sha256(expected_bytes);
+        let target_path = fixture.0.join(target);
+        let parent_path = fixture.0.join("src");
+        let unrelated_path = fixture.0.join(unrelated);
+
+        fs::remove_dir_all(fixture.0.join(".git"))
+            .map_err(|error| format!("placeholder metadata cleanup failed: {error}"))?;
+        fs::remove_file(fixture.0.join("inside.txt"))
+            .map_err(|error| format!("placeholder file cleanup failed: {error}"))?;
+        let run_git = |arguments: &[&str]| -> Result<(), String> {
+            let output = Command::new(&git)
+                .args(arguments)
+                .current_dir(&fixture.0)
+                .output()
+                .map_err(|error| format!("Git fixture command failed to start: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Git fixture command failed with status {}",
+                    output.status
+                ));
+            }
+            Ok(())
+        };
+        run_git(&["init", "--quiet"])?;
+        run_git(&["config", "user.email", "rah-delete-live@example.invalid"])?;
+        run_git(&["config", "user.name", "RAH Delete Live Test"])?;
+        run_git(&["config", "core.autocrlf", "false"])?;
+        fs::create_dir_all(&parent_path)
+            .map_err(|error| format!("target parent creation failed: {error}"))?;
+        fs::write(&target_path, expected_bytes)
+            .map_err(|error| format!("target fixture write failed: {error}"))?;
+        fs::write(&unrelated_path, b"unrelated committed\n")
+            .map_err(|error| format!("unrelated fixture write failed: {error}"))?;
+        run_git(&["add", target, unrelated])?;
+        run_git(&["commit", "--quiet", "-m", "live deletion fixture"])?;
+        fs::write(&unrelated_path, b"unrelated staged change\n")
+            .map_err(|error| format!("unrelated staged change failed: {error}"))?;
+        run_git(&["add", unrelated])?;
+
+        let require_regular_non_reparse = |path: &Path, description: &str| {
+            use std::os::windows::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|error| format!("{description} metadata failed: {error}"))?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.file_attributes() & 0x400 != 0
+            {
+                return Err(format!(
+                    "{description} was not an ordinary non-reparse file"
+                ));
+            }
+            Ok::<(), String>(())
+        };
+        let require_link_count_one = |path: &Path| -> Result<(), String> {
+            let file = fs::File::open(path)
+                .map_err(|error| format!("target link-count handle failed: {error}"))?;
+            let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+            let result = unsafe {
+                GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr())
+            };
+            if result == 0 {
+                return Err("target link-count observation failed".to_owned());
+            }
+            let information = unsafe { information.assume_init() };
+            if information.nNumberOfLinks != 1 {
+                return Err("target link count was not one".to_owned());
+            }
+            Ok(())
+        };
+        require_regular_non_reparse(&target_path, "target")?;
+        require_link_count_one(&target_path)?;
+        if expected_bytes.len() > 65536
+            || std::str::from_utf8(expected_bytes).is_err()
+            || expected_bytes.contains(&0)
+        {
+            return Err("live target source did not meet reviewed bounds".to_owned());
+        }
+        let target_stage = live_git_text(&git, &fixture.0, &["ls-files", "--stage", "--", target])?;
+        if !target_stage.starts_with("100644 ") || !target_stage.contains(target) {
+            return Err("live target was not mode 100644 in the stage-0 index".to_owned());
+        }
+        let before_target_bytes = fs::read(&target_path)
+            .map_err(|error| format!("target baseline read failed: {error}"))?;
+        let before_target_identity = live_file_identity(&target_path)?;
+        let sparse_checkout = live_git_text(
+            &git,
+            &fixture.0,
+            &["config", "--get", "core.sparseCheckout"],
+        )
+        .or_else(|error| {
+            if error.contains("status") {
+                Ok(String::new())
+            } else {
+                Err(error)
+            }
+        })?;
+        if sparse_checkout.trim().eq_ignore_ascii_case("true") {
+            return Err("live fixture unexpectedly enabled sparse checkout".to_owned());
+        }
+
+        clear_live_test_delete_file_tool_executions(&fixture.0);
+        clear_live_test_delete_file_native_attempts(&fixture.0);
+        let deletion_authority = RepositoryFileDeletionAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("deletion authority construction failed: {error}"))?;
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            None,
+            Some(deletion_authority),
+            None,
+            None,
+        )
+        .map_err(|error| format!("Desktop repository construction failed: {error:?}"))?;
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let host_activity = listen_for_test_event(app.handle(), "host_activity_event");
+        let refresh_events = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+        let chat_events = listen_for_test_event(app.handle(), "chat_event");
+        let model_activity = listen_for_test_event(app.handle(), "activity_event");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        set_commit_identity(
+            app.handle().clone(),
+            app.state(),
+            "RAH Delete-File HostExplicit Live Test".to_owned(),
+            "rah-delete-file@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("Desktop commit identity setup failed: {error:?}"))?;
+        connect_codex(app.state())
+            .await
+            .map_err(|error| format!("production Desktop connection failed: {error:?}"))?;
+
+        let connected_snapshot = get_effective_authority_snapshot(app.state());
+        let eligible = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| tool.host_invocation.eligible)
+            .map(|tool| tool.public_tool_name.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_eligible = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let delete_tool = connected_snapshot
+            .effective_tools
+            .iter()
+            .find(|tool| tool.public_tool_name == "repo.delete-file")
+            .ok_or_else(|| "repo.delete-file was not advertised".to_owned())?;
+        let ineligible_names = ["repo.rename-file", "repo.create-directory", "repo.commit"];
+        let ineligible_was_eligible = connected_snapshot.effective_tools.iter().any(|tool| {
+            ineligible_names.contains(&tool.public_tool_name.as_str())
+                && tool.host_invocation.eligible
+        });
+        let external_effective = connected_snapshot
+            .effective_tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                )
+            })
+            .count();
+        let provider_activation_present = app
+            .state::<DesktopAppState>()
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let trusted_profile_present = app
+            .state::<DesktopAppState>()
+            .trusted_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if connected_snapshot.status != SnapshotStatus::ConnectedCurrent
+            || eligible != expected_eligible
+            || ineligible_was_eligible
+            || !delete_tool.host_invocation.eligible
+            || delete_tool.host_invocation.kind != Some(HostInvocationKind::RepoDeleteFile)
+            || delete_tool.source_kind != SourceKind::RepositoryHost
+            || delete_tool.source_label != "desktop_repository"
+            || delete_tool.effect_class != EffectClass::RepositoryMutation
+            || delete_tool.authority_category != AuthorityCategory::RepositoryFileDeletion
+            || delete_tool.permission != PermissionLevel::Execute
+            || !delete_tool.repository_bound
+            || external_effective != 0
+            || connected_snapshot.configured.configured_provider_count != 0
+            || provider_activation_present
+            || trusted_profile_present
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("connected-current deletion composition was not exact".to_owned());
+        }
+        let commit_control = app
+            .state::<DesktopAppState>()
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control))
+            .ok_or_else(|| "reviewed Commit control was not composed".to_owned())?;
+        reset_startup_activation_counters();
+        if startup_activation_snapshot() != StartupActivationCounters::default()
+            || !chat_events.0.lock().unwrap().is_empty()
+            || !model_activity.0.lock().unwrap().is_empty()
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("live operation baseline included model lifecycle activity".to_owned());
+        }
+
+        let reviewed = refresh_repository_workflow(app.state::<DesktopAppState>().inner())
+            .await
+            .map_err(|error| format!("review snapshot failed: {error:?}"))?;
+        let review_id = match reviewed.review {
+            StagedReviewPresentation::ReviewAvailable {
+                review_id: Some(review_id),
+                can_authorize: true,
+                authorization_state: CommitAuthorizationPresentation::ReadyToAuthorize,
+            } => review_id,
+            other => {
+                shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+                return Err(format!(
+                    "fixture did not expose a reviewed Commit authorization: {other:?}"
+                ));
+            }
+        };
+        let authorization =
+            authorize_repository_commit_review(app.state::<DesktopAppState>().inner(), &review_id)
+                .await
+                .map_err(|error| format!("review authorization failed: {error:?}"))?;
+        if authorization.authorization_state != CommitAuthorizationPresentation::AuthorizedPending
+            || !commit_control.has_pending_authorization().await
+        {
+            shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+            return Err("reviewed Commit authorization was not pending".to_owned());
+        }
+
+        let before_directory_entries = live_directory_entries(&fixture.0)?;
+        let before_parent_entries = live_directory_entries(&parent_path)?;
+        let before_index = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("Git index baseline read failed: {error}"))?;
+        let before_cached_binary =
+            live_git_text(&git, &fixture.0, &["diff", "--cached", "--binary"])?;
+        let before_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        if !before_git
+            .status
+            .lines()
+            .any(|line| line == format!("M  {unrelated}").as_str())
+            || before_git.status.lines().any(|line| line.contains(target))
+            || !before_git.index_semantics.contains(target)
+            || !before_cached_binary.contains(unrelated)
+        {
+            return Err("protected staged fixture baseline was not established".to_owned());
+        }
+        let before_head = before_git.head_oid.clone();
+        let before_branch = before_git.current_branch.clone();
+        let before_refs = before_git.all_refs.clone();
+        let before_generations =
+            current_host_generation_tuple(app.state::<DesktopAppState>().inner());
+        let before_namespace = app.state::<DesktopAppState>().persistence_namespace();
+        let before_conversation = serde_json::to_value(
+            app.state::<DesktopAppState>()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("conversation baseline serialization failed: {error}"))?;
+        if before_git.raw_staged_diff
+            != live_git_text(&git, &fixture.0, &["diff", "--cached", "--raw"])?
+        {
+            return Err("raw staged and binary staged baselines disagreed".to_owned());
+        }
+
+        let prepared = host_prepare_repo_delete_file(
+            HostPrepareDeleteFileRequest {
+                path: target.to_owned(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.delete-file Prepare failed: {error:?}"))?;
+        let prepare_events = wait_for_test_events(&host_activity.0, 1).await?;
+        require_host_event(&prepare_events[0], "prepared", "repo.delete-file")?;
+        let activity_id = prepare_events[0]
+            .get("invocationId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Prepared activity omitted invocationId".to_owned())?
+            .to_owned();
+        let prepare_activity = serde_json::to_string(&prepare_events[0])
+            .map_err(|error| format!("Prepared activity serialization failed: {error}"))?;
+        let native_target = target_path.to_string_lossy().into_owned();
+        let native_repository = fixture.0.to_string_lossy().into_owned();
+        let escaped_source =
+            "RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_SOURCE_SENTINEL\\nline-two\\nfinal-line-no-newline";
+        let raw_tool_input = serde_json::to_string(&serde_json::json!({
+            "path": target,
+            "expected_file_sha256": expected_sha256,
+            "expected_file_byte_length": expected_bytes.len(),
+        }))
+        .map_err(|error| format!("Tool input serialization failed: {error}"))?;
+        let direct_review = serde_json::to_string(&prepared.review)
+            .map_err(|error| format!("direct review serialization failed: {error}"))?;
+        let target_identity_text = format!("{before_target_identity:?}");
+        let source_length_marker = format!("\"content_byte_length\":{}", expected_bytes.len());
+        let forbidden_prepare_values = [
+            prepared.ticket_id.as_str(),
+            "RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_SOURCE_SENTINEL",
+            escaped_source,
+            expected_sha256.as_str(),
+            target,
+            native_repository.as_str(),
+            native_target.as_str(),
+            target_identity_text.as_str(),
+            raw_tool_input.as_str(),
+            direct_review.as_str(),
+            source_length_marker.as_str(),
+        ];
+        if prepare_events[0].get("review").is_some()
+            || prepare_events[0].get("result").is_some()
+            || activity_id == prepared.ticket_id
+            || forbidden_prepare_values
+                .iter()
+                .any(|value| !value.is_empty() && prepare_activity.contains(value))
+        {
+            return Err("generic Prepared activity was not value-level private".to_owned());
+        }
+        let facts = prepared.review.content_facts();
+        if prepared.ticket_id.is_empty()
+            || prepared.ticket_id.len() > 256
+            || prepared.review.operation() != "repo.delete-file"
+            || prepared.review.target_count() != 1
+            || prepared.review.path() != target
+            || prepared.review.tracked_state() != "clean HEAD-tracked stage-0 regular file"
+            || prepared.review.file_mode() != "100644"
+            || prepared.review.file_intent() != "permanently remove this existing regular file"
+            || prepared.review.preimage_encoding() != "complete_utf8_escaped"
+            || prepared.review.content_escaped() != escaped_source
+            || prepared.review.content_byte_length() != expected_bytes.len()
+            || prepared.review.content_sha256() != expected_sha256
+            || prepared.review.bom() != rah_tools::RepositoryDeleteFileBomState::Absent
+            || facts.contains_cr
+            || !facts.contains_lf
+            || facts.contains_crlf
+            || facts.carriage_returns != 0
+            || facts.line_feeds != 2
+            || facts.crlf_pairs != 0
+            || !facts.ends_with_newline
+            || facts.final_eof != "final_newline"
+            || facts.contains_tab
+            || facts.contains_trailing_space
+            || facts.contains_control_or_format_escape
+            || facts.control_characters != 0
+            || facts.format_characters != 0
+            || facts.empty
+            || prepared.review.head_blob_relationship() != "worktree bytes equal current HEAD blob"
+            || prepared.review.index_relationship()
+                != "exact stage-0 index entry equals HEAD tree entry and worktree"
+            || prepared.review.expected_effect()
+                != "one worktree file becomes absent; one unstaged deletion"
+            || prepared.review.post_delete_git_meaning()
+                != "index, HEAD, branch, refs, and history remain unchanged"
+            || !prepared.review.non_effects().contains(&"not Stage")
+            || !prepared.review.non_effects().contains(&"not Unstage")
+            || !prepared.review.non_effects().contains(&"not Commit")
+            || !prepared
+                .review
+                .non_effects()
+                .contains(&"does not modify the index")
+            || !prepared
+                .review
+                .warnings()
+                .contains(&"no Trash or Recycle Bin guarantee")
+            || !prepared.review.warnings().contains(&"no retry or replay")
+        {
+            return Err("direct Prepared deletion review was incomplete or altered".to_owned());
+        }
+        let prepare_index_unchanged = fs::read(fixture.0.join(".git").join("index"))
+            .map_err(|error| format!("Prepare index read failed: {error}"))?
+            == before_index;
+        let prepare_git_unchanged =
+            live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")? == before_git;
+        let prepare_cached_unchanged =
+            live_git_text(&git, &fixture.0, &["diff", "--cached", "--binary"])?
+                == before_cached_binary;
+        let prepare_root_unchanged =
+            live_directory_entries(&fixture.0)? == before_directory_entries;
+        let prepare_parent_unchanged =
+            live_directory_entries(&parent_path)? == before_parent_entries;
+        let prepare_conversation_unchanged = serde_json::to_value(
+            app.state::<DesktopAppState>()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation(),
+        )
+        .map_err(|error| format!("Prepare conversation serialization failed: {error}"))?
+            == before_conversation;
+        let prepare_coordinator = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state();
+        if !prepare_index_unchanged
+            || !prepare_git_unchanged
+            || !prepare_cached_unchanged
+            || !prepare_root_unchanged
+            || !prepare_parent_unchanged
+            || fs::read(&target_path)
+                .map_err(|error| format!("Prepare target read failed: {error}"))?
+                != before_target_bytes
+            || live_file_identity(&target_path)? != before_target_identity
+            || live_test_delete_file_tool_executions(&fixture.0) != 0
+            || live_test_delete_file_native_attempts(&fixture.0) != 0
+            || current_host_generation_tuple(app.state::<DesktopAppState>().inner())
+                != before_generations
+            || app.state::<DesktopAppState>().persistence_namespace() != before_namespace
+            || !prepare_conversation_unchanged
+            || prepare_coordinator != CoordinatorState::HostPrepared
+            || !commit_control.has_pending_authorization().await
+        {
+            return Err("Prepare was not zero effect or invalidated Commit review".to_owned());
+        }
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_TARGET={target}");
+        println!(
+            "RAH_DELETE_FILE_HOSTEXPLICIT_SOURCE_LENGTH={}",
+            expected_bytes.len()
+        );
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_SOURCE_SHA256={expected_sha256}");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_PREPARE_TOOL_EXECUTIONS=0");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_PREPARE_NATIVE_ATTEMPTS=0");
+
+        let confirmed = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await
+        .map_err(|error| format!("production repo.delete-file Confirm failed: {error:?}"))?;
+        if confirmed.invocation_id != activity_id {
+            return Err("Confirm changed the independent activity ID".to_owned());
+        }
+        let started_events = wait_for_test_events(&host_activity.0, 2).await?;
+        require_host_event(&started_events[1], "started", "repo.delete-file")?;
+        if commit_control.has_pending_authorization().await {
+            return Err("reviewed Commit authorization remained pending at Started".to_owned());
+        }
+        if !target_path.exists() {
+            return Err("target disappeared before Started observation".to_owned());
+        }
+        let events = wait_for_test_events(&host_activity.0, 3).await?;
+        require_host_event(&events[2], "tool_completed", "repo.delete-file")?;
+        let terminal_output = event_tool_output(&events[2])?;
+        let [ToolContent::Json(terminal_result)] = terminal_output.content.as_slice() else {
+            return Err("terminal result was not one JSON status object".to_owned());
+        };
+        if terminal_output.is_error
+            || terminal_result != &serde_json::json!({"status": "deleted_verified"})
+        {
+            return Err("terminal public result was not status-only deleted_verified".to_owned());
+        }
+        for event in &events {
+            if event.get("invocationId").and_then(Value::as_str) != Some(activity_id.as_str())
+                || event.get("review").is_some()
+            {
+                return Err("HostExplicit activity correlation or review privacy failed".to_owned());
+            }
+            let serialized = serde_json::to_string(event)
+                .map_err(|error| format!("HostActivity serialization failed: {error}"))?;
+            if forbidden_prepare_values
+                .iter()
+                .any(|value| !value.is_empty() && serialized.contains(value))
+            {
+                return Err("terminal HostActivity privacy boundary failed".to_owned());
+            }
+        }
+        if live_test_delete_file_tool_executions(&fixture.0) != 1
+            || live_test_delete_file_native_attempts(&fixture.0) != 1
+        {
+            return Err(
+                "Confirm was not exactly one Tool and one native delete attempt".to_owned(),
+            );
+        }
+        let final_target_exists = target_path.exists();
+        let final_parent_entries = live_directory_entries(&parent_path)?;
+        if final_target_exists
+            || final_parent_entries
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case("rah-hostexplicit-live-delete.txt"))
+        {
+            return Err("independent final absence proof failed".to_owned());
+        }
+        let after_git = live_git_state(&git, &fixture.0, "__rah_no_excluded_branch__")?;
+        let after_cached_binary =
+            live_git_text(&git, &fixture.0, &["diff", "--cached", "--binary"])?;
+        let after_status = after_git
+            .status
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let expected_status = [format!(" D {target}"), format!("M  {unrelated}")]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if after_status != expected_status
+            || after_git.index_semantics != before_git.index_semantics
+            || after_git.head_oid != before_head
+            || after_git.symbolic_head != before_git.symbolic_head
+            || after_git.current_branch != before_branch
+            || after_git.local_heads != before_git.local_heads
+            || after_git.tags_and_remotes != before_git.tags_and_remotes
+            || after_git.all_refs != before_refs
+            || fs::read(fixture.0.join(".git").join("index"))
+                .map_err(|error| format!("post-effect index read failed: {error}"))?
+                != before_index
+            || after_cached_binary != before_cached_binary
+        {
+            return Err("verified deletion changed protected Git state or staged state".to_owned());
+        }
+        let refresh = wait_for_test_events(&refresh_events.0, 1).await?;
+        if refresh.len() != 1 {
+            return Err("descriptive repository refresh was not emitted exactly once".to_owned());
+        }
+        if commit_control.has_pending_authorization().await {
+            return Err("Started recreated reviewed Commit authorization".to_owned());
+        }
+        let duplicate = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: prepared.ticket_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        let activity_as_confirm = host_confirm_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        )
+        .await;
+        let activity_as_cancel = host_cancel_tool_invocation(
+            HostConfirmRequest {
+                ticket_id: activity_id.clone(),
+            },
+            app.handle().clone(),
+            app.state(),
+        );
+        if duplicate != Err(FrontendError::HostInvocationTicketInvalid)
+            || activity_as_confirm != Err(FrontendError::HostInvocationTicketInvalid)
+            || activity_as_cancel != Err(FrontendError::HostInvocationTicketInvalid)
+            || live_test_delete_file_tool_executions(&fixture.0) != 1
+            || live_test_delete_file_native_attempts(&fixture.0) != 1
+        {
+            return Err("duplicate or activity-ID authority rejection was not exact".to_owned());
+        }
+        let final_coordinator = app
+            .state::<DesktopAppState>()
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state();
+        let final_chat = *app
+            .state::<DesktopAppState>()
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if final_coordinator != CoordinatorState::Idle
+            || final_chat != ChatState::Idle
+            || !app
+                .state::<DesktopAppState>()
+                .active_chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            || !chat_events.0.lock().unwrap().is_empty()
+            || !model_activity.0.lock().unwrap().is_empty()
+            || startup_activation_snapshot() != StartupActivationCounters::default()
+        {
+            return Err("HostExplicit deletion left coordinator/chat/model activity".to_owned());
+        }
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_CONFIRM_TOOL_EXECUTIONS=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_CONFIRM_NATIVE_ATTEMPTS=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_TERMINAL_STATUS=deleted_verified");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_TERMINAL_STATE=tool_completed");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_GIT_UNSTAGED_DELETION=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_INDEX_UNCHANGED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_HEAD_UNCHANGED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_REFS_UNCHANGED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_COMMIT_AUTHORIZATION_INVALIDATED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_TICKET_ACTIVITY_SEPARATE=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_DUPLICATE_CONFIRM_REJECTED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_ACTIVITY_CONFIRM_REJECTED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_ACTIVITY_CANCEL_REJECTED=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_COORDINATOR_IDLE=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_CHAT_IDLE=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_GENERATIONS={before_generations:?}");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_MODEL_LIFECYCLE=0");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_MCP=0");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_PROCESS_PLUGINS=0");
+        app.unlisten(host_activity.1);
+        app.unlisten(refresh_events.1);
+        app.unlisten(chat_events.1);
+        app.unlisten(model_activity.1);
+        shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+        clear_live_test_delete_file_tool_executions(&fixture.0);
+        clear_live_test_delete_file_native_attempts(&fixture.0);
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_CODEX_CLEANUP=1");
+        println!("RAH_DELETE_FILE_HOSTEXPLICIT_LIVE_OK");
         Ok(())
     }
 

@@ -77,6 +77,16 @@ pub use repository_create_file::{
     RepositoryCreateFilePreparationError, RepositoryCreateFilePreparationRequest,
     RepositoryCreateFilePreparer, RepositoryCreateFileReview, RepositoryFileCreationTool,
 };
+#[cfg(feature = "live-test-support")]
+pub use repository_delete_file::live_test_delete_file_native_attempts::{
+    clear as clear_live_test_delete_file_native_attempts,
+    count as live_test_delete_file_native_attempts,
+};
+#[cfg(feature = "live-test-support")]
+pub use repository_delete_file::live_test_delete_file_tool_executions::{
+    clear as clear_live_test_delete_file_tool_executions,
+    count as live_test_delete_file_tool_executions,
+};
 pub use repository_delete_file::{
     REPOSITORY_DELETE_FILE_TOOL_NAME, RepositoryDeleteFileBomState,
     RepositoryDeleteFileContentFacts, RepositoryDeleteFilePreparation,
