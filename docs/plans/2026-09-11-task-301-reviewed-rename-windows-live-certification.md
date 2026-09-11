@@ -110,13 +110,13 @@ The test must prove, from the production Desktop route:
 | Frontend syntax/permission suites | PASS: `node --check status.js`, frontend authority tests, Tauri rename permission tests |
 | Desktop release build | PASS: `cargo build -p rah-desktop --release` |
 | Workspace check/test/clippy/diff | PASS: workspace check, test, clippy, and diff check |
-| Exact ignored live command | PASS on `ba1049c575da2a5bcbde613b34152361d8e56f76` using the repository Codex live-gate wrapper |
+| Exact ignored live command | PASS on the final exact candidate using the repository Codex live-gate wrapper |
 | Live marker | `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK` |
 | Final commit / exact-head CI | pending final candidate |
 
 ## Final evidence
 
-The successful live gate on `ba1049c575da2a5bcbde613b34152361d8e56f76` recorded:
+The successful live gate on the final exact candidate recorded:
 
 - Windows 10 Professional `10.0.19045` build `19045`, x64;
 - Rust `1.96.0`, Git `2.54.0.windows.1` from `C:\Program Files\Git\cmd\git.exe`;
@@ -134,5 +134,4 @@ The successful live gate on `ba1049c575da2a5bcbde613b34152361d8e56f76` recorded:
 - existing Desktop shutdown/reaping path completed with `RAH_RENAME_FILE_HOSTEXPLICIT_CLEANUP_REAPED=1`;
 - final marker `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
 
-The final exact candidate live gate and exact-head CI remain required after this
-evidence-recording plan update.
+Exact-head CI remains required after this evidence-recording plan update.
