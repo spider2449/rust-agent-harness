@@ -134,4 +134,4 @@ The successful live gate on the final exact candidate recorded:
 - existing Desktop shutdown/reaping path completed with `RAH_RENAME_FILE_HOSTEXPLICIT_CLEANUP_REAPED=1`;
 - final marker `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
 
-Exact-head CI remains required after this evidence-recording plan update.
+Exact-head CI for the final evidence-recording head passed as run `34584375927`.
