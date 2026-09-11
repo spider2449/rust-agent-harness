@@ -2,13 +2,14 @@
 
 ## Verdict
 
-**Verdict B — NOT READY; CORRECTION REQUIRED**
+**Verdict A — READY FOR RELEASE PREPARATION**
 
-The complete v0.25 milestone is not ready to enter release preparation. The
-audit found a material ordinary ADR 0018 Windows case-equivalent Git collision
-gap. Task 303 has completed the focused correction, but this gate remains
-Verdict B until Task 304 independently re-audits the corrected boundary. This
-gate does not authorize release preparation, version changes, tagging,
+Task 302 remains historically **Verdict B — NOT READY; CORRECTION REQUIRED**
+because it found a material ordinary ADR 0018 Windows case-equivalent Git
+collision defect. Task 303 completed the separate focused production
+correction. Task 304 independently re-audited the corrected boundary and found
+it closed, with no new material release-readiness defect. This gate authorizes
+only release preparation; it does not authorize version changes, tagging,
 publication, or a GitHub Release.
 
 ## Milestone and release boundary
@@ -18,12 +19,12 @@ existing ordinary `repo.rename-file` Tool. v0.24.0 remains the current
 immutable published release. v0.25 is an unreleased candidate milestone;
 there is no `v0.25.0` tag and no GitHub Release.
 
-Audit checkpoint:
+Task 304 corrected checkpoint:
 
-- master: `3f82d1d894c8ccf804691ed04fb9745ae6e99a82`
-- direct parent: `6f2637626248c2cabac2142357ef4e31e266ec4b`
-- supplied exact-head CI: `34584375927` — PASS
-- Task 301 live marker: `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`
+- master: `b2e170cc6f8226891f572dce6ce453abba836aaa`
+- direct parent and Task 303 production correction: `1aa4d3277bd7ba24dec1caa3d52cc57c2aa2584a`
+- supplied exact-head CI: `34602139743` — PASS
+- Task 303 corrected live marker: `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`
 
 The audited sequence is Task 290 v0.25 scope and authority roadmap, Task 291
 contract research, Tasks 292/294/296 ADR 0018 conformance corrections, Task
@@ -105,33 +106,25 @@ reverse rename, copy-delete, `git mv`, or shell path.
 
 ## Ordinary security foundation
 
-The audit confirms the Task 292/294/296 corrections for repository identity,
-supported `.git` form, Git executable identity, source exact HEAD/index/
-worktree equality, source mode and link count, destination worktree and Git
-absence checks, parent identity, reparse/symlink/junction rejection, nested
-repository rejection, supported volume constraints, known-no-effect exact
-preimage proof, independent post-effect proof, uncertain classification, and
-one native attempt maximum.
+The audit confirms the Task 292/294/296 corrections and the Task 303 fix for
+repository identity, supported `.git` form, Git executable identity, source
+exact HEAD/index/worktree equality, source mode and link count, destination
+worktree and Git absence checks, parent identity, reparse/symlink/junction
+rejection, nested repository rejection, supported volume constraints,
+known-no-effect exact preimage proof, independent post-effect proof, uncertain
+classification, and one native attempt maximum.
 
-One material gap remains. `destination_git_absent` currently asks Git for the
-requested destination spelling and compares returned paths by exact bytes.
-On Windows, a tracked `README.md` can remain in HEAD/index while absent from
-the worktree, and a requested `readme.md` can evade that exact Git collision
-check. The filesystem path-equivalence rules are case-insensitive on Windows,
-so the native no-replace operation can create an alias that ADR 0018 requires
-to be rejected. The existing exact-case tracked-destination and case-only
-rename tests pass, but this tracked-but-missing case-equivalent collision is
-not covered.
-
-This was the material ordinary authority defect corrected by Task 303. The
-correction compares independently queried HEAD and every index-stage candidate
-under the existing Windows filesystem-equivalence rule, with bounded
-case-insensitive index discovery and bounded component-wise HEAD tree
-discovery. Deterministic real-Git coverage proves the tracked-but-missing
-case-equivalent destination returns `precondition_failed` with zero native
-attempts and no effect. Task 303 does not itself change this gate's Verdict B;
-release readiness remains pending the independent Task 304 milestone
-re-audit.
+Task 303's ordinary correction is independently confirmed closed.
+`destination_git_absent` checks HEAD and the index independently. Windows index
+discovery uses bounded `--icase-pathspecs`; HEAD uses bounded
+component-by-component `ls-tree -z HEAD --` discovery that follows actual tree
+spellings at each relevant depth. Both are narrowing mechanisms only. Strict
+parsing and host-owned component-wise `paths_equivalent` comparison remain the
+final collision authority. All index stages, intent-to-add, conflict forms,
+malformed/ambiguous records, and observation timeout/overflow/failure fail
+closed. The tracked-but-missing `README.md` versus requested `readme.md`
+regression returns `precondition_failed` with zero native attempts and no
+effect, before native rename.
 
 Task 303's corrected production candidate also passed the exact-head Windows
 reviewed live route with marker `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
@@ -139,8 +132,9 @@ Prepare Tool/native was `0/0`, Confirm Tool/native was `1/1`, final proof was
 `ReviewedSuccess`, and terminal status was `renamed_verified`. HEAD, index, and
 refs were preserved; Commit authorization was invalidated at the effect
 boundary; model, MCP, and Process Plugin activity were zero; and Codex cleanup
-was reaped successfully. This carried evidence does not change Verdict B or
-replace the independent Task 304 milestone re-audit.
+was reaped successfully. This carried evidence was independently reviewed by
+Task 304 and remains applicable because Task 304 changes documentation only.
+It does not claim model-selected rename certification.
 
 ## Reviewed preparation
 
@@ -229,16 +223,13 @@ non-authority activity correlation.
 
 ## Deterministic validation
 
-The reliable serial focused ordinary rename suite passed with 36 tests. The
-Task 301 record reports 219 Desktop deterministic tests passed and 10 ignored,
-frontend JavaScript and authority tests passed, Tauri permission tests passed,
-and the Desktop release build passed. The complete Task 302 execution record
-is:
+Task 304 reran the focused and workspace validation sequentially. The complete
+Task 304 execution record is:
 
 | Check | Result |
 | --- | --- |
 | `rah-tools` reviewed rename preparation suite | PASS: 24 passed |
-| `rah-tools` ordinary rename suite, serial | PASS: 36 passed |
+| `rah-tools` ordinary rename suite, serial | PASS: 41 passed |
 | `rah-desktop` deterministic suite | PASS: 219 passed, 10 ignored |
 | Frontend JavaScript syntax and authority tests | PASS: syntax, authority, and permission checks |
 | Tauri permission test | PASS |
@@ -247,19 +238,23 @@ is:
 | `cargo check --workspace` | PASS |
 | `cargo test --workspace` | PASS: all executed crate and integration tests passed; live/host-only tests remained ignored |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `git diff --check` | PASS before staging |
-| `cargo metadata --no-deps --format-version 1` | PASS |
+| `git diff --check` | PASS |
+| `cargo metadata --no-deps --format-version 1` | PASS: 13 packages, version `0.24.0`, edition 2024 |
 
-The initial parallel focused library run encountered a disposable fixture
-setup collision; the required serial rerun passed all 36 tests. Ignored live
-tests are not deterministic failures.
+The four Windows correction cases passed within the 41-test ordinary suite,
+including tracked-but-missing HEAD, index-only, intent-to-add, and conflict
+stages. Each collision was rejected before a native attempt. Ignored live tests
+are host-only evidence gates, not deterministic failures.
 
 ## Windows live certification carried forward
 
-Task 301 evidence remains valid because this audit makes no production code
-change and does not rerun the destructive live test. The certified evidence
-records Windows 10 Professional build 19045 x64, Rust/Cargo 1.96.0, Git
-2.54.0.windows.1, and certified Codex baseline 0.149.0 with SHA-256
+Task 303's corrected production live evidence remains valid because Task 304
+makes documentation-only changes and does not rerun the destructive live test.
+The corrected production commit is the direct parent
+`1aa4d3277bd7ba24dec1caa3d52cc57c2aa2584a`; checkpoint `b2e170c` contains
+validation-documentation changes only. The certified environment was Windows
+10 Professional build 19045 x64, Rust/Cargo 1.96.0, Git 2.54.0.windows.1,
+and `codex-cli 0.149.0` with executable SHA-256
 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
 
 Prepare recorded zero Tool executions and zero native rename attempts.
@@ -268,7 +263,8 @@ The final proof was `ReviewedSuccess` and terminal status was
 `renamed_verified`. HEAD, index, and refs were preserved. Commit authorization
 was pending before and after Prepare and invalidated after Started/effect.
 Model lifecycle, MCP, and Process Plugin counts were zero. Cleanup reaped
-Codex, and the marker was `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
+Codex successfully, protected HEAD/index/refs were preserved, and the marker
+was `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
 
 The live-test-support instrumentation is feature-gated observability only. It
 adds counters and test diagnostics under `cfg(feature = "live-test-support")`
@@ -280,16 +276,16 @@ rename dispatch.
 
 README, CHANGELOG, ARCHITECTURE, SECURITY, ADR 0018, ADR 0021, ADR 0026, and
 the relevant plans were checked. The release-facing documents correctly leave
-v0.24.0 as the current published release; the new gate records v0.25 as
-unreleased. The stale final line in the Task 301 plan was corrected to record
-exact-head CI run `34584375927` as passed. No unrelated historical record was
-rewritten.
+v0.24.0 as the current published release; this gate records v0.25 as
+unreleased. Task 302 remains historical Verdict B, Task 303 remains the
+focused correction, and Task 304 is the independent readiness decision. No
+unrelated historical record was rewritten.
 
 The workspace remains on Rust edition 2024 and version `0.24.0`; no version
-bump is part of this audit. No Cargo.toml or Cargo.lock dependency drift was
-found between the supplied parent and checkpoint. There is no Trusted Profile
-schema change or provider protocol change. Task 302 adds documentation and
-plans only; it adds no public API or production capability.
+bump is part of this audit. Metadata reports 13 packages. No Cargo.toml or
+Cargo.lock dependency drift was found between the supplied parent and
+checkpoint. There is no Trusted Profile schema change, MCP protocol change,
+Process Plugin protocol change, or Codex baseline change.
 
 ## Known nonclaims
 
@@ -301,17 +297,18 @@ certification.
 
 ## Remaining release prerequisites
 
-Task 303 must correct and test the ordinary Windows case-equivalent Git
-collision proof. A follow-up milestone audit must then confirm the ordinary
-security foundation, rerun the required deterministic gates, and obtain
-successful exact-head CI for the corrected master. Only a later explicit
-release-preparation task may update release-facing version material. Tagging
-and GitHub publication remain later explicit gates.
+Task 305 may begin release preparation and may update release-facing version
+material in its separately authorized scope. Task 304 does not authorize tag
+creation, GitHub Release creation, or publication. The supplied checkpoint
+exact-head CI `34602139743` passed; the final Task 304 commit must also be
+verified against `origin/master` with exact-head CI before closure.
 
 ## Final decision
 
-**Verdict B — NOT READY; CORRECTION REQUIRED**
+**Verdict A — READY FOR RELEASE PREPARATION**
 
-The exact defect is the Windows case-equivalent tracked-but-missing Git
-destination collision described in the ordinary security section. No release
-preparation has started. No `v0.25.0` tag or GitHub Release was created.
+Task 303's Windows case-equivalent tracked-but-missing Git destination defect
+is independently confirmed closed. No new material ordinary ADR 0018,
+reviewed-route, frontend/Tauri, privacy, dependency, version, or release
+documentation defect was found. Task 305 is the next task. No release
+preparation has started, and no `v0.25.0` tag or GitHub Release exists.
