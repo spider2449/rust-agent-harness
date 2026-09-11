@@ -118,6 +118,16 @@ pub use repository_multi_file_preflight::{
     RepositoryMultiFileEditTargetReview, RepositoryMultiFileEditTextReplacement,
 };
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
+#[cfg(feature = "live-test-support")]
+pub use repository_rename_file::live_test_rename_file_native_attempts::{
+    clear as clear_live_test_rename_file_native_attempts,
+    count as live_test_rename_file_native_attempts,
+};
+#[cfg(feature = "live-test-support")]
+pub use repository_rename_file::live_test_rename_file_tool_executions::{
+    clear as clear_live_test_rename_file_tool_executions,
+    count as live_test_rename_file_tool_executions,
+};
 pub use repository_rename_file::{
     REPOSITORY_RENAME_FILE_TOOL_NAME, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
     RepositoryRenameFilePreparation, RepositoryRenameFilePreparationError,

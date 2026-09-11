@@ -535,6 +535,8 @@ impl Tool for RepositoryFileRenameTool {
         input: ToolInput,
         _context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
+        #[cfg(feature = "live-test-support")]
+        live_test_rename_file_tool_executions::record(&self.policy.root);
         let request = match RenameRequest::parse(&input) {
             Ok(request) => request,
             Err(()) => return Ok(result("invalid_input", None, false)),
@@ -555,6 +557,8 @@ impl Tool for RepositoryFileRenameTool {
         self.policy
             .rename_attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(feature = "live-test-support")]
+        live_test_rename_file_native_attempts::record(&self.policy.root);
         let native = {
             #[cfg(test)]
             if self
@@ -599,6 +603,88 @@ impl Tool for RepositoryFileRenameTool {
         } else {
             Ok(result("uncertain", None, true))
         }
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+pub mod live_test_rename_file_tool_executions {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static EXECUTIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+    fn key(root: &Path) -> PathBuf {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub fn record(root: &Path) {
+        let mut executions = EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        *executions.entry(key(root)).or_default() += 1;
+    }
+
+    pub fn count(root: &Path) -> usize {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&key(root))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn clear(root: &Path) {
+        EXECUTIONS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(&key(root));
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+pub mod live_test_rename_file_native_attempts {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+    fn key(root: &Path) -> PathBuf {
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub fn record(root: &Path) {
+        let mut attempts = ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        *attempts.entry(key(root)).or_default() += 1;
+    }
+
+    pub fn count(root: &Path) -> usize {
+        ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&key(root))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn clear(root: &Path) {
+        ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(&key(root));
     }
 }
 
