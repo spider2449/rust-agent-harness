@@ -250,6 +250,7 @@ impl RepositoryFileRenamePolicy {
             return Err(());
         }
         let source_parent = source.parent().ok_or(())?.to_path_buf();
+        validate_ordinary_directory_ancestry(&self.root, &source_parent, "source parent")?;
         let source_parent_identity = FileIdentity::capture(&source_parent).map_err(|_| ())?;
         let destination = self.destination(&request.destination_path).await?;
         let destination_parent = destination.parent().ok_or(())?.to_path_buf();
@@ -778,6 +779,7 @@ fn validate_ordinary_directory_ancestry(
     label: &str,
 ) -> Result<(), ()> {
     validate_directory_path(root, directory, label).map_err(|_| ())?;
+    let mount_points = observed_mount_points()?;
     let mut current = directory.to_path_buf();
     loop {
         reject_link_or_reparse(&current, label).map_err(|_| ())?;
@@ -787,12 +789,73 @@ fn validate_ordinary_directory_ancestry(
         if paths_equivalent(&current, root) {
             return Ok(());
         }
+        reject_nested_repository_boundary(&current)?;
+        if mount_points
+            .iter()
+            .any(|mount_point| paths_equivalent(mount_point, &current))
+        {
+            return Err(());
+        }
         let parent = current.parent().ok_or(())?;
         if !is_beneath(parent, root) {
             return Err(());
         }
         current = parent.to_path_buf();
     }
+}
+
+fn reject_nested_repository_boundary(directory: &Path) -> Result<(), ()> {
+    match fs::symlink_metadata(directory.join(".git")) {
+        Ok(_) => Err(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(()),
+    }
+}
+
+fn observed_mount_points() -> Result<Vec<PathBuf>, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        let contents = fs::read_to_string("/proc/self/mountinfo").map_err(|_| ())?;
+        contents
+            .lines()
+            .map(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                let mount_point = fields.get(4).ok_or(())?;
+                decode_mountinfo_path(mount_point)
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(value: &str) -> Result<PathBuf, ()> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut bytes = Vec::with_capacity(value.len());
+    let encoded = value.as_bytes();
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded[index] == b'\\' {
+            let digits = encoded.get(index + 1..index + 4).ok_or(())?;
+            if digits.iter().all(|digit| matches!(digit, b'0'..=b'7')) {
+                let byte = digits
+                    .iter()
+                    .fold(0, |value, digit| value * 8 + (*digit - b'0'));
+                bytes.push(byte);
+                index += 4;
+                continue;
+            }
+            return Err(());
+        }
+        bytes.push(encoded[index]);
+        index += 1;
+    }
+    let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    path.is_absolute().then_some(path).ok_or(())
 }
 
 #[cfg(windows)]
@@ -932,10 +995,12 @@ struct TestHook {
     create_destination: std::sync::atomic::AtomicBool,
     replace_source_parent: std::sync::atomic::AtomicBool,
     replace_destination_parent: std::sync::atomic::AtomicBool,
+    create_nested_boundary: std::sync::atomic::AtomicBool,
     replace_source_after_attempt: std::sync::atomic::AtomicBool,
     replace_destination_after_attempt: std::sync::atomic::AtomicBool,
     replace_source_parent_after_attempt: std::sync::atomic::AtomicBool,
     replace_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
+    create_nested_boundary_after_attempt: std::sync::atomic::AtomicBool,
     #[cfg(any(unix, windows))]
     redirect_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
     #[cfg(unix)]
@@ -959,6 +1024,9 @@ impl TestHook {
             .swap(false, Ordering::SeqCst)
         {
             replace_parent(&pre.destination_parent);
+        }
+        if self.create_nested_boundary.swap(false, Ordering::SeqCst) {
+            fs::create_dir(pre.destination_parent.join(".git")).unwrap();
         }
     }
 
@@ -993,6 +1061,12 @@ impl TestHook {
             .swap(false, Ordering::SeqCst)
         {
             replace_parent(&pre.destination_parent);
+        }
+        if self
+            .create_nested_boundary_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            fs::create_dir(pre.destination_parent.join(".git")).unwrap();
         }
         #[cfg(any(unix, windows))]
         if self
@@ -1373,6 +1447,81 @@ mod tests {
             "precondition_failed"
         );
         assert_eq!(attempts(&destination_tool), 0);
+    }
+
+    #[test]
+    fn existing_nested_repository_destination_ancestry_is_rejected() {
+        let f = Fixture::new();
+        let nested = f.root.join("nested");
+        fs::create_dir_all(nested.join("sub")).unwrap();
+        run(&f.git, &nested, &["init", "--quiet"]);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "nested/sub/moved.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!nested.join("sub/moved.txt").exists());
+    }
+
+    #[test]
+    fn outer_tracked_source_inside_nested_repository_is_rejected() {
+        let f = Fixture::nested();
+        run(&f.git, &f.root.join("source"), &["init", "--quiet"]);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("source/old.txt", "moved.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("source/old.txt").exists());
+        assert!(!f.root.join("moved.txt").exists());
+    }
+
+    #[test]
+    fn nested_repository_boundary_appearing_between_capture_and_revalidation_is_rejected() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .create_nested_boundary
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "existing/moved.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("existing/moved.txt").exists());
+        assert!(f.root.join("existing/.git").is_dir());
+    }
+
+    #[test]
+    fn nested_repository_boundary_after_possible_effect_is_uncertain_without_replay() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .create_nested_boundary_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "existing/moved.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert!(!f.root.join("old.txt").exists());
+        assert!(f.root.join("existing/moved.txt").exists());
+        assert!(f.root.join("existing/.git").is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mountinfo_path_escapes_are_decoded_for_ancestry_proof() {
+        assert_eq!(
+            decode_mountinfo_path(r"/tmp/with\040space\134name").unwrap(),
+            PathBuf::from("/tmp/with space\\name")
+        );
     }
 
     #[test]
