@@ -11727,7 +11727,24 @@ mod tests {
                 CodexExecutableSource::CertifiedBaseline | CodexExecutableSource::Override
             )
         {
-            return Err("connected-current rename composition was not exact".to_owned());
+            return Err(format!(
+                "connected-current rename composition was not exact: status={:?} eligible={eligible:?} rename_count={} rename_eligible={} rename_kind={:?} rename_source={:?} rename_effect={:?} rename_category={:?} rename_permission={:?} rename_repository_bound={} preparer={} external={} providers={} provider_activation={} trusted_profile={} source={:?}",
+                connected_snapshot.status,
+                rename_tools.len(),
+                rename_tool.host_invocation.eligible,
+                rename_tool.host_invocation.kind,
+                rename_tool.source_kind,
+                rename_tool.effect_class,
+                rename_tool.authority_category,
+                rename_tool.permission,
+                rename_tool.repository_bound,
+                current.repository_rename_file_preparer.is_some(),
+                external_effective,
+                connected_snapshot.configured.configured_provider_count,
+                provider_activation_present,
+                trusted_profile_present,
+                connection_source,
+            ));
         }
 
         reset_startup_activation_counters();
