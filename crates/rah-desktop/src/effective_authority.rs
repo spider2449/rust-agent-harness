@@ -3,12 +3,14 @@
 use rah_protocol::PermissionLevel;
 use rah_tools::{
     RepositoryCreateFilePreparer, RepositoryDeleteFilePreparer, RepositoryMultiFileEditPreparer,
-    RepositoryPatchPreparer, ToolRegistry, TrustedStaticProfile,
+    RepositoryPatchPreparer, RepositoryRenameFilePreparer, ToolRegistry, TrustedStaticProfile,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::host_invocation::{CoordinatorState, HostInvocationDescriptor, host_descriptor};
+use crate::host_invocation::{
+    CoordinatorState, HostInvocationDescriptor, host_descriptor_with_rename,
+};
 use crate::{CodexExecutableSource, CommitAuthorizationPresentation, DesktopRepository};
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -227,6 +229,7 @@ pub(crate) struct DesktopToolComposition {
     pub repository_multi_file_edit_preparer: Option<Arc<RepositoryMultiFileEditPreparer>>,
     pub repository_create_file_preparer: Option<Arc<RepositoryCreateFilePreparer>>,
     pub repository_delete_file_preparer: Option<Arc<RepositoryDeleteFilePreparer>>,
+    pub repository_rename_file_preparer: Option<Arc<RepositoryRenameFilePreparer>>,
 }
 
 /// Builds only bounded presentation metadata from the validated host profile.
@@ -394,6 +397,19 @@ pub(crate) fn compose(
                 .ok()
                 .map(Arc::new)
         });
+    let repository_rename_file_preparer = repository
+        .filter(|repository| repository.rename_authority.is_some())
+        .filter(|_| {
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.as_str() == "repo.rename-file")
+        })
+        .and_then(|repository| {
+            RepositoryRenameFilePreparer::new(&repository.git_executable, &repository.root)
+                .ok()
+                .map(Arc::new)
+        });
     let mut tools = Vec::new();
     let mut matched_external = vec![false; external_descriptors.len()];
     for definition in registry.definitions() {
@@ -417,7 +433,7 @@ pub(crate) fn compose(
                 permission: definition.permission,
                 repository_bound,
                 advertised: false,
-                host_invocation: host_descriptor(
+                host_invocation: host_descriptor_with_rename(
                     &EffectiveToolEntry {
                         public_tool_name: definition.name.to_string(),
                         source_kind: if repository_bound {
@@ -449,6 +465,7 @@ pub(crate) fn compose(
                     repository_multi_file_edit_preparer.is_some(),
                     repository_create_file_preparer.is_some(),
                     repository_delete_file_preparer.is_some(),
+                    repository_rename_file_preparer.is_some(),
                     CoordinatorState::Idle,
                 ),
             }
@@ -558,6 +575,7 @@ pub(crate) fn compose(
         repository_multi_file_edit_preparer,
         repository_create_file_preparer,
         repository_delete_file_preparer,
+        repository_rename_file_preparer,
     })
 }
 

@@ -13,7 +13,8 @@ use rah_tools::{
     RepositoryDeleteFilePreparation, RepositoryDeleteFilePreparer, RepositoryDeleteFileReview,
     RepositoryMultiFileEditPreparation, RepositoryMultiFileEditPreparer,
     RepositoryMultiFileEditReview, RepositoryPatchPreparation, RepositoryPatchPreparer,
-    RepositoryPatchReview, ToolRegistry,
+    RepositoryPatchReview, RepositoryRenameFilePreparation, RepositoryRenameFilePreparer,
+    RepositoryRenameFileReview, ToolRegistry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,7 @@ pub(crate) enum HostInvocationKind {
     RepoEditFiles,
     RepoCreateFile,
     RepoDeleteFile,
+    RepoRenameFile,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -137,6 +139,13 @@ pub(crate) struct HostPrepareDeleteFileRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostPrepareRenameFileRequest {
+    pub source_path: String,
+    pub destination_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HostConfirmRequest {
     pub ticket_id: String,
@@ -185,6 +194,13 @@ pub(crate) struct PreparedDeleteFileResponse {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PreparedRenameFileResponse {
+    pub ticket_id: String,
+    pub review: RepositoryRenameFileReview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BranchReview {
     pub operation: &'static str,
     pub branch: String,
@@ -220,6 +236,10 @@ pub(crate) enum PreparedHostPayload {
     DeleteFile {
         preparation: Box<RepositoryDeleteFilePreparation>,
         preparer: Arc<RepositoryDeleteFilePreparer>,
+    },
+    RenameFile {
+        preparation: Box<RepositoryRenameFilePreparation>,
+        preparer: Arc<RepositoryRenameFilePreparer>,
     },
 }
 
@@ -512,11 +532,12 @@ pub(crate) fn host_kind(name: &str) -> Option<HostInvocationKind> {
         "repo.edit-files" => HostInvocationKind::RepoEditFiles,
         "repo.create-file" => HostInvocationKind::RepoCreateFile,
         "repo.delete-file" => HostInvocationKind::RepoDeleteFile,
+        "repo.rename-file" => HostInvocationKind::RepoRenameFile,
         _ => return None,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn host_descriptor(
     entry: &EffectiveToolEntry,
     connected_current: bool,
@@ -529,12 +550,43 @@ pub(crate) fn host_descriptor(
     delete_file_preparer_present: bool,
     coordinator_state: CoordinatorState,
 ) -> HostInvocationDescriptor {
+    host_descriptor_with_rename(
+        entry,
+        connected_current,
+        repository_selected,
+        permission_allowed,
+        branch_authority_present,
+        patch_preparer_present,
+        multi_file_edit_preparer_present,
+        create_file_preparer_present,
+        delete_file_preparer_present,
+        false,
+        coordinator_state,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn host_descriptor_with_rename(
+    entry: &EffectiveToolEntry,
+    connected_current: bool,
+    repository_selected: bool,
+    permission_allowed: bool,
+    branch_authority_present: bool,
+    patch_preparer_present: bool,
+    multi_file_edit_preparer_present: bool,
+    create_file_preparer_present: bool,
+    delete_file_preparer_present: bool,
+    rename_file_preparer_present: bool,
+    coordinator_state: CoordinatorState,
+) -> HostInvocationDescriptor {
     let kind = host_kind(&entry.public_tool_name);
     let reason = if (!matches!(
         entry.source_kind,
         SourceKind::BuiltIn | SourceKind::RepositoryHost
-    )) || (kind == Some(HostInvocationKind::RepoDeleteFile)
-        && !matches!(entry.source_kind, SourceKind::RepositoryHost))
+    )) || (matches!(
+        kind,
+        Some(HostInvocationKind::RepoDeleteFile | HostInvocationKind::RepoRenameFile)
+    ) && !matches!(entry.source_kind, SourceKind::RepositoryHost))
     {
         HostInvocationUnavailableReason::ProviderNotSupported
     } else if kind.is_none() {
@@ -554,6 +606,7 @@ pub(crate) fn host_descriptor(
         || (entry.public_tool_name == "repo.edit-files" && !multi_file_edit_preparer_present)
         || (entry.public_tool_name == "repo.create-file" && !create_file_preparer_present)
         || (entry.public_tool_name == "repo.delete-file" && !delete_file_preparer_present)
+        || (entry.public_tool_name == "repo.rename-file" && !rename_file_preparer_present)
     {
         HostInvocationUnavailableReason::AuthorityNotGranted
     } else {
@@ -633,13 +686,13 @@ mod tests {
             "repo.edit-files",
             "repo.create-file",
             "repo.delete-file",
+            "repo.rename-file",
         ];
         for name in supported {
             assert!(host_kind(name).is_some());
         }
         for name in [
             "repo.commit",
-            "repo.rename-file",
             "repo.create-directory",
             "echo",
             "fixture",
@@ -871,6 +924,77 @@ mod tests {
     }
 
     #[test]
+    fn rename_host_descriptor_requires_repository_source_and_preparer() {
+        let entry = EffectiveToolEntry {
+            public_tool_name: "repo.rename-file".to_owned(),
+            source_kind: SourceKind::RepositoryHost,
+            source_label: "desktop_repository".to_owned(),
+            effect_class: crate::effective_authority::EffectClass::RepositoryMutation,
+            authority_category: crate::effective_authority::AuthorityCategory::RepositoryFileRename,
+            permission: PermissionLevel::Execute,
+            repository_bound: true,
+            advertised: true,
+            host_invocation: HostInvocationDescriptor {
+                eligible: false,
+                kind: None,
+                unavailable_reason: None,
+            },
+        };
+        let unavailable = host_descriptor_with_rename(
+            &entry,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            CoordinatorState::Idle,
+        );
+        assert_eq!(
+            unavailable.unavailable_reason,
+            Some(HostInvocationUnavailableReason::AuthorityNotGranted)
+        );
+        assert!(
+            host_descriptor_with_rename(
+                &entry,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+        let mut provider = entry.clone();
+        provider.source_kind = SourceKind::Mcp;
+        assert_eq!(
+            host_descriptor_with_rename(
+                &provider,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .unavailable_reason,
+            Some(HostInvocationUnavailableReason::ProviderNotSupported)
+        );
+    }
+
+    #[test]
     fn ticket_expiry_is_deterministic_without_sleeping() {
         let now = Instant::now();
         let ticket = PreparedHostInvocation::for_test(now);
@@ -1068,6 +1192,13 @@ mod tests {
         }))
         .expect("typed delete-file request should deserialize");
         assert_eq!(delete.path, "src/delete.rs");
+        let rename = serde_json::from_value::<HostPrepareRenameFileRequest>(serde_json::json!({
+            "source_path": "src/old.rs",
+            "destination_path": "src/new.rs"
+        }))
+        .expect("typed rename-file request should deserialize");
+        assert_eq!(rename.source_path, "src/old.rs");
+        assert_eq!(rename.destination_path, "src/new.rs");
         for field in [
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","hash":"x"}),
             serde_json::json!({"path":"a","expectedOldText":"b","replacementText":"c","toolName":"repo.patch"}),
@@ -1116,6 +1247,14 @@ mod tests {
             serde_json::json!({"path":"a","activityId":"x"}),
         ] {
             assert!(serde_json::from_value::<HostPrepareDeleteFileRequest>(field).is_err());
+        }
+        for field in [
+            serde_json::json!({"source_path":"a","destination_path":"b","sha256":"x"}),
+            serde_json::json!({"source_path":"a","destination_path":"b","content":"x"}),
+            serde_json::json!({"source_path":"a","destination_path":"b","toolName":"repo.rename-file"}),
+            serde_json::json!({"source_path":"a","destination_path":"b","ticketId":"x"}),
+        ] {
+            assert!(serde_json::from_value::<HostPrepareRenameFileRequest>(field).is_err());
         }
     }
 

@@ -31,21 +31,22 @@ use desktop_preferences::{
 #[cfg(target_os = "windows")]
 use effective_authority::{
     ConfiguredSummary, ConnectionBinding, ConnectionBindingState, DesktopToolComposition,
-    EffectiveAuthoritySnapshot, ExternalToolDescriptor, RepositoryBinding, RepositoryIdentity,
-    RepositoryKind, SnapshotStatus, SourceKind,
+    EffectiveAuthoritySnapshot, EffectiveToolEntry, ExternalToolDescriptor, RepositoryBinding,
+    RepositoryIdentity, RepositoryKind, SnapshotStatus, SourceKind,
 };
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
 use host_invocation::{
     BranchReview, CoordinatorState, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES, HostConfirmRequest,
-    HostInvocationCoordinator, HostInvocationDescriptor, HostInvocationKind,
-    HostInvocationResponse, HostInvocationReview, HostInvocationUnavailableReason,
-    HostPrepareBranchRequest, HostPrepareCreateFileRequest, HostPrepareDeleteFileRequest,
-    HostPrepareMultiFileEditRequest, HostPreparePatchRequest, HostReadRequest,
-    PreparedBranchResponse, PreparedCreateFileResponse, PreparedDeleteFileResponse,
-    PreparedHostInvocation, PreparedHostPayload, PreparedMultiFileEditResponse,
-    PreparedPatchResponse, host_descriptor, host_kind, read_request, validate_bounded_string,
+    HostInvocationCoordinator, HostInvocationKind, HostInvocationResponse, HostInvocationReview,
+    HostInvocationUnavailableReason, HostPrepareBranchRequest, HostPrepareCreateFileRequest,
+    HostPrepareDeleteFileRequest, HostPrepareMultiFileEditRequest, HostPreparePatchRequest,
+    HostPrepareRenameFileRequest, HostReadRequest, PreparedBranchResponse,
+    PreparedCreateFileResponse, PreparedDeleteFileResponse, PreparedHostInvocation,
+    PreparedHostPayload, PreparedMultiFileEditResponse, PreparedPatchResponse,
+    PreparedRenameFileResponse, host_descriptor_with_rename, host_kind, read_request,
+    validate_bounded_string,
 };
 #[cfg(target_os = "windows")]
 use provider_composition::{
@@ -79,9 +80,11 @@ use rah_tools::{
     RepositoryMultiFileEditPreparationError, RepositoryMultiFileEditPreparationRequest,
     RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditTextReplacement,
     RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
-    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
-    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
+    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification,
+    RepositoryRenameFilePreparationError, RepositoryRenameFilePreparationRequest,
+    RepositoryRenameFileProof, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
+    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
+    classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
@@ -2174,7 +2177,7 @@ fn get_effective_authority_snapshot(
         .is_some_and(|value| value.branch_creation_authority.is_some());
     for tool in &mut effective_tools {
         tool.advertised = connection_binding.advertised;
-        tool.host_invocation = host_descriptor(
+        tool.host_invocation = host_descriptor_with_rename(
             tool,
             status == SnapshotStatus::ConnectedCurrent,
             selected,
@@ -2192,6 +2195,9 @@ fn get_effective_authority_snapshot(
             composition
                 .as_ref()
                 .is_some_and(|value| value.repository_delete_file_preparer.is_some()),
+            composition
+                .as_ref()
+                .is_some_and(|value| value.repository_rename_file_preparer.is_some()),
             coordinator_state,
         );
     }
@@ -2269,10 +2275,12 @@ struct CurrentHostComposition {
     generations: [u64; 4],
     repository_identity: Option<String>,
     repository: Option<Arc<DesktopRepository>>,
+    tools: Vec<EffectiveToolEntry>,
     repository_patch_preparer: Option<Arc<rah_tools::RepositoryPatchPreparer>>,
     repository_multi_file_edit_preparer: Option<Arc<rah_tools::RepositoryMultiFileEditPreparer>>,
     repository_create_file_preparer: Option<Arc<rah_tools::RepositoryCreateFilePreparer>>,
     repository_delete_file_preparer: Option<Arc<rah_tools::RepositoryDeleteFilePreparer>>,
+    repository_rename_file_preparer: Option<Arc<rah_tools::RepositoryRenameFilePreparer>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2327,12 +2335,14 @@ fn current_host_composition(
         generations,
         repository_identity,
         repository,
+        tools: composition.tools.clone(),
         repository_patch_preparer: composition.repository_patch_preparer.clone(),
         repository_multi_file_edit_preparer: composition
             .repository_multi_file_edit_preparer
             .clone(),
         repository_create_file_preparer: composition.repository_create_file_preparer.clone(),
         repository_delete_file_preparer: composition.repository_delete_file_preparer.clone(),
+        repository_rename_file_preparer: composition.repository_rename_file_preparer.clone(),
     })
 }
 
@@ -2342,60 +2352,22 @@ fn host_tool_definition(
     name: &ToolName,
     coordinator_state: CoordinatorState,
 ) -> Result<ToolDefinition, FrontendError> {
+    let effective = current
+        .tools
+        .iter()
+        .find(|entry| entry.public_tool_name == name.as_str())
+        .cloned()
+        .ok_or(FrontendError::HostInvocationNotEligible)?;
     let entry = current
         .expected_definitions
         .iter()
         .find(|definition| definition.name == *name)
         .cloned()
         .ok_or(FrontendError::HostInvocationNotEligible)?;
-    let effective = {
-        let kind = host_kind(name.as_str());
-        if kind.is_none() {
-            return Err(FrontendError::HostInvocationNotEligible);
-        }
-        let (effect_class, authority_category) = match name.as_str() {
-            "repo.patch" => (
-                effective_authority::EffectClass::RepositoryMutation,
-                effective_authority::AuthorityCategory::RepositoryContentMutation,
-            ),
-            "repo.create-branch" => (
-                effective_authority::EffectClass::RepositoryMutation,
-                effective_authority::AuthorityCategory::RepositoryLocalBranchCreation,
-            ),
-            "repo.edit-files" => (
-                effective_authority::EffectClass::RepositoryMutation,
-                effective_authority::AuthorityCategory::RepositoryContentMutation,
-            ),
-            "repo.create-file" => (
-                effective_authority::EffectClass::RepositoryMutation,
-                effective_authority::AuthorityCategory::RepositoryFileCreation,
-            ),
-            "repo.delete-file" => (
-                effective_authority::EffectClass::RepositoryMutation,
-                effective_authority::AuthorityCategory::RepositoryFileDeletion,
-            ),
-            _ => (
-                effective_authority::EffectClass::ReadOnly,
-                effective_authority::AuthorityCategory::RepositoryObservation,
-            ),
-        };
-        effective_authority::EffectiveToolEntry {
-            public_tool_name: name.to_string(),
-            source_kind: SourceKind::RepositoryHost,
-            source_label: "desktop_repository".to_owned(),
-            effect_class,
-            authority_category,
-            permission: entry.permission,
-            repository_bound: true,
-            advertised: true,
-            host_invocation: HostInvocationDescriptor {
-                eligible: false,
-                kind: None,
-                unavailable_reason: None,
-            },
-        }
-    };
-    let descriptor = host_descriptor(
+    if host_kind(name.as_str()).is_none() {
+        return Err(FrontendError::HostInvocationNotEligible);
+    }
+    let descriptor = host_descriptor_with_rename(
         &effective,
         true,
         current.repository.is_some(),
@@ -2408,6 +2380,7 @@ fn host_tool_definition(
         current.repository_multi_file_edit_preparer.is_some(),
         current.repository_create_file_preparer.is_some(),
         current.repository_delete_file_preparer.is_some(),
+        current.repository_rename_file_preparer.is_some(),
         coordinator_state,
     );
     if !descriptor.eligible {
@@ -2590,6 +2563,28 @@ fn safe_delete_file_activity_result(classification: DeleteFileResultClassificati
 }
 
 #[cfg(target_os = "windows")]
+fn rename_file_host_terminal_state(proof: RepositoryRenameFileProof) -> HostActivityState {
+    match proof {
+        RepositoryRenameFileProof::ReviewedSuccess => HostActivityState::ToolCompleted,
+        RepositoryRenameFileProof::KnownNoEffect => HostActivityState::ToolError,
+        RepositoryRenameFileProof::Uncertain => HostActivityState::PossibleEffectUnknown,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn safe_rename_file_activity_result(proof: RepositoryRenameFileProof) -> ToolOutput {
+    let (status, is_error) = match proof {
+        RepositoryRenameFileProof::ReviewedSuccess => ("renamed_verified", false),
+        RepositoryRenameFileProof::KnownNoEffect => ("known_no_effect", true),
+        RepositoryRenameFileProof::Uncertain => ("uncertain", true),
+    };
+    ToolOutput {
+        content: vec![ToolContent::Json(serde_json::json!({"status": status}))],
+        is_error,
+    }
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CreateFileExpectedOutput {
     path: String,
@@ -2713,6 +2708,10 @@ async fn run_host_tool(
         Box<rah_tools::RepositoryDeleteFilePreparation>,
         Arc<rah_tools::RepositoryDeleteFilePreparer>,
     )>,
+    rename_proof: Option<(
+        Box<rah_tools::RepositoryRenameFilePreparation>,
+        Arc<rah_tools::RepositoryRenameFilePreparer>,
+    )>,
 ) {
     let tool_name = call.name.to_string();
     let result = authorized_tool_dispatch(
@@ -2788,6 +2787,25 @@ async fn run_host_tool(
                     delete_file_host_terminal_state(classification),
                     Some(safe_delete_file_activity_result(classification)),
                 )
+            } else if kind == HostInvocationKind::RepoRenameFile {
+                let proof = match rename_proof.as_ref() {
+                    Some((preparation, preparer)) => {
+                        preparer.prove_result(preparation, &output).await
+                    }
+                    None => RepositoryRenameFileProof::Uncertain,
+                };
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    rename_file_host_terminal_state(proof),
+                    Some(safe_rename_file_activity_result(proof)),
+                )
             } else if kind == HostInvocationKind::RepoCreateFile {
                 let classification = create_file_expected_output
                     .as_ref()
@@ -2861,6 +2879,21 @@ async fn run_host_tool(
                         DeleteFileResultClassification::Uncertain,
                     )),
                 )
+            } else if kind == HostInvocationKind::RepoRenameFile {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    HostActivityState::PossibleEffectUnknown,
+                    Some(safe_rename_file_activity_result(
+                        RepositoryRenameFileProof::Uncertain,
+                    )),
+                )
             } else {
                 (HostActivityState::RejectedStale, None)
             }
@@ -2920,6 +2953,21 @@ async fn run_host_tool(
                     HostActivityState::PossibleEffectUnknown,
                     Some(safe_delete_file_activity_result(
                         DeleteFileResultClassification::Uncertain,
+                    )),
+                )
+            } else if kind == HostInvocationKind::RepoRenameFile {
+                if host_repository_context_is_current(
+                    state.inner(),
+                    repository_identity.as_deref(),
+                    generations,
+                ) {
+                    let _ = refresh_repository_workflow(state.inner()).await;
+                    emit_repository_refresh(&app);
+                }
+                (
+                    HostActivityState::PossibleEffectUnknown,
+                    Some(safe_rename_file_activity_result(
+                        RepositoryRenameFileProof::Uncertain,
                     )),
                 )
             } else {
@@ -2990,6 +3038,7 @@ fn repository_bound_authoring_kind(kind: HostInvocationKind) -> bool {
             | HostInvocationKind::RepoEditFiles
             | HostInvocationKind::RepoCreateFile
             | HostInvocationKind::RepoDeleteFile
+            | HostInvocationKind::RepoRenameFile
     )
 }
 
@@ -3086,6 +3135,7 @@ async fn host_invoke_read(
         invocation_id.clone(),
         current.repository_identity,
         current.generations,
+        None,
         None,
         None,
         None,
@@ -3373,6 +3423,25 @@ fn delete_file_preparation_frontend_error(
             FrontendError::HostInvocationReviewTooLarge
         }
         RepositoryDeleteFilePreparationError::Stale => FrontendError::HostInvocationStale,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn rename_file_preparation_frontend_error(
+    error: RepositoryRenameFilePreparationError,
+) -> FrontendError {
+    match error {
+        RepositoryRenameFilePreparationError::InvalidInput { .. } => {
+            FrontendError::HostInvocationInvalidInput
+        }
+        RepositoryRenameFilePreparationError::Unsupported { .. }
+        | RepositoryRenameFilePreparationError::PreconditionFailed { .. } => {
+            FrontendError::HostInvocationPreconditionChanged
+        }
+        RepositoryRenameFilePreparationError::ReviewTooLarge => {
+            FrontendError::HostInvocationReviewTooLarge
+        }
+        RepositoryRenameFilePreparationError::Stale => FrontendError::HostInvocationStale,
     }
 }
 
@@ -3838,6 +3907,122 @@ async fn host_prepare_repo_delete_file(
 }
 
 #[cfg(target_os = "windows")]
+async fn prepare_repo_rename_file_with_current(
+    request: HostPrepareRenameFileRequest,
+    app: &AppHandle,
+    state: &DesktopAppState,
+    current: CurrentHostComposition,
+) -> Result<PreparedRenameFileResponse, FrontendError> {
+    let name = ToolName::new("repo.rename-file");
+    let expected_definition = match host_tool_definition(&current, &name, CoordinatorState::Idle) {
+        Ok(definition) => definition,
+        Err(error) => {
+            abort_host_patch_prepare(state);
+            return Err(error);
+        }
+    };
+    let preparer = match current.repository_rename_file_preparer.clone() {
+        Some(preparer) => preparer,
+        None => {
+            abort_host_patch_prepare(state);
+            return Err(FrontendError::HostInvocationNotEligible);
+        }
+    };
+    let preflight_call = host_call(name.clone(), ToolInput(serde_json::json!({})));
+    if let Err(rejection) = authorize_tool_dispatch(
+        &current.registry,
+        &expected_definition,
+        &current.allowed_permissions,
+        &preflight_call,
+    ) {
+        abort_host_patch_prepare(state);
+        return Err(match rejection {
+            AuthorizedDispatchRejection::PermissionDenied { .. } => {
+                FrontendError::HostInvocationPermissionDenied
+            }
+            _ => FrontendError::HostInvocationStale,
+        });
+    }
+    let preparation = match preparer
+        .prepare(RepositoryRenameFilePreparationRequest {
+            source_path: request.source_path,
+            destination_path: request.destination_path,
+        })
+        .await
+    {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            abort_host_patch_prepare(state);
+            return Err(rename_file_preparation_frontend_error(error));
+        }
+    };
+    let review = preparation.review().clone();
+    let call = host_call(name.clone(), preparation.tool_input().clone());
+    let (ticket_id, activity_id) = {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket_id = coordinator.next_ticket_id();
+        let activity_id = coordinator.next_invocation_id();
+        let ticket = PreparedHostInvocation::new(
+            ticket_id.clone(),
+            activity_id.clone(),
+            HostInvocationKind::RepoRenameFile,
+            name,
+            expected_definition,
+            call,
+            current.registry,
+            current.allowed_permissions,
+            current.generations,
+            current.repository_identity,
+            current.composition_identity,
+            PreparedHostPayload::RenameFile {
+                preparation: Box::new(preparation),
+                preparer,
+            },
+        );
+        if coordinator.finalize_prepare(ticket).is_err() {
+            coordinator.abort_prepare();
+            return Err(FrontendError::HostInvocationBusy);
+        }
+        (ticket_id, activity_id)
+    };
+    emit_host_activity(
+        app,
+        prepared_host_activity(activity_id, "repo.rename-file".to_owned(), None),
+    );
+    Ok(PreparedRenameFileResponse { ticket_id, review })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn host_prepare_repo_rename_file(
+    request: HostPrepareRenameFileRequest,
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<PreparedRenameFileResponse, FrontendError> {
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        coordinator
+            .begin_prepare()
+            .map_err(|_| FrontendError::HostInvocationBusy)?;
+    }
+    let current = match current_host_composition(state.inner()) {
+        Ok(current) => current,
+        Err(error) => {
+            abort_host_patch_prepare(state.inner());
+            return Err(error);
+        }
+    };
+    prepare_repo_rename_file_with_current(request, &app, state.inner(), current).await
+}
+
+#[cfg(target_os = "windows")]
 async fn validate_host_confirmation_ticket(
     ticket: &PreparedHostInvocation,
     current: &CurrentHostComposition,
@@ -3845,6 +4030,7 @@ async fn validate_host_confirmation_ticket(
     if ticket.generations != current.generations
         || ticket.composition_identity != current.composition_identity
         || ticket.repository_identity != current.repository_identity
+        || !Arc::ptr_eq(&ticket.registry, &current.registry)
     {
         return Err(FrontendError::HostInvocationStale);
     }
@@ -3888,6 +4074,14 @@ async fn validate_host_confirmation_ticket(
         {
             return Err(FrontendError::HostInvocationStale);
         }
+        PreparedHostPayload::RenameFile { preparer, .. }
+            if current
+                .repository_rename_file_preparer
+                .as_ref()
+                .is_none_or(|current_preparer| !Arc::ptr_eq(current_preparer, preparer)) =>
+        {
+            return Err(FrontendError::HostInvocationStale);
+        }
         _ => {}
     }
     match &ticket.payload {
@@ -3919,6 +4113,13 @@ async fn validate_host_confirmation_ticket(
             .revalidate(preparation)
             .await
             .map_err(delete_file_preparation_frontend_error),
+        PreparedHostPayload::RenameFile {
+            preparation,
+            preparer,
+        } => preparer
+            .revalidate(preparation)
+            .await
+            .map_err(rename_file_preparation_frontend_error),
         PreparedHostPayload::Branch { .. } => Ok(()),
     }?;
     authorize_tool_dispatch(
@@ -4001,14 +4202,19 @@ async fn host_confirm_tool_invocation(
         PreparedHostPayload::Patch { .. }
         | PreparedHostPayload::MultiFileEdit { .. }
         | PreparedHostPayload::CreateFile { .. }
-        | PreparedHostPayload::DeleteFile { .. } => None,
+        | PreparedHostPayload::DeleteFile { .. }
+        | PreparedHostPayload::RenameFile { .. } => None,
     };
-    let deletion_proof = match ticket.payload {
+    let (deletion_proof, rename_proof) = match ticket.payload {
         PreparedHostPayload::DeleteFile {
             preparation,
             preparer,
-        } => Some((preparation, preparer)),
-        _ => None,
+        } => (Some((preparation, preparer)), None),
+        PreparedHostPayload::RenameFile {
+            preparation,
+            preparer,
+        } => (None, Some((preparation, preparer))),
+        _ => (None, None),
     };
     emit_host_activity(
         &app,
@@ -4034,6 +4240,7 @@ async fn host_confirm_tool_invocation(
         multi_file_target_order,
         create_file_expected_output,
         deletion_proof,
+        rename_proof,
     ));
     Ok(HostInvocationResponse { invocation_id })
 }
@@ -4063,6 +4270,7 @@ fn host_cancel_tool_invocation(
                 HostInvocationKind::RepoEditFiles => "repo.edit-files".to_owned(),
                 HostInvocationKind::RepoCreateFile => "repo.create-file".to_owned(),
                 HostInvocationKind::RepoDeleteFile => "repo.delete-file".to_owned(),
+                HostInvocationKind::RepoRenameFile => "repo.rename-file".to_owned(),
                 _ => REPOSITORY_CREATE_BRANCH_TOOL_NAME.to_owned(),
             },
             state: HostActivityState::CancelledBeforeStart,
@@ -6649,6 +6857,7 @@ fn empty_composition_metadata() -> DesktopToolComposition {
         repository_multi_file_edit_preparer: None,
         repository_create_file_preparer: None,
         repository_delete_file_preparer: None,
+        repository_rename_file_preparer: None,
     }
 }
 
@@ -7523,6 +7732,7 @@ fn main() -> ExitCode {
             host_prepare_repo_edit_files,
             host_prepare_repo_create_file,
             host_prepare_repo_delete_file,
+            host_prepare_repo_rename_file,
             host_confirm_tool_invocation,
             host_cancel_tool_invocation
         ])
@@ -7563,11 +7773,12 @@ mod tests {
         AuthorityCategory, EffectClass, EffectiveToolEntry, SnapshotStatus,
     };
     use super::host_invocation::{
-        BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest, HostInvocationKind,
-        HostInvocationReview, HostPrepareBranchRequest, HostPrepareCreateFileRequest,
-        HostPrepareDeleteFileRequest, HostPrepareMultiFileEditReplacement,
-        HostPrepareMultiFileEditRequest, HostPrepareMultiFileEditTarget, HostPreparePatchRequest,
-        HostReadRequest,
+        BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest,
+        HostInvocationDescriptor, HostInvocationKind, HostInvocationReview,
+        HostPrepareBranchRequest, HostPrepareCreateFileRequest, HostPrepareDeleteFileRequest,
+        HostPrepareMultiFileEditReplacement, HostPrepareMultiFileEditRequest,
+        HostPrepareMultiFileEditTarget, HostPreparePatchRequest, HostPrepareRenameFileRequest,
+        HostReadRequest, host_descriptor, host_descriptor_with_rename,
     };
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -7578,7 +7789,7 @@ mod tests {
         DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
         DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
-        HostActivityEvent, HostActivityState, HostInvocationCoordinator, HostInvocationDescriptor,
+        HostActivityEvent, HostActivityState, HostInvocationCoordinator,
         HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
         MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
@@ -7599,13 +7810,12 @@ mod tests {
         desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
         empty_composition_metadata, forget_trusted_profile_preference, frontend_error,
         get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
-        host_confirm_tool_invocation, host_descriptor, host_invoke_read,
-        host_prepare_repo_create_branch, host_prepare_repo_create_file,
-        host_prepare_repo_delete_file, host_prepare_repo_edit_files, host_prepare_repo_patch,
-        install_repository_workflow, invalidate_repository_commit_review,
+        host_confirm_tool_invocation, host_invoke_read, host_prepare_repo_create_branch,
+        host_prepare_repo_create_file, host_prepare_repo_delete_file, host_prepare_repo_edit_files,
+        host_prepare_repo_patch, install_repository_workflow, invalidate_repository_commit_review,
         model_configuration_status, patch_host_terminal_state, prepare_codex_connection,
-        prepare_repo_delete_file_with_current, prepared_host_activity,
-        publish_connected_provider_state, publish_readiness_result,
+        prepare_repo_delete_file_with_current, prepare_repo_rename_file_with_current,
+        prepared_host_activity, publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_selection_allowed,
@@ -7633,10 +7843,11 @@ mod tests {
         RepositoryBranchCreationAuthority, RepositoryCommitControl, RepositoryCommitTool,
         RepositoryDirectoryCreationAuthority, RepositoryFileCreationTool,
         RepositoryFileDeletionAuthority, RepositoryFileDeletionTool, RepositoryFileRenameAuthority,
-        RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
-        RepositoryMultiFileEditPreparer, RepositoryMultiFileEditTextReplacement,
-        RepositoryPatchResultClassification, Tool, ToolContext, ToolRegistry,
-        classify_repository_patch_output, clear_live_test_create_file_native_attempts,
+        RepositoryFileRenameTool, RepositoryMultiFileEditPreparationRequest,
+        RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditPreparer,
+        RepositoryMultiFileEditTextReplacement, RepositoryPatchResultClassification, Tool,
+        ToolContext, ToolRegistry, classify_repository_patch_output,
+        classify_repository_rename_file_output, clear_live_test_create_file_native_attempts,
         clear_live_test_create_file_tool_executions, clear_live_test_delete_file_native_attempts,
         clear_live_test_delete_file_tool_executions, clear_live_test_multi_file_native_attempts,
         clear_live_test_multi_file_tool_executions, live_test_create_file_native_attempts,
@@ -7680,8 +7891,29 @@ mod tests {
         executions: Arc<AtomicUsize>,
     }
 
+    struct CountingRenameFileTool {
+        inner: RepositoryFileRenameTool,
+        executions: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl rah_tools::Tool for CountingDeleteFileTool {
+        fn definition(&self) -> rah_protocol::ToolDefinition {
+            self.inner.definition()
+        }
+
+        async fn execute(
+            &self,
+            input: ToolInput,
+            context: ToolContext,
+        ) -> Result<ToolOutput, rah_tools::ToolError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            self.inner.execute(input, context).await
+        }
+    }
+
+    #[async_trait]
+    impl rah_tools::Tool for CountingRenameFileTool {
         fn definition(&self) -> rah_protocol::ToolDefinition {
             self.inner.definition()
         }
@@ -8112,6 +8344,24 @@ mod tests {
         Arc::new(registry)
     }
 
+    fn counting_rename_registry(
+        repository: &DesktopRepository,
+        executions: Arc<AtomicUsize>,
+    ) -> Arc<ToolRegistry> {
+        let authority = repository
+            .rename_authority
+            .clone()
+            .expect("rename authority should be present");
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(CountingRenameFileTool {
+                inner: RepositoryFileRenameTool::from_authority(authority),
+                executions,
+            }))
+            .expect("counting rename tool should register");
+        Arc::new(registry)
+    }
+
     fn current_delete_composition(
         state: &DesktopAppState,
         registry: Arc<ToolRegistry>,
@@ -8141,10 +8391,50 @@ mod tests {
             generations: current_host_generation_tuple(state),
             repository_identity: Some(repository_context_fingerprint(&repository.root)),
             repository: Some(repository),
+            tools: composition.tools.clone(),
             repository_patch_preparer: None,
             repository_multi_file_edit_preparer: None,
             repository_create_file_preparer: None,
             repository_delete_file_preparer: composition.repository_delete_file_preparer.clone(),
+            repository_rename_file_preparer: composition.repository_rename_file_preparer.clone(),
+        }
+    }
+
+    fn current_rename_composition(
+        state: &DesktopAppState,
+        registry: Arc<ToolRegistry>,
+    ) -> super::CurrentHostComposition {
+        let repository = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("repository should be selected");
+        let composition = desktop_tool_composition_from_registry(
+            Arc::clone(&registry),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("rename composition should be classified");
+        super::CurrentHostComposition {
+            registry,
+            expected_definitions: composition.expected_definitions.clone(),
+            composition_identity: composition.registry.as_ref() as *const ToolRegistry as usize,
+            allowed_permissions: vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            generations: current_host_generation_tuple(state),
+            repository_identity: Some(repository_context_fingerprint(&repository.root)),
+            repository: Some(repository),
+            tools: composition.tools.clone(),
+            repository_patch_preparer: None,
+            repository_multi_file_edit_preparer: None,
+            repository_create_file_preparer: None,
+            repository_delete_file_preparer: None,
+            repository_rename_file_preparer: composition.repository_rename_file_preparer.clone(),
         }
     }
 
@@ -8256,6 +8546,52 @@ mod tests {
             .expect("commit review should authorize");
         assert!(control.has_pending_authorization().await);
         control
+    }
+
+    #[test]
+    fn rename_file_result_classification_is_strict_and_status_only() {
+        let success = ToolOutput {
+            content: vec![ToolContent::Json(
+                serde_json::json!({"status":"renamed_verified","uncertain":false,"path":"new.rs"}),
+            )],
+            is_error: false,
+        };
+        assert_eq!(
+            classify_repository_rename_file_output(&success, "new.rs"),
+            rah_tools::RepositoryRenameFileProof::ReviewedSuccess
+        );
+        for malformed in [
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status":"renamed_verified","uncertain":false,"path":"wrong.rs"}),
+                )],
+                is_error: false,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Json(
+                    serde_json::json!({"status":"known_no_effect","uncertain":false,"extra":true}),
+                )],
+                is_error: true,
+            },
+            ToolOutput {
+                content: vec![ToolContent::Text("RAH_RAW_RENAME_OUTPUT".to_owned())],
+                is_error: true,
+            },
+        ] {
+            assert_eq!(
+                classify_repository_rename_file_output(&malformed, "new.rs"),
+                rah_tools::RepositoryRenameFileProof::Uncertain
+            );
+        }
+        assert_eq!(
+            super::safe_rename_file_activity_result(
+                rah_tools::RepositoryRenameFileProof::ReviewedSuccess,
+            )
+            .content,
+            vec![ToolContent::Json(serde_json::json!({
+                "status": "renamed_verified"
+            }))]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14452,6 +14788,226 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rename_file_is_the_eleventh_host_tool_and_requires_rename_authority() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let repository = DesktopRepository::new_with_authorities(
+            &git,
+            &fixture.0,
+            Some(
+                RepositoryDirectoryCreationAuthority::new(&fixture.0)
+                    .expect("directory authority should construct"),
+            ),
+            Some(
+                RepositoryFileDeletionAuthority::new(&git, &fixture.0)
+                    .expect("deletion authority should construct"),
+            ),
+            Some(
+                RepositoryFileRenameAuthority::new(&git, &fixture.0)
+                    .expect("rename authority should construct"),
+            ),
+            Some(
+                RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+                    .expect("branch authority should construct"),
+            ),
+        )
+        .expect("fully authorized repository should construct");
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&repository), None).expect("registry should build"),
+            Some(&repository),
+            false,
+            &[],
+        )
+        .expect("rename composition should build");
+        let rename = composition
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.rename-file")
+            .expect("repo.rename-file should be composed");
+        assert_eq!(rename.source_kind, SourceKind::RepositoryHost);
+        assert_eq!(rename.source_label, "desktop_repository");
+        assert_eq!(rename.effect_class, EffectClass::RepositoryMutation);
+        assert_eq!(
+            rename.authority_category,
+            super::effective_authority::AuthorityCategory::RepositoryFileRename
+        );
+        assert_eq!(rename.permission, PermissionLevel::Execute);
+        assert!(rename.repository_bound);
+        assert_eq!(
+            rename.host_invocation.kind,
+            Some(HostInvocationKind::RepoRenameFile)
+        );
+        assert!(composition.repository_rename_file_preparer.is_some());
+        assert!(
+            host_descriptor_with_rename(
+                rename,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                CoordinatorState::Idle,
+            )
+            .eligible
+        );
+        let eligible_count = composition
+            .tools
+            .iter()
+            .filter(|entry| {
+                host_descriptor_with_rename(
+                    entry,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                    CoordinatorState::Idle,
+                )
+                .eligible
+            })
+            .count();
+        assert_eq!(eligible_count, 11);
+
+        let without_authority = fixture.desktop_repository();
+        let composition = desktop_tool_composition_from_registry(
+            desktop_tool_registry(Some(&without_authority), None)
+                .expect("registry without rename authority should build"),
+            Some(&without_authority),
+            false,
+            &[],
+        )
+        .expect("composition without rename authority should build");
+        assert!(composition.repository_rename_file_preparer.is_none());
+        assert!(
+            composition
+                .tools
+                .iter()
+                .all(|entry| entry.public_tool_name != "repo.rename-file")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reviewed_rename_prepare_is_zero_effect_and_dispatches_once_with_retained_input() {
+        let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository = fixture.rename_repository();
+        let source = fixture.0.join("tracked.txt");
+        let destination = fixture.0.join("renamed.txt");
+        let before = fs::read(&source).expect("rename source should read");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = counting_rename_registry(&repository, Arc::clone(&executions));
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .expect("rename Desktop app should build");
+        replace_selected_repository(app.state::<DesktopAppState>().inner(), repository);
+        let state = app.state::<DesktopAppState>().inner();
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_prepare()
+            .expect("rename preparation should reserve the coordinator");
+        let app_handle = app.handle().clone();
+        let prepared = prepare_repo_rename_file_with_current(
+            HostPrepareRenameFileRequest {
+                source_path: "tracked.txt".to_owned(),
+                destination_path: "renamed.txt".to_owned(),
+            },
+            &app_handle,
+            state,
+            current_rename_composition(state, Arc::clone(&registry)),
+        )
+        .await
+        .expect("reviewed rename preparation should succeed");
+        assert!(!prepared.ticket_id.is_empty());
+        assert_eq!(prepared.review.source_path(), "tracked.txt");
+        assert_eq!(prepared.review.destination_path(), "renamed.txt");
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(&source).expect("source should remain after Prepare"),
+            before
+        );
+        assert!(!destination.exists());
+
+        let ticket = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_prepared(&prepared.ticket_id, std::time::Instant::now())
+            .expect("prepared rename ticket should be single-use");
+        let PreparedHostInvocation {
+            registry,
+            expected_definition,
+            allowed_permissions,
+            call,
+            kind,
+            activity_id,
+            repository_identity,
+            generations,
+            payload,
+            ..
+        } = ticket;
+        let rename_proof = match payload {
+            PreparedHostPayload::RenameFile {
+                preparation,
+                preparer,
+            } => Some((preparation, preparer)),
+            _ => panic!("ticket should retain rename proof"),
+        };
+        emit_host_activity(
+            app.handle(),
+            HostActivityEvent {
+                source: "host_explicit",
+                invocation_id: activity_id.clone(),
+                tool: "repo.rename-file".to_owned(),
+                state: HostActivityState::Started,
+                result: None,
+                review: None,
+            },
+        );
+        run_host_tool(
+            app.handle().clone(),
+            registry,
+            expected_definition,
+            allowed_permissions,
+            call,
+            kind,
+            activity_id,
+            repository_identity,
+            generations,
+            None,
+            None,
+            None,
+            rename_proof,
+        )
+        .await;
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(&destination).expect("destination should be written"),
+            before
+        );
+        assert_eq!(
+            state
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state(),
+            CoordinatorState::Idle
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn deterministic_create_file_dispatch_runs_the_real_tool_once() {
         let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
@@ -15906,6 +16462,7 @@ mod tests {
             None,
             None,
             deletion_proof,
+            None,
         )
         .await;
         let events = wait_for_test_events(&host_activity.0, 3)
@@ -16061,6 +16618,7 @@ mod tests {
             None,
             None,
             Some((preparation, preparer)),
+            None,
         )
         .await;
         let events = wait_for_test_events(&host_activity.0, 2)
@@ -16143,6 +16701,7 @@ mod tests {
             "RAH_REJECTED_ACTIVITY".to_owned(),
             repository_identity,
             generations,
+            None,
             None,
             None,
             None,
@@ -17584,6 +18143,7 @@ mod tests {
             repository_multi_file_edit_preparer: None,
             repository_create_file_preparer: None,
             repository_delete_file_preparer: None,
+            repository_rename_file_preparer: None,
         }
     }
 
