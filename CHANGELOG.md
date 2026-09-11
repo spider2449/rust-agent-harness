@@ -1,9 +1,9 @@
 # Changelog
 
-## v0.24.0 — release preparation (2026-09-10)
+## v0.24.0 — released (2026-09-10)
 
-RAH v0.24.0 is **PREPARED, NOT PUBLISHED**. v0.23.0 remains the current
-immutable published release. This preparation is based on Task 286's accepted
+RAH v0.24.0 is the current immutable published release. v0.23.0 is the prior
+immutable published release. This release is based on Task 286's accepted
 verdict:
 
 > RAH v0.24 REVIEWED DELETION MILESTONE READY FOR RELEASE PREPARATION
@@ -12,6 +12,22 @@ The preparation baseline is `4197d90cd04493b562db7ae9be315074f9320433`.
 The workspace version moves from `0.23.0` to `0.24.0` across 13 packages;
 all remain on Rust edition 2024. No dependency, public API, authority, or
 production behavior change is part of this release preparation.
+
+### Immutable release record
+
+- Immutable release source: `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- Annotated tag: `v0.24.0`.
+- Tag object: `5708cfd0078ba1593e86077bf88c0dddaa03c1bf`.
+- Peeled target: `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- Release-preparation CI: `34456482581` PASS.
+- Tag CI: `34457322318` PASS.
+- GitHub Release: `386128676` — `RAH v0.24.0`.
+- Published: `2026-09-10T08:53:24Z`.
+
+Task 287 completed release preparation at the immutable source and stopped
+before publication. Task 288 performed the later immutable publication with no
+commit. Task 289 is a documentation-only descendant cleanup and is not the
+v0.24.0 release source.
 
 ### Release theme
 

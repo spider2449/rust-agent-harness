@@ -5,11 +5,14 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.24.0 prepared — not yet published
+## RAH v0.24.0 released
 
-RAH v0.24.0 is **PREPARED, NOT PUBLISHED**, with the release theme
-**HostExplicit Reviewed File Deletion (`repo.delete-file`)**. v0.23.0 remains
-the current immutable published release.
+RAH v0.24.0 is the current immutable published release, with the release theme
+**HostExplicit Reviewed File Deletion (`repo.delete-file`)**. v0.23.0 is the
+prior immutable published release.
+
+The immutable v0.24.0 release source is
+`2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
 
 The accepted reviewed human workflow is:
 

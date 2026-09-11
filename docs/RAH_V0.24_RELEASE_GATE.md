@@ -2,12 +2,12 @@
 
 ## Status
 
-PREPARED — NOT PUBLISHED
+RELEASED — HISTORICAL RECORD
 
-RAH v0.24.0 is prepared from the independently accepted Task 286 milestone
-audit. No v0.24.0 tag, GitHub Release, artifact publication, or post-release
-cleanup is part of this gate. v0.23.0 remains the current immutable published
-release.
+RAH v0.24.0 was prepared from the independently accepted Task 286 milestone
+audit and was later published immutably. v0.24.0 is the current immutable
+published release; v0.23.0 is the prior immutable published release. Task 289
+records documentation-only post-release cleanup.
 
 ## Release identity and checkpoint
 
@@ -15,7 +15,13 @@ release.
 - Preparation baseline: `4197d90cd04493b562db7ae9be315074f9320433`.
 - Baseline subject: `docs: audit v0.24 reviewed deletion milestone`.
 - Direct parent of the baseline: `3a465d3b5010f86e606e3e3a0281d20774aacbc8`.
-- Final release-preparation commit: `TO BE RECORDED AFTER COMMIT`.
+- Final release-preparation commit / immutable release source:
+  `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- Annotated tag: `v0.24.0`.
+- Tag object: `5708cfd0078ba1593e86077bf88c0dddaa03c1bf`.
+- Tag peeled source: `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- Tag message: `RAH v0.24.0`.
+- Tagger timestamp: `2026-09-10T08:49:24Z`.
 - Workspace: 13 packages, all version `0.24.0`, all edition 2024.
 - No dependency, resolver, edition, member, public API, or authority change.
 
@@ -43,6 +49,13 @@ Task 286 accepted the following verdict:
   `e6cb63436541fe653ba0ea4165466aaa822bc206`.
 - Task 285 final docs-only evidence head: `3a465d3b5010f86e606e3e3a0281d20774aacbc8`.
 - Task 286 — milestone audit: `4197d90cd04493b562db7ae9be315074f9320433`.
+- Task 287 — release preparation / immutable release source:
+  `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- Task 287 exact-head CI: run `34456482581`, branch `master`, SHA
+  `2d4cf0e4d89a461f54250ff81ad9808929d854f0`, event `push`, status
+  `completed`, conclusion `success`.
+- Task 288 — immutable publication, no commit.
+- Task 289 — documentation-only descendant cleanup; not the release source.
 
 ## Architecture and authority contract
 
@@ -200,6 +213,25 @@ deleted.
 - Task 286 audit CI: run `34454136984`, branch `master`, SHA
   `4197d90cd04493b562db7ae9be315074f9320433`, event `push`, status
   `completed`, conclusion `success`.
+- Task 287 exact-head preparation CI: run `34456482581`, branch `master`, SHA
+  `2d4cf0e4d89a461f54250ff81ad9808929d854f0`, event `push`, status
+  `completed`, conclusion `success`.
+- v0.24.0 tag CI: run `34457322318`, branch `v0.24.0`, SHA
+  `2d4cf0e4d89a461f54250ff81ad9808929d854f0`, event `push`, status
+  `completed`, conclusion `success`.
+
+## Immutable v0.24.0 publication record
+
+- Annotated tag object: `5708cfd0078ba1593e86077bf88c0dddaa03c1bf`.
+- Peeled source: `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+- GitHub Release ID: `386128676`.
+- GitHub Release name: `RAH v0.24.0`.
+- GitHub Release tag: `v0.24.0`.
+- Published: `2026-09-10T08:53:24Z`.
+- Draft: `false`.
+- Prerelease: `false`.
+- Assets: `0`.
+- Task 288 performed publication later than Task 287 and created no commit.
 
 ## Preparation validation checklist
 
@@ -219,8 +251,8 @@ The final Task 287 candidate must pass:
 - [x] Cargo diff audit shows only workspace package-version movement and no
   dependency drift;
 - [x] changed paths are exactly the eight preparation files;
-- [x] `v0.24.0` tag and GitHub Release remain absent; and
-- [ ] exact-head Task 287 push CI is completed with conclusion `success`.
+- [x] `v0.24.0` tag and GitHub Release were absent at the Task 287 preparation checkpoint; and
+- [x] exact-head Task 287 push CI is completed with conclusion `success`.
 
 The destructive ignored Windows test is explicitly not part of this checklist.
 
@@ -232,19 +264,23 @@ The destructive ignored Windows test is explicitly not part of this checklist.
   `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`;
 - GitHub Release ID: `385352229`;
 - v0.23.0 tag/release remain unchanged; and
-- v0.24.0 tag and GitHub Release are absent.
+- v0.24.0 tag and GitHub Release remain unchanged after publication.
 
-## Publication checklist — intentionally incomplete
+## Publication and post-release checklist
 
-- [ ] independent review of the prepared commit and exact-head CI;
-- [ ] create and verify the annotated `v0.24.0` tag;
-- [ ] run terminal exact-source tag CI;
-- [ ] verify the tag object and peeled source independently;
-- [ ] create the GitHub Release with `--verify-tag`; and
-- [ ] independently audit publication state.
+- [x] independently review the prepared commit and exact-head CI;
+- [x] create and verify the annotated `v0.24.0` tag;
+- [x] run terminal exact-source tag CI `34457322318`;
+- [x] verify the tag object and peeled source independently;
+- [x] create the GitHub Release with `--verify-tag`;
+- [x] independently audit publication state and v0.23.0 identity;
+- [x] complete Task 289 as documentation-only cleanup in the authorized seven-file scope.
 
-No future v0.24.0 tag SHA is recorded here. Post-release cleanup and v0.25
-work are outside this task.
+The immutable v0.24.0 release source forever remains
+`2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+
+The later Task 289 documentation cleanup commit is not the release source.
+Task 289 does not modify the tag, GitHub Release, or any publication object.
 
 ## Explicit nonclaims
 

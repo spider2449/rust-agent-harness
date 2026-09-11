@@ -1,13 +1,20 @@
-# RAH v0.24.0 Architecture — prepared, not yet published
+# RAH v0.24.0 Architecture — released
 
-This document describes the prepared v0.24.0 architecture.
+This document describes the released v0.24.0 architecture.
 
-RAH v0.24.0 is **PREPARED — NOT PUBLISHED**.
+RAH v0.24.0 is **RELEASED**.
 
-v0.23.0 remains the current immutable published release.
+The current immutable release is `v0.24.0`.
 
-The immutable v0.23.0 release source is:
+The immutable v0.24.0 release source is:
+`2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
+
+The prior immutable release is `v0.23.0`, whose release source is
 `05527ce10cc088bbaa09fc6792e0f26f6c85ac2b`.
+
+Task 287 stopped before publication. Task 288 later performed publication with
+no commit. The later Task 289 documentation cleanup commit is not the v0.24.0
+release source.
 
 The later Task 278 documentation cleanup commit is not the v0.23.0 release
 source.
