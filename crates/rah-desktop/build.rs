@@ -33,6 +33,7 @@ fn main() {
             "host_invoke_read",
             "host_prepare_repo_create_branch",
             "host_prepare_repo_patch",
+            "host_prepare_repo_rename_file",
             "host_confirm_tool_invocation",
             "host_cancel_tool_invocation",
         ]),

@@ -45,6 +45,7 @@ assert.match(source, /const isPatch = host\.kind === "repo_patch"/);
 assert.match(source, /const isMultiFileEdit = host\.kind === "repo_edit_files"/);
 assert.match(source, /const isCreateFile = host\.kind === "repo_create_file"/);
 assert.match(source, /const isDeleteFile = host\.kind === "repo_delete_file"/);
+assert.match(source, /const isRenameFile = host\.kind === "repo_rename_file"/);
 assert.match(source, /input\.dataset\.hostInput = isPatch \? "path"/);
 assert.match(source, /path\.dataset\.hostInput = "path"/);
 assert.match(source, /fileContent\.dataset\.hostInput = "content"/);
@@ -56,6 +57,7 @@ assert.match(source, /host_prepare_repo_create_branch/);
 assert.match(source, /host_prepare_repo_patch/);
 assert.match(source, /host_prepare_repo_edit_files/);
 assert.match(source, /host_prepare_repo_create_file/);
+assert.match(source, /host_prepare_repo_rename_file/);
 assert.match(source, /const isCreateFile = kind === "repo_create_file"/);
 const createFileSubmit = source.slice(source.indexOf('const isCreateFile = kind === "repo_create_file"'), source.indexOf("const request = { kind }"));
 assert.match(createFileSubmit, /path: form\.querySelector\('\[data-host-input="path"\]'\)\.value/);
@@ -82,8 +84,26 @@ assert.match(deleteSubmit, /invoke\("host_prepare_repo_delete_file", \{ request 
 for (const forbiddenDeleteField of ["expected_file_sha256", "expected_file_byte_length", "hash", "length", "nativePath", "repository", "root", "FileIdentity", "permission", "authority", "ToolName", "ToolInput", "retry", "restore", "stage", "commit", "ticketId", "activityId"]) {
   assert.equal(deleteSubmit.includes(forbiddenDeleteField), false, `delete-file DTO field: ${forbiddenDeleteField}`);
 }
+const renameForm = source.slice(source.indexOf("if (isRenameFile)"), source.indexOf("if (isPatch)"));
+assert.match(renameForm, /Source repository-relative path/);
+assert.match(renameForm, /Destination repository-relative path/);
+assert.equal((renameForm.match(/document\.createElement\("input"\)/g) ?? []).length, 2);
+assert.match(renameForm, /source\.dataset\.hostInput = "sourcePath"/);
+assert.match(renameForm, /destination\.dataset\.hostInput = "destinationPath"/);
+assert.match(renameForm, /source\.maxLength = 1024/);
+assert.match(renameForm, /destination\.maxLength = 1024/);
+assert.match(renameForm, /Prepare itself renames nothing/);
+assert.match(source, /button\.textContent = .*isRenameFile \? "Prepare"/);
+const renameSubmit = source.slice(source.indexOf('if (kind === "repo_rename_file")'), source.indexOf("const request = { kind }"));
+assert.match(renameSubmit, /const request = \{\s*source_path: form\.querySelector\('\[data-host-input="sourcePath"\]'\)\.value,\s*destination_path: form\.querySelector\('\[data-host-input="destinationPath"\]'\)\.value,\s*\}/);
+assert.match(renameSubmit, /invoke\("host_prepare_repo_rename_file", \{ request \}\)/);
+for (const forbiddenRenameField of ["expected_source_file_sha256", "expected_source_file_byte_length", "sourceSha256", "sourceByteLength", "sourceContent", "nativePath", "repository", "root", "ToolInput", "permission", "authority", "ticketId", "activityId"]) {
+  assert.equal(renameSubmit.includes(forbiddenRenameField), false, `rename-file DTO field: ${forbiddenRenameField}`);
+}
 assert.equal(source.includes("createHash"), false);
 assert.equal(source.includes("crypto."), false);
+assert.equal(source.includes("window.__TAURI__.fs"), false);
+assert.equal(source.includes("readFile"), false);
 assert.match(source, /targets: \[\.\.\.form\.querySelectorAll\("\[data-multi-file-target\]"\)\]/);
 assert.match(source, /expectedOldText: replacement\.querySelector/);
 assert.match(source, /replacementText: replacement\.querySelector/);
@@ -131,6 +151,10 @@ assert.match(source, /nothing was rolled back or continued/);
 assert.match(source, /host_invocation_review_too_large/);
 assert.match(source, /host_invocation_invalid_target/);
 assert.match(source, /host_invocation_precondition_changed/);
+assert.match(source, /host_invocation_stale/);
+assert.match(source, /host_invocation_ticket_invalid/);
+assert.match(source, /host_invocation_busy/);
+assert.match(source, /showChatError\(error\)/);
 assert.match(source, /pre\.textContent/);
 assert.match(source, /Host action — not Model/);
 assert.match(source, /content\?\.type !== "json"/);
@@ -317,6 +341,50 @@ assert.equal(deleteActivityRenderer.includes("Restore"), false);
 assert.equal(deleteActivityRenderer.includes("Stage"), false);
 assert.equal(deleteActivityRenderer.includes("Commit"), false);
 assert.equal(deleteActivityRenderer.includes("activityId"), false);
+
+const renameReviewStart = source.indexOf('if (kind === "rename_file")');
+const renameReview = source.slice(renameReviewStart, source.indexOf("function clearActiveHostReview"));
+for (const reviewField of [
+  "operation",
+  "source_path",
+  "destination_path",
+  "source_byte_length",
+  "source_sha256",
+  "source_format",
+  "source_mode",
+  "source_content_escaped",
+  "expected_effect",
+  "expected_git_consequence",
+  "non_effects",
+]) {
+  assert.match(renameReview, new RegExp(`review\\.${reviewField}`));
+}
+assert.match(renameReview, /Source path/);
+assert.match(renameReview, /Destination path/);
+assert.match(renameReview, /Complete escaped source content/);
+assert.match(renameReview, /contentPre\.textContent = String\(review\.source_content_escaped \?\? ""\)/);
+assert.match(renameReview, /nonEffectsHeading\.textContent = "Explicit non-effects"/);
+assert.match(source, /Review Host file rename \/ move/);
+const renameLabels = source.slice(source.indexOf("const renameFileResultLabels"), source.indexOf("const authorityStatusLabels"));
+for (const result of [
+  "renamed_verified",
+  "known_no_effect",
+  "invalid_input",
+  "precondition_failed",
+  "uncertain",
+]) {
+  assert.match(renameLabels, new RegExp(`${result}:`));
+}
+assert.match(source, /status === "renamed_verified"[\s\S]*source is absent[\s\S]*destination matches[\s\S]*unstaged worktree rename\/move[\s\S]*no Stage or Commit/);
+assert.match(source, /status === "known_no_effect"[\s\S]*source preimage remains intact[\s\S]*destination is absent/);
+assert.match(source, /status === "uncertain"[\s\S]*does not automatically retry, reverse, roll back, or compensate/);
+const renameActivityRenderer = source.slice(source.indexOf("const renameFileStatus"), source.indexOf("entry.append(title, state)"));
+assert.match(renameActivityRenderer, /payload\.tool === "repo\.rename-file"/);
+assert.equal(renameActivityRenderer.includes("source_content_escaped"), false);
+assert.equal(renameActivityRenderer.includes("ticketId"), false);
+assert.equal(renameActivityRenderer.includes("ToolOutput"), false);
+assert.match(source, /if \(host\.eligible === true && host\.kind\)/);
+assert.match(source, /host_invocation_busy: "HostExplicit busy"/);
 
 const hostileReviewValues = [
   "<script>alert(1)</script>",

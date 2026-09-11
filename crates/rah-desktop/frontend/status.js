@@ -53,6 +53,14 @@ const deleteFileResultLabels = {
   uncertain: "Uncertain — final file state cannot be proven",
 };
 
+const renameFileResultLabels = {
+  renamed_verified: "Verified — reviewed file renamed / moved",
+  known_no_effect: "Rename failed — reviewed source proven unchanged",
+  invalid_input: "Rejected — invalid rename input; no rename effect",
+  precondition_failed: "Rejected — rename precondition failed; no rename effect",
+  uncertain: "Uncertain — final file location/state cannot be proven",
+};
+
 const authorityStatusLabels = {
   no_repository: "No repository selected",
   disconnected: "Runtime disconnected",
@@ -270,6 +278,7 @@ function renderEffectiveTool(tool) {
     const isMultiFileEdit = host.kind === "repo_edit_files";
     const isCreateFile = host.kind === "repo_create_file";
     const isDeleteFile = host.kind === "repo_delete_file";
+    const isRenameFile = host.kind === "repo_rename_file";
     if (needsPath || isBranch || isPatch) {
       const input = document.createElement("input");
       input.type = "text";
@@ -338,6 +347,41 @@ function renderEffectiveTool(tool) {
       }
       form.append(guidance);
     }
+    if (isRenameFile) {
+      const sourceLabel = document.createElement("label");
+      sourceLabel.textContent = "Source repository-relative path";
+      const source = document.createElement("input");
+      source.type = "text";
+      source.required = true;
+      source.maxLength = 1024;
+      source.placeholder = "Relative source path";
+      source.dataset.hostInput = "sourcePath";
+      sourceLabel.append(source);
+      form.append(sourceLabel);
+
+      const destinationLabel = document.createElement("label");
+      destinationLabel.textContent = "Destination repository-relative path";
+      const destination = document.createElement("input");
+      destination.type = "text";
+      destination.required = true;
+      destination.maxLength = 1024;
+      destination.placeholder = "Relative destination path";
+      destination.dataset.hostInput = "destinationPath";
+      destinationLabel.append(destination);
+      form.append(destinationLabel);
+
+      const guidance = document.createElement("ul");
+      for (const text of [
+        "Prepares one reviewed tracked-file rename or move; Prepare itself renames nothing.",
+        "The backend provides the complete review before Confirm.",
+        "The operation is an unstaged worktree move with no automatic Stage or Commit.",
+      ]) {
+        const item = document.createElement("li");
+        item.textContent = text;
+        guidance.append(item);
+      }
+      form.append(guidance);
+    }
     if (isPatch) {
       const oldText = document.createElement("textarea");
       oldText.required = true;
@@ -374,7 +418,7 @@ function renderEffectiveTool(tool) {
     }
     const button = document.createElement("button");
     button.type = "submit";
-    button.textContent = isBranch || isPatch || isMultiFileEdit || isCreateFile || isDeleteFile ? "Prepare" : "Invoke";
+    button.textContent = isBranch || isPatch || isMultiFileEdit || isCreateFile || isDeleteFile || isRenameFile ? "Prepare" : "Invoke";
     if (isMultiFileEdit) button.dataset.multiFileAction = "prepare";
     form.append(button);
     hostBox.append(form);
@@ -503,7 +547,8 @@ function renderHostResult(payload) {
   const status = result?.status;
   const isCreateFile = payload.tool === "repo.create-file";
   const isDeleteFile = payload.tool === "repo.delete-file";
-  const resultLabels = isCreateFile ? createFileResultLabels : isDeleteFile ? deleteFileResultLabels : multiFileResultLabels;
+  const isRenameFile = payload.tool === "repo.rename-file";
+  const resultLabels = isCreateFile ? createFileResultLabels : isDeleteFile ? deleteFileResultLabels : isRenameFile ? renameFileResultLabels : multiFileResultLabels;
   const box = document.createElement("div");
   box.className = "host-result";
   const title = document.createElement("strong");
@@ -544,6 +589,23 @@ function renderHostResult(payload) {
       explanation.textContent = "A required deletion precondition failed; no verified deletion effect occurred. Prepare a fresh review if the human still intends to delete the current file.";
     } else if (status === "uncertain") {
       explanation.textContent = "The final target state cannot be safely proven. Inspect the refreshed repository state manually. Do not retry automatically.";
+    }
+    box.append(explanation);
+    return box;
+  }
+
+  if (isRenameFile) {
+    const explanation = document.createElement("p");
+    if (status === "renamed_verified") {
+      explanation.textContent = "The backend independently proved that the reviewed source is absent and the destination matches the reviewed source. This is an unstaged worktree rename/move; no Stage or Commit was performed.";
+    } else if (status === "known_no_effect") {
+      explanation.textContent = "The backend independently proved that the reviewed source preimage remains intact and the destination is absent. No rename effect is reported.";
+    } else if (status === "invalid_input") {
+      explanation.textContent = "The backend rejected the rename request as invalid; no verified rename effect occurred.";
+    } else if (status === "precondition_failed") {
+      explanation.textContent = "A required rename precondition failed; no verified rename effect occurred. Prepare a fresh review if the human still intends to move the file.";
+    } else if (status === "uncertain") {
+      explanation.textContent = "The final file location or state cannot be proven. RAH does not automatically retry, reverse, roll back, or compensate; inspect the refreshed repository state manually.";
     }
     box.append(explanation);
     return box;
@@ -604,6 +666,8 @@ function appendHostActivity(payload) {
   const createFileLabel = createFileStatus ? createFileResultLabels[createFileStatus] : null;
   const deleteFileStatus = payload.tool === "repo.delete-file" ? result?.status : null;
   const deleteFileLabel = deleteFileStatus ? deleteFileResultLabels[deleteFileStatus] : null;
+  const renameFileStatus = payload.tool === "repo.rename-file" ? result?.status : null;
+  const renameFileLabel = renameFileStatus ? renameFileResultLabels[renameFileStatus] : null;
   const activityLabel = payload.tool === "repo.create-file"
     ? (createFileLabel ?? (payload.state === "partial_effect"
       ? "Partial effect — inspect current repository state"
@@ -620,6 +684,14 @@ function appendHostActivity(payload) {
           : payload.state === "rejected_stale"
             ? "Rejected stale — no deletion effect from this review"
             : labels[payload.state] ?? "Host action state unavailable"))
+      : payload.tool === "repo.rename-file"
+        ? (renameFileLabel ?? (payload.state === "possible_effect_unknown"
+          ? "Uncertain — inspect the refreshed repository state manually; do not retry"
+          : payload.state === "cancelled_before_start"
+            ? "Cancelled without effect"
+            : payload.state === "rejected_stale"
+              ? "Rejected stale — no rename effect from this review"
+              : labels[payload.state] ?? "Host action state unavailable"))
     : labels[payload.state] ?? "Host action state unavailable";
   state.textContent = `${payload.tool}: ${activityLabel}`;
   entry.append(title, state);
@@ -897,6 +969,45 @@ function renderHostReview(review, kind) {
     content.append(warningsHeading, warnings);
     return content;
   }
+  if (kind === "rename_file") {
+    const details = document.createElement("dl");
+    const values = [
+      ["Operation", review.operation],
+      ["Source path", review.source_path],
+      ["Destination path", review.destination_path],
+      ["Source byte length", review.source_byte_length],
+      ["Source SHA-256", review.source_sha256],
+      ["Source format", review.source_format],
+      ["Source mode", review.source_mode],
+      ["Expected effect", review.expected_effect],
+      ["Expected Git consequence", review.expected_git_consequence],
+    ];
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = String(value ?? "");
+      details.append(term, detail);
+    }
+    content.append(details);
+
+    const contentHeading = document.createElement("h4");
+    contentHeading.textContent = "Complete escaped source content";
+    const contentPre = document.createElement("pre");
+    contentPre.textContent = String(review.source_content_escaped ?? "");
+    content.append(contentHeading, contentPre);
+
+    const nonEffectsHeading = document.createElement("h4");
+    nonEffectsHeading.textContent = "Explicit non-effects";
+    const nonEffects = document.createElement("ul");
+    for (const value of review.non_effects ?? []) {
+      const item = document.createElement("li");
+      item.textContent = String(value ?? "");
+      nonEffects.append(item);
+    }
+    content.append(nonEffectsHeading, nonEffects);
+    return content;
+  }
   const details = document.createElement("dl");
   const values = [
     ["Operation", review.operation],
@@ -960,7 +1071,8 @@ function openHostReview(invoke, prepared, kind) {
     ? "Review Host patch"
     : kind === "multi_file_edit" ? "Review Host multi-file edit"
       : kind === "create_file" ? "Review Host new-file creation"
-        : kind === "delete_file" ? "Review Host file deletion" : "Review Host action";
+        : kind === "delete_file" ? "Review Host file deletion"
+          : kind === "rename_file" ? "Review Host file rename / move" : "Review Host action";
   confirm.type = "button";
   confirm.textContent = "Confirm Host action";
   cancel.type = "button";
@@ -1035,6 +1147,15 @@ async function submitHostForm(invoke, form) {
     };
     const prepared = await invoke("host_prepare_repo_delete_file", { request });
     openHostReview(invoke, prepared, "delete_file");
+    return;
+  }
+  if (kind === "repo_rename_file") {
+    const request = {
+      source_path: form.querySelector('[data-host-input="sourcePath"]').value,
+      destination_path: form.querySelector('[data-host-input="destinationPath"]').value,
+    };
+    const prepared = await invoke("host_prepare_repo_rename_file", { request });
+    openHostReview(invoke, prepared, "rename_file");
     return;
   }
   const request = { kind };
