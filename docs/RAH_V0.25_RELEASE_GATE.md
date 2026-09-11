@@ -133,6 +133,15 @@ attempts and no effect. Task 303 does not itself change this gate's Verdict B;
 release readiness remains pending the independent Task 304 milestone
 re-audit.
 
+Task 303's corrected production candidate also passed the exact-head Windows
+reviewed live route with marker `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
+Prepare Tool/native was `0/0`, Confirm Tool/native was `1/1`, final proof was
+`ReviewedSuccess`, and terminal status was `renamed_verified`. HEAD, index, and
+refs were preserved; Commit authorization was invalidated at the effect
+boundary; model, MCP, and Process Plugin activity were zero; and Codex cleanup
+was reaped successfully. This carried evidence does not change Verdict B or
+replace the independent Task 304 milestone re-audit.
+
 ## Reviewed preparation
 
 The Task 298 preparation foundation remains coherent in current code:

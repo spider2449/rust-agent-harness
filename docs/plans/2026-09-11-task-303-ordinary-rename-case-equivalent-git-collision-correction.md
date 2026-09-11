@@ -88,8 +88,15 @@ candidate framing/record tests fail closed.
 - `cargo metadata --no-deps --format-version 1`: passed; 13 packages, edition
   2024, workspace version 0.24.0.
 
-The exact-head Windows live gate remains to be run after the final local
-commit. Task 301's historical live result is not reused for this corrected
-production candidate. Release readiness remains pending a fresh Task 304
-milestone re-audit; no v0.25.0 tag or GitHub Release is authorized or created
-by Task 303.
+The exact-head Windows live gate passed on corrected production commit
+`1aa4d3277bd7ba24dec1caa3d52cc57c2aa2584a` with
+`RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`. The certified baseline was
+`codex-cli 0.149.0`, source `certified_baseline`, SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+Prepare Tool/native counts were `0/0`; Confirm Tool/native counts were `1/1`;
+final proof was `ReviewedSuccess`; terminal status was `renamed_verified`;
+HEAD, index, and refs were preserved; Commit authorization was invalidated;
+model, MCP, and Process Plugin activity were all `0`; and cleanup/reaping
+passed. Task 301's historical live result was not reused. Release readiness
+remains pending a fresh Task 304 milestone re-audit; no v0.25.0 tag or GitHub
+Release is authorized or created by Task 303.
