@@ -11612,15 +11612,19 @@ mod tests {
             }
         }
 
+        let branch_authority = RepositoryBranchCreationAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("branch authority construction failed: {error}"))?;
+        let deletion_authority = RepositoryFileDeletionAuthority::new(&git, &fixture.0)
+            .map_err(|error| format!("deletion authority construction failed: {error}"))?;
         let rename_authority = RepositoryFileRenameAuthority::new(&git, &fixture.0)
             .map_err(|error| format!("rename authority construction failed: {error}"))?;
         let repository = DesktopRepository::new_with_authorities(
             &git,
             &fixture.0,
             None,
-            None,
+            Some(deletion_authority),
             Some(rename_authority),
-            None,
+            Some(branch_authority),
         )
         .map_err(|error| format!("Desktop repository construction failed: {error:?}"))?;
         let app = tauri::Builder::default()
