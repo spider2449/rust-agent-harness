@@ -11823,7 +11823,7 @@ mod tests {
                 != ["rah-hostexplicit-live-rename.txt".to_owned()]
                     .into_iter()
                     .collect()
-            || before_destination_parent_entries.is_empty()
+            || !before_destination_parent_entries.is_empty()
         {
             return Err("protected staged fixture baseline was not exact".to_owned());
         }
