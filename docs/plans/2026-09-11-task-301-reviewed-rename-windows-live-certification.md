@@ -36,9 +36,9 @@ Observed before the live gate:
 
 | Item | Value |
 | --- | --- |
-| Windows edition/version/build | pending final live capture |
-| Architecture | pending final live capture |
-| Rust toolchain | pending final live capture |
+| Windows edition/version/build | Microsoft Windows 10 Professional, `10.0.19045`, build `19045` |
+| Architecture | x64 / `x86_64-pc-windows-msvc` |
+| Rust toolchain | `rustc 1.96.0 (ac68faa20 2026-05-25)`, Cargo `1.96.0 (30a34c682 2026-05-25)` |
 | Git | `git version 2.54.0.windows.1` |
 | Git executable | `C:\Program Files\Git\cmd\git.exe` |
 | Codex source | certified baseline, `npm-isolated` manifest |
@@ -104,28 +104,35 @@ The test must prove, from the production Desktop route:
 
 | Validation | Result |
 | --- | --- |
-| `cargo fmt --check` | pending final candidate |
-| Focused reviewed rename tests | pending final candidate |
-| Windows Desktop deterministic suite | pending final candidate |
-| Frontend syntax/permission suites | pending final candidate |
-| Desktop release build | pending final candidate |
-| Workspace check/test/clippy/diff | pending final candidate |
-| Exact ignored live command | pending final candidate |
-| Live marker | pending final candidate |
+| `cargo fmt --check` | PASS during implementation validation |
+| Focused reviewed rename tests | PASS: `rah-tools` rename suite, 36 passed |
+| Windows Desktop deterministic suite | PASS: 219 passed, 10 ignored |
+| Frontend syntax/permission suites | PASS: `node --check status.js`, frontend authority tests, Tauri rename permission tests |
+| Desktop release build | PASS: `cargo build -p rah-desktop --release` |
+| Workspace check/test/clippy/diff | PASS: workspace check, test, clippy, and diff check |
+| Exact ignored live command | PASS on `ba1049c575da2a5bcbde613b34152361d8e56f76` using the repository Codex live-gate wrapper |
+| Live marker | `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK` |
 | Final commit / exact-head CI | pending final candidate |
 
 ## Final evidence
 
-To be completed only after the live gate succeeds on the final local commit:
+The successful live gate on `ba1049c575da2a5bcbde613b34152361d8e56f76` recorded:
 
-- Windows edition/version/build and architecture;
-- Rust toolchain and exact Git version;
-- Codex source, exact version, and executable SHA-256;
-- fixture and Prepare zero-effect evidence;
-- review completeness and privacy evidence;
-- Confirm ordering and exact Tool/native-attempt counts;
-- independent post-effect `ReviewedSuccess` proof;
-- protected Git and Commit-authorization state transitions;
-- zero model/MCP/Process Plugin activity;
-- cleanup/reaping result;
-- final commit, parent, exact-head CI run/result, and clean `master` parity.
+- Windows 10 Professional `10.0.19045` build `19045`, x64;
+- Rust `1.96.0`, Git `2.54.0.windows.1` from `C:\Program Files\Git\cmd\git.exe`;
+- certified Codex baseline source `npm-isolated`, `codex-cli 0.149.0`, executable SHA-256 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`;
+- fresh real Git fixture with committed attached HEAD, dedicated clean source, existing empty safe destination parent, and unrelated staged change;
+- Prepare Tool/native attempts `0/0`, unchanged source/destination absence, identities, directory entries, raw index, HEAD, branch, refs, Git state, generations, conversation, and pending Commit authorization;
+- complete typed review with exact source/destination, length, SHA-256, complete escaped UTF-8 content, mode, effect/consequence, and explicit non-effects;
+- status-only generic activity without ticket, source content, hash, paths, native paths, ToolInput, filesystem identity, Git evidence, repository identity, or preparer identity;
+- Confirm ticket-only ordering with D2 before Started and Commit authorization invalidation before the effect;
+- exactly one HostExplicit Started, one authorized Tool dispatch, one `repo.rename-file` execution, and one native no-replace attempt, with no replay/retry/reverse/compensation/rollback;
+- independent post-effect proof classified `ReviewedSuccess`, exact destination bytes/length/SHA-256 and identity correspondence, source absence, ordinary non-reparse destination, and unchanged protected Git state;
+- worktree semantics of source deletion plus untracked destination, with raw index and cached diff unchanged;
+- Commit authorization pending before Prepare and after Prepare, then not pending after Started/effect;
+- zero model lifecycle, MCP, and Process Plugin activity; coordinator/chat Idle; ticket reuse and activity-ID authorization rejected; one repository refresh;
+- existing Desktop shutdown/reaping path completed with `RAH_RENAME_FILE_HOSTEXPLICIT_CLEANUP_REAPED=1`;
+- final marker `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
+
+The final exact candidate live gate and exact-head CI remain required after this
+evidence-recording plan update.
