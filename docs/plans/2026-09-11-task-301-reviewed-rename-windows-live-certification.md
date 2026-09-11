@@ -112,7 +112,7 @@ The test must prove, from the production Desktop route:
 | Workspace check/test/clippy/diff | PASS: workspace check, test, clippy, and diff check |
 | Exact ignored live command | PASS on the final exact candidate using the repository Codex live-gate wrapper |
 | Live marker | `RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK` |
-| Final commit / exact-head CI | pending final candidate |
+| Final commit / exact-head CI | PASS: final pushed SHA and exact-head CI result are recorded in the closure report |
 
 ## Final evidence
 
