@@ -16,7 +16,7 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_support::git_environment,
-    host_execute::paths_equivalent,
+    host_execute::{is_beneath, paths_equivalent},
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         reject_unsupported_file_attributes, validate_directory_path, validate_existing_target,
@@ -174,6 +174,8 @@ struct RepositoryFileRenamePolicy {
     force_observation_unknown: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     force_same_volume_mismatch: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, windows))]
+    force_alias_ambiguity: std::sync::atomic::AtomicBool,
 }
 
 impl RepositoryFileRenamePolicy {
@@ -213,6 +215,8 @@ impl RepositoryFileRenamePolicy {
             force_observation_unknown: Default::default(),
             #[cfg(test)]
             force_same_volume_mismatch: Default::default(),
+            #[cfg(all(test, windows))]
+            force_alias_ambiguity: Default::default(),
         })
     }
     fn matches_resources(&self, git: &Path, root: &Path) -> bool {
@@ -282,7 +286,7 @@ impl RepositoryFileRenamePolicy {
     async fn destination(&self, relative: &Path) -> Result<PathBuf, ()> {
         let destination = self.root.join(relative);
         let parent = destination.parent().ok_or(())?;
-        validate_directory_path(&self.root, parent, "destination parent").map_err(|_| ())?;
+        validate_ordinary_directory_ancestry(&self.root, parent, "destination parent")?;
         match observe_absence(&destination) {
             AbsenceObservation::Absent => {}
             AbsenceObservation::Present | AbsenceObservation::Unknown => return Err(()),
@@ -312,9 +316,12 @@ impl RepositoryFileRenamePolicy {
     }
     async fn verify_post(&self, pre: &Preimage) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
-        validate_directory_path(&self.root, &pre.source_parent, "source parent").map_err(|_| ())?;
-        validate_directory_path(&self.root, &pre.destination_parent, "destination parent")
-            .map_err(|_| ())?;
+        validate_ordinary_directory_ancestry(&self.root, &pre.source_parent, "source parent")?;
+        validate_ordinary_directory_ancestry(
+            &self.root,
+            &pre.destination_parent,
+            "destination parent",
+        )?;
         if FileIdentity::capture(&pre.source_parent).map_err(|_| ())? != pre.source_parent_identity
             || FileIdentity::capture(&pre.destination_parent).map_err(|_| ())?
                 != pre.destination_parent_identity
@@ -324,6 +331,31 @@ impl RepositoryFileRenamePolicy {
         }
         if self.observe_absence(&pre.destination) != AbsenceObservation::Present {
             return Err(());
+        }
+        #[cfg(windows)]
+        {
+            #[cfg(test)]
+            if self
+                .force_alias_ambiguity
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                verify_post_aliases_with(pre, |parent| {
+                    if paths_equivalent(parent, &pre.source_parent) {
+                        Ok(vec![pre.source_parent.join("fOo.rs")])
+                    } else if paths_equivalent(parent, &pre.destination_parent) {
+                        Ok(vec![
+                            pre.destination_parent.join("Target.rs"),
+                            pre.destination_parent.join("tArGeT.rs"),
+                        ])
+                    } else {
+                        Err(())
+                    }
+                })?;
+            } else {
+                verify_post_aliases(pre)?;
+            }
+            #[cfg(not(test))]
+            verify_post_aliases(pre)?;
         }
         let destination =
             validate_existing_target(&self.root, &pre.destination_path).map_err(|_| ())?;
@@ -740,6 +772,69 @@ fn observe_absence(path: &Path) -> AbsenceObservation {
     }
 }
 
+fn validate_ordinary_directory_ancestry(
+    root: &Path,
+    directory: &Path,
+    label: &str,
+) -> Result<(), ()> {
+    validate_directory_path(root, directory, label).map_err(|_| ())?;
+    let mut current = directory.to_path_buf();
+    loop {
+        reject_link_or_reparse(&current, label).map_err(|_| ())?;
+        if !fs::metadata(&current).map_err(|_| ())?.is_dir() {
+            return Err(());
+        }
+        if paths_equivalent(&current, root) {
+            return Ok(());
+        }
+        let parent = current.parent().ok_or(())?;
+        if !is_beneath(parent, root) {
+            return Err(());
+        }
+        current = parent.to_path_buf();
+    }
+}
+
+#[cfg(windows)]
+fn verify_post_aliases(pre: &Preimage) -> Result<(), ()> {
+    verify_post_aliases_with(pre, read_directory_entries)
+}
+
+#[cfg(windows)]
+fn verify_post_aliases_with<F>(pre: &Preimage, mut read_entries: F) -> Result<(), ()>
+where
+    F: FnMut(&Path) -> Result<Vec<PathBuf>, ()>,
+{
+    let source_entries = read_entries(&pre.source_parent)?;
+    if source_entries
+        .iter()
+        .any(|entry| paths_equivalent(entry, &pre.source))
+    {
+        return Err(());
+    }
+    let destination_entries = if paths_equivalent(&pre.source_parent, &pre.destination_parent) {
+        source_entries
+    } else {
+        read_entries(&pre.destination_parent)?
+    };
+    let destination_matches = destination_entries
+        .iter()
+        .filter(|entry| paths_equivalent(entry, &pre.destination))
+        .count();
+    if destination_matches != 1 {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_directory_entries(parent: &Path) -> Result<Vec<PathBuf>, ()> {
+    fs::read_dir(parent)
+        .map_err(|_| ())?
+        .map(|entry| entry.map(|entry| entry.path()).map_err(|_| ()))
+        .collect()
+}
+
 fn worktree_mode_matches(metadata: &fs::Metadata, mode: &[u8]) -> bool {
     #[cfg(unix)]
     {
@@ -841,6 +936,8 @@ struct TestHook {
     replace_destination_after_attempt: std::sync::atomic::AtomicBool,
     replace_source_parent_after_attempt: std::sync::atomic::AtomicBool,
     replace_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
+    #[cfg(any(unix, windows))]
+    redirect_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
     #[cfg(unix)]
     replace_destination_with_symlink_after_attempt: std::sync::atomic::AtomicBool,
 }
@@ -897,6 +994,13 @@ impl TestHook {
         {
             replace_parent(&pre.destination_parent);
         }
+        #[cfg(any(unix, windows))]
+        if self
+            .redirect_destination_parent_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            redirect_parent(&pre.destination_parent);
+        }
         #[cfg(unix)]
         if self
             .replace_destination_with_symlink_after_attempt
@@ -918,6 +1022,38 @@ fn replace_parent(path: &Path) {
     ));
     fs::rename(path, backup).unwrap();
     fs::create_dir(path).unwrap();
+}
+
+#[cfg(all(test, any(unix, windows)))]
+fn redirect_parent(path: &Path) {
+    let backup = path.with_file_name(format!(
+        "{}.rah-rename-redirect-target",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(path, &backup).unwrap();
+    create_directory_redirect(path, &backup);
+}
+
+#[cfg(all(test, unix))]
+fn create_directory_redirect(alias: &Path, target: &Path) {
+    std::os::unix::fs::symlink(target, alias).unwrap();
+}
+
+#[cfg(all(test, windows))]
+fn create_directory_redirect(alias: &Path, target: &Path) {
+    assert!(
+        std::process::Command::new("cmd.exe")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                alias.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[cfg(test)]
@@ -1254,6 +1390,45 @@ mod tests {
         assert_eq!(attempts(&t), 1);
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn destination_intermediate_redirect_is_rejected_before_native_attempt() {
+        let f = Fixture::new();
+        let redirect_target = f.root.join("redirect-target");
+        fs::create_dir_all(redirect_target.join("sub")).unwrap();
+        create_directory_redirect(&f.root.join("redirect"), &redirect_target);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "redirect/sub/moved.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!redirect_target.join("sub/moved.txt").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn destination_parent_redirect_after_effect_is_uncertain() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .redirect_destination_parent_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "existing/moved.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert!(!f.root.join("old.txt").exists());
+        assert!(
+            f.root
+                .join("existing.rah-rename-redirect-target/moved.txt")
+                .exists()
+        );
+    }
+
     #[test]
     fn same_volume_mismatch_fails_closed_before_the_native_attempt() {
         let f = Fixture::new();
@@ -1378,6 +1553,26 @@ mod tests {
             "precondition_failed"
         );
         assert_eq!(attempts(&t), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_post_effect_alias_ambiguity_is_uncertain_without_replay() {
+        let f = Fixture::with_source("Foo.rs");
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .force_alias_ambiguity
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("Foo.rs", "existing/Target.rs"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert!(!f.root.join("Foo.rs").exists());
+        assert_eq!(
+            fs::read(f.root.join("existing/Target.rs")).unwrap(),
+            b"rename bytes"
+        );
     }
 
     #[test]
