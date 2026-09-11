@@ -6,9 +6,10 @@
 
 The complete v0.25 milestone is not ready to enter release preparation. The
 audit found a material ordinary ADR 0018 Windows case-equivalent Git collision
-gap. Task 303 is the separate focused correction task. This gate does not
-authorize release preparation, version changes, tagging, publication, or a
-GitHub Release.
+gap. Task 303 has completed the focused correction, but this gate remains
+Verdict B until Task 304 independently re-audits the corrected boundary. This
+gate does not authorize release preparation, version changes, tagging,
+publication, or a GitHub Release.
 
 ## Milestone and release boundary
 
@@ -122,9 +123,15 @@ to be rejected. The existing exact-case tracked-destination and case-only
 rename tests pass, but this tracked-but-missing case-equivalent collision is
 not covered.
 
-This is a material ordinary authority defect. It requires Task 303 to compare
-relevant Git HEAD and index paths under Windows filesystem equivalence and add
-deterministic no-effect coverage. It blocks release preparation.
+This was the material ordinary authority defect corrected by Task 303. The
+correction compares independently queried HEAD and every index-stage candidate
+under the existing Windows filesystem-equivalence rule, with bounded
+case-insensitive index discovery and bounded component-wise HEAD tree
+discovery. Deterministic real-Git coverage proves the tracked-but-missing
+case-equivalent destination returns `precondition_failed` with zero native
+attempts and no effect. Task 303 does not itself change this gate's Verdict B;
+release readiness remains pending the independent Task 304 milestone
+re-audit.
 
 ## Reviewed preparation
 

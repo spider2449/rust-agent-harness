@@ -1027,32 +1027,85 @@ impl RepositoryFileRenamePolicy {
     }
     async fn destination_git_absent(&self, path: &Path) -> Result<(), ()> {
         let target = path.to_string_lossy().replace('\\', "/");
-        let tree = self
-            .git_output(vec![
-                "--literal-pathspecs",
-                "ls-tree",
-                "-z",
-                "HEAD",
-                "--",
-                &target,
-            ])
-            .await?;
-        let index = self
-            .git_output(vec![
-                "--literal-pathspecs",
-                "ls-files",
-                "-s",
-                "-z",
-                "--",
-                &target,
-            ])
-            .await?;
-        if git_path_present(&tree, target.as_bytes())?
-            || git_path_present(&index, target.as_bytes())?
-        {
+        #[cfg(windows)]
+        let tree_conflict = self.windows_tree_destination_conflict(path).await?;
+        #[cfg(not(windows))]
+        let tree_conflict = {
+            let tree = self
+                .git_output(vec![
+                    "--literal-pathspecs",
+                    "ls-tree",
+                    "-z",
+                    "HEAD",
+                    "--",
+                    target.as_str(),
+                ])
+                .await?;
+            git_tree_candidates_conflict(&tree, path)?
+        };
+
+        #[cfg(windows)]
+        let mut index_args = vec!["--icase-pathspecs"];
+        #[cfg(not(windows))]
+        let mut index_args = vec!["--literal-pathspecs"];
+        index_args.extend(["ls-files", "-s", "-z", "--", target.as_str()]);
+        let index = self.git_output(index_args).await?;
+
+        let index_conflict = git_index_candidates_conflict(&index, path)?;
+        if tree_conflict || index_conflict {
             return Err(());
         }
         Ok(())
+    }
+    #[cfg(windows)]
+    async fn windows_tree_destination_conflict(&self, destination: &Path) -> Result<bool, ()> {
+        let target_components = destination.components().collect::<Vec<_>>();
+        let mut parent: Option<PathBuf> = None;
+        for depth in 0..target_components.len() {
+            let pathspec = match parent.as_ref() {
+                Some(path) => format!("{}/", path.to_str().ok_or(())?),
+                None => ".".to_owned(),
+            };
+            let tree = self
+                .git_output(vec![
+                    "--literal-pathspecs",
+                    "ls-tree",
+                    "-z",
+                    "HEAD",
+                    "--",
+                    pathspec.as_str(),
+                ])
+                .await?;
+            let target_prefix =
+                target_components[..=depth]
+                    .iter()
+                    .fold(PathBuf::new(), |mut path, component| {
+                        path.push(component.as_os_str());
+                        path
+                    });
+            let mut next_parent = None;
+            let mut conflict = false;
+            for record in nul_records(&tree)? {
+                let (candidate, is_tree) = parse_tree_candidate(record)?;
+                if git_candidate_is_destination_or_descendant(&candidate, destination) {
+                    conflict = true;
+                }
+                if is_tree
+                    && paths_equivalent(&candidate, &target_prefix)
+                    && next_parent.replace(candidate).is_some()
+                {
+                    return Err(());
+                }
+            }
+            if conflict {
+                return Ok(true);
+            }
+            parent = next_parent;
+            if parent.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(false)
     }
     async fn destination_is_ignored(&self, path: &Path) -> Result<bool, ()> {
         let target = path.to_string_lossy().replace('\\', "/");
@@ -1524,15 +1577,87 @@ fn parse_index_entry(bytes: &[u8], path: &[u8]) -> Result<GitEntry, ()> {
     })
 }
 
-fn git_path_present(bytes: &[u8], path: &[u8]) -> Result<bool, ()> {
-    Ok(nul_records(bytes)?.into_iter().any(|record| {
-        record_path(record).is_some_and(|entry| {
-            entry == path
-                || entry
-                    .strip_prefix(path)
-                    .is_some_and(|suffix| suffix.first() == Some(&b'/'))
-        })
-    }))
+fn git_index_candidates_conflict(bytes: &[u8], destination: &Path) -> Result<bool, ()> {
+    let mut conflict = false;
+    for record in nul_records(bytes)? {
+        let candidate = parse_index_candidate(record)?;
+        conflict |= git_candidate_is_destination_or_descendant(&candidate, destination);
+    }
+    Ok(conflict)
+}
+
+#[cfg(not(windows))]
+fn git_tree_candidates_conflict(bytes: &[u8], destination: &Path) -> Result<bool, ()> {
+    let mut conflict = false;
+    for record in nul_records(bytes)? {
+        let (candidate, _) = parse_tree_candidate(record)?;
+        conflict |= git_candidate_is_destination_or_descendant(&candidate, destination);
+    }
+    Ok(conflict)
+}
+
+fn parse_tree_candidate(record: &[u8]) -> Result<(PathBuf, bool), ()> {
+    let tab = record.iter().position(|byte| *byte == b'\t').ok_or(())?;
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, kind, object] = fields.as_slice() else {
+        return Err(());
+    };
+    if !matches!(
+        (*kind, *mode),
+        (b"blob", b"100644" | b"100755" | b"120000")
+            | (b"tree", b"040000")
+            | (b"commit", b"160000")
+    ) || !valid_git_object_id(object)
+    {
+        return Err(());
+    }
+    Ok((git_candidate_path(&record[tab + 1..])?, *kind == b"tree"))
+}
+
+fn parse_index_candidate(record: &[u8]) -> Result<PathBuf, ()> {
+    let tab = record.iter().position(|byte| *byte == b'\t').ok_or(())?;
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, object, stage] = fields.as_slice() else {
+        return Err(());
+    };
+    if !matches!(*mode, b"100644" | b"100755" | b"120000" | b"160000")
+        || !valid_git_object_id(object)
+        || !matches!(*stage, b"0" | b"1" | b"2" | b"3")
+    {
+        return Err(());
+    }
+    git_candidate_path(&record[tab + 1..])
+}
+
+fn valid_git_object_id(object: &[u8]) -> bool {
+    matches!(object.len(), 40 | 64)
+        && object
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'A'..=b'F'))
+}
+
+fn git_candidate_path(path: &[u8]) -> Result<PathBuf, ()> {
+    let path = std::str::from_utf8(path).map_err(|_| ())?;
+    parse_rename_path(path)
+}
+
+fn git_candidate_is_destination_or_descendant(candidate: &Path, destination: &Path) -> bool {
+    let candidate_components = candidate.components().collect::<Vec<_>>();
+    let destination_components = destination.components().collect::<Vec<_>>();
+    candidate_components.len() >= destination_components.len()
+        && candidate_components.iter().zip(destination_components).all(
+            |(candidate, destination)| {
+                let mut candidate_prefix = PathBuf::new();
+                candidate_prefix.push(candidate.as_os_str());
+                let mut destination_prefix = PathBuf::new();
+                destination_prefix.push(destination.as_os_str());
+                paths_equivalent(&candidate_prefix, &destination_prefix)
+            },
+        )
 }
 
 fn record_path(record: &[u8]) -> Option<&[u8]> {
@@ -2222,6 +2347,172 @@ mod tests {
             "precondition_failed"
         );
         assert_eq!(attempts(&t), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_equivalent_tracked_destination_missing_from_worktree_is_rejected() {
+        let f = Fixture::new();
+        fs::write(f.root.join("README.md"), b"tracked").unwrap();
+        run(&f.git, &f.root, &["add", "README.md"]);
+        run(
+            &f.git,
+            &f.root,
+            &["commit", "--quiet", "-m", "tracked-destination"],
+        );
+        fs::remove_file(f.root.join("README.md")).unwrap();
+        let index_before = fs::read(f.root.join(".git/index")).unwrap();
+        let head_before = output(&f.git, &f.root, &["rev-parse", "HEAD"]);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("old.txt", "readme.md"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert_eq!(fs::read(f.root.join("old.txt")).unwrap(), b"rename bytes");
+        assert!(!f.root.join("readme.md").exists());
+        assert_eq!(fs::read(f.root.join(".git/index")).unwrap(), index_before);
+        assert_eq!(output(&f.git, &f.root, &["rev-parse", "HEAD"]), head_before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_equivalent_index_destination_collision_is_rejected_without_effect() {
+        let f = Fixture::new();
+        fs::write(f.root.join("IndexOnly.md"), b"index").unwrap();
+        run(&f.git, &f.root, &["add", "IndexOnly.md"]);
+        fs::remove_file(f.root.join("IndexOnly.md")).unwrap();
+        let index_before = fs::read(f.root.join(".git/index")).unwrap();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("old.txt", "indexonly.md"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("indexonly.md").exists());
+        assert_eq!(fs::read(f.root.join(".git/index")).unwrap(), index_before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_equivalent_intent_to_add_destination_collision_is_rejected_without_effect() {
+        let f = Fixture::new();
+        fs::write(f.root.join("IntentOnly.md"), b"intent").unwrap();
+        run(&f.git, &f.root, &["add", "-N", "IntentOnly.md"]);
+        fs::remove_file(f.root.join("IntentOnly.md")).unwrap();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("old.txt", "intentonly.md"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("intentonly.md").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_equivalent_conflict_destination_collision_is_rejected_without_effect() {
+        let f = Fixture::new();
+        let mut objects = Vec::new();
+        for (name, bytes) in [
+            ("one", b"one".as_slice()),
+            ("two", b"two"),
+            ("three", b"three"),
+        ] {
+            fs::write(f.root.join(name), bytes).unwrap();
+            objects.push(
+                String::from_utf8(output(&f.git, &f.root, &["hash-object", "-w", name]))
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+            );
+        }
+        let input = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| format!("100644 {object} {}\tConflict.md\n", index + 1))
+            .collect::<String>();
+        let mut child = Command::new(&f.git)
+            .args(["update-index", "--index-info"])
+            .current_dir(&f.root)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("old.txt", "conflict.md"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("conflict.md").exists());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn distinct_case_spelling_remains_admissible_on_case_sensitive_platforms() {
+        let f = Fixture::new();
+        fs::write(f.root.join("README.md"), b"tracked").unwrap();
+        run(&f.git, &f.root, &["add", "README.md"]);
+        run(
+            &f.git,
+            &f.root,
+            &["commit", "--quiet", "-m", "tracked-destination"],
+        );
+        fs::remove_file(f.root.join("README.md")).unwrap();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("old.txt", "readme.md"))["status"],
+            "renamed_verified"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert!(!f.root.join("old.txt").exists());
+        assert_eq!(fs::read(f.root.join("readme.md")).unwrap(), b"rename bytes");
+    }
+
+    #[test]
+    fn malformed_git_candidate_records_fail_closed() {
+        let valid_object = b"0000000000000000000000000000000000000000";
+        let destination = Path::new("target.md");
+        assert!(parse_tree_candidate(b"100644 blob	target.md\0").is_err());
+        assert!(parse_index_candidate(b"100644 0000\ttarget.md\0").is_err());
+        assert!(
+            parse_tree_candidate(
+                [&b"100644 blob "[..], &valid_object[..], &b"\ttarget.md"[..],]
+                    .concat()
+                    .as_slice()
+            )
+            .is_ok()
+        );
+        assert!(
+            git_index_candidates_conflict(
+                b"100644 0000000000000000000000000000000000000000 0\ttarget.md",
+                destination,
+            )
+            .is_err()
+        );
+        #[cfg(not(windows))]
+        assert!(
+            git_tree_candidates_conflict(
+                b"100644 blob 0000000000000000000000000000000000000000\ttarget.md",
+                destination,
+            )
+            .is_err()
+        );
     }
 
     #[test]
