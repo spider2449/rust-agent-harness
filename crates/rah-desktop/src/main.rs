@@ -12085,7 +12085,40 @@ mod tests {
             || !live_git_text(&git, &fixture.0, &["ls-files", "-s", "--", destination])?.is_empty()
             || live_git_exit_success(&git, &fixture.0, &["check-ignore", "-q", "--", destination])?
         {
-            return Err("protected Git state or semantic worktree move proof failed".to_owned());
+            return Err(format!(
+                "protected Git state or semantic worktree move proof failed: status={:?} expected_status={expected_status:?} index_same={} head_same={} symbolic_same={} branch_same={} local_heads_same={} tags_remotes_same={} refs_same={} staged_diff_same={} worktree_diff_empty={} worktree_diff_has_source={} raw_index_same={} cached_binary_same={} source_in_head={} source_in_index={} destination_in_head={} destination_in_index={} destination_ignored={}",
+                after_git.status,
+                after_git.index_semantics == before_git.index_semantics,
+                after_git.head_oid == before_head,
+                after_git.symbolic_head == before_git.symbolic_head,
+                after_git.current_branch == before_branch,
+                after_git.local_heads == before_git.local_heads,
+                after_git.tags_and_remotes == before_git.tags_and_remotes,
+                after_git.all_refs == before_refs,
+                after_git.raw_staged_diff == before_git.raw_staged_diff,
+                after_git.raw_worktree_diff.is_empty(),
+                after_git.raw_worktree_diff.contains(source),
+                fs::read(fixture.0.join(".git").join("index"))
+                    .map_err(|error| format!("post-effect index read failed: {error}"))?
+                    == before_index,
+                live_git_text(&git, &fixture.0, &["diff", "--cached", "--binary"])?
+                    == before_cached_binary,
+                live_git_text(&git, &fixture.0, &["ls-tree", "-r", "--name-only", "HEAD"])?
+                    .lines()
+                    .any(|line| line == source),
+                live_git_text(&git, &fixture.0, &["ls-files", "-s", "--", source])?
+                    .contains(source),
+                live_git_text(&git, &fixture.0, &["ls-tree", "-r", "--name-only", "HEAD"])?
+                    .lines()
+                    .any(|line| line == destination),
+                !live_git_text(&git, &fixture.0, &["ls-files", "-s", "--", destination])?
+                    .is_empty(),
+                live_git_exit_success(
+                    &git,
+                    &fixture.0,
+                    &["check-ignore", "-q", "--", destination]
+                )?,
+            ));
         }
         let refresh = wait_for_test_events(&refresh_events.0, 1).await?;
         if refresh.len() != 1
