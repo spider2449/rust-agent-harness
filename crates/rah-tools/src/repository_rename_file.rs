@@ -10,8 +10,11 @@ use std::{
 use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
@@ -27,6 +30,235 @@ use crate::{
 pub const REPOSITORY_RENAME_FILE_TOOL_NAME: &str = "repo.rename-file";
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
+const MAX_REVIEWED_FILE_BYTES: usize = 64 * 1024;
+const MAX_PREPARATION_REQUEST_BYTES: usize = 8192;
+const MAX_SERIALIZED_REVIEW_BYTES: usize = 256 * 1024;
+const MAX_PREPARED_REPRESENTATION_BYTES: usize = 512 * 1024;
+
+/// Typed human input for the future reviewed rename route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryRenameFilePreparationRequest {
+    /// Repository-relative logical source path.
+    pub source_path: String,
+    /// Repository-relative logical destination path.
+    pub destination_path: String,
+}
+
+/// Sanitized errors from reviewed rename preparation and revalidation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RepositoryRenameFilePreparationError {
+    /// The closed human request violates a route bound.
+    #[error("invalid repository rename-file preparation input: {reason}")]
+    InvalidInput { reason: &'static str },
+    /// The reviewed route does not support the requested file or repository form.
+    #[error("repository rename-file preparation is unsupported: {reason}")]
+    Unsupported { reason: &'static str },
+    /// The selected repository state or reviewed subset is not admissible.
+    #[error("repository rename-file preparation precondition failed: {reason}")]
+    PreconditionFailed { reason: &'static str },
+    /// Complete review or private retained evidence exceeds its bound.
+    #[error("repository rename-file review is too large")]
+    ReviewTooLarge,
+    /// Retained evidence no longer matches current host state.
+    #[error("repository rename-file preparation is stale")]
+    Stale,
+}
+
+/// Complete bounded review of one exact reviewed move.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryRenameFileReview {
+    operation: &'static str,
+    source_path: String,
+    destination_path: String,
+    source_byte_length: usize,
+    source_sha256: String,
+    source_content_escaped: String,
+    source_format: &'static str,
+    source_mode: String,
+    expected_effect: &'static str,
+    expected_git_consequence: &'static str,
+    non_effects: Vec<&'static str>,
+}
+
+impl RepositoryRenameFileReview {
+    /// Returns the reviewed operation name.
+    #[must_use]
+    pub fn operation(&self) -> &str {
+        self.operation
+    }
+    /// Returns the logical source path.
+    #[must_use]
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+    /// Returns the logical destination path.
+    #[must_use]
+    pub fn destination_path(&self) -> &str {
+        &self.destination_path
+    }
+    /// Returns the exact source byte length.
+    #[must_use]
+    pub fn source_byte_length(&self) -> usize {
+        self.source_byte_length
+    }
+    /// Returns the host-derived source SHA-256.
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+    /// Returns the complete escaped source content.
+    #[must_use]
+    pub fn source_content_escaped(&self) -> &str {
+        &self.source_content_escaped
+    }
+    /// Returns explicit source encoding facts.
+    #[must_use]
+    pub fn source_format(&self) -> &str {
+        self.source_format
+    }
+    /// Returns the protected Git file mode.
+    #[must_use]
+    pub fn source_mode(&self) -> &str {
+        &self.source_mode
+    }
+    /// Returns the expected worktree effect.
+    #[must_use]
+    pub fn expected_effect(&self) -> &str {
+        self.expected_effect
+    }
+    /// Returns the expected unstaged Git consequence.
+    #[must_use]
+    pub fn expected_git_consequence(&self) -> &str {
+        self.expected_git_consequence
+    }
+    /// Returns effects explicitly excluded from this review.
+    #[must_use]
+    pub fn non_effects(&self) -> &[&'static str] {
+        &self.non_effects
+    }
+    /// Compatibility alias for complete escaped source display.
+    #[must_use]
+    pub fn content_escaped(&self) -> &str {
+        self.source_content_escaped()
+    }
+    /// Compatibility alias for the source length.
+    #[must_use]
+    pub fn content_byte_length(&self) -> usize {
+        self.source_byte_length()
+    }
+    /// Compatibility alias for the source digest.
+    #[must_use]
+    pub fn content_sha256(&self) -> &str {
+        self.source_sha256()
+    }
+}
+
+/// Opaque host-retained evidence for one reviewed rename preparation.
+pub struct RepositoryRenameFilePreparation {
+    preparer_identity: Uuid,
+    tool_input: ToolInput,
+    review: RepositoryRenameFileReview,
+    review_identity: String,
+    source_sha256: String,
+    source_byte_length: usize,
+    root_identity: FileIdentity,
+    dot_git_identity: FileIdentity,
+    git_identity: FileIdentity,
+    tool_definition: ToolDefinition,
+    destination_ignored: bool,
+    pre: Preimage,
+}
+
+impl RepositoryRenameFilePreparation {
+    /// Returns the exact host-constructed ordinary ToolInput.
+    #[must_use]
+    pub fn tool_input(&self) -> &ToolInput {
+        &self.tool_input
+    }
+    /// Returns the complete bounded review.
+    #[must_use]
+    pub fn review(&self) -> &RepositoryRenameFileReview {
+        &self.review
+    }
+    /// Returns the deterministic identity of the complete reviewed operation.
+    #[must_use]
+    pub fn review_identity(&self) -> &str {
+        &self.review_identity
+    }
+    /// Returns the host-derived source digest.
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+    /// Returns the host-derived source length.
+    #[must_use]
+    pub fn source_byte_length(&self) -> usize {
+        self.source_byte_length
+    }
+}
+
+impl std::fmt::Debug for RepositoryRenameFilePreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryRenameFilePreparation")
+            .field("preparation", &"redacted")
+            .field("review_identity", &self.review_identity)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Independent classification of a later ordinary rename ToolOutput.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryRenameFileProof {
+    /// Filesystem and protected Git evidence prove the reviewed move.
+    ReviewedSuccess,
+    /// The exact reviewed source preimage remains intact and destination absent.
+    KnownNoEffect,
+    /// The result or independent observations do not prove either state.
+    Uncertain,
+}
+
+/// Strictly classifies the current ordinary `repo.rename-file` producer shape.
+#[must_use]
+pub fn classify_repository_rename_file_output(
+    output: &ToolOutput,
+    destination_path: &str,
+) -> RepositoryRenameFileProof {
+    let [ToolContent::Json(value)] = output.content.as_slice() else {
+        return RepositoryRenameFileProof::Uncertain;
+    };
+    let Some(object) = value.as_object() else {
+        return RepositoryRenameFileProof::Uncertain;
+    };
+    let Some(status) = object.get("status").and_then(Value::as_str) else {
+        return RepositoryRenameFileProof::Uncertain;
+    };
+    let Some(uncertain) = object.get("uncertain").and_then(Value::as_bool) else {
+        return RepositoryRenameFileProof::Uncertain;
+    };
+    match status {
+        "renamed_verified" => {
+            if output.is_error
+                || uncertain
+                || object.len() != 3
+                || object.get("path").and_then(Value::as_str) != Some(destination_path)
+            {
+                RepositoryRenameFileProof::Uncertain
+            } else {
+                RepositoryRenameFileProof::ReviewedSuccess
+            }
+        }
+        "known_no_effect" | "invalid_input" | "precondition_failed" => {
+            if !output.is_error || uncertain || object.len() != 2 {
+                RepositoryRenameFileProof::Uncertain
+            } else {
+                RepositoryRenameFileProof::KnownNoEffect
+            }
+        }
+        "uncertain" => RepositoryRenameFileProof::Uncertain,
+        _ => RepositoryRenameFileProof::Uncertain,
+    }
+}
 
 /// Host-created authority for one selected repository.
 pub struct RepositoryFileRenameTool {
@@ -37,6 +269,227 @@ pub struct RepositoryFileRenameTool {
 #[derive(Clone)]
 pub struct RepositoryFileRenameAuthority {
     policy: Arc<RepositoryFileRenamePolicy>,
+}
+
+/// Host-bound, zero-effect preparation and proof foundation for reviewed rename.
+pub struct RepositoryRenameFilePreparer {
+    identity: Uuid,
+    policy: RepositoryFileRenamePolicy,
+}
+
+impl RepositoryRenameFilePreparer {
+    /// Creates a preparer bound to one host-selected repository and Git binary.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            identity: Uuid::new_v4(),
+            policy: RepositoryFileRenamePolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+            )?,
+        })
+    }
+
+    /// Captures a complete review using observation only.
+    pub async fn prepare(
+        &self,
+        request: RepositoryRenameFilePreparationRequest,
+    ) -> Result<RepositoryRenameFilePreparation, RepositoryRenameFilePreparationError> {
+        let request = ReviewedRenameRequest::parse(request)?;
+        let _lease = self.policy.lease.lock().await;
+        let source = self
+            .policy
+            .reviewed_source_bytes(&request.source_path)
+            .await
+            .map_err(
+                |_| RepositoryRenameFilePreparationError::PreconditionFailed {
+                    reason: "reviewed_source",
+                },
+            )?;
+        let ordinary_request = RenameRequest {
+            source_path: request.source_path.clone(),
+            destination_path: request.destination_path.clone(),
+            sha256: sha256(&source),
+            length: source.len(),
+        };
+        let pre = self.policy.capture(&ordinary_request).await.map_err(|_| {
+            RepositoryRenameFilePreparationError::PreconditionFailed {
+                reason: "repository_state",
+            }
+        })?;
+        let destination_ignored = self
+            .policy
+            .destination_is_ignored(&request.destination_path)
+            .await
+            .map_err(
+                |_| RepositoryRenameFilePreparationError::PreconditionFailed {
+                    reason: "destination_ignore_state",
+                },
+            )?;
+        if destination_ignored {
+            return Err(RepositoryRenameFilePreparationError::PreconditionFailed {
+                reason: "destination_ignored",
+            });
+        }
+        let tool_input = canonical_reviewed_tool_input(&ordinary_request);
+        let review = build_rename_review(&request, &pre)?;
+        let review_identity = compute_rename_review_identity(
+            self.identity,
+            &self.policy,
+            &ordinary_request,
+            &pre,
+            destination_ignored,
+            &tool_input,
+            &review,
+        );
+        let preparation = RepositoryRenameFilePreparation {
+            preparer_identity: self.identity,
+            tool_input,
+            review,
+            review_identity,
+            source_sha256: ordinary_request.sha256,
+            source_byte_length: ordinary_request.length,
+            root_identity: self.policy.root_identity.clone(),
+            dot_git_identity: self.policy.dot_git_identity.clone(),
+            git_identity: self.policy.git_identity.clone(),
+            tool_definition: ordinary_rename_tool_definition(),
+            destination_ignored,
+            pre,
+        };
+        if serialized_preparation_size(&preparation) > MAX_PREPARED_REPRESENTATION_BYTES {
+            return Err(RepositoryRenameFilePreparationError::ReviewTooLarge);
+        }
+        Ok(preparation)
+    }
+
+    /// Revalidates the retained preparation without performing any mutation.
+    pub async fn revalidate(
+        &self,
+        preparation: &RepositoryRenameFilePreparation,
+    ) -> Result<(), RepositoryRenameFilePreparationError> {
+        let _lease = self.policy.lease.lock().await;
+        if preparation.preparer_identity != self.identity
+            || preparation.root_identity != self.policy.root_identity
+            || preparation.dot_git_identity != self.policy.dot_git_identity
+            || preparation.git_identity != self.policy.git_identity
+            || preparation.tool_definition != ordinary_rename_tool_definition()
+        {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        let request = RenameRequest::parse(&preparation.tool_input)
+            .map_err(|_| RepositoryRenameFilePreparationError::Stale)?;
+        if canonical_reviewed_tool_input(&request) != preparation.tool_input
+            || request.length > MAX_REVIEWED_FILE_BYTES
+        {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        let current = self
+            .policy
+            .capture(&request)
+            .await
+            .map_err(|_| RepositoryRenameFilePreparationError::Stale)?;
+        if current != preparation.pre {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        let ignored = self
+            .policy
+            .destination_is_ignored(&request.destination_path)
+            .await
+            .map_err(|_| RepositoryRenameFilePreparationError::Stale)?;
+        if ignored != preparation.destination_ignored || ignored {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        let reviewed_request = ReviewedRenameRequest {
+            source_path: request.source_path.clone(),
+            destination_path: request.destination_path.clone(),
+        };
+        let review = build_rename_review(&reviewed_request, &current)
+            .map_err(|_| RepositoryRenameFilePreparationError::Stale)?;
+        if review != preparation.review
+            || sha256(&current.bytes) != preparation.source_sha256
+            || current.bytes.len() != preparation.source_byte_length
+        {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        let identity = compute_rename_review_identity(
+            self.identity,
+            &self.policy,
+            &request,
+            &current,
+            ignored,
+            &preparation.tool_input,
+            &review,
+        );
+        if identity != preparation.review_identity {
+            return Err(RepositoryRenameFilePreparationError::Stale);
+        }
+        Ok(())
+    }
+
+    /// Independently classifies a later ordinary ToolOutput and fresh state.
+    pub async fn prove_result(
+        &self,
+        preparation: &RepositoryRenameFilePreparation,
+        output: &ToolOutput,
+    ) -> RepositoryRenameFileProof {
+        let _lease = self.policy.lease.lock().await;
+        if !self.preparation_resources_match(preparation) {
+            return RepositoryRenameFileProof::Uncertain;
+        }
+        let Ok(request) = RenameRequest::parse(&preparation.tool_input) else {
+            return RepositoryRenameFileProof::Uncertain;
+        };
+        let destination_path = request
+            .destination_path
+            .to_string_lossy()
+            .replace('\\', "/");
+        match classify_repository_rename_file_output(output, &destination_path) {
+            RepositoryRenameFileProof::ReviewedSuccess => {
+                if self.policy.verify_post(&preparation.pre).await.is_ok() {
+                    RepositoryRenameFileProof::ReviewedSuccess
+                } else {
+                    RepositoryRenameFileProof::Uncertain
+                }
+            }
+            RepositoryRenameFileProof::KnownNoEffect => {
+                if self.policy.intact(&request, &preparation.pre).await {
+                    RepositoryRenameFileProof::KnownNoEffect
+                } else {
+                    RepositoryRenameFileProof::Uncertain
+                }
+            }
+            RepositoryRenameFileProof::Uncertain => RepositoryRenameFileProof::Uncertain,
+        }
+    }
+
+    /// Proves the exact reviewed no-effect state after a possible boundary.
+    pub async fn prove_known_no_effect(
+        &self,
+        preparation: &RepositoryRenameFilePreparation,
+    ) -> bool {
+        let _lease = self.policy.lease.lock().await;
+        let Ok(request) = RenameRequest::parse(&preparation.tool_input) else {
+            return false;
+        };
+        self.preparation_resources_match(preparation)
+            && self.policy.intact(&request, &preparation.pre).await
+    }
+
+    /// Proves the reviewed post-effect state without relying on Tool status.
+    pub async fn prove_success(&self, preparation: &RepositoryRenameFilePreparation) -> bool {
+        let _lease = self.policy.lease.lock().await;
+        self.preparation_resources_match(preparation)
+            && self.policy.verify_post(&preparation.pre).await.is_ok()
+    }
+
+    fn preparation_resources_match(&self, preparation: &RepositoryRenameFilePreparation) -> bool {
+        preparation.preparer_identity == self.identity
+            && preparation.root_identity == self.policy.root_identity
+            && preparation.dot_git_identity == self.policy.dot_git_identity
+            && preparation.git_identity == self.policy.git_identity
+    }
 }
 
 impl RepositoryFileRenameAuthority {
@@ -74,12 +527,7 @@ impl RepositoryFileRenameTool {
 #[async_trait]
 impl Tool for RepositoryFileRenameTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: ToolName::new(REPOSITORY_RENAME_FILE_TOOL_NAME),
-            description: "Renames one clean HEAD-tracked file to an absent path within the same bounded repository.".to_owned(),
-            input_schema: json!({"type":"object","properties":{"source_path":{"type":"string","minLength":1,"maxLength":MAX_PATH_BYTES},"destination_path":{"type":"string","minLength":1,"maxLength":MAX_PATH_BYTES},"expected_source_file_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"expected_source_file_byte_length":{"type":"integer","minimum":0,"maximum":MAX_FILE_BYTES}},"required":["source_path","destination_path","expected_source_file_sha256","expected_source_file_byte_length"],"additionalProperties":false}),
-            permission: PermissionLevel::Execute,
-        }
+        ordinary_rename_tool_definition()
     }
 
     async fn execute(
@@ -279,6 +727,24 @@ impl RepositoryFileRenamePolicy {
             git,
             index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
         })
+    }
+    async fn reviewed_source_bytes(&self, path: &Path) -> Result<Vec<u8>, ()> {
+        self.repository_ok().map_err(|_| ())?;
+        let source = validate_existing_target(&self.root, path).map_err(|_| ())?;
+        let metadata = fs::metadata(&source).map_err(|_| ())?;
+        reject_unsupported_file_attributes(&metadata).map_err(|_| ())?;
+        let identity = FileIdentity::capture(&source).map_err(|_| ())?;
+        if identity.link_count != 1 {
+            return Err(());
+        }
+        let bytes = fs::read(source).map_err(|_| ())?;
+        if bytes.len() > MAX_REVIEWED_FILE_BYTES
+            || std::str::from_utf8(&bytes).is_err()
+            || bytes.contains(&0)
+        {
+            return Err(());
+        }
+        Ok(bytes)
     }
     async fn destination(&self, relative: &Path) -> Result<PathBuf, ()> {
         let destination = self.root.join(relative);
@@ -499,6 +965,35 @@ impl RepositoryFileRenamePolicy {
         }
         Ok(())
     }
+    async fn destination_is_ignored(&self, path: &Path) -> Result<bool, ()> {
+        let target = path.to_string_lossy().replace('\\', "/");
+        let output = HostExecutionPolicy::new(
+            &self.git,
+            HostArgumentPolicy::Exact(vec![
+                "check-ignore".to_owned(),
+                "--no-index".to_owned(),
+                "--quiet".to_owned(),
+                "--".to_owned(),
+                target,
+            ]),
+            &self.root,
+            ".",
+        )
+        .map_err(|_| ())?
+        .with_environment(git_environment())
+        .map_err(|_| ())?
+        .execute_process(&ToolInput(json!({})))
+        .await
+        .map_err(|_| ())?;
+        if output.timed_out || output.overflow.is_some() {
+            return Err(());
+        }
+        match output.exit_code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(()),
+        }
+    }
     async fn require_supported_repository_state(&self) -> Result<(), ()> {
         for marker in [
             "MERGE_HEAD",
@@ -572,6 +1067,7 @@ fn validate_supported_dot_git(root: &Path) -> Result<FileIdentity, ToolError> {
     FileIdentity::capture(&dot_git)
 }
 
+#[derive(PartialEq, Eq)]
 struct Preimage {
     source: PathBuf,
     destination: PathBuf,
@@ -598,14 +1094,14 @@ impl Preimage {
             && self.index == other.index
     }
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GitState {
     blob: Vec<u8>,
     head_entry: GitEntry,
     index_entry: GitEntry,
     fingerprint: Vec<u8>,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GitEntry {
     mode: Vec<u8>,
     object: Vec<u8>,
@@ -622,6 +1118,200 @@ struct RenameRequest {
     sha256: String,
     length: usize,
 }
+
+struct ReviewedRenameRequest {
+    source_path: PathBuf,
+    destination_path: PathBuf,
+}
+
+impl ReviewedRenameRequest {
+    fn parse(
+        request: RepositoryRenameFilePreparationRequest,
+    ) -> Result<Self, RepositoryRenameFilePreparationError> {
+        let serialized = serde_json::to_vec(&request).map_err(|_| {
+            RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "request_serialization",
+            }
+        })?;
+        if serialized.len() > MAX_PREPARATION_REQUEST_BYTES {
+            return Err(RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "request_too_large",
+            });
+        }
+        if request.source_path.is_empty() || request.destination_path.is_empty() {
+            return Err(RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "empty_path",
+            });
+        }
+        let source_path = parse_rename_path(&request.source_path).map_err(|_| {
+            RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "source_path",
+            }
+        })?;
+        let destination_path = parse_rename_path(&request.destination_path).map_err(|_| {
+            RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "destination_path",
+            }
+        })?;
+        if source_path == destination_path {
+            return Err(RepositoryRenameFilePreparationError::InvalidInput {
+                reason: "paths_must_differ",
+            });
+        }
+        Ok(Self {
+            source_path,
+            destination_path,
+        })
+    }
+}
+
+fn canonical_reviewed_tool_input(request: &RenameRequest) -> ToolInput {
+    ToolInput(json!({
+        "source_path": request.source_path.to_string_lossy().replace('\\', "/"),
+        "destination_path": request.destination_path.to_string_lossy().replace('\\', "/"),
+        "expected_source_file_sha256": request.sha256,
+        "expected_source_file_byte_length": request.length,
+    }))
+}
+
+fn build_rename_review(
+    request: &ReviewedRenameRequest,
+    pre: &Preimage,
+) -> Result<RepositoryRenameFileReview, RepositoryRenameFilePreparationError> {
+    let source = std::str::from_utf8(&pre.bytes).map_err(|_| {
+        RepositoryRenameFilePreparationError::PreconditionFailed {
+            reason: "source_utf8",
+        }
+    })?;
+    let mode = String::from_utf8(pre.git.head_entry.mode.clone()).map_err(|_| {
+        RepositoryRenameFilePreparationError::PreconditionFailed {
+            reason: "source_mode",
+        }
+    })?;
+    let review = RepositoryRenameFileReview {
+        operation: REPOSITORY_RENAME_FILE_TOOL_NAME,
+        source_path: request.source_path.to_string_lossy().replace('\\', "/"),
+        destination_path: request
+            .destination_path
+            .to_string_lossy()
+            .replace('\\', "/"),
+        source_byte_length: pre.bytes.len(),
+        source_sha256: sha256(&pre.bytes),
+        source_content_escaped: escape_reviewed_text(source),
+        source_format: "strict UTF-8, NUL-free, complete escaped source",
+        source_mode: mode,
+        expected_effect: "one reviewed source file moves to the absent destination",
+        expected_git_consequence: "one unstaged worktree rename-like change; HEAD, index, refs, and history remain unchanged",
+        non_effects: vec![
+            "no content rewrite",
+            "no staging",
+            "no unstaging",
+            "no commit",
+            "no branch/ref/history mutation",
+            "no directory creation",
+            "no overwrite",
+            "no import/reference rewrite",
+            "no automatic retry",
+            "no replay",
+            "no rollback",
+            "no compensation",
+        ],
+    };
+    if serde_json::to_vec(&review)
+        .map(|bytes| bytes.len() <= MAX_SERIALIZED_REVIEW_BYTES)
+        .unwrap_or(false)
+    {
+        Ok(review)
+    } else {
+        Err(RepositoryRenameFilePreparationError::ReviewTooLarge)
+    }
+}
+
+fn escape_reviewed_text(source: &str) -> String {
+    use std::fmt::Write as _;
+    let mut escaped = String::with_capacity(source.len());
+    for character in source.chars() {
+        match character {
+            '\r' => escaped.push_str("\\r"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            ' ' => escaped.push_str("\\u{20}"),
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            character
+                if character.is_control() || character == '\u{7f}' || !character.is_ascii() =>
+            {
+                let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn compute_rename_review_identity(
+    preparer_identity: Uuid,
+    policy: &RepositoryFileRenamePolicy,
+    request: &RenameRequest,
+    pre: &Preimage,
+    destination_ignored: bool,
+    tool_input: &ToolInput,
+    review: &RepositoryRenameFileReview,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"rah-repository-rename-file-preparation-v1\0");
+    digest.update(preparer_identity.as_bytes());
+    update_serialized(&mut digest, tool_input);
+    update_serialized(&mut digest, review);
+    update_serialized(&mut digest, &ordinary_rename_tool_definition());
+    digest.update(request.source_path.to_string_lossy().as_bytes());
+    digest.update(request.destination_path.to_string_lossy().as_bytes());
+    digest.update(&pre.bytes);
+    digest.update(&pre.index);
+    digest.update(&pre.git.fingerprint);
+    digest.update([u8::from(destination_ignored)]);
+    digest.update(format!("{:?}", policy.root_identity).as_bytes());
+    digest.update(format!("{:?}", policy.dot_git_identity).as_bytes());
+    digest.update(format!("{:?}", policy.git_identity).as_bytes());
+    digest.update(format!("{:?}", pre.identity).as_bytes());
+    digest.update(format!("{:?}", pre.source_parent_identity).as_bytes());
+    digest.update(format!("{:?}", pre.destination_parent_identity).as_bytes());
+    hex_digest(digest.finalize())
+}
+
+fn update_serialized<T: Serialize>(digest: &mut Sha256, value: &T) {
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        digest.update(bytes);
+    }
+}
+
+fn hex_digest(bytes: impl IntoIterator<Item = u8>) -> String {
+    use std::fmt::Write as _;
+    let mut result = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
+}
+
+fn serialized_preparation_size(preparation: &RepositoryRenameFilePreparation) -> usize {
+    let public_size = serde_json::to_vec(&json!({
+        "tool_input": &preparation.tool_input,
+        "review": &preparation.review,
+        "review_identity": &preparation.review_identity,
+        "source_sha256": &preparation.source_sha256,
+        "source_byte_length": preparation.source_byte_length,
+        "tool_definition": &preparation.tool_definition,
+    }))
+    .map(|bytes| bytes.len())
+    .unwrap_or(usize::MAX);
+    public_size
+        .saturating_add(preparation.pre.bytes.len())
+        .saturating_add(preparation.pre.index.len())
+        .saturating_add(preparation.pre.git.fingerprint.len())
+        .saturating_add(4096)
+}
+
 impl RenameRequest {
     fn parse(input: &ToolInput) -> Result<Self, ()> {
         let object = input.0.as_object().ok_or(())?;
@@ -972,6 +1662,16 @@ fn rename_once(source: &Path, destination: &Path) -> Result<(), std::io::Error> 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+fn ordinary_rename_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ToolName::new(REPOSITORY_RENAME_FILE_TOOL_NAME),
+        description: "Renames one clean HEAD-tracked file to an absent path within the same bounded repository.".to_owned(),
+        input_schema: json!({"type":"object","properties":{"source_path":{"type":"string","minLength":1,"maxLength":MAX_PATH_BYTES},"destination_path":{"type":"string","minLength":1,"maxLength":MAX_PATH_BYTES},"expected_source_file_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"expected_source_file_byte_length":{"type":"integer","minimum":0,"maximum":MAX_FILE_BYTES}},"required":["source_path","destination_path","expected_source_file_sha256","expected_source_file_byte_length"],"additionalProperties":false}),
+        permission: PermissionLevel::Execute,
+    }
+}
+
 fn result(status: &str, path: Option<&Path>, uncertain: bool) -> ToolOutput {
     let mut value = json!({"status":status,"uncertain":uncertain});
     if let Some(path) = path {

@@ -120,6 +120,9 @@ pub use repository_multi_file_preflight::{
 pub use repository_mutation::{RepositoryMutationFixtureTestMode, RepositoryMutationFixtureTool};
 pub use repository_rename_file::{
     REPOSITORY_RENAME_FILE_TOOL_NAME, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+    RepositoryRenameFilePreparation, RepositoryRenameFilePreparationError,
+    RepositoryRenameFilePreparationRequest, RepositoryRenameFilePreparer,
+    RepositoryRenameFileProof, RepositoryRenameFileReview, classify_repository_rename_file_output,
 };
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{
