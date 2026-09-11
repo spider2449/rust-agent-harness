@@ -733,6 +733,9 @@ impl RepositoryFileRenamePolicy {
         let source = validate_existing_target(&self.root, path).map_err(|_| ())?;
         let metadata = fs::metadata(&source).map_err(|_| ())?;
         reject_unsupported_file_attributes(&metadata).map_err(|_| ())?;
+        if !reviewed_worktree_mode_supported(&metadata) {
+            return Err(());
+        }
         let identity = FileIdentity::capture(&source).map_err(|_| ())?;
         if identity.link_count != 1 {
             return Err(());
@@ -1607,6 +1610,20 @@ fn worktree_mode_matches(metadata: &fs::Metadata, mode: &[u8]) -> bool {
         true
     }
 }
+
+fn reviewed_worktree_mode_supported(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        matches!(metadata.permissions().mode() & 0o777, 0o644 | 0o755)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
 fn rename_once(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
