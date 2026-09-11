@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -106,7 +107,26 @@ impl Tool for RepositoryFileRenameTool {
         self.policy
             .rename_attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let native = rename_once(&pre.source, &pre.destination);
+        let native = {
+            #[cfg(test)]
+            if self
+                .policy
+                .force_native_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(std::io::Error::other("forced native failure"))
+            } else {
+                rename_once(&pre.source, &pre.destination)
+            }
+            #[cfg(not(test))]
+            {
+                rename_once(&pre.source, &pre.destination)
+            }
+        };
+        #[cfg(test)]
+        self.policy
+            .test_hook
+            .apply_after_attempt(&pre, &self.policy.root);
         if native.is_err() {
             return Ok(if self.policy.intact(&request, &pre).await {
                 result("known_no_effect", None, false)
@@ -148,6 +168,12 @@ struct RepositoryFileRenamePolicy {
     rename_attempts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     force_uncertain: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    force_native_failure: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    force_observation_unknown: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    force_same_volume_mismatch: std::sync::atomic::AtomicBool,
 }
 
 impl RepositoryFileRenamePolicy {
@@ -181,6 +207,12 @@ impl RepositoryFileRenamePolicy {
             rename_attempts: Default::default(),
             #[cfg(test)]
             force_uncertain: Default::default(),
+            #[cfg(test)]
+            force_native_failure: Default::default(),
+            #[cfg(test)]
+            force_observation_unknown: Default::default(),
+            #[cfg(test)]
+            force_same_volume_mismatch: Default::default(),
         })
     }
     fn matches_resources(&self, git: &Path, root: &Path) -> bool {
@@ -210,38 +242,60 @@ impl RepositoryFileRenamePolicy {
             return Err(());
         }
         let git = self.git_state(&request.source_path).await?;
-        if git.blob != bytes {
+        if git.blob != bytes || !worktree_mode_matches(&metadata, &git.head_entry.mode) {
             return Err(());
         }
-        let destination = self.destination(&request.destination_path)?;
-        let parent = destination.parent().ok_or(())?;
-        let parent_identity = FileIdentity::capture(parent).map_err(|_| ())?;
+        let source_parent = source.parent().ok_or(())?.to_path_buf();
+        let source_parent_identity = FileIdentity::capture(&source_parent).map_err(|_| ())?;
+        let destination = self.destination(&request.destination_path).await?;
+        let destination_parent = destination.parent().ok_or(())?.to_path_buf();
+        let destination_parent_identity =
+            FileIdentity::capture(&destination_parent).map_err(|_| ())?;
+        if !identity.same_volume(&destination_parent_identity) || {
+            #[cfg(test)]
+            {
+                self.force_same_volume_mismatch
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        } {
+            return Err(());
+        }
         Ok(Preimage {
             source,
             destination,
             source_path: request.source_path.clone(),
+            destination_path: request.destination_path.clone(),
             identity,
-            parent_identity,
+            source_parent,
+            source_parent_identity,
+            destination_parent,
+            destination_parent_identity,
             bytes,
             git,
             index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
         })
     }
-    fn destination(&self, relative: &Path) -> Result<PathBuf, ()> {
+    async fn destination(&self, relative: &Path) -> Result<PathBuf, ()> {
         let destination = self.root.join(relative);
         let parent = destination.parent().ok_or(())?;
         validate_directory_path(&self.root, parent, "destination parent").map_err(|_| ())?;
-        if fs::symlink_metadata(&destination).is_ok() {
-            reject_link_or_reparse(&destination, "destination").map_err(|_| ())?;
-            return Err(());
+        match observe_absence(&destination) {
+            AbsenceObservation::Absent => {}
+            AbsenceObservation::Present | AbsenceObservation::Unknown => return Err(()),
         }
+        self.destination_git_absent(relative).await?;
         Ok(destination)
     }
     async fn revalidate(&self, request: &RenameRequest, pre: &Preimage) -> Result<(), ()> {
         let current = self.capture(request).await?;
         if !paths_equivalent(&current.source, &pre.source)
             || current.identity != pre.identity
-            || current.parent_identity != pre.parent_identity
+            || current.source_parent_identity != pre.source_parent_identity
+            || current.destination_parent_identity != pre.destination_parent_identity
             || current.bytes != pre.bytes
             || current.git != pre.git
             || current.index != pre.index
@@ -251,18 +305,43 @@ impl RepositoryFileRenamePolicy {
         Ok(())
     }
     async fn intact(&self, request: &RenameRequest, pre: &Preimage) -> bool {
-        self.capture(request).await.is_ok() && fs::symlink_metadata(&pre.destination).is_err()
+        self.capture(request)
+            .await
+            .is_ok_and(|current| current.matches(pre))
+            && self.observe_absence(&pre.destination) == AbsenceObservation::Absent
     }
     async fn verify_post(&self, pre: &Preimage) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
-        if fs::symlink_metadata(&pre.source).is_ok()
-            || reject_link_or_reparse(&pre.destination, "destination").is_err()
-            || fs::read(&pre.destination).map_err(|_| ())? != pre.bytes
+        validate_directory_path(&self.root, &pre.source_parent, "source parent").map_err(|_| ())?;
+        validate_directory_path(&self.root, &pre.destination_parent, "destination parent")
+            .map_err(|_| ())?;
+        if FileIdentity::capture(&pre.source_parent).map_err(|_| ())? != pre.source_parent_identity
+            || FileIdentity::capture(&pre.destination_parent).map_err(|_| ())?
+                != pre.destination_parent_identity
+            || self.observe_absence(&pre.source) != AbsenceObservation::Absent
         {
             return Err(());
         }
-        let destination_identity = FileIdentity::capture(&pre.destination).map_err(|_| ())?;
-        if destination_identity.link_count != 1 {
+        if self.observe_absence(&pre.destination) != AbsenceObservation::Present {
+            return Err(());
+        }
+        let destination =
+            validate_existing_target(&self.root, &pre.destination_path).map_err(|_| ())?;
+        if !paths_equivalent(&destination, &pre.destination) {
+            return Err(());
+        }
+        let destination_metadata = fs::metadata(&destination).map_err(|_| ())?;
+        let destination_bytes = fs::read(&destination).map_err(|_| ())?;
+        if !destination_metadata.is_file()
+            || destination_bytes != pre.bytes
+            || destination_bytes.len() != pre.bytes.len()
+            || sha256(&destination_bytes) != sha256(&pre.bytes)
+        {
+            return Err(());
+        }
+        let destination_identity = FileIdentity::capture(&destination).map_err(|_| ())?;
+        if destination_identity.link_count != 1 || !destination_identity.same_object(&pre.identity)
+        {
             return Err(());
         }
         let git = self.git_state(&pre.source_path).await?;
@@ -270,6 +349,16 @@ impl RepositoryFileRenamePolicy {
             return Err(());
         }
         Ok(())
+    }
+    fn observe_absence(&self, path: &Path) -> AbsenceObservation {
+        #[cfg(test)]
+        if self
+            .force_observation_unknown
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return AbsenceObservation::Unknown;
+        }
+        observe_absence(path)
     }
     fn repository_ok(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
@@ -284,6 +373,7 @@ impl RepositoryFileRenamePolicy {
         Ok(())
     }
     async fn git_state(&self, path: &Path) -> Result<GitState, ()> {
+        self.require_supported_repository_state().await?;
         let target = path.to_string_lossy().replace('\\', "/");
         let head = self
             .git_output(vec!["rev-parse", "--verify", "HEAD"])
@@ -311,9 +401,9 @@ impl RepositoryFileRenamePolicy {
                 &target,
             ])
             .await?;
-        if !tree.starts_with(b"100644 blob ") && !tree.starts_with(b"100755 blob ")
-            || !valid_index(&index, target.as_bytes())
-        {
+        let head_entry = parse_tree_entry(&tree, target.as_bytes())?;
+        let index_entry = parse_index_entry(&index, target.as_bytes())?;
+        if index_entry != head_entry {
             return Err(());
         }
         let tag = self
@@ -331,10 +421,96 @@ impl RepositoryFileRenamePolicy {
                 "--format=%(refname)%00%(objectname)%00",
             ])
             .await?;
+        let sparse = [
+            self.git_optional_output(vec!["config", "--bool", "core.sparseCheckout"])
+                .await?,
+            self.git_optional_output(vec!["config", "--bool", "index.sparse"])
+                .await?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if sparse.iter().any(|value| value.starts_with(b"true")) {
+            return Err(());
+        }
         Ok(GitState {
             blob,
-            fingerprint: [head, branch, tree, index, refs].concat(),
+            head_entry,
+            index_entry,
+            fingerprint: [head, branch, tree, index, refs, sparse.concat()].concat(),
         })
+    }
+    async fn destination_git_absent(&self, path: &Path) -> Result<(), ()> {
+        let target = path.to_string_lossy().replace('\\', "/");
+        let tree = self
+            .git_output(vec![
+                "--literal-pathspecs",
+                "ls-tree",
+                "-z",
+                "HEAD",
+                "--",
+                &target,
+            ])
+            .await?;
+        let index = self
+            .git_output(vec![
+                "--literal-pathspecs",
+                "ls-files",
+                "-s",
+                "-z",
+                "--",
+                &target,
+            ])
+            .await?;
+        if git_path_present(&tree, target.as_bytes())?
+            || git_path_present(&index, target.as_bytes())?
+        {
+            return Err(());
+        }
+        Ok(())
+    }
+    async fn require_supported_repository_state(&self) -> Result<(), ()> {
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "REBASE_HEAD",
+            "SQUASH_MSG",
+            "BISECT_LOG",
+            "BISECT_START",
+            "sequencer",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            match fs::symlink_metadata(self.root.join(".git").join(marker)) {
+                Ok(_) => return Err(()),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(())
+    }
+    async fn git_optional_output(&self, args: Vec<&str>) -> Result<Option<Vec<u8>>, ()> {
+        let output = HostExecutionPolicy::new(
+            &self.git,
+            HostArgumentPolicy::Exact(args.into_iter().map(str::to_owned).collect()),
+            &self.root,
+            ".",
+        )
+        .map_err(|_| ())?
+        .with_environment(git_environment())
+        .map_err(|_| ())?
+        .execute_process(&ToolInput(json!({})))
+        .await
+        .map_err(|_| ())?;
+        if output.timed_out || output.overflow.is_some() {
+            return Err(());
+        }
+        match output.exit_code {
+            Some(0) => Ok(Some(output.stdout)),
+            Some(1) => Ok(None),
+            _ => Err(()),
+        }
     }
     async fn git_output(&self, args: Vec<&str>) -> Result<Vec<u8>, ()> {
         let output = HostExecutionPolicy::new(
@@ -361,16 +537,45 @@ struct Preimage {
     source: PathBuf,
     destination: PathBuf,
     source_path: PathBuf,
+    destination_path: PathBuf,
     identity: FileIdentity,
-    parent_identity: FileIdentity,
+    source_parent: PathBuf,
+    source_parent_identity: FileIdentity,
+    destination_parent: PathBuf,
+    destination_parent_identity: FileIdentity,
     bytes: Vec<u8>,
     git: GitState,
     index: Vec<u8>,
 }
+impl Preimage {
+    fn matches(&self, other: &Self) -> bool {
+        paths_equivalent(&self.source, &other.source)
+            && paths_equivalent(&self.destination, &other.destination)
+            && self.identity == other.identity
+            && self.source_parent_identity == other.source_parent_identity
+            && self.destination_parent_identity == other.destination_parent_identity
+            && self.bytes == other.bytes
+            && self.git == other.git
+            && self.index == other.index
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
 struct GitState {
     blob: Vec<u8>,
+    head_entry: GitEntry,
+    index_entry: GitEntry,
     fingerprint: Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct GitEntry {
+    mode: Vec<u8>,
+    object: Vec<u8>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbsenceObservation {
+    Absent,
+    Present,
+    Unknown,
 }
 struct RenameRequest {
     source_path: PathBuf,
@@ -448,20 +653,105 @@ fn reserved_windows_name(component: &str) -> bool {
             && matches!(&stem[..3], "COM" | "LPT")
             && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
-fn valid_index(bytes: &[u8], path: &[u8]) -> bool {
-    let Some(record) = bytes.strip_suffix(&[0]) else {
-        return false;
+fn parse_tree_entry(bytes: &[u8], path: &[u8]) -> Result<GitEntry, ()> {
+    let records = nul_records(bytes)?;
+    let matching = records
+        .iter()
+        .filter(|record| record_path(record) == Some(path))
+        .copied()
+        .collect::<Vec<_>>();
+    let [record] = matching.as_slice() else {
+        return Err(());
     };
-    let Some(tab) = record.iter().position(|b| *b == b'\t') else {
-        return false;
+    let tab = record.iter().position(|byte| *byte == b'\t').ok_or(())?;
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, kind, object] = fields.as_slice() else {
+        return Err(());
     };
-    &record[tab + 1..] == path
-        && record[..tab]
-            .split(|b| *b == b' ')
-            .collect::<Vec<_>>()
-            .as_slice()
-            .get(2)
-            == Some(&&b"0"[..])
+    if *kind != b"blob" || !matches!(*mode, b"100644" | b"100755") {
+        return Err(());
+    }
+    Ok(GitEntry {
+        mode: mode.to_vec(),
+        object: object.to_vec(),
+    })
+}
+
+fn parse_index_entry(bytes: &[u8], path: &[u8]) -> Result<GitEntry, ()> {
+    let records = nul_records(bytes)?;
+    let [record] = records.as_slice() else {
+        return Err(());
+    };
+    let tab = record.iter().position(|byte| *byte == b'\t').ok_or(())?;
+    if &record[tab + 1..] != path {
+        return Err(());
+    }
+    let fields = record[..tab]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let [mode, object, stage] = fields.as_slice() else {
+        return Err(());
+    };
+    if *stage != b"0" || !matches!(*mode, b"100644" | b"100755") {
+        return Err(());
+    }
+    if object.iter().all(|byte| *byte == b'0') {
+        return Err(());
+    }
+    Ok(GitEntry {
+        mode: mode.to_vec(),
+        object: object.to_vec(),
+    })
+}
+
+fn git_path_present(bytes: &[u8], path: &[u8]) -> Result<bool, ()> {
+    Ok(nul_records(bytes)?.into_iter().any(|record| {
+        record_path(record).is_some_and(|entry| {
+            entry == path
+                || entry
+                    .strip_prefix(path)
+                    .is_some_and(|suffix| suffix.first() == Some(&b'/'))
+        })
+    }))
+}
+
+fn record_path(record: &[u8]) -> Option<&[u8]> {
+    record
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .map(|tab| &record[tab + 1..])
+}
+
+fn nul_records(bytes: &[u8]) -> Result<Vec<&[u8]>, ()> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = bytes.strip_suffix(&[0]).ok_or(())?;
+    Ok(bytes.split(|byte| *byte == 0).collect())
+}
+
+fn observe_absence(path: &Path) -> AbsenceObservation {
+    match fs::symlink_metadata(path) {
+        Ok(_) => AbsenceObservation::Present,
+        Err(error) if error.kind() == ErrorKind::NotFound => AbsenceObservation::Absent,
+        Err(_) => AbsenceObservation::Unknown,
+    }
+}
+
+fn worktree_mode_matches(metadata: &fs::Metadata, mode: &[u8]) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = metadata.permissions().mode() & 0o111 != 0;
+        executable == (mode == b"100755")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (metadata, mode);
+        true
+    }
 }
 fn rename_once(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
@@ -545,6 +835,14 @@ fn fs_error(error: impl std::fmt::Display) -> ToolError {
 struct TestHook {
     modify_source: std::sync::atomic::AtomicBool,
     create_destination: std::sync::atomic::AtomicBool,
+    replace_source_parent: std::sync::atomic::AtomicBool,
+    replace_destination_parent: std::sync::atomic::AtomicBool,
+    replace_source_after_attempt: std::sync::atomic::AtomicBool,
+    replace_destination_after_attempt: std::sync::atomic::AtomicBool,
+    replace_source_parent_after_attempt: std::sync::atomic::AtomicBool,
+    replace_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
+    #[cfg(unix)]
+    replace_destination_with_symlink_after_attempt: std::sync::atomic::AtomicBool,
 }
 #[cfg(test)]
 impl TestHook {
@@ -556,13 +854,77 @@ impl TestHook {
         if self.create_destination.swap(false, Ordering::SeqCst) {
             fs::write(root.join(destination), b"external").unwrap();
         }
+        if self.replace_source_parent.swap(false, Ordering::SeqCst) {
+            replace_parent(&pre.source_parent);
+        }
+        if self
+            .replace_destination_parent
+            .swap(false, Ordering::SeqCst)
+        {
+            replace_parent(&pre.destination_parent);
+        }
     }
+
+    fn apply_after_attempt(&self, pre: &Preimage, _root: &Path) {
+        use std::sync::atomic::Ordering;
+        if self
+            .replace_source_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            if pre.source.exists() {
+                let backup = pre.source.with_extension("rah-rename-replaced");
+                fs::rename(&pre.source, backup).unwrap();
+            }
+            fs::write(&pre.source, &pre.bytes).unwrap();
+        }
+        if self
+            .replace_destination_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            let backup = pre.destination.with_extension("rah-rename-replaced");
+            fs::rename(&pre.destination, backup).unwrap();
+            fs::write(&pre.destination, &pre.bytes).unwrap();
+        }
+        if self
+            .replace_source_parent_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            replace_parent(&pre.source_parent);
+        }
+        if self
+            .replace_destination_parent_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            replace_parent(&pre.destination_parent);
+        }
+        #[cfg(unix)]
+        if self
+            .replace_destination_with_symlink_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            use std::os::unix::fs::symlink;
+            let backup = pre.destination.with_extension("rah-rename-link-target");
+            fs::rename(&pre.destination, &backup).unwrap();
+            symlink(&backup, &pre.destination).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+fn replace_parent(path: &Path) {
+    let backup = path.with_file_name(format!(
+        "{}.rah-rename-replaced",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(path, backup).unwrap();
+    fs::create_dir(path).unwrap();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
+        io::Write,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -572,6 +934,12 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_source("old.txt")
+        }
+        fn nested() -> Self {
+            Self::with_source("source/old.txt")
+        }
+        fn with_source(source: &str) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "rah-rename-{}",
                 SystemTime::now()
@@ -588,8 +956,12 @@ mod tests {
             ] {
                 run(&git, &root, args);
             }
-            fs::write(root.join("old.txt"), b"rename bytes").unwrap();
-            run(&git, &root, &["add", "old.txt"]);
+            let source = Path::new(source);
+            if let Some(parent) = source.parent() {
+                fs::create_dir_all(root.join(parent)).unwrap();
+            }
+            fs::write(root.join(source), b"rename bytes").unwrap();
+            run(&git, &root, &["add", source.to_str().unwrap()]);
             run(&git, &root, &["commit", "--quiet", "-m", "base"]);
             Self { root, git }
         }
@@ -625,6 +997,15 @@ mod tests {
             "{args:?}"
         );
     }
+    fn output(git: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new(git)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        output.stdout
+    }
     fn execute(tool: &RepositoryFileRenameTool, input: Value) -> Value {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -640,6 +1021,11 @@ mod tests {
     }
     fn request(source: &str, destination: &str) -> Value {
         json!({"source_path":source,"destination_path":destination,"expected_source_file_sha256":sha256(b"rename bytes"),"expected_source_file_byte_length":12})
+    }
+    fn attempts(tool: &RepositoryFileRenameTool) -> usize {
+        tool.policy
+            .rename_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     #[test]
     fn same_directory_rename_preserves_bytes_and_attempt_count() {
@@ -674,6 +1060,326 @@ mod tests {
             b"rename bytes"
         );
     }
+
+    #[test]
+    fn tracked_destination_missing_from_worktree_is_rejected() {
+        let f = Fixture::new();
+        fs::write(f.root.join("tracked-destination.txt"), b"tracked").unwrap();
+        run(&f.git, &f.root, &["add", "tracked-destination.txt"]);
+        run(
+            &f.git,
+            &f.root,
+            &["commit", "--quiet", "-m", "tracked-destination"],
+        );
+        fs::remove_file(f.root.join("tracked-destination.txt")).unwrap();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "tracked-destination.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
+    #[test]
+    fn staged_or_intent_to_add_destination_collision_is_rejected() {
+        for intent_to_add in [false, true] {
+            let f = Fixture::new();
+            if intent_to_add {
+                fs::write(f.root.join("collision.txt"), b"intent").unwrap();
+                run(&f.git, &f.root, &["add", "-N", "collision.txt"]);
+                fs::remove_file(f.root.join("collision.txt")).unwrap();
+            } else {
+                fs::write(f.root.join("collision.txt"), b"staged").unwrap();
+                run(&f.git, &f.root, &["add", "collision.txt"]);
+                fs::remove_file(f.root.join("collision.txt")).unwrap();
+            }
+            let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+            assert_eq!(
+                execute(&t, request("old.txt", "collision.txt"))["status"],
+                "precondition_failed"
+            );
+            assert_eq!(attempts(&t), 0);
+        }
+    }
+
+    #[test]
+    fn source_staged_content_replacement_is_rejected_when_worktree_is_head_bytes() {
+        let f = Fixture::new();
+        fs::write(f.root.join("old.txt"), b"staged replacement").unwrap();
+        run(&f.git, &f.root, &["add", "old.txt"]);
+        fs::write(f.root.join("old.txt"), b"rename bytes").unwrap();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
+    #[test]
+    fn source_staged_mode_replacement_is_rejected() {
+        let f = Fixture::new();
+        run(&f.git, &f.root, &["update-index", "--chmod=+x", "old.txt"]);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
+    #[test]
+    fn source_conflict_stages_are_rejected() {
+        let f = Fixture::new();
+        let mut objects = Vec::new();
+        for (name, bytes) in [
+            ("one", b"one".as_slice()),
+            ("two", b"two"),
+            ("three", b"three"),
+        ] {
+            fs::write(f.root.join(name), bytes).unwrap();
+            objects.push(
+                String::from_utf8(output(&f.git, &f.root, &["hash-object", "-w", name]))
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+            );
+        }
+        run(
+            &f.git,
+            &f.root,
+            &["update-index", "--force-remove", "old.txt"],
+        );
+        let input = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| format!("100644 {object} {}\told.txt\n", index + 1))
+            .collect::<String>();
+        let mut child = Command::new(&f.git)
+            .args(["update-index", "--index-info"])
+            .current_dir(&f.root)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
+    #[test]
+    fn active_git_operation_markers_are_rejected_without_effect() {
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "REBASE_HEAD",
+            "BISECT_LOG",
+            "sequencer",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            let f = Fixture::new();
+            let path = f.root.join(".git").join(marker);
+            if marker == "sequencer" || marker.starts_with("rebase-") {
+                fs::create_dir(path).unwrap();
+            } else {
+                fs::write(path, b"marker").unwrap();
+            }
+            let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+            assert_eq!(
+                execute(&t, request("old.txt", "renamed.txt"))["status"],
+                "precondition_failed",
+                "marker {marker}"
+            );
+            assert_eq!(attempts(&t), 0, "marker {marker}");
+            assert!(f.root.join("old.txt").exists());
+            assert!(!f.root.join("renamed.txt").exists());
+        }
+    }
+
+    #[test]
+    fn source_and_destination_parent_replacement_are_rejected() {
+        let source_fixture = Fixture::nested();
+        let source_tool =
+            RepositoryFileRenameTool::new(&source_fixture.git, &source_fixture.root).unwrap();
+        source_tool
+            .policy
+            .test_hook
+            .replace_source_parent
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&source_tool, request("source/old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&source_tool), 0);
+
+        let destination_fixture = Fixture::new();
+        let destination_tool =
+            RepositoryFileRenameTool::new(&destination_fixture.git, &destination_fixture.root)
+                .unwrap();
+        destination_tool
+            .policy
+            .test_hook
+            .replace_destination_parent
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&destination_tool, request("old.txt", "existing/moved.txt"),)["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&destination_tool), 0);
+    }
+
+    #[test]
+    fn destination_parent_replacement_after_effect_is_uncertain() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .replace_destination_parent_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "existing/moved.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+    }
+
+    #[test]
+    fn same_volume_mismatch_fails_closed_before_the_native_attempt() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .force_same_volume_mismatch
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
+    #[test]
+    fn native_failure_with_identity_equal_preimage_is_known_no_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .force_native_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "known_no_effect"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("renamed.txt").exists());
+    }
+
+    #[test]
+    fn same_byte_source_identity_replacement_is_uncertain_after_failure() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .force_native_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        t.policy
+            .test_hook
+            .replace_source_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert_eq!(fs::read(f.root.join("old.txt")).unwrap(), b"rename bytes");
+    }
+
+    #[test]
+    fn generic_absence_observation_failure_is_uncertain() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .force_observation_unknown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+    }
+
+    #[test]
+    fn destination_identity_mismatch_is_uncertain_after_possible_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .replace_destination_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert_eq!(
+            fs::read(f.root.join("renamed.txt")).unwrap(),
+            b"rename bytes"
+        );
+    }
+
+    #[test]
+    fn same_name_source_replacement_is_uncertain_after_possible_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .replace_source_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert_eq!(fs::read(f.root.join("old.txt")).unwrap(), b"rename bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_symlink_substitution_is_uncertain_after_possible_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        t.policy
+            .test_hook
+            .replace_destination_with_symlink_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_case_only_rename_is_rejected_without_effect() {
+        let f = Fixture::with_source("Foo.rs");
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        assert_eq!(
+            execute(&t, request("Foo.rs", "foo.rs"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+    }
+
     #[test]
     fn malformed_and_colliding_requests_make_no_attempt() {
         let f = Fixture::new();

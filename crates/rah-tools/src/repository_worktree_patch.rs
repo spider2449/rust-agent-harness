@@ -2471,6 +2471,22 @@ impl FileIdentity {
         }
     }
 
+    pub(crate) fn same_volume(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.device == other.device
+        }
+        #[cfg(windows)]
+        {
+            self.volume_serial == other.volume_serial
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = other;
+            false
+        }
+    }
+
     pub(crate) fn capture(path: &Path) -> Result<Self, ToolError> {
         #[cfg(unix)]
         {
