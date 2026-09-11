@@ -186,11 +186,7 @@ impl RepositoryFileRenamePolicy {
         reject_reparse_ancestry(root, "repository root")?;
         let root = fs::canonicalize(root).map_err(fs_error)?;
         validate_directory_path(&root, &root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-            return Err(policy_error("linked worktrees are unsupported"));
-        }
+        let dot_git_identity = validate_supported_dot_git(&root)?;
         reject_reparse_ancestry(git, "Git executable")?;
         let git = fs::canonicalize(git).map_err(fs_error)?;
         if !fs::metadata(&git).map_err(fs_error)?.is_file() {
@@ -199,7 +195,7 @@ impl RepositoryFileRenamePolicy {
         Ok(Self {
             root_identity: FileIdentity::capture(&root)?,
             git_identity: FileIdentity::capture(&git)?,
-            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            dot_git_identity,
             lease: crate::git_stage::repository_lease(&root),
             git,
             root,
@@ -396,9 +392,10 @@ impl RepositoryFileRenamePolicy {
     fn repository_ok(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
         let root = fs::canonicalize(&self.root).map_err(fs_error)?;
+        let dot_git_identity = validate_supported_dot_git(&self.root)?;
         if !paths_equivalent(&root, &self.root)
             || FileIdentity::capture(&root)? != self.root_identity
-            || FileIdentity::capture(&root.join(".git"))? != self.dot_git_identity
+            || dot_git_identity != self.dot_git_identity
             || FileIdentity::capture(&self.git)? != self.git_identity
         {
             return Err(policy_error("repository identity changed"));
@@ -564,6 +561,15 @@ impl RepositoryFileRenamePolicy {
             Err(())
         }
     }
+}
+
+fn validate_supported_dot_git(root: &Path) -> Result<FileIdentity, ToolError> {
+    let dot_git = root.join(".git");
+    reject_link_or_reparse(&dot_git, "repository metadata")?;
+    if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
+        return Err(policy_error("linked worktrees are unsupported"));
+    }
+    FileIdentity::capture(&dot_git)
 }
 
 struct Preimage {
@@ -996,11 +1002,15 @@ struct TestHook {
     replace_source_parent: std::sync::atomic::AtomicBool,
     replace_destination_parent: std::sync::atomic::AtomicBool,
     create_nested_boundary: std::sync::atomic::AtomicBool,
+    #[cfg(any(unix, windows))]
+    replace_dot_git_before_revalidation: std::sync::atomic::AtomicBool,
     replace_source_after_attempt: std::sync::atomic::AtomicBool,
     replace_destination_after_attempt: std::sync::atomic::AtomicBool,
     replace_source_parent_after_attempt: std::sync::atomic::AtomicBool,
     replace_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
     create_nested_boundary_after_attempt: std::sync::atomic::AtomicBool,
+    #[cfg(any(unix, windows))]
+    replace_dot_git_after_attempt: std::sync::atomic::AtomicBool,
     #[cfg(any(unix, windows))]
     redirect_destination_parent_after_attempt: std::sync::atomic::AtomicBool,
     #[cfg(unix)]
@@ -1027,6 +1037,13 @@ impl TestHook {
         }
         if self.create_nested_boundary.swap(false, Ordering::SeqCst) {
             fs::create_dir(pre.destination_parent.join(".git")).unwrap();
+        }
+        #[cfg(any(unix, windows))]
+        if self
+            .replace_dot_git_before_revalidation
+            .swap(false, Ordering::SeqCst)
+        {
+            replace_dot_git_with_redirect(&root.join(".git"));
         }
     }
 
@@ -1070,6 +1087,13 @@ impl TestHook {
         }
         #[cfg(any(unix, windows))]
         if self
+            .replace_dot_git_after_attempt
+            .swap(false, Ordering::SeqCst)
+        {
+            replace_dot_git_with_redirect(&_root.join(".git"));
+        }
+        #[cfg(any(unix, windows))]
+        if self
             .redirect_destination_parent_after_attempt
             .swap(false, Ordering::SeqCst)
         {
@@ -1106,6 +1130,13 @@ fn redirect_parent(path: &Path) {
     ));
     fs::rename(path, &backup).unwrap();
     create_directory_redirect(path, &backup);
+}
+
+#[cfg(all(test, any(unix, windows)))]
+fn replace_dot_git_with_redirect(dot_git: &Path) {
+    let target = dot_git.with_file_name(".git.rah-rename-metadata-target");
+    fs::rename(dot_git, &target).unwrap();
+    create_directory_redirect(dot_git, &target);
 }
 
 #[cfg(all(test, unix))]
@@ -1269,6 +1300,106 @@ mod tests {
             fs::read(f.root.join("existing/moved.txt")).unwrap(),
             b"rename bytes"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn same_target_dot_git_link_before_initial_execution_is_rejected_without_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        let expected = t.policy.dot_git_identity.clone();
+        replace_dot_git_with_redirect(&f.root.join(".git"));
+        assert_eq!(
+            FileIdentity::capture(&f.root.join(".git")).unwrap(),
+            expected
+        );
+        assert!(reject_link_or_reparse(&f.root.join(".git"), "repository metadata").is_err());
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("renamed.txt").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn same_target_dot_git_link_between_capture_and_revalidation_is_rejected_without_effect() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        let expected = t.policy.dot_git_identity.clone();
+        t.policy
+            .test_hook
+            .replace_dot_git_before_revalidation
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert_eq!(
+            FileIdentity::capture(&f.root.join(".git")).unwrap(),
+            expected
+        );
+        assert!(reject_link_or_reparse(&f.root.join(".git"), "repository metadata").is_err());
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("renamed.txt").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn same_target_dot_git_link_after_possible_effect_is_uncertain_without_replay() {
+        let f = Fixture::new();
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+        let expected = t.policy.dot_git_identity.clone();
+        t.policy
+            .test_hook
+            .replace_dot_git_after_attempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute(&t, request("old.txt", "renamed.txt"))["status"],
+            "uncertain"
+        );
+        assert_eq!(attempts(&t), 1);
+        assert_eq!(
+            FileIdentity::capture(&f.root.join(".git")).unwrap(),
+            expected
+        );
+        assert!(reject_link_or_reparse(&f.root.join(".git"), "repository metadata").is_err());
+        assert!(!f.root.join("old.txt").exists());
+        assert!(f.root.join("renamed.txt").exists());
+    }
+
+    #[test]
+    fn removed_or_replaced_dot_git_directory_is_rejected_without_effect() {
+        for replace in [false, true] {
+            let f = Fixture::new();
+            let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+            let dot_git = f.root.join(".git");
+            if replace {
+                fs::rename(&dot_git, f.root.join(".git.rah-rename-different")).unwrap();
+                fs::create_dir(&dot_git).unwrap();
+            } else {
+                fs::remove_dir_all(&dot_git).unwrap();
+            }
+            assert_eq!(
+                execute(&t, request("old.txt", "renamed.txt"))["status"],
+                "precondition_failed"
+            );
+            assert_eq!(attempts(&t), 0);
+            assert!(f.root.join("old.txt").exists());
+            assert!(!f.root.join("renamed.txt").exists());
+        }
+    }
+
+    #[test]
+    fn linked_worktree_gitfile_remains_unsupported() {
+        let f = Fixture::new();
+        let dot_git = f.root.join(".git");
+        fs::remove_dir_all(&dot_git).unwrap();
+        fs::write(&dot_git, "gitdir: metadata").unwrap();
+        assert!(RepositoryFileRenameTool::new(&f.git, &f.root).is_err());
     }
 
     #[test]
