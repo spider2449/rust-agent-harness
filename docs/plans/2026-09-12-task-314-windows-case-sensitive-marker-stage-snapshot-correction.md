@@ -146,9 +146,15 @@ cross-direction/stronger-proof regressions pass. The exact 11 HostExplicit
 allowlist and public Tool/schema comparisons remain unchanged. Workspace
 membership remains unimplemented.
 
-Production commit(s), any test/docs evidence commit, exact-head CI,
-`HEAD == origin/master`, and clean-worktree evidence will be appended at
-delivery closure.
+Production commit:
+
+- `1756b3a1f5848280017914169c648fb0efce76dc` —
+  `fix: close remaining repository nested boundaries`.
+
+There is no separate test-only commit. This plan was included with the
+production correction; the final documentation evidence will be a separate
+docs-only commit. Exact-head CI `34682248814` passed for the production head.
+The final docs head will be pushed and receive its own exact-head CI result.
 
 ## Closure gate
 
