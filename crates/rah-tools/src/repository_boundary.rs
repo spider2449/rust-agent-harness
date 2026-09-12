@@ -94,7 +94,14 @@ impl RepositoryNestedBoundaryPolicy {
                     }
                     continue;
                 }
-                if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+                if metadata.file_type().is_symlink() {
+                    // Git observes a symlink as a directory entry and does
+                    // not dereference it during the repository-wide scan.
+                    // The `.git` name was handled above, so an ordinary
+                    // symlink file does not make the observation ambiguous.
+                    continue;
+                }
+                if is_reparse_point(&metadata) {
                     if metadata.is_dir() || !metadata.is_file() {
                         return Err(boundary_error(
                             "repository observation boundary is ambiguous",
