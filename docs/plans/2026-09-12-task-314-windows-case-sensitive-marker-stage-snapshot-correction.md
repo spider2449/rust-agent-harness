@@ -154,7 +154,14 @@ Production commit:
 There is no separate test-only commit. This plan was included with the
 production correction; the final documentation evidence will be a separate
 docs-only commit. Exact-head CI `34682248814` passed for the production head.
-The final docs head will be pushed and receive its own exact-head CI result.
+Docs-only evidence commit:
+
+- `1d219a70134e1a26cc4ef5531a47176966f5ebc5` —
+  `docs: record task 314 delivery evidence`.
+
+Exact-head CI `34682377331` passed for that docs-evidence head. At that
+checkpoint, `HEAD == origin/master` and the worktree was clean. No real
+case-sensitive NTFS fixture was run, and no live certification is claimed.
 
 ## Closure gate
 
