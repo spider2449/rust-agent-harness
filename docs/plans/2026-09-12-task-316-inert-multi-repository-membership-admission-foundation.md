@@ -107,6 +107,89 @@ The deterministic implementation gates passed before the production commit:
 - `node crates/rah-desktop/frontend/status_authority_test.js` — PASS.
 - `node crates/rah-desktop/tauri_permission_test.js` — PASS.
 
-The production commit and final exact-head CI evidence are recorded in the
-closure follow-up after publication. No connected destructive Codex test was
-run.
+The production commit and final exact-head CI evidence are recorded below. No
+connected destructive Codex test was run.
+
+## Closure report
+
+**Outcome A — MEMBERSHIP FOUNDATION CLOSED.**
+
+The implementation is process-local and deterministic. The direct production
+commit is `ad56f0c85bae5a41175e85d37e534f57838d8825`, with checkpoint
+`6443525ad2ffdc5e4407e2eb1b8f214acbdae4a8` as its parent. Two narrow
+cross-platform test corrections followed: `742739cbf9711030c684b813ed4b612dc8143ebe`
+uses a regular current executable in the identity fixture, and
+`185db1d24cbcab81823ac76a041df53a87c76f3b` removes conditional return forms
+rejected by Unix clippy. The final code exact-head CI is run `34699519435`,
+which passed formatting, workspace check, workspace test, and workspace lint
+for `185db1d24cbcab81823ac76a041df53a87c76f3b`.
+
+The state type is `WorkspaceMembershipState` in
+`crates/rah-desktop/src/repository_membership.rs`. It owns a process-local
+workspace epoch, membership generation, monotonic member allocator, bounded
+inert member map, and optional active member handle. `RepositoryMemberId`
+contains only the private process epoch and ordinal. It is host-generated,
+non-persistent, opaque to the frontend/model/provider, and not an authority
+or authorization token.
+
+The narrow `rah-tools` helper `RepositoryAdmissionIdentity` was required. It
+privately binds canonical root, root filesystem identity, supported directory
+`.git` identity, canonical Git executable identity, and fresh capture
+currentness. It revalidates those bindings, rejects symbolic-link/reparse
+ambiguity and linked-worktree `.git` files, and compares captured roots as
+same, nested, or distinct without exposing raw identity values or generic
+filesystem authority.
+
+Admission is host-owned: fresh Git and identity validation, temporary current
+repository capability construction, identity revalidation, duplicate/alias
+comparison, nested comparison, and inert publication under the coordination
+lock. Duplicate identity, canonical alias, case-equivalent Windows spelling,
+or shared root/`.git` identity returns `RepositoryAlreadyMember` without
+focusing or activating the existing member. A canonical parent/child relation
+in either direction returns `RepositoryNestedMembershipConflict`. No
+automatic repository scan occurs. Legacy `choose_repository` admits and then
+freshly activates the new member; activation failure removes that just-created
+inert member so the command remains all-or-nothing.
+
+Activation accepts only a catalog member handle, revalidates its identity and
+Git binding, freshly constructs `DesktopRepository` and its current authority
+objects, checks idle/disconnected lifecycle state, clears prepared
+HostExplicit state, revokes old Commit context, resets workflow/action/review
+state, starts the existing fresh conversation namespace, and publishes the
+active member with the active repository. Model turns and running HostExplicit
+effects reject activation; connecting, connected, and disconnecting states
+remain rejected. No inactive member retains a ToolRegistry, DesktopToolComposition,
+DesktopRepository, mutation authority, CommitControl, workflow, HostExplicit
+preparation, provider Tool, or runtime connection.
+
+Membership generation changes for inert admission/removal only. The existing
+`repository_generation` remains the active repository/current composition
+generation: inactive B admission does not change active A, while each fresh
+activation increments it. The current active member handle and current
+authority-bearing repository are published through the host coordination path;
+there is no per-member executable composition.
+
+Active change withdraws old Commit authorization, clears Stage/Unstage action
+selectors and review state, invalidates prepared HostExplicit state, and
+requires fresh review for the new active repository. The global
+`HostInvocationCoordinator` remains authoritative. Conversation state starts
+fresh on active change and is never migrated or resumed automatically.
+Membership is absent from persistence and startup creates zero members and no
+active repository. Effective Authority and ToolRegistry remain active-only;
+there is no workspace union, repository ID in ToolInput, model-selected
+switching, provider activation, or cross-repository operation. HostExplicit
+eligibility remains exactly 11 names.
+
+The focused matrix is one Desktop test plus one identity test. The Desktop
+crate passed 220 tests with 10 ignored; `rah-tools` passed 285 unit tests and
+all integration suites; the nested-boundary regression passed one test. The
+full workspace test passed locally and in final exact-head CI. Package
+metadata remains 13 packages, version `0.25.0`, edition `2024`; there is no
+dependency or `Cargo.lock` drift. Frontend multi-repository UX, persistence,
+removal UX, explicit switching, full product tabs, and live certification are
+deferred to later tasks.
+
+The v0.25.0 immutable identity remains unchanged: source
+`a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`, annotated tag `v0.25.0`, and tag
+object `ea3c31aaf5190b632d7ef86387f7aff6004ae664`. The next task is Task 317,
+active repository switching and active-only composition integration.
