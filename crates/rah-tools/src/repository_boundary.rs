@@ -119,14 +119,27 @@ impl RepositoryNestedBoundaryPolicy {
 }
 
 fn reject_nested_marker(directory: &Path) -> Result<(), ToolError> {
-    let marker = directory.join(".git");
-    match fs::symlink_metadata(marker) {
-        Ok(_) => Err(boundary_error(
+    let names = fs::read_dir(directory)
+        .map_err(boundary_observation_error)?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(boundary_observation_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_marker_entries(names)
+}
+
+fn reject_marker_entries<I>(names: I) -> Result<(), ToolError>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    if names.into_iter().any(|name| is_dot_git_name(&name)) {
+        return Err(boundary_error(
             "repository path crosses a nested repository boundary",
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(boundary_observation_error(error)),
+        ));
     }
+    Ok(())
 }
 
 fn reject_ambiguous_component(path: &Path) -> Result<(), ToolError> {
@@ -137,7 +150,12 @@ fn reject_ambiguous_component(path: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn is_dot_git_name(name: &OsStr) -> bool {
+/// Matches the repository metadata marker using RAH's platform contract.
+///
+/// Windows uses ASCII-insensitive matching so this remains correct for
+/// case-sensitive directories. Unix-like systems retain exact-case `.git`
+/// semantics.
+pub(crate) fn is_dot_git_name(name: &OsStr) -> bool {
     #[cfg(windows)]
     {
         name.to_string_lossy().eq_ignore_ascii_case(".git")
@@ -170,12 +188,13 @@ fn boundary_observation_error(_: std::io::Error) -> ToolError {
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsStr,
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::RepositoryNestedBoundaryPolicy;
+    use super::{RepositoryNestedBoundaryPolicy, is_dot_git_name};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -219,6 +238,54 @@ mod tests {
                 .is_ok()
         );
         assert!(policy.validate_observation().is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marker_name_matching_is_platform_explicit() {
+        assert!(is_dot_git_name(OsStr::new(".git")));
+        #[cfg(windows)]
+        {
+            assert!(is_dot_git_name(OsStr::new(".GIT")));
+            assert!(is_dot_git_name(OsStr::new(".Git")));
+            assert!(is_dot_git_name(OsStr::new(".gIt")));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(!is_dot_git_name(OsStr::new(".GIT")));
+            assert!(!is_dot_git_name(OsStr::new(".Git")));
+            assert!(!is_dot_git_name(OsStr::new(".gIt")));
+        }
+        assert!(!is_dot_git_name(OsStr::new(".git ")));
+        assert!(!is_dot_git_name(OsStr::new("git")));
+    }
+
+    #[test]
+    fn enumerated_marker_names_are_the_authoritative_boundary_input() {
+        let names = if cfg!(windows) {
+            vec![std::ffi::OsString::from(".GIT")]
+        } else {
+            vec![std::ffi::OsString::from(".git")]
+        };
+        assert!(super::reject_marker_entries(names).is_err());
+        assert!(
+            super::reject_marker_entries([
+                std::ffi::OsString::from("ordinary"),
+                std::ffi::OsString::from("another"),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn existing_validation_uses_enumerated_marker_names() {
+        let root = root("enumerated-marker");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        let marker_name = if cfg!(windows) { ".GIT" } else { ".git" };
+        fs::write(root.join("nested").join(marker_name), b"marker").unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&root);
+        assert!(policy.validate_existing(&root.join("nested")).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -5,6 +5,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
@@ -91,6 +94,8 @@ pub(crate) struct GitIndexMutationPolicy {
     refs: HostExecutionPolicy,
     index: HostExecutionPolicy,
     lease: Arc<AsyncMutex<()>>,
+    #[cfg(test)]
+    mutation_attempts: AtomicUsize,
 }
 
 impl GitIndexMutationPolicy {
@@ -157,6 +162,8 @@ impl GitIndexMutationPolicy {
             index: exact(vec!["ls-files".into(), "-s".into(), "-z".into()])?,
             root,
             target,
+            #[cfg(test)]
+            mutation_attempts: AtomicUsize::new(0),
         })
     }
 
@@ -172,6 +179,8 @@ impl GitIndexMutationPolicy {
         self.revalidate()?;
         self.require_tracked().await?;
         self.revalidate()?;
+        #[cfg(test)]
+        self.mutation_attempts.fetch_add(1, Ordering::Relaxed);
         let process = self.mutation.execute_process(&ToolInput(json!({}))).await;
         #[cfg(test)]
         let process = test_after_stage::run(process).await;
@@ -204,7 +213,7 @@ impl GitIndexMutationPolicy {
             head_entry,
             refs,
             index: parse_index(&index)?,
-            worktree: WorktreeSnapshot::capture(&self.root)?,
+            worktree: WorktreeSnapshot::capture(&self.root, &self.boundary)?,
         })
     }
 
@@ -338,30 +347,42 @@ struct State {
 }
 struct WorktreeSnapshot(BTreeMap<PathBuf, Vec<u8>>);
 impl WorktreeSnapshot {
-    fn capture(root: &Path) -> Result<Self, ToolError> {
+    fn capture(root: &Path, boundary: &RepositoryNestedBoundaryPolicy) -> Result<Self, ToolError> {
         let mut files = BTreeMap::new();
         let mut total = 0;
-        capture_tree(root, root, &mut files, &mut total)?;
+        capture_tree(root, root, boundary, &mut files, &mut total)?;
         Ok(Self(files))
     }
 }
 fn capture_tree(
     root: &Path,
     directory: &Path,
+    boundary: &RepositoryNestedBoundaryPolicy,
     files: &mut BTreeMap<PathBuf, Vec<u8>>,
     total: &mut usize,
 ) -> Result<(), ToolError> {
     for entry in fs::read_dir(directory).map_err(fs_error)? {
         let entry = entry.map_err(fs_error)?;
         let path = entry.path();
-        if path.file_name().is_some_and(|name| name == ".git") {
-            continue;
+        if path
+            .file_name()
+            .is_some_and(crate::repository_boundary::is_dot_git_name)
+        {
+            if paths_equivalent(directory, root) {
+                continue;
+            }
+            return Err(git_error(
+                "repository path crosses a nested repository boundary",
+            ));
         }
         reject_link(&path, "worktree entry")?;
         let metadata = fs::metadata(&path).map_err(fs_error)?;
         if metadata.is_dir() {
-            capture_tree(root, &path, files, total)?;
+            boundary.validate_existing(&path)?;
+            capture_tree(root, &path, boundary, files, total)?;
         } else if metadata.is_file() {
+            #[cfg(test)]
+            snapshot_read_audit::record(&path);
             let bytes = fs::read(&path).map_err(fs_error)?;
             *total = total.saturating_add(bytes.len());
             if *total > MAX_WORKTREE_SNAPSHOT_BYTES {
@@ -379,6 +400,41 @@ fn capture_tree(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod snapshot_read_audit {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    static READS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+
+    pub(super) fn record(path: &Path) {
+        READS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("snapshot read audit mutex poisoned")
+            .push(path.to_path_buf());
+    }
+
+    pub(super) fn clear() {
+        READS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("snapshot read audit mutex poisoned")
+            .clear();
+    }
+
+    pub(super) fn reads() -> Vec<PathBuf> {
+        READS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("snapshot read audit mutex poisoned")
+            .clone()
+    }
+}
+
 struct Verification {
     changed: bool,
     target_changed: bool,
@@ -739,8 +795,8 @@ mod tests {
     use crate::GitUnstageTool;
 
     use super::{
-        GitIndexMutation, GitStageTool, State, Tool, ToolContext, WorktreeSnapshot,
-        test_after_stage, verify,
+        GitIndexMutation, GitIndexMutationPolicy, GitStageTool, State, Tool, ToolContext,
+        WorktreeSnapshot, snapshot_read_audit, test_after_stage, verify,
     };
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -813,6 +869,25 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    fn index_bytes(git: &Path, root: &Path) -> Vec<u8> {
+        let output = Command::new(git)
+            .args(["ls-files", "-s", "-z"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    }
+
+    fn add_unrelated_nested_repository(root: &Path) -> PathBuf {
+        let nested = root.join("nested-b");
+        let marker = if cfg!(windows) { ".GIT" } else { ".git" };
+        fs::create_dir_all(nested.join(marker)).unwrap();
+        let secret = nested.join("secret.txt");
+        fs::write(&secret, b"Repository B secret\n").unwrap();
+        secret
     }
 
     fn content(output: &rah_protocol::ToolOutput) -> &serde_json::Value {
@@ -1058,5 +1133,101 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn stage_rejects_unrelated_nested_repository_before_snapshot_reads_b() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "changed\n").unwrap();
+        let secret = add_unrelated_nested_repository(&root);
+        let policy = GitIndexMutationPolicy::new(
+            &git,
+            &root,
+            "release-artifact".to_owned(),
+            &root.join("target.txt"),
+            GitIndexMutation::Stage,
+        )
+        .unwrap();
+        let before = index_bytes(&git, &root);
+        snapshot_read_audit::clear();
+
+        assert!(policy.execute_once(GitIndexMutation::Stage).await.is_err());
+        assert_eq!(index_bytes(&git, &root), before);
+        assert_eq!(policy.mutation_attempts.load(Ordering::Relaxed), 0);
+        assert!(!snapshot_read_audit::reads().contains(&secret));
+    }
+
+    #[tokio::test]
+    async fn unstage_rejects_unrelated_nested_repository_before_snapshot_reads_b() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let secret = add_unrelated_nested_repository(&root);
+        let policy = GitIndexMutationPolicy::new(
+            &git,
+            &root,
+            "release-artifact".to_owned(),
+            &root.join("target.txt"),
+            GitIndexMutation::Unstage,
+        )
+        .unwrap();
+        let before = index_bytes(&git, &root);
+        snapshot_read_audit::clear();
+
+        assert!(
+            policy
+                .execute_once(GitIndexMutation::Unstage)
+                .await
+                .is_err()
+        );
+        assert_eq!(index_bytes(&git, &root), before);
+        assert_eq!(policy.mutation_attempts.load(Ordering::Relaxed), 0);
+        assert!(!snapshot_read_audit::reads().contains(&secret));
+    }
+
+    #[tokio::test]
+    async fn stage_rejects_nested_boundary_appearing_after_construction_before_mutation() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "changed\n").unwrap();
+        let policy = GitIndexMutationPolicy::new(
+            &git,
+            &root,
+            "release-artifact".to_owned(),
+            &root.join("target.txt"),
+            GitIndexMutation::Stage,
+        )
+        .unwrap();
+        let before = index_bytes(&git, &root);
+        add_unrelated_nested_repository(&root);
+
+        assert!(policy.execute_once(GitIndexMutation::Stage).await.is_err());
+        assert_eq!(index_bytes(&git, &root), before);
+        assert_eq!(policy.mutation_attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn unstage_rejects_nested_boundary_appearing_after_construction_before_mutation() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::write(root.join("target.txt"), "staged\n").unwrap();
+        run_git(&git, &root, &["add", "--", "target.txt"]);
+        let policy = GitIndexMutationPolicy::new(
+            &git,
+            &root,
+            "release-artifact".to_owned(),
+            &root.join("target.txt"),
+            GitIndexMutation::Unstage,
+        )
+        .unwrap();
+        let before = index_bytes(&git, &root);
+        add_unrelated_nested_repository(&root);
+
+        assert!(
+            policy
+                .execute_once(GitIndexMutation::Unstage)
+                .await
+                .is_err()
+        );
+        assert_eq!(index_bytes(&git, &root), before);
+        assert_eq!(policy.mutation_attempts.load(Ordering::Relaxed), 0);
     }
 }

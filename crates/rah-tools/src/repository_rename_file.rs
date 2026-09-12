@@ -1703,7 +1703,6 @@ fn validate_ordinary_directory_ancestry(
         if paths_equivalent(&current, root) {
             return Ok(());
         }
-        reject_nested_repository_boundary(&current)?;
         if mount_points
             .iter()
             .any(|mount_point| paths_equivalent(mount_point, &current))
@@ -1715,14 +1714,6 @@ fn validate_ordinary_directory_ancestry(
             return Err(());
         }
         current = parent.to_path_buf();
-    }
-}
-
-fn reject_nested_repository_boundary(directory: &Path) -> Result<(), ()> {
-    match fs::symlink_metadata(directory.join(".git")) {
-        Ok(_) => Err(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(()),
     }
 }
 
