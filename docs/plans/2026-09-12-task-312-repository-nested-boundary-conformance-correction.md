@@ -68,7 +68,7 @@ nested Repo B observer test, repository-scoped `fs.read` rejection, ordinary
 directory allowance, `.git` directory/file/symlink marker rejection, Windows
 case-equivalent marker coverage, zero native directory-create attempts, and
 the existing rename cross-direction/currentness/uncertainty tests. The
-`rah-tools` suite passed 269 unit tests plus all package integration suites;
+`rah-tools` suite passed 277 unit tests plus all package integration suites;
 the new `repository_nested_boundary` integration test passed 1 test. The
 full workspace test passed with 0 failures; 10 host-only tests remained
 ignored by their existing environment gates. Clippy, format, metadata, and
@@ -84,15 +84,14 @@ Focused capability counts on the final production correction were:
 - status: 4 integration tests plus the nested-boundary integration test;
 - diff: 4 Windows integration tests and 5 Unix CI integration tests;
 - diff-staged: 7 integration tests;
-- patch: 48 unit tests;
-- edit-files: 5 edit tests and 31 multi-file preflight tests;
-- create-file: 11 integration tests;
-- delete-file: 11 integration tests;
-- rename-file: 24 preparation tests;
+- patch: 49 unit tests;
+- edit-files: 5 edit tests and 33 multi-file preflight tests;
+- create-file: 9 unit tests and 11 integration tests;
+- delete-file: 8 unit tests and 11 integration tests;
+- rename-file: 42 unit tests and 24 preparation tests;
 - create-directory: 6 unit tests;
-- Stage: 6 integration tests;
-- Unstage: 6 integration tests;
-- reviewed Commit: 14 unit tests;
+- Stage and Unstage: 5 shared unit tests, plus 6 integration tests each;
+- reviewed Commit: 15 unit tests;
 - shared boundary: 4 Windows unit tests, including case-equivalent `.git`;
 - fresh nested-boundary fixture: 1 integration test covering read, file-info,
   status, diff, and diff-staged rejection.
@@ -130,6 +129,13 @@ Production correction commits:
 - `13409e80e15e98f80bd5150416d2d73132784790` — `fix: enforce repository nested boundaries`;
 - `4bbeeac98c0c3e4fd553616bd3cebf44edb4e49b` — `fix: preserve repository symlink observation`.
 
+Deterministic regression test commits:
+
+- `4a3a0a46a1bd5b52c001705fe64050a0237f57d8` —
+  `test: cover nested boundary mutators`;
+- `85bdf14471ba8556d7aad9cb6758461e19874d09` —
+  `test: satisfy nested boundary lint`.
+
 Later evidence commits:
 
 - `361fdae0f18563ff648f74507d3ae9df993e8b91` —
@@ -139,6 +145,7 @@ Later evidence commits:
 
 Exact-head CI for the production correction: `34671965449` — PASS.
 Exact-head CI for the final evidence-recording head: `34672392029` — PASS.
+Exact-head CI for the expanded mutator-test head: `34673154824` — PASS.
 Final Git state and immutable v0.25 identity recheck: verified after the final
 evidence-recording head; the worktree was clean and `HEAD == origin/master`.
 
