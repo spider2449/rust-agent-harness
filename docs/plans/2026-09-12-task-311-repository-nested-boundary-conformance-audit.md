@@ -669,7 +669,16 @@ change, tag, or Release was performed.
 | v0.25 immutable release identity | Unchanged: source `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`, tag object `ea3c31aaf5190b632d7ef86387f7aff6004ae664`, Release `387406579` |
 | Expected changed-file scope | This one audit document |
 
-The final commit, push, exact-head CI, clean worktree, and `HEAD ==
-origin/master` verification are recorded below after delivery.
+The audit-content delivery was committed and pushed as follows:
+
+| Delivery item | Value |
+| --- | --- |
+| Audit-content commit | `d46b4c4c47b9b0747fc1b6bfa35a1c399323f665` |
+| Audit-content direct parent | `3aa30494c344846b57fd416f0039116f58a12aa0` |
+| Exact-head CI | `34669416842` — PASS for `d46b4c4c47b9b0747fc1b6bfa35a1c399323f665` |
+| Changed-file scope | Exactly this one audit document |
+| HostExplicit eligible count | 11 |
+| Worktree after delivery | Clean |
+| `HEAD == origin/master` after delivery | Confirmed for the audit-content push |
 
 Verdict B — CORRECTION REQUIRED
