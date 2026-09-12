@@ -1095,15 +1095,14 @@ mod tests {
             CommitDisposition::PreconditionFailed
         );
         assert_eq!(policy.attempts(), 0);
-        assert_eq!(
+        assert!(
             Command::new(&git)
                 .args(["rev-parse", "HEAD"])
                 .current_dir(&root)
                 .output()
                 .unwrap()
                 .status
-                .success(),
-            true
+                .success()
         );
         fs::remove_dir_all(root).unwrap();
     }

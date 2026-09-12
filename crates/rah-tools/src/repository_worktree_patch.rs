@@ -2823,7 +2823,7 @@ mod tests {
     async fn nested_repository_boundary_rejects_before_replacement_attempt() {
         let base = TestDirectory::new("nested-boundary");
         let root = base.repository();
-        fs::create_dir(&root.join("nested")).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
         fs::write(root.join("nested/target.txt"), b"alpha\nold\nomega\n").unwrap();
         git(&root, &["add", "--", "nested/target.txt"]);
         git(&root, &["commit", "--quiet", "-m", "nested target"]);
