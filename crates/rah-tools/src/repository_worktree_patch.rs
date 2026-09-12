@@ -23,6 +23,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_support::{git_environment, git_error},
     host_execute::{is_beneath, paths_equivalent},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
 };
 
 /// Stable name for the bounded repository worktree text replacement capability.
@@ -669,6 +670,7 @@ struct RepositoryWorktreeMutationPolicy {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: std::sync::Arc<AsyncMutex<()>>,
     limits: PatchLimits,
     #[cfg(test)]
@@ -696,6 +698,7 @@ impl RepositoryWorktreeMutationPolicy {
             git,
             root_identity: FileIdentity::capture(&root)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: crate::git_stage::repository_lease(&root),
             root,
             limits,
@@ -865,6 +868,9 @@ impl RepositoryWorktreeMutationPolicy {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
         let target = Target::capture(&self.root, path).map_err(RefusalReason::Path)?;
+        self.boundary
+            .validate_existing(&target.path)
+            .map_err(RefusalReason::Path)?;
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterInitialPathValidation, &target.path, None);
@@ -894,6 +900,9 @@ impl RepositoryWorktreeMutationPolicy {
         pre.target
             .revalidate(&self.root)
             .map_err(RefusalReason::Path)?;
+        self.boundary
+            .validate_existing(&pre.target.path)
+            .map_err(RefusalReason::Path)?;
         #[cfg(test)]
         self.test_hook.run(
             TestPhase::AfterFinalTargetIdentityRevalidation,
@@ -904,6 +913,9 @@ impl RepositoryWorktreeMutationPolicy {
             .map_err(RefusalReason::Repository)?;
         pre.target
             .revalidate(&self.root)
+            .map_err(RefusalReason::Path)?;
+        self.boundary
+            .validate_existing(&pre.target.path)
             .map_err(RefusalReason::Path)?;
         let git = self
             .git_state(&pre.target)
@@ -939,6 +951,9 @@ impl RepositoryWorktreeMutationPolicy {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
         Target::verify_replaced(&self.root, &pre.target, &temporary.identity)
+            .map_err(RefusalReason::Path)?;
+        self.boundary
+            .validate_existing(&pre.target.path)
             .map_err(RefusalReason::Path)?;
         let git = self
             .git_state(&pre.target)

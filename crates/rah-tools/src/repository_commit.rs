@@ -23,6 +23,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError, ToolInput,
     git_stage::repository_lease,
     git_support::git_error,
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_diff::{DiffBaseline, contains_binary_content, execute_fixed_diff_while_leased},
     repository_observer::RepositoryObserver,
     repository_observer::{FileIdentity, RepositoryIdentity},
@@ -338,6 +339,7 @@ impl RepositoryCommitPolicy {
             .await?;
         let staged = successful(staged)?;
         validate_stage_entries(&staged.stdout)?;
+        validate_staged_boundaries(self.repository.root(), &staged.stdout)?;
         let tree = output_text(self.run(&["write-tree"]).await?)?;
         if !valid_oid(&tree) {
             return Err(git_error("write-tree returned an invalid object id"));
@@ -815,6 +817,23 @@ fn validate_stage_entries(bytes: &[u8]) -> Result<(), ToolError> {
                 "index contains unsupported conflict, gitlink, or intent-to-add entry",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_staged_boundaries(root: &Path, bytes: &[u8]) -> Result<(), ToolError> {
+    let boundary = RepositoryNestedBoundaryPolicy::new(root);
+    for entry in bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| git_error("malformed staged path"))?;
+        let path = std::str::from_utf8(&entry[tab + 1..])
+            .map_err(|_| git_error("staged path was not UTF-8"))?;
+        boundary.validate_existing(&root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR)))?;
     }
     Ok(())
 }

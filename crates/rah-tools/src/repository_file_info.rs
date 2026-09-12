@@ -64,6 +64,11 @@ impl Tool for RepositoryFileInfoTool {
         let request = FileInfoRequest::parse(&input)?;
         let _lease = self.observer.acquire_lease().await;
         self.observer.revalidate()?;
+        let target = self
+            .observer
+            .root()
+            .join(request.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        self.observer.validate_target(&target)?;
         let started = Instant::now();
 
         let index = required_output(

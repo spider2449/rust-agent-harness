@@ -20,6 +20,7 @@ use crate::{
     git_stage::repository_lease,
     git_support::git_environment,
     native_repository_create::{NativeCreateError, NativeObjectIdentity, NativeParent, create_new},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_worktree_patch::FileIdentity,
 };
 
@@ -648,6 +649,7 @@ struct RepositoryFileCreationPolicy {
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
     git_identity: FileIdentity,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
@@ -673,11 +675,12 @@ impl RepositoryFileCreationPolicy {
         let git_identity = FileIdentity::capture(&git)?;
         Ok(Self {
             lease: repository_lease(&root),
-            root,
+            root: root.clone(),
             git,
             root_identity,
             dot_git_identity,
             git_identity,
+            boundary: RepositoryNestedBoundaryPolicy::new(&root),
         })
     }
     async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
@@ -687,6 +690,7 @@ impl RepositoryFileCreationPolicy {
         self.revalidate_root()?;
         let path = self.root.join(&request.path);
         let parent = path.parent().ok_or(())?;
+        self.boundary.validate_existing(parent).map_err(|_| ())?;
         let parent_relative = parent.strip_prefix(&self.root).map_err(|_| ())?;
         let native_parent = NativeParent::open(&self.root, parent_relative).map_err(|_| ())?;
         match observe_absence(&path) {
@@ -781,6 +785,13 @@ impl RepositoryFileCreationPolicy {
             request.path.parent().unwrap_or_else(|| Path::new("")),
         )
         .map_err(|_| ())?;
+        self.boundary
+            .validate_existing(
+                &self
+                    .root
+                    .join(request.path.parent().unwrap_or_else(|| Path::new(""))),
+            )
+            .map_err(|_| ())?;
         if parent.identities() != pre.parent_chain.as_slice() {
             return Err(());
         }
@@ -822,6 +833,13 @@ impl RepositoryFileCreationPolicy {
             request.path.parent().unwrap_or_else(|| Path::new("")),
         )
         .map_err(|_| ())?;
+        self.boundary
+            .validate_existing(
+                &self
+                    .root
+                    .join(request.path.parent().unwrap_or_else(|| Path::new(""))),
+            )
+            .map_err(|_| ())?;
         if parent.identities() != pre.parent_chain.as_slice() {
             return Err(());
         }
@@ -864,6 +882,13 @@ impl RepositoryFileCreationPolicy {
             request.path.parent().unwrap_or_else(|| Path::new("")),
         )
         .map_err(|_| ())?;
+        self.boundary
+            .validate_existing(
+                &self
+                    .root
+                    .join(request.path.parent().unwrap_or_else(|| Path::new(""))),
+            )
+            .map_err(|_| ())?;
         if parent.identities() != pre.parent_chain.as_slice() {
             return Err(());
         }

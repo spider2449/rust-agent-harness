@@ -21,6 +21,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, ToolError,
     git_support::{git_error, repository_observer_environment},
     host_execute::paths_equivalent,
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_diff::DiffBaseline,
 };
 
@@ -59,6 +60,7 @@ pub(crate) struct RepositoryObserver {
     staged_diff_raw: HostExecutionPolicy,
     staged_diff_numstat: HostExecutionPolicy,
     staged_diff_patch: HostExecutionPolicy,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
@@ -277,6 +279,7 @@ impl RepositoryObserver {
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
                 combined_bytes: DIFF_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
             })?,
+            boundary: RepositoryNestedBoundaryPolicy::new(&repository.root),
             lease: crate::git_stage::repository_lease(&repository.root),
             repository,
         })
@@ -288,6 +291,14 @@ impl RepositoryObserver {
 
     pub(crate) fn revalidate(&self) -> Result<(), ToolError> {
         self.repository.revalidate()
+    }
+
+    pub(crate) fn validate_target(&self, path: &Path) -> Result<(), ToolError> {
+        self.boundary.validate_existing(path)
+    }
+
+    pub(crate) fn validate_observation(&self) -> Result<(), ToolError> {
+        self.boundary.validate_observation()
     }
 
     pub(crate) async fn acquire_lease(&self) -> MutexGuard<'_, ()> {
@@ -302,6 +313,15 @@ impl RepositoryObserver {
         started: Instant,
     ) -> Result<HostProcessOutput, ToolError> {
         self.revalidate()?;
+        if matches!(
+            command,
+            ObserverCommand::Status
+                | ObserverCommand::DiffRaw(_)
+                | ObserverCommand::DiffNumstat(_)
+                | ObserverCommand::DiffPatch(_)
+        ) {
+            self.validate_observation()?;
+        }
         let timeout = match command {
             ObserverCommand::Status => STATUS_TIMEOUT,
             ObserverCommand::DiffRaw(_)

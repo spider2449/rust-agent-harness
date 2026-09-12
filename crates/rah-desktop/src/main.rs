@@ -5984,11 +5984,9 @@ fn desktop_tool_registry(
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool::new()))?;
     if let Some(repository) = repository {
-        let fs_read =
-            FsReadTool::new(&repository.root, DESKTOP_FS_READ_MAX_BYTES).map_err(|error| {
-                ToolError::Execution {
-                    message: error.to_string(),
-                }
+        let fs_read = FsReadTool::new_repository(&repository.root, DESKTOP_FS_READ_MAX_BYTES)
+            .map_err(|error| ToolError::Execution {
+                message: error.to_string(),
             })?;
         let file_info = RepositoryFileInfoTool::new(&repository.git_executable, &repository.root)?;
         let status = RepositoryStatusTool::new(&repository.git_executable, &repository.root)?;

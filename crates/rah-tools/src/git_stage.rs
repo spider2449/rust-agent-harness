@@ -14,6 +14,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_support::{git_environment, git_error},
     host_execute::{is_beneath, paths_equivalent},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
 };
 
 /// Stable name for the single-target host-authorized Git staging capability.
@@ -81,6 +82,7 @@ pub(crate) struct GitIndexMutationPolicy {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    boundary: RepositoryNestedBoundaryPolicy,
     target: Target,
     track: HostExecutionPolicy,
     mutation: HostExecutionPolicy,
@@ -116,6 +118,8 @@ impl GitIndexMutationPolicy {
             return Err(git_error("repository metadata is missing"));
         }
         let target = Target::capture(&root, symbolic_target, target_path)?;
+        let boundary = RepositoryNestedBoundaryPolicy::new(&root);
+        boundary.validate_existing(&target.path)?;
         let relative = target.git_relative.clone();
         if relative.contains('\0') {
             return Err(git_error("authorized target contains NUL"));
@@ -127,6 +131,7 @@ impl GitIndexMutationPolicy {
         Ok(Self {
             root_identity: FileIdentity::capture(&root)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            boundary,
             lease: repository_lease(&root),
             track: exact(vec![
                 "--literal-pathspecs".into(),
@@ -164,6 +169,7 @@ impl GitIndexMutationPolicy {
         mutation_kind: GitIndexMutation,
     ) -> Result<ToolOutput, ToolError> {
         let pre = self.capture_state(mutation_kind).await?;
+        self.revalidate()?;
         self.require_tracked().await?;
         self.revalidate()?;
         let process = self.mutation.execute_process(&ToolInput(json!({}))).await;
@@ -215,7 +221,8 @@ impl GitIndexMutationPolicy {
         if FileIdentity::capture(&dot_git)? != self.dot_git_identity {
             return Err(git_error("repository metadata identity changed"));
         }
-        self.target.revalidate(&self.root)
+        self.target.revalidate(&self.root)?;
+        self.boundary.validate_existing(&self.target.path)
     }
 
     fn result(

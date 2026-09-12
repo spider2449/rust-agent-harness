@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::{
     git_stage::repository_lease,
     host_execute::{is_beneath, paths_equivalent},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_worktree_patch::escape_review_text,
 };
 
@@ -796,6 +797,7 @@ pub(crate) struct RepositoryMultiFileMutationPolicy {
     root_identity: Identity,
     dot_git: PathBuf,
     dot_git_identity: Identity,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
@@ -822,6 +824,7 @@ impl RepositoryMultiFileMutationPolicy {
             root_identity: Identity::capture(&root)?,
             dot_git_identity: Identity::capture(&dot_git)?,
             dot_git,
+            boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: repository_lease(&root),
             root,
         })
@@ -982,6 +985,9 @@ impl RepositoryMultiFileMutationPolicy {
         let mut targets = Vec::with_capacity(request_targets.len());
         for request_target in request_targets {
             let target = SafeTarget::capture(&self.root, &request_target.path)?;
+            self.boundary
+                .validate_existing(&target.path)
+                .map_err(|_| PreflightError::Precondition("nested repository boundary"))?;
             if !seen_canonical.insert(target.canonical_logical.clone()) {
                 return Err(PreflightError::InvalidTarget("duplicate canonical target"));
             }
@@ -1140,6 +1146,9 @@ impl RepositoryMultiFileMutationPolicy {
         expected: &[u8],
     ) -> Result<(), PreflightError> {
         prepared.target.revalidate_parent(&self.root)?;
+        self.boundary
+            .validate_existing(&prepared.target.path)
+            .map_err(|_| PreflightError::Precondition("nested repository boundary"))?;
         reject_link_or_reparse(&prepared.target.path, "target")?;
         let metadata = fs::metadata(&prepared.target.path).map_err(fs_error)?;
         if !metadata.is_file() || Identity::capture(&prepared.target.path)?.link_count != 1 {

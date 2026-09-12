@@ -20,6 +20,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_support::git_environment,
     host_execute::{is_beneath, paths_equivalent},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         reject_unsupported_file_attributes, validate_directory_path, validate_existing_target,
@@ -1689,6 +1690,9 @@ fn validate_ordinary_directory_ancestry(
     label: &str,
 ) -> Result<(), ()> {
     validate_directory_path(root, directory, label).map_err(|_| ())?;
+    RepositoryNestedBoundaryPolicy::new(root)
+        .validate_existing(directory)
+        .map_err(|_| ())?;
     let mount_points = observed_mount_points()?;
     let mut current = directory.to_path_buf();
     loop {

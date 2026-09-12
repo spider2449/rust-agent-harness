@@ -6,12 +6,13 @@ use rah_sandbox::{WorkspacePathError, WorkspacePolicy};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
-use crate::{Tool, ToolContext, ToolError};
+use crate::{Tool, ToolContext, ToolError, repository_boundary::RepositoryNestedBoundaryPolicy};
 
 /// Workspace-bounded UTF-8 file reader.
 pub struct FsReadTool {
     workspace: WorkspacePolicy,
     max_bytes: usize,
+    repository_boundary: Option<RepositoryNestedBoundaryPolicy>,
 }
 
 impl FsReadTool {
@@ -23,6 +24,22 @@ impl FsReadTool {
         Ok(Self {
             workspace: WorkspacePolicy::new(workspace_root)?,
             max_bytes,
+            repository_boundary: None,
+        })
+    }
+
+    /// Creates a reader whose root is also one host-selected repository root.
+    /// Generic `fs.read` construction remains Git-agnostic.
+    pub fn new_repository(
+        repository_root: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Self, WorkspacePathError> {
+        let workspace = WorkspacePolicy::new(repository_root)?;
+        let boundary = RepositoryNestedBoundaryPolicy::new(workspace.root());
+        Ok(Self {
+            workspace,
+            max_bytes,
+            repository_boundary: Some(boundary),
         })
     }
 }
@@ -62,6 +79,9 @@ impl Tool for FsReadTool {
             .workspace
             .resolve_existing(path)
             .map_err(tool_execution_error)?;
+        if let Some(boundary) = &self.repository_boundary {
+            boundary.validate_existing(&resolved)?;
+        }
         let metadata =
             tokio::fs::metadata(&resolved)
                 .await
@@ -174,6 +194,28 @@ mod tests {
 
         assert_eq!(output.content, vec![ToolContent::Text("hello".to_owned())]);
         assert_eq!(tool.definition().permission, PermissionLevel::Read);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_scoped_reader_rejects_nested_repository_content_before_read() {
+        let repository = TestDirectory::new();
+        fs::create_dir(repository.0.join(".git")).expect("repository metadata should exist");
+        fs::create_dir_all(repository.0.join("nested/.git"))
+            .expect("nested repository metadata should exist");
+        fs::write(repository.0.join("nested/secret.txt"), "secret")
+            .expect("nested content should be written");
+        let tool = FsReadTool::new_repository(&repository.0, 32)
+            .expect("repository-scoped reader should be valid");
+
+        let error = tool
+            .execute(
+                ToolInput(json!({"path": "nested/secret.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .expect_err("nested repository content must be rejected");
+
+        assert!(matches!(error, ToolError::Execution { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]

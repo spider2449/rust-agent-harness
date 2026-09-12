@@ -19,6 +19,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, Tool, ToolContext, ToolError,
     git_support::git_environment,
     host_execute::paths_equivalent,
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         reject_unsupported_file_attributes, validate_directory_path, validate_existing_target,
@@ -679,6 +680,7 @@ struct RepositoryFileDeletionPolicy {
     root_identity: FileIdentity,
     git_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
     #[cfg(test)]
     test_modify_before_delete: std::sync::atomic::AtomicBool,
@@ -716,6 +718,7 @@ impl RepositoryFileDeletionPolicy {
             root_identity: FileIdentity::capture(&root)?,
             git_identity: FileIdentity::capture(&git)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            boundary: RepositoryNestedBoundaryPolicy::new(&root),
             git,
             root,
             lease,
@@ -761,6 +764,7 @@ impl RepositoryFileDeletionPolicy {
     ) -> Result<Preimage, ()> {
         self.repository_ok().map_err(|_| ())?;
         let path = validate_existing_target(&self.root, path).map_err(|_| ())?;
+        self.boundary.validate_existing(&path).map_err(|_| ())?;
         let metadata = fs::metadata(&path).map_err(|_| ())?;
         reject_unsupported_file_attributes(&metadata).map_err(|_| ())?;
         let identity = FileIdentity::capture(&path).map_err(|_| ())?;
@@ -811,6 +815,9 @@ impl RepositoryFileDeletionPolicy {
 
     async fn deleted_verified(&self, pre: &Preimage) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
+        self.boundary
+            .validate_existing(pre.path.parent().ok_or(())?)
+            .map_err(|_| ())?;
         if fs::symlink_metadata(&pre.path).is_ok()
             || self.git_state(Path::new(&pre.git_path), false).await?.blob != pre.bytes
         {

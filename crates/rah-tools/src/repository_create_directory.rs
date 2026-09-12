@@ -15,6 +15,7 @@ use crate::{
     Tool, ToolContext, ToolError,
     git_stage::repository_lease,
     native_repository_create::{NativeCreateError, NativeParent, create_directory},
+    repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         validate_directory_path,
@@ -158,6 +159,7 @@ struct RepositoryDirectoryCreationPolicy {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
 
@@ -193,6 +195,7 @@ impl RepositoryDirectoryCreationPolicy {
         Ok(Self {
             root_identity: FileIdentity::capture(&root)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: repository_lease(&root),
             root,
         })
@@ -208,7 +211,7 @@ impl RepositoryDirectoryCreationPolicy {
         let parent = path.parent().ok_or(())?;
         validate_directory_path(&self.root, parent, "directory parent").map_err(|_| ())?;
         reject_reparse_ancestry(parent, "directory parent").map_err(|_| ())?;
-        if has_nested_metadata(&self.root, parent) || fs::symlink_metadata(&path).is_ok() {
+        if self.boundary.validate_existing(parent).is_err() || fs::symlink_metadata(&path).is_ok() {
             return Err(());
         }
         let name = path
@@ -242,6 +245,9 @@ impl RepositoryDirectoryCreationPolicy {
 
     fn verify_post(&self, pre: &PreState) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
+        self.boundary
+            .validate_existing(pre.path.parent().ok_or(())?)
+            .map_err(|_| ())?;
         let metadata = fs::symlink_metadata(&pre.path).map_err(|_| ())?;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
@@ -266,6 +272,9 @@ impl RepositoryDirectoryCreationPolicy {
 
     fn known_no_effect(&self, pre: &PreState) -> Result<(), ()> {
         self.repository_ok().map_err(|_| ())?;
+        self.boundary
+            .validate_existing(pre.path.parent().ok_or(())?)
+            .map_err(|_| ())?;
         if fs::symlink_metadata(&pre.path).is_ok()
             || !FileIdentity::capture(pre.path.parent().ok_or(())?)
                 .map_err(|_| ())?
@@ -314,20 +323,6 @@ impl CreateDirectoryRequest {
         }
         Ok(Self { path })
     }
-}
-
-fn has_nested_metadata(root: &Path, parent: &Path) -> bool {
-    let mut current = root.to_path_buf();
-    let Ok(relative) = parent.strip_prefix(root) else {
-        return true;
-    };
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if current.join(".git").exists() {
-            return true;
-        }
-    }
-    false
 }
 
 fn git_snapshot(root: &Path) -> Result<GitSnapshot, std::io::Error> {
@@ -492,6 +487,21 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn rejects_nested_repository_parent_before_native_creation() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root.join("nested")).unwrap();
+        fs::create_dir(fixture.root.join("nested/.git")).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+
+        assert_eq!(
+            execute(&tool, json!({"path":"nested/new-dir"}))["status"],
+            "precondition_failed"
+        );
+        assert!(!fixture.root.join("nested/new-dir").exists());
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[test]
