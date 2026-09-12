@@ -1,6 +1,6 @@
 # Task 312 — Repository Nested-Boundary Conformance Correction
 
-Status: correction implemented; production correction delivered; final evidence commit pending
+Status: correction closed; final evidence recorded
 
 ## Authoritative checkpoint
 
@@ -77,6 +77,30 @@ the pre-existing tracked-symlink diff contract; production commit `4bbeeac`
 corrected that narrow observer condition, and exact-head CI run
 `34671965449` passed formatting, workspace tests, and clippy.
 
+Focused capability counts on the final production correction were:
+
+- repository-scoped `fs.read`: 8 unit tests plus 1 nested-boundary integration test;
+- repository file-info: 4 integration tests plus the nested-boundary integration test;
+- status: 4 integration tests plus the nested-boundary integration test;
+- diff: 4 Windows integration tests and 5 Unix CI integration tests;
+- diff-staged: 7 integration tests;
+- patch: 48 unit tests;
+- edit-files: 5 edit tests and 31 multi-file preflight tests;
+- create-file: 11 integration tests;
+- delete-file: 11 integration tests;
+- rename-file: 24 preparation tests;
+- create-directory: 6 unit tests;
+- Stage: 6 integration tests;
+- Unstage: 6 integration tests;
+- reviewed Commit: 14 unit tests;
+- shared boundary: 4 Windows unit tests, including case-equivalent `.git`;
+- fresh nested-boundary fixture: 1 integration test covering read, file-info,
+  status, diff, and diff-staged rejection.
+
+All focused counts passed with zero failures. The final CI Unix job also passed
+the symlink, invalid-UTF-8, and repository observer coverage; this is
+deterministic CI evidence, not a claim of Unix live certification.
+
 The exact changed-file scope is:
 
 - `crates/rah-tools/src/repository_boundary.rs`;
@@ -106,9 +130,12 @@ Production correction commits:
 - `13409e80e15e98f80bd5150416d2d73132784790` — `fix: enforce repository nested boundaries`;
 - `4bbeeac98c0c3e4fd553616bd3cebf44edb4e49b` — `fix: preserve repository symlink observation`.
 
-Later evidence commit: pending.
+Later evidence commit: `361fdae0f18563ff648f74507d3ae9df993e8b91` —
+`docs: record task 312 delivery evidence`.
 Exact-head CI for the production correction: `34671965449` — PASS.
-Final Git state and immutable v0.25 identity recheck: pending.
+Final exact-head CI for the evidence-recording head: pending.
+Final Git state and immutable v0.25 identity recheck: verified before final CI;
+the final head remains `361fdae0f18563ff648f74507d3ae9df993e8b91`.
 
 Final verdict will be exactly one of:
 
