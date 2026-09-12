@@ -15,6 +15,8 @@ mod host_invocation;
 #[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
+mod repository_membership;
+#[cfg(target_os = "windows")]
 mod trusted_profile_selection;
 
 #[cfg(target_os = "windows")]
@@ -69,23 +71,25 @@ use rah_runtime_codex::{
 #[cfg(target_os = "windows")]
 use rah_tools::{
     AuthorizedDispatchError, AuthorizedDispatchRejection, EchoTool, FsReadTool, GitStageTool,
-    GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryBranchCreationAuthority,
-    RepositoryBranchCreationTool, RepositoryCommitControl, RepositoryCommitReview,
-    RepositoryCommitTool, RepositoryCreateFilePreparationError,
-    RepositoryCreateFilePreparationRequest, RepositoryDeleteFilePreparationError,
-    RepositoryDeleteFilePreparationRequest, RepositoryDiffStagedTool, RepositoryDiffTool,
-    RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
-    RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
-    RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
-    RepositoryMultiFileEditPreparationError, RepositoryMultiFileEditPreparationRequest,
-    RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditTextReplacement,
-    RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
-    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification,
-    RepositoryRenameFilePreparationError, RepositoryRenameFilePreparationRequest,
-    RepositoryRenameFileProof, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
-    classify_repository_patch_output,
+    GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryAdmissionIdentity,
+    RepositoryAdmissionRelation, RepositoryBranchCreationAuthority, RepositoryBranchCreationTool,
+    RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
+    RepositoryCreateFilePreparationError, RepositoryCreateFilePreparationRequest,
+    RepositoryDeleteFilePreparationError, RepositoryDeleteFilePreparationRequest,
+    RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryDirectoryCreationAuthority,
+    RepositoryDirectoryCreationTool, RepositoryFileCreationTool, RepositoryFileDeletionAuthority,
+    RepositoryFileDeletionTool, RepositoryFileInfoTool, RepositoryFileRenameAuthority,
+    RepositoryFileRenameTool, RepositoryMultiFileEditPreparationError,
+    RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
+    RepositoryMultiFileEditTextReplacement, RepositoryMultiFileEditTool,
+    RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
+    RepositoryPatchResultClassification, RepositoryRenameFilePreparationError,
+    RepositoryRenameFilePreparationRequest, RepositoryRenameFileProof, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
+#[cfg(target_os = "windows")]
+use repository_membership::{RepositoryMemberId, WorkspaceMembershipState};
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -373,6 +377,10 @@ struct DesktopAppState {
     active_chat: Mutex<Option<ActiveChat>>,
     next_chat_generation: Mutex<u64>,
     next_connection_generation: Mutex<u64>,
+    /// Descriptive process-local membership; it retains no executable objects.
+    workspace_membership: Mutex<WorkspaceMembershipState>,
+    /// Serializes admission and activation publication transactions.
+    membership_coordination: Mutex<()>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     repository_workflow: Mutex<RepositoryWorkflowState>,
@@ -456,6 +464,8 @@ impl DesktopAppState {
             active_chat: Mutex::new(None),
             next_chat_generation: Mutex::new(0),
             next_connection_generation: Mutex::new(0),
+            workspace_membership: Mutex::new(WorkspaceMembershipState::new()),
+            membership_coordination: Mutex::new(()),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
@@ -1281,6 +1291,10 @@ pub(crate) enum FrontendError {
     GitUnavailable,
     RepositoryNotSelected,
     RepositoryInvalid,
+    RepositoryAlreadyMember,
+    RepositoryNestedMembershipConflict,
+    RepositoryMemberStale,
+    RepositoryMemberNotFound,
     RepositoryObservationFailed,
     RepositoryDialogFailed,
     RepositoryBusy,
@@ -5563,6 +5577,7 @@ async fn invalidate_repository_commit_review(state: &DesktopAppState) {
 }
 
 #[cfg(target_os = "windows")]
+#[cfg(test)]
 fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepository) {
     *state
         .commit_capability
@@ -5602,8 +5617,225 @@ fn replace_selected_repository(state: &DesktopAppState, repository: DesktopRepos
 }
 
 #[cfg(target_os = "windows")]
+fn construct_repository_for_admission(
+    git: &Path,
+    root: &Path,
+) -> Result<DesktopRepository, FrontendError> {
+    let deletion_authority = RepositoryFileDeletionAuthority::new(git, root).map_err(|error| {
+        let _ = error;
+        tracing::warn!("admitted repository cannot receive deletion authority");
+        FrontendError::RepositoryInvalid
+    })?;
+    let rename_authority = match RepositoryFileRenameAuthority::new(git, root) {
+        Ok(authority) => Some(authority),
+        Err(error) => {
+            let _ = error;
+            tracing::warn!("admitted repository cannot receive rename authority");
+            None
+        }
+    };
+    let directory_creation_authority =
+        RepositoryDirectoryCreationAuthority::new(root).map_err(|error| {
+            let _ = error;
+            tracing::warn!("admitted repository cannot receive directory authority");
+            FrontendError::RepositoryInvalid
+        })?;
+    let branch_creation_authority = match RepositoryBranchCreationAuthority::new(git, root) {
+        Ok(authority) => Some(authority),
+        Err(error) => {
+            let _ = error;
+            tracing::warn!("admitted repository cannot receive branch authority");
+            None
+        }
+    };
+    DesktopRepository::new_with_authorities(
+        git,
+        root,
+        Some(directory_creation_authority),
+        Some(deletion_authority),
+        rename_authority,
+        branch_creation_authority,
+    )
+    .map_err(|error| {
+        let _ = error;
+        tracing::warn!("admitted repository is invalid");
+        FrontendError::RepositoryInvalid
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn admit_repository(
+    state: &DesktopAppState,
+    git: &Path,
+    selected_path: &Path,
+) -> Result<RepositoryMemberId, FrontendError> {
+    let identity = RepositoryAdmissionIdentity::capture(git, selected_path).map_err(|error| {
+        let _ = error;
+        tracing::warn!("repository admission identity capture failed");
+        FrontendError::RepositoryInvalid
+    })?;
+    let root = identity.canonical_root().to_path_buf();
+    // Admission may use current validators as a proof, but the constructed
+    // repository and all temporary authorities are dropped before publication.
+    let _ = construct_repository_for_admission(git, &root)?;
+    identity.revalidate(git, &root).map_err(|error| {
+        let _ = error;
+        tracing::warn!("repository became stale before admission");
+        FrontendError::RepositoryMemberStale
+    })?;
+
+    let _coordination = state
+        .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut membership = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match membership.relation_to_existing(&identity) {
+        Some(RepositoryAdmissionRelation::Same) => {
+            return Err(FrontendError::RepositoryAlreadyMember);
+        }
+        Some(RepositoryAdmissionRelation::Nested) => {
+            return Err(FrontendError::RepositoryNestedMembershipConflict);
+        }
+        Some(RepositoryAdmissionRelation::Distinct) | None => {}
+    }
+    let member = membership.admit(root.display().to_string(), root, identity);
+    Ok(member.id)
+}
+
+#[cfg(target_os = "windows")]
+fn publish_active_repository(
+    state: &DesktopAppState,
+    member_id: RepositoryMemberId,
+    repository: DesktopRepository,
+) -> Result<(), FrontendError> {
+    let repository_fingerprint = repository_context_fingerprint(&repository.root);
+    let repository = Arc::new(repository);
+    let repository_generation = {
+        let mut membership = state
+            .workspace_membership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !membership.publish_active(member_id) {
+            return Err(FrontendError::RepositoryMemberNotFound);
+        }
+        *state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(repository);
+        let mut generation = state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+        *generation
+    };
+    append_live_evidence(serde_json::json!({
+        "event": "repository_selected",
+        "repository_generation": repository_generation,
+        "repository_fingerprint": repository_fingerprint,
+    }));
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+    state.select_persistence_namespace();
+    state
+        .conversation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .start_new();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+async fn activate_admitted_member(
+    state: &DesktopAppState,
+    member_id: RepositoryMemberId,
+) -> Result<(), FrontendError> {
+    let _coordination = state
+        .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    repository_selection_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    repository_selection_allowed_for_connection(
+        &state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        match coordinator.state() {
+            CoordinatorState::Idle | CoordinatorState::HostPrepared => {}
+            CoordinatorState::ModelTurn | CoordinatorState::HostRunning => {
+                return Err(FrontendError::HostInvocationBusy);
+            }
+        }
+    }
+
+    let member = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .member(member_id)
+        .cloned()
+        .ok_or(FrontendError::RepositoryMemberNotFound)?;
+    let git = selected_git_executable().map_err(|_| FrontendError::RepositoryMemberStale)?;
+    member
+        .identity
+        .revalidate(&git, &member.root)
+        .map_err(|error| {
+            let _ = error;
+            tracing::warn!("admitted repository member is stale");
+            FrontendError::RepositoryMemberStale
+        })?;
+    let repository = construct_repository_for_admission(&git, &member.root)?;
+    member
+        .identity
+        .revalidate(&git, &member.root)
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
+
+    repository_selection_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    repository_selection_allowed_for_connection(
+        &state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    drop(_coordination);
+    revoke_repository_commit_context(state).await;
+    state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear_prepared();
+    let _publication_coordination = state
+        .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    publish_active_repository(state, member.id, repository)
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
-fn choose_repository(
+async fn choose_repository(
     app: AppHandle,
     state: State<'_, DesktopAppState>,
 ) -> Result<(), FrontendError> {
@@ -5627,55 +5859,15 @@ fn choose_repository(
         .into_path()
         .map_err(|_| FrontendError::RepositoryDialogFailed)?;
     let git = selected_git_executable()?;
-    let deletion_authority =
-        RepositoryFileDeletionAuthority::new(&git, &path).map_err(|error| {
-            tracing::warn!(error = %error, "selected repository cannot receive deletion authority");
-            FrontendError::RepositoryInvalid
-        })?;
-    let rename_authority = match RepositoryFileRenameAuthority::new(&git, &path) {
-        Ok(authority) => Some(authority),
-        Err(error) => {
-            tracing::warn!(error = %error, "selected repository cannot receive rename authority");
-            None
-        }
-    };
-    let directory_creation_authority = RepositoryDirectoryCreationAuthority::new(&path)
-        .map_err(|error| {
-            tracing::warn!(error = %error, "selected repository cannot receive directory creation authority");
-            FrontendError::RepositoryInvalid
-        })?;
-    let branch_creation_authority = match RepositoryBranchCreationAuthority::new(&git, &path) {
-        Ok(authority) => Some(authority),
-        Err(_) => {
-            tracing::warn!("selected repository cannot receive branch creation authority");
-            None
-        }
-    };
-    let repository = DesktopRepository::new_with_authorities(
-        &git,
-        &path,
-        Some(directory_creation_authority),
-        Some(deletion_authority),
-        rename_authority,
-        branch_creation_authority,
-    )
-    .map_err(|error| {
-        tracing::warn!(error = %error, "selected repository is invalid");
-        FrontendError::RepositoryInvalid
-    })?;
-    repository_selection_allowed(
-        *state
-            .chat
+    let member_id = admit_repository(state.inner(), &git, &path)?;
+    if let Err(error) = activate_admitted_member(state.inner(), member_id).await {
+        state
+            .workspace_membership
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )?;
-    repository_selection_allowed_for_connection(
-        &state
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )?;
-    replace_selected_repository(state.inner(), repository);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(member_id);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -7797,18 +7989,19 @@ mod tests {
         REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
         RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
         SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
-        activity_event, activity_event_with_composition, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, branch_result_classification,
-        classify_repository_delete_file_result, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
-        current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
+        activate_admitted_member, activity_event, activity_event_with_composition,
+        admit_repository, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        branch_result_classification, classify_repository_delete_file_result,
+        classify_repository_multi_file_output, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
+        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
+        current_host_generation_tuple, delete_file_host_terminal_state,
         desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
         empty_composition_metadata, forget_trusted_profile_preference, frontend_error,
         get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
-        host_confirm_tool_invocation, host_invoke_read, host_prepare_repo_create_branch,
+        host_confirm_tool_invocation, host_invoke_read, host_kind, host_prepare_repo_create_branch,
         host_prepare_repo_create_file, host_prepare_repo_delete_file, host_prepare_repo_edit_files,
         host_prepare_repo_patch, host_prepare_repo_rename_file, install_repository_workflow,
         invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
@@ -15045,6 +15238,254 @@ mod tests {
         assert_ne!(first, other);
         assert!(!first.contains("fixtures"));
         assert!(first.starts_with("repo-context:"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_316_membership_admission_and_activation_matrix_is_inert_and_current() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Untracked);
+        let git = TestRepository::native_git();
+
+        {
+            let membership = state.workspace_membership.lock().unwrap();
+            assert_eq!(membership.member_count(), 0);
+            assert_eq!(membership.membership_generation(), 0);
+            assert!(membership.active_member().is_none());
+            assert!(state.repository.lock().unwrap().is_none());
+            assert!(state.provider_activation.lock().unwrap().is_none());
+        }
+
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        {
+            let membership = state.workspace_membership.lock().unwrap();
+            assert_eq!(membership.member_count(), 1);
+            assert_eq!(membership.membership_generation(), 1);
+            assert!(membership.active_member().is_none());
+            let member = membership.member(member_a).expect("A member");
+            assert_eq!(member.id, member_a);
+            assert_eq!(member.admission_generation, 1);
+            assert!(member.root.is_absolute());
+            assert!(member.display_path.contains("rah-desktop-tool-registry"));
+        }
+        assert!(state.repository.lock().unwrap().is_none());
+        assert_eq!(*state.repository_generation.lock().unwrap(), 0);
+
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let active_a = state.repository.lock().unwrap().clone().expect("active A");
+        let conversation_after_a = state.conversation.lock().unwrap().epoch;
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        assert_ne!(member_a.as_debug_tuple(), member_b.as_debug_tuple());
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+        assert_eq!(
+            state.conversation.lock().unwrap().epoch,
+            conversation_after_a
+        );
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        assert_eq!(
+            state
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .observation_generation,
+            0
+        );
+        assert!(Arc::ptr_eq(
+            &active_a,
+            &state
+                .repository
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("A remains active")
+        ));
+        assert!(state.provider_activation.lock().unwrap().is_none());
+
+        let before_duplicate = {
+            let membership = state.workspace_membership.lock().unwrap();
+            (
+                membership.member_count(),
+                membership.membership_generation(),
+            )
+        };
+        assert_eq!(
+            admit_repository(&state, &git, &repository_a.0),
+            Err(FrontendError::RepositoryAlreadyMember)
+        );
+        let case_alias = PathBuf::from(format!(
+            r"{}\.",
+            repository_a.0.to_string_lossy().to_ascii_uppercase()
+        ));
+        assert_eq!(
+            admit_repository(&state, &git, &case_alias),
+            Err(FrontendError::RepositoryAlreadyMember)
+        );
+        let after_duplicate = {
+            let membership = state.workspace_membership.lock().unwrap();
+            (
+                membership.member_count(),
+                membership.membership_generation(),
+            )
+        };
+        assert_eq!(after_duplicate, before_duplicate);
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+
+        activate_admitted_member(&state, member_b)
+            .await
+            .expect("activate B");
+        let active_b = state.repository.lock().unwrap().clone().expect("active B");
+        assert_eq!(active_b.root, fs::canonicalize(&repository_b.0).unwrap());
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_b)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
+        assert_ne!(
+            state.conversation.lock().unwrap().epoch,
+            conversation_after_a
+        );
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::ReviewRequired
+        );
+
+        let prepared = PreparedHostInvocation::for_test(std::time::Instant::now());
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(prepared)
+            .unwrap();
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("return to A clears prepared HostExplicit");
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 3);
+
+        state.host_invocation.lock().unwrap().begin_model().unwrap();
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Err(FrontendError::HostInvocationBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 3);
+        state.host_invocation.lock().unwrap().release_model();
+
+        let stale = TestRepository::git_repository(GitRepositoryState::Clean);
+        let stale_id = admit_repository(&state, &git, &stale.0).expect("admit stale candidate");
+        fs::remove_dir_all(stale.0.join(".git")).expect("replace stale metadata");
+        fs::create_dir(stale.0.join(".git")).expect("replacement metadata");
+        assert_eq!(
+            activate_admitted_member(&state, stale_id).await,
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 3);
+
+        let nested_parent = TestRepository::git_repository(GitRepositoryState::Clean);
+        let nested_child = nested_parent.0.join("nested-member");
+        fs::create_dir_all(&nested_child).expect("nested root");
+        let output = Command::new(&git)
+            .args(["init", "--quiet"])
+            .current_dir(&nested_child)
+            .output()
+            .expect("nested Git should start");
+        assert!(output.status.success());
+        let nested_storage = TestRepository::new();
+        let nested_state = DesktopAppState::new(nested_storage.0.clone());
+        let child_id = admit_repository(&nested_state, &git, &nested_child).expect("admit child");
+        assert_eq!(
+            admit_repository(&nested_state, &git, &nested_parent.0),
+            Err(FrontendError::RepositoryNestedMembershipConflict)
+        );
+        assert_eq!(
+            nested_state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count(),
+            1
+        );
+        assert_eq!(
+            nested_state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member(),
+            None
+        );
+        assert_ne!(child_id.as_debug_tuple(), (0, 0));
+
+        let unsupported = TestRepository::new();
+        fs::remove_dir_all(unsupported.0.join(".git")).unwrap();
+        fs::write(unsupported.0.join(".git"), "gitdir: elsewhere").unwrap();
+        assert_eq!(
+            admit_repository(&state, &git, &unsupported.0),
+            Err(FrontendError::RepositoryInvalid)
+        );
+
+        let restart_storage = TestRepository::new();
+        let restart = DesktopAppState::new(restart_storage.0.clone());
+        assert_eq!(
+            restart.workspace_membership.lock().unwrap().member_count(),
+            0
+        );
+        assert!(
+            restart
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member()
+                .is_none()
+        );
+        assert!(restart.repository.lock().unwrap().is_none());
+
+        let host_names = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+            "repo.rename-file",
+        ];
+        assert_eq!(
+            host_names
+                .iter()
+                .filter(|name| host_kind(name).is_some())
+                .count(),
+            11
+        );
     }
 
     #[test]
