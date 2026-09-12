@@ -29,10 +29,10 @@ impl FileIdentity {
         {
             use std::os::unix::fs::MetadataExt;
             let metadata = fs::metadata(path).map_err(identity_error)?;
-            return Ok(Self {
+            Ok(Self {
                 device: metadata.dev(),
                 inode: metadata.ino(),
-            });
+            })
         }
         #[cfg(windows)]
         {
