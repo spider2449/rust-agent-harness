@@ -1,9 +1,13 @@
-# RAH v0.25.0 Release Preparation Gate - prepared, not yet published
+# RAH v0.25.0 Release Gate — released historical record
 
-## Task 305 preparation state
+## Status
 
-RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
-immutable published release. Preparation baseline:
+RELEASED — HISTORICAL RECORD
+
+RAH v0.25.0 was prepared at the Task 305 baseline and later published
+immutably. v0.25.0 is the current immutable published release; v0.24.0 is the
+prior immutable published release. Task 307 records documentation-only
+post-release cleanup. Preparation baseline:
 `b3532f52b79be9575f3f9d8e818efa2096da4e12`.
 
 Task 304's decision was **Verdict A - READY FOR RELEASE PREPARATION**. This
@@ -12,7 +16,7 @@ it does not authorize product functionality, authority/security behavior,
 ADR contracts, provider protocols, frontend behavior, tagging, publication,
 or post-release cleanup.
 
-The release candidate scope is exactly:
+The Task 305 release-candidate scope was exactly:
 
 ```text
 Cargo.toml
@@ -25,26 +29,56 @@ docs/RAH_V0.25_RELEASE_GATE.md
 docs/plans/2026-09-12-v0.25-release-preparation.md
 ```
 
-The workspace moves from `0.24.0` to `0.25.0` across 13 packages, remains on
+The workspace is `0.25.0` across 13 packages, remains on
 Rust edition 2024, and has no dependency drift. The certified Codex baseline
 remains `codex-cli 0.149.0` with SHA-256
 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
 
-## Release checklist
+## Milestone and publication checklist
 
 - [x] Task 302 preserved: **Verdict B - NOT READY; CORRECTION REQUIRED**.
 - [x] Task 303 focused Windows case-equivalent Git collision correction
   completed.
 - [x] Task 304 preserved: **Verdict A - READY FOR RELEASE PREPARATION**.
-- [x] v0.25.0 version and release-facing documentation prepared.
-- [ ] Annotated `v0.25.0` tag not yet created.
-- [ ] Tag CI not yet verified.
-- [ ] GitHub Release not yet created.
-- [ ] Post-release cleanup not started.
+- [x] Task 305 prepared the immutable v0.25.0 release source.
+- [x] Task 306 created the annotated `v0.25.0` tag and GitHub Release with no repository commit.
+- [x] Task 307 completed documentation-only post-release cleanup.
+- [x] Annotated tag and peeled source independently verified.
+- [x] Tag CI and GitHub Release independently verified.
+- [x] Publication checklist complete.
 
-The immutable Task 305 release-candidate commit and exact-head CI result are
-recorded in the Task 305 plan and final closure report after commit/push. No
-tag or GitHub Release is created by this task.
+The immutable Task 305 release source and exact-head CI are recorded below.
+The later Task 307 descendant is not the release source.
+
+## Immutable publication record
+
+- Release source: `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+- Annotated tag: `v0.25.0`.
+- Tag object: `ea3c31aaf5190b632d7ef86387f7aff6004ae664`.
+- Peeled source: `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+- Tag message: `RAH v0.25.0`.
+- Tagger timestamp: `2026-09-12T00:44:21Z`.
+- Preparation CI: `34662233490` PASS.
+- Tag CI: `34662635116` PASS.
+- GitHub Release ID: `387406579`.
+- GitHub Release name: `RAH v0.25.0`.
+- Published: `2026-09-12T00:47:29Z`.
+- Draft: `false`.
+- Prerelease: `false`.
+- Assets: `0`.
+
+Task 305 prepared the immutable source and stopped before publication. Task
+306 created the annotated tag and GitHub Release with no repository commit.
+Task 307 is documentation-only cleanup and is not the v0.25.0 release source.
+
+## Complete milestone history
+
+- Task 302: Verdict B — NOT READY; CORRECTION REQUIRED.
+- Task 303: Windows case-equivalent Git collision correction.
+- Task 304: Verdict A — READY FOR RELEASE PREPARATION.
+- Task 305: release preparation at the immutable release source.
+- Task 306: immutable publication with no repository commit.
+- Task 307: documentation-only post-release cleanup.
 
 ## Historical Task 304 milestone audit
 
@@ -63,9 +97,9 @@ publication, or a GitHub Release.
 ## Milestone and release boundary
 
 The v0.25 theme is **HostExplicit Reviewed File Rename/Move** through the
-existing ordinary `repo.rename-file` Tool. v0.24.0 remains the current
-immutable published release. v0.25 is an unreleased candidate milestone;
-there is no `v0.25.0` tag and no GitHub Release.
+existing ordinary `repo.rename-file` Tool. At the historical Task 304
+checkpoint, v0.25 was an unreleased candidate milestone with no tag or GitHub
+Release. It was later published as recorded above.
 
 Task 304 corrected checkpoint:
 
@@ -323,17 +357,17 @@ rename dispatch.
 ## Documentation and dependency audit
 
 README, CHANGELOG, ARCHITECTURE, SECURITY, ADR 0018, ADR 0021, ADR 0026, and
-the relevant plans were checked. The release-facing documents correctly leave
-v0.24.0 as the current published release; this gate records v0.25 as
-unreleased. Task 302 remains historical Verdict B, Task 303 remains the
-focused correction, and Task 304 is the independent readiness decision. No
-unrelated historical record was rewritten.
+the relevant plans were checked. The release-facing documents record v0.25.0
+as the current published release and v0.24.0 as prior. Task 302 remains
+historical Verdict B, Task 303 remains the focused correction, and Task 304 is
+the independent readiness decision. No unrelated historical record was
+rewritten.
 
-The workspace remains on Rust edition 2024 and version `0.24.0`; no version
-bump is part of this audit. Metadata reports 13 packages. No Cargo.toml or
+The workspace remains on Rust edition 2024 and version `0.25.0`; no version
+change is part of this cleanup. Metadata reports 13 packages. No Cargo.toml or
 Cargo.lock dependency drift was found between the supplied parent and
-checkpoint. There is no Trusted Profile schema change, MCP protocol change,
-Process Plugin protocol change, or Codex baseline change.
+checkpoint or cleanup. There is no Trusted Profile schema change, MCP protocol
+change, Process Plugin protocol change, or Codex baseline change.
 
 ## Known nonclaims
 
@@ -343,13 +377,20 @@ mutation, HostExplicit `repo.commit`, HostExplicit provider tools,
 cross-repository atomic mutation, or model-selected reviewed rename
 certification.
 
-## Remaining release prerequisites
+## Publication and post-release checklist
 
-Task 305 may begin release preparation and may update release-facing version
-material in its separately authorized scope. Task 304 does not authorize tag
-creation, GitHub Release creation, or publication. The supplied checkpoint
-exact-head CI `34602139743` passed; the final Task 304 commit must also be
-verified against `origin/master` with exact-head CI before closure.
+- [x] Independently review the prepared source and exact-head preparation CI.
+- [x] Create and verify the annotated `v0.25.0` tag.
+- [x] Run and verify terminal exact-source tag CI `34662635116`.
+- [x] Create and independently audit the GitHub Release.
+- [x] Reconfirm v0.24.0 publication identity.
+- [x] Complete Task 307 as documentation-only cleanup in the authorized
+  seven-file scope.
+
+The immutable v0.25.0 release source forever remains
+`a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`. The later Task 307 documentation
+cleanup commit is not the release source and does not modify any publication
+object.
 
 ## Final decision
 
@@ -358,5 +399,5 @@ verified against `origin/master` with exact-head CI before closure.
 Task 303's Windows case-equivalent tracked-but-missing Git destination defect
 is independently confirmed closed. No new material ordinary ADR 0018,
 reviewed-route, frontend/Tauri, privacy, dependency, version, or release
-documentation defect was found. Task 305 is the next task. No release
-preparation has started, and no `v0.25.0` tag or GitHub Release exists.
+documentation defect was found. Task 305 prepared the source, Task 306
+published it, and Task 307 records the later documentation-only cleanup.

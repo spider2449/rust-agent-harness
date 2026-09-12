@@ -1,11 +1,27 @@
 # Changelog
 
-## v0.25.0 - release preparation (2026-09-12)
+## v0.25.0 — released (2026-09-12)
 
-RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
-immutable published release until a later explicit publication task succeeds.
-This release preparation records Task 304's **Verdict A - READY FOR RELEASE
-PREPARATION** at baseline `b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+RAH v0.25.0 is the current immutable published release. v0.24.0 is the prior
+immutable published release. This release records Task 304's **Verdict A -
+READY FOR RELEASE PREPARATION** at baseline
+`b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+
+### Immutable release record
+
+- Immutable release source: `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+- Annotated tag: `v0.25.0`.
+- Tag object: `ea3c31aaf5190b632d7ef86387f7aff6004ae664`.
+- Peeled target: `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+- Release-preparation CI: `34662233490` PASS.
+- Tag CI: `34662635116` PASS.
+- GitHub Release: `387406579` — `RAH v0.25.0`.
+- Published: `2026-09-12T00:47:29Z`.
+
+Task 305 prepared the immutable release source and stopped before
+publication. Task 306 later created the annotated tag and GitHub Release with
+no repository commit. Task 307 is documentation-only cleanup and is not the
+v0.25.0 release source.
 
 The release theme is **HostExplicit Reviewed File Rename/Move
 (`repo.rename-file`)**. ADR 0018 remains the ordinary rename/move authority;

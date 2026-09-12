@@ -5,13 +5,16 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.25.0 prepared - not yet published
+## RAH v0.25.0 released
 
-RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
+RAH v0.25.0 is the current immutable published release. v0.24.0 is the prior
 immutable published release. The v0.25 release theme is **HostExplicit Reviewed
 File Rename/Move (`repo.rename-file`)**, based on Task 304's **Verdict A - READY
 FOR RELEASE PREPARATION** at baseline
 `b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+
+The immutable v0.25.0 release source is
+`a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
 
 The reviewed route is host-owned and reaches the existing ordinary Tool only
 through the current registry:

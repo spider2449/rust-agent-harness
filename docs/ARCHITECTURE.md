@@ -1,8 +1,19 @@
-# RAH v0.25.0 Architecture - prepared, not yet published
+# RAH v0.25.0 Architecture — released
 
-This document records the prepared v0.25.0 architecture. v0.25.0 is
-**PREPARED, NOT PUBLISHED**; v0.24.0 remains the current immutable published
-release.
+This document records the released v0.25.0 architecture.
+
+RAH v0.25.0 is **RELEASED**.
+
+The current immutable release is `v0.25.0`.
+
+The current immutable release source is:
+`a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+
+The prior immutable release is `v0.24.0`.
+
+Task 305 prepared the immutable release source. Task 306 later performed
+publication with no repository commit. Task 307 is a later documentation-only
+descendant cleanup and is not the v0.25.0 release source.
 
 ## v0.25 reviewed HostExplicit file rename/move
 
@@ -91,8 +102,8 @@ parity.
 ## Release state
 
 Task 304 recorded **Verdict A - READY FOR RELEASE PREPARATION** at baseline
-`b3532f52b79be9575f3f9d8e818efa2096da4e12`. No tag or publication is part of
-this prepared architecture.
+`b3532f52b79be9575f3f9d8e818efa2096da4e12`. The publication facts are
+recorded above; the architecture itself is unchanged.
 
 ---
 
