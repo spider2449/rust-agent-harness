@@ -130,12 +130,17 @@ Production correction commits:
 - `13409e80e15e98f80bd5150416d2d73132784790` — `fix: enforce repository nested boundaries`;
 - `4bbeeac98c0c3e4fd553616bd3cebf44edb4e49b` — `fix: preserve repository symlink observation`.
 
-Later evidence commit: `361fdae0f18563ff648f74507d3ae9df993e8b91` —
-`docs: record task 312 delivery evidence`.
+Later evidence commits:
+
+- `361fdae0f18563ff648f74507d3ae9df993e8b91` —
+  `docs: record task 312 delivery evidence`;
+- `37542ba5cc39d25fa331f35cf81f768e8b851ec2` —
+  `docs: finalize task 312 evidence`.
+
 Exact-head CI for the production correction: `34671965449` — PASS.
-Final exact-head CI for the evidence-recording head: pending.
-Final Git state and immutable v0.25 identity recheck: verified before final CI;
-the final head remains `361fdae0f18563ff648f74507d3ae9df993e8b91`.
+Exact-head CI for the final evidence-recording head: `34672392029` — PASS.
+Final Git state and immutable v0.25 identity recheck: verified after the final
+evidence-recording head; the worktree was clean and `HEAD == origin/master`.
 
 Final verdict will be exactly one of:
 
