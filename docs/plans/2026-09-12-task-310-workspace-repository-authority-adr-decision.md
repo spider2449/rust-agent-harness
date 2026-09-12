@@ -137,11 +137,11 @@ required validation was run sequentially:
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
 | `git diff --check` | PASS |
 
-Commit SHA: `PENDING_COMMIT_SHA`
+Decision commit SHA: `f3de3ebb96f17d56195ff72ac74591e08d2c7119`
 
 Direct parent: `7971d253dd6f89717b682773ded06235c5daf39a`
 
-Exact-head CI: `PENDING_EXACT_HEAD_CI` — PASS
+Decision commit exact-head CI: `34668338465` — PASS
 
 The final delivery must verify `HEAD == origin/master`, a clean worktree, the
 two-file scope, and unchanged v0.25.0 immutable release identity.
