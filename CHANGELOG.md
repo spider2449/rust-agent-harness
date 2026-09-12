@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.25.0 - release preparation (2026-09-12)
+
+RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
+immutable published release until a later explicit publication task succeeds.
+This release preparation records Task 304's **Verdict A - READY FOR RELEASE
+PREPARATION** at baseline `b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+
+The release theme is **HostExplicit Reviewed File Rename/Move
+(`repo.rename-file`)**. ADR 0018 remains the ordinary rename/move authority;
+ADR 0021 remains the generic HostExplicit coordinator, currentness, ticket,
+and D2 boundary; and ADR 0026 remains the capability-specific reviewed
+rename/move boundary. The reviewed route uses typed human
+`{source_path, destination_path}`, zero-effect Prepare, a complete bounded
+review, an opaque single-use ticket, ticket-only Confirm, currentness, exact
+`ToolDefinition`, permission, and D2 checks, reviewed Commit authorization
+invalidation before Started, exactly one authorized Tool dispatch through the
+current ToolRegistry, the existing `repo.rename-file`, independent reviewed
+post-effect proof, and status-only activity.
+
+The exact production HostExplicit eligible set is 11 Tools:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixture/diagnostic Tools, and unknown/provider-defined Tools remain ineligible.
+
+The ordinary public input remains exactly `source_path`, `destination_path`,
+`expected_source_file_sha256`, and `expected_source_file_byte_length`, with
+`PermissionLevel::Execute` and statuses `renamed_verified`, `known_no_effect`,
+`invalid_input`, `precondition_failed`, and `uncertain`. The native effect is
+at most one no-replace rename attempt. There is no retry, replay, reverse
+rename, rollback, compensation, copy-delete, `git mv`, or shell path.
+
+The Task 303 correction is part of the final v0.25 security foundation:
+Windows Git destination collision proof rejects filesystem-equivalent tracked
+and index paths even when spelling differs. Bounded HEAD tree discovery,
+bounded case-insensitive index discovery, strict Git candidate parsing, and
+host-owned existing filesystem path-equivalence comparison cover tracked-but-
+missing HEAD, index-only, intent-to-add, and conflict/unmerged collision
+regressions. Rejection occurs before the native effect with zero native
+attempts.
+
+The reviewed subset remains deliberately narrower than the ordinary Tool. It
+requires one existing clean HEAD-tracked regular source file in the same
+repository, source at most 65,536 raw bytes, strict UTF-8, no NUL, supported
+mode, link count 1, exact HEAD/index/worktree equality, an existing destination
+parent, and destination absence from the worktree, HEAD, and every index stage.
+Ignored destinations, Windows aliases/case-equivalent collisions,
+cross-repository or unsupported cross-volume movement, overwrite, and parent
+creation are rejected. The complete review is not truncated. The expected
+effect is one unstaged worktree rename/move, with no content rewrite, Stage,
+Unstage, Commit, branch/ref/history mutation, directory creation, import or
+reference rewriting, or automatic retry/replay/rollback/compensation.
+
+Task 303's corrected Windows host-driven certification is carried forward from
+production commit `1aa4d3277bd7ba24dec1caa3d52cc57c2aa2584a`; later validation
+documentation is at `b2e170cc6f8226891f572dce6ce453abba836aaa`. On Windows 10
+Professional 10.0.19045 build 19045 x64, Rust/Cargo 1.96.0, Git
+2.54.0.windows.1, and certified `codex-cli 0.149.0` with executable SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, Prepare
+was Tool/native `0/0`, Confirm was `1/1`, final proof was `ReviewedSuccess`,
+terminal status was `renamed_verified`, HEAD/index/refs were preserved, Commit
+authorization was invalidated after Started/effect, model/MCP/Process Plugin
+counts were zero, and Codex cleanup was reaped. Marker:
+`RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
+
+This is connected-current host-driven evidence only; it does not claim
+model-selected rename certification or Linux/macOS live parity.
+
 ## v0.24.0 — released (2026-09-10)
 
 RAH v0.24.0 is the current immutable published release. v0.23.0 is the prior

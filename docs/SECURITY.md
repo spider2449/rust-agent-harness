@@ -1,4 +1,106 @@
-# RAH v0.24.0 Security Model — released
+# RAH v0.25.0 Security Model - prepared, not yet published
+
+This document records the prepared v0.25.0 security posture. v0.25.0 is
+**PREPARED, NOT PUBLISHED**; v0.24.0 remains the current immutable published
+release.
+
+## v0.25 reviewed rename/move invariants
+
+The reviewed human route uses the existing ordinary `repo.rename-file` through
+the host-owned chain in which model/runtime requests are untrusted:
+
+```text
+typed human paths -> zero-effect Prepare -> complete review
+ -> opaque single-use ticket -> ticket-only Confirm
+ -> currentness / exact ToolDefinition / permission / D2
+ -> reviewed Commit authorization invalidation before Started
+ -> exactly one authorized dispatch -> current ToolRegistry
+ -> ordinary repo.rename-file / ADR 0018
+ -> independent post-effect proof -> status-only activity
+```
+
+ADR 0018 remains ordinary rename/move authority, ADR 0021 remains the generic
+HostExplicit coordinator/currentness/ticket/D2 boundary, and ADR 0026 remains
+the reviewed rename/move boundary. Fail-closed invariants include repository
+binding; `.git` form and identity revalidation; Git executable identity;
+source exact HEAD/index/worktree equality; parent and ancestry identity;
+reparse, symlink, and junction protections; nested repository boundaries;
+destination worktree/HEAD/all-index-stage absence; Windows case-equivalent Git
+collision rejection; and same-volume/supported-platform rules.
+
+The reviewed subset requires exactly one existing clean HEAD-tracked regular
+source file in the same repository, at most 65,536 raw bytes, strict UTF-8,
+NUL-free content, supported mode, link count 1, exact HEAD/index/worktree
+equality, an existing destination parent, and a complete non-truncated review.
+Ignored destinations, aliases, case-equivalent collisions, cross-repository or
+unsupported cross-volume movement, overwrite, and parent creation fail closed.
+
+The native effect is at most one no-replace rename attempt. There is no retry,
+replay, reverse rename, rollback, compensation, copy-delete, `git mv`, shell
+path, Stage, Unstage, Commit, branch/ref/history mutation, content rewrite,
+directory creation, or reference rewriting. Success requires independent
+reviewed post-effect proof; known no-effect requires exact original preimage
+proof; uncertainty is conservative.
+
+The ordinary statuses remain `renamed_verified`, `known_no_effect`,
+`invalid_input`, `precondition_failed`, and `uncertain`. Generic activity and
+provenance do not persist the ticket, complete review/content, source hash,
+ToolInput, native paths, FileIdentity, Git/index evidence, repository identity,
+preparer identity, or authority-bearing private preparation. Terminal activity
+is status-only and uses a separate non-authority activity correlation value.
+
+Task 303 corrected Windows Git collision proof using bounded HEAD tree
+discovery, bounded case-insensitive index discovery, strict Git candidate
+parsing, and host-owned filesystem path-equivalence comparison. Tracked-but-
+missing HEAD, index-only, intent-to-add, and conflict/unmerged equivalent
+collisions are rejected before native effect with zero native attempts.
+
+The exact 11 production HostExplicit Tools are:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixture/diagnostic Tools, and unknown/provider-defined Tools remain ineligible.
+There is no generic filesystem mutation or provider-derived admission.
+
+The corrected Windows evidence is carried forward from production commit
+`1aa4d3277bd7ba24dec1caa3d52cc57c2aa2584a` and later documentation checkpoint
+`b2e170cc6f8226891f572dce6ce453abba836aaa`: Windows 10 Professional
+`10.0.19045` build 19045 x64, Rust/Cargo `1.96.0`, Git `2.54.0.windows.1`,
+certified `codex-cli 0.149.0`, executable SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`, Prepare
+Tool/native `0/0`, Confirm `1/1`, `ReviewedSuccess`, `renamed_verified`,
+preserved HEAD/index/refs, Commit authorization invalidated after
+Started/effect, model/MCP/Process Plugin `0`, and reaped Codex cleanup. Marker:
+`RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`.
+
+This is connected-current host-driven evidence only. It does not claim
+model-selected reviewed rename certification or Linux/macOS live parity.
+
+## Preserved nonclaims
+
+The release claims no race-free TOCTOU guarantee, rollback guarantee, OS
+sandbox, network isolation, Linux/macOS live parity, generic filesystem
+mutation, HostExplicit `repo.commit`, HostExplicit provider Tools, or
+model-selected reviewed rename certification. Frontend/Tauri remain
+presentation/input surfaces, and the certified Codex baseline remains
+`codex-cli 0.149.0` with the SHA-256 recorded above.
+
+---
+
+# Historical v0.24.0 Security Model - released
 
 This document describes the released v0.24.0 security posture.
 

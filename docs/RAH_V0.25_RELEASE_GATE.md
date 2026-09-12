@@ -1,4 +1,52 @@
-# RAH v0.25 Reviewed Rename/Move Milestone Audit and Release Readiness Gate
+# RAH v0.25.0 Release Preparation Gate - prepared, not yet published
+
+## Task 305 preparation state
+
+RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
+immutable published release. Preparation baseline:
+`b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+
+Task 304's decision was **Verdict A - READY FOR RELEASE PREPARATION**. This
+task records only version/release documentation and Cargo workspace metadata;
+it does not authorize product functionality, authority/security behavior,
+ADR contracts, provider protocols, frontend behavior, tagging, publication,
+or post-release cleanup.
+
+The release candidate scope is exactly:
+
+```text
+Cargo.toml
+Cargo.lock
+CHANGELOG.md
+README.md
+docs/ARCHITECTURE.md
+docs/SECURITY.md
+docs/RAH_V0.25_RELEASE_GATE.md
+docs/plans/2026-09-12-v0.25-release-preparation.md
+```
+
+The workspace moves from `0.24.0` to `0.25.0` across 13 packages, remains on
+Rust edition 2024, and has no dependency drift. The certified Codex baseline
+remains `codex-cli 0.149.0` with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+
+## Release checklist
+
+- [x] Task 302 preserved: **Verdict B - NOT READY; CORRECTION REQUIRED**.
+- [x] Task 303 focused Windows case-equivalent Git collision correction
+  completed.
+- [x] Task 304 preserved: **Verdict A - READY FOR RELEASE PREPARATION**.
+- [x] v0.25.0 version and release-facing documentation prepared.
+- [ ] Annotated `v0.25.0` tag not yet created.
+- [ ] Tag CI not yet verified.
+- [ ] GitHub Release not yet created.
+- [ ] Post-release cleanup not started.
+
+The immutable Task 305 release-candidate commit and exact-head CI result are
+recorded in the Task 305 plan and final closure report after commit/push. No
+tag or GitHub Release is created by this task.
+
+## Historical Task 304 milestone audit
 
 ## Verdict
 

@@ -5,6 +5,73 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.25.0 prepared - not yet published
+
+RAH v0.25.0 is **PREPARED, NOT PUBLISHED**. v0.24.0 remains the current
+immutable published release. The v0.25 release theme is **HostExplicit Reviewed
+File Rename/Move (`repo.rename-file`)**, based on Task 304's **Verdict A - READY
+FOR RELEASE PREPARATION** at baseline
+`b3532f52b79be9575f3f9d8e818efa2096da4e12`.
+
+The reviewed route is host-owned and reaches the existing ordinary Tool only
+through the current registry:
+
+```text
+typed human {source_path, destination_path}
+ -> zero-effect Prepare -> complete bounded review
+ -> opaque single-use ticket -> ticket-only Confirm
+ -> currentness / exact ToolDefinition / permission / D2
+ -> reviewed Commit authorization invalidation before Started
+ -> exactly one authorized_tool_dispatch -> current ToolRegistry
+ -> existing repo.rename-file -> ADR 0018
+ -> independent reviewed post-effect proof -> status-only activity
+```
+
+ADR 0018 remains ordinary rename/move authority, ADR 0021 remains generic
+HostExplicit coordination/currentness/ticket/D2, and ADR 0026 remains the
+capability-specific reviewed boundary. The exact 11 production HostExplicit
+Tools are `fs.read`, `repo.file-info`, `repo.status`, `repo.diff`,
+`repo.diff-staged`, `repo.create-branch`, `repo.patch`, `repo.edit-files`,
+`repo.create-file`, `repo.delete-file`, and `repo.rename-file`.
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixture/diagnostic Tools, and unknown/provider-defined Tools remain ineligible.
+
+The reviewed workflow accepts exactly two typed paths and requires one existing
+clean HEAD-tracked regular source file in the same repository, strict UTF-8,
+NUL-free content no larger than 65,536 raw bytes, supported mode, link count 1,
+exact HEAD/index/worktree equality, an existing destination parent, and
+destination absence from the worktree, HEAD, and every index stage. Complete
+review is backend-derived and non-truncated. Ignored destinations, Windows
+aliases/case-equivalent collisions, unsupported cross-repository or
+cross-volume movement, overwrite, and parent creation fail closed. The effect
+is one unstaged worktree rename/move only; no content rewrite, Stage, Unstage,
+Commit, branch/ref/history mutation, directory creation, reference rewriting,
+or retry/replay/rollback/compensation occurs.
+
+The ordinary Tool remains separate: its four-field input is
+`source_path`, `destination_path`, `expected_source_file_sha256`, and
+`expected_source_file_byte_length`; its permission is `PermissionLevel::Execute`;
+and its statuses are `renamed_verified`, `known_no_effect`, `invalid_input`,
+`precondition_failed`, and `uncertain`. Its native effect is at most one
+no-replace rename attempt, with no `git mv`, copy-delete, or shell path.
+
+Task 303 corrected Windows Git collision proof now rejects filesystem-equivalent
+tracked/index paths even when spelling differs, including tracked-but-missing
+HEAD, index-only, intent-to-add, and conflict/unmerged regressions, before any
+native attempt. The corrected connected-current Windows evidence records
+Prepare Tool/native `0/0`, Confirm `1/1`, `ReviewedSuccess`,
+`renamed_verified`, preserved HEAD/index/refs, invalidated Commit authorization,
+zero model/MCP/Process Plugin activity, and marker
+`RAH_REVIEWED_RENAME_HOSTEXPLICIT_LIVE_OK`, using certified `codex-cli 0.149.0`
+with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+
+This is host-driven connected-current evidence only. It does not claim
+model-selected reviewed rename certification, Linux/macOS live parity,
+race-free TOCTOU, rollback, OS sandboxing, network isolation, generic
+filesystem mutation, HostExplicit `repo.commit`, or HostExplicit provider
+Tools. Frontend/Tauri are presentation and input surfaces, not authority.
+
 ## RAH v0.24.0 released
 
 RAH v0.24.0 is the current immutable published release, with the release theme

@@ -1,4 +1,102 @@
-# RAH v0.24.0 Architecture — released
+# RAH v0.25.0 Architecture - prepared, not yet published
+
+This document records the prepared v0.25.0 architecture. v0.25.0 is
+**PREPARED, NOT PUBLISHED**; v0.24.0 remains the current immutable published
+release.
+
+## v0.25 reviewed HostExplicit file rename/move
+
+The v0.25 release theme is **HostExplicit Reviewed File Rename/Move
+(`repo.rename-file`)**. The established layering remains:
+
+```text
+Model/Runtime
+ -> AgentRuntime
+ -> ToolRegistry
+ -> host-owned Tool authority
+```
+
+The reviewed human route is deliberately capability-specific:
+
+```text
+typed human {source_path, destination_path}
+ -> zero-effect Prepare -> complete bounded review
+ -> opaque single-use ticket -> ticket-only Confirm
+ -> currentness / exact ToolDefinition / permission / D2
+ -> reviewed Commit authorization invalidation before Started
+ -> exactly one authorized_tool_dispatch
+ -> current ToolRegistry -> existing repo.rename-file
+ -> ADR 0018 policy -> independent reviewed post-effect proof
+ -> status-only activity
+```
+
+ADR 0018 remains the ordinary rename/move mutation authority. ADR 0021 remains
+the generic HostExplicit coordinator/currentness/ticket/D2 boundary. ADR 0026
+remains the capability-specific reviewed authority. The frontend and Tauri are
+presentation and typed-input surfaces; they do not own repository selection,
+authority, native rename, or permission escalation.
+
+The exact production HostExplicit set is 11 Tools:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixture/diagnostic Tools, and unknown/provider-defined Tools remain ineligible.
+Admission is exact and host-owned; it is not wildcard, prefix,
+effect-category, permission-derived, provider-derived, model-derived, or
+frontend-derived.
+
+The reviewed preparer binds one existing clean HEAD-tracked regular source
+file, same-repository paths, source content no larger than 65,536 raw bytes,
+strict UTF-8, no NUL, supported mode, link count 1, exact HEAD/index/worktree
+equality, an existing destination parent, and destination absence from the
+worktree, HEAD, and every index stage. The complete review is backend-derived
+and never truncated. The route produces one unstaged worktree rename/move and
+does not rewrite content or references, create directories, overwrite, Stage,
+Unstage, Commit, mutate refs/history, or retry/replay/rollback/compensate.
+
+The ordinary Tool remains distinct with its four public fields,
+`PermissionLevel::Execute`, five statuses, and at-most-one no-replace native
+rename attempt. The reviewed route does not add a second rename implementation
+or bypass the current ToolRegistry.
+
+## Task 303 Windows Git-equivalence correction
+
+The final v0.25 architecture includes the Task 303 correction to ordinary
+ADR 0018 destination proof. Bounded HEAD tree discovery and bounded
+case-insensitive index discovery are narrowing observations; strict Git
+candidate parsing and host-owned filesystem path-equivalence comparison are
+the collision authority. Filesystem-equivalent tracked/index paths are
+rejected even when spelling differs, including tracked-but-missing HEAD,
+index-only, intent-to-add, and conflict/unmerged cases, before native effect
+with zero native attempts.
+
+The corrected Task 303 Windows certification is carried forward because later
+Task 304 changes were documentation-only. It is connected-current host-driven
+evidence, not model-selected rename certification and not Linux/macOS live
+parity.
+
+## Release state
+
+Task 304 recorded **Verdict A - READY FOR RELEASE PREPARATION** at baseline
+`b3532f52b79be9575f3f9d8e818efa2096da4e12`. No tag or publication is part of
+this prepared architecture.
+
+---
+
+# Historical v0.24.0 Architecture - released
 
 This document describes the released v0.24.0 architecture.
 
