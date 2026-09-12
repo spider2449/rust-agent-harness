@@ -3424,6 +3424,75 @@ mod tests {
             b"nested old\n"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nested_repository_boundary_rejects_before_any_multi_file_replacement() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/target.txt"), b"old\n").unwrap();
+        git(&git_path, &root, &["add", "--", "nested/target.txt"]);
+        git(
+            &git_path,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "nested target",
+            ],
+        );
+        fs::create_dir(root.join("nested/.git")).unwrap();
+
+        let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+        let result = policy.commit(&multi(&root, &["nested/target.txt"])).await;
+
+        assert!(matches!(
+            result,
+            Err(PreflightError::Precondition("nested repository boundary"))
+        ));
+        assert_eq!(test_commit_hook::attempts(&root, 0), 0);
+        assert_eq!(fs::read(root.join("nested/target.txt")).unwrap(), b"old\n");
+        test_commit_hook::clear(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_repository_boundary_target_rejects_the_complete_edit() {
+        let (_base, git_path, root) = TestDirectory::repository();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/target.txt"), b"old\n").unwrap();
+        git(&git_path, &root, &["add", "--", "nested/target.txt"]);
+        git(
+            &git_path,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "nested target",
+            ],
+        );
+        fs::create_dir(root.join("nested/.git")).unwrap();
+
+        let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
+        let result = policy
+            .commit(&multi(&root, &["a.txt", "nested/target.txt"]))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(test_commit_hook::attempts(&root, 0), 0);
+        assert_eq!(test_commit_hook::attempts(&root, 1), 0);
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A old\n");
+        assert_eq!(fs::read(root.join("nested/target.txt")).unwrap(), b"old\n");
+        test_commit_hook::clear(&root);
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn real_git_unmerged_and_gitlink_targets_are_rejected() {
         let (_base, git_path, root) = TestDirectory::repository();

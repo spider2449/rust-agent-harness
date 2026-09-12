@@ -1504,6 +1504,20 @@ mod tests {
     }
 
     #[test]
+    fn nested_repository_parent_is_rejected_before_native_create() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root.join("nested")).unwrap();
+        fs::create_dir(fixture.root.join("nested/.git")).unwrap();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();
+
+        let value = execute(&tool, json!({"path":"nested/new.rs","content":"new"}));
+
+        assert_eq!(value["status"], "precondition_failed");
+        assert!(!fixture.root.join("nested/new.rs").exists());
+        assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn target_race_uses_one_exclusive_create_without_overwrite_or_retry() {
         let fixture = Fixture::new();
         let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.root).unwrap();

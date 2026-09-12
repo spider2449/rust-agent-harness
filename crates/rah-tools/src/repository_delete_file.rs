@@ -1601,6 +1601,39 @@ mod tests {
     }
 
     #[test]
+    fn nested_repository_target_is_rejected_before_native_delete() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root.join("nested")).unwrap();
+        fs::write(fixture.root.join("nested/target.txt"), b"nested\n").unwrap();
+        run(&fixture.git, &fixture.root, &["add", "nested/target.txt"]);
+        run(
+            &fixture.git,
+            &fixture.root,
+            &["commit", "--quiet", "-m", "nested target"],
+        );
+        fs::create_dir(fixture.root.join("nested/.git")).unwrap();
+        let tool = RepositoryFileDeletionTool::new(&fixture.git, &fixture.root).unwrap();
+
+        let value = execute(
+            &tool,
+            json!({
+                "path":"nested/target.txt",
+                "expected_file_sha256":sha256(b"nested\n"),
+                "expected_file_byte_length":7
+            }),
+        );
+
+        assert_eq!(value["status"], "precondition_failed");
+        assert!(fixture.root.join("nested/target.txt").exists());
+        assert_eq!(
+            tool.policy
+                .delete_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[test]
     fn stale_preimage_is_refused_before_native_attempt() {
         let fixture = Fixture::new();
         let tool = RepositoryFileDeletionTool::new(&fixture.git, &fixture.root).unwrap();

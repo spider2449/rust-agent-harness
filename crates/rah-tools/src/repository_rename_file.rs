@@ -2709,6 +2709,22 @@ mod tests {
     }
 
     #[test]
+    fn source_and_destination_inside_nested_repository_are_rejected() {
+        let f = Fixture::nested();
+        fs::create_dir_all(f.root.join("source/sub")).unwrap();
+        run(&f.git, &f.root.join("source"), &["init", "--quiet"]);
+        let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();
+
+        assert_eq!(
+            execute(&t, request("source/old.txt", "source/sub/moved.txt"))["status"],
+            "precondition_failed"
+        );
+        assert_eq!(attempts(&t), 0);
+        assert!(f.root.join("source/old.txt").exists());
+        assert!(!f.root.join("source/sub/moved.txt").exists());
+    }
+
+    #[test]
     fn nested_repository_boundary_appearing_between_capture_and_revalidation_is_rejected() {
         let f = Fixture::new();
         let t = RepositoryFileRenameTool::new(&f.git, &f.root).unwrap();

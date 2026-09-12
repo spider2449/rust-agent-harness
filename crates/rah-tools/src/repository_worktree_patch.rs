@@ -2820,6 +2820,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn nested_repository_boundary_rejects_before_replacement_attempt() {
+        let base = TestDirectory::new("nested-boundary");
+        let root = base.repository();
+        fs::create_dir(&root.join("nested")).unwrap();
+        fs::write(root.join("nested/target.txt"), b"alpha\nold\nomega\n").unwrap();
+        git(&root, &["add", "--", "nested/target.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "nested target"]);
+        fs::create_dir(root.join("nested/.git")).unwrap();
+
+        let tool = RepositoryWorktreePatchTool::new(git_executable(), &root).unwrap();
+        let output = run(
+            &tool,
+            request_value("nested/target.txt", b"alpha\nold\nomega\n", "old", "new"),
+        )
+        .await;
+
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(
+            tool.policy
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fs::read(root.join("nested/target.txt")).unwrap(),
+            b"alpha\nold\nomega\n"
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn unchanged_preparation_revalidates_without_effect() {
         let base = TestDirectory::new("revalidate-unchanged");
         let root = base.repository();

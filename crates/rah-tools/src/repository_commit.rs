@@ -1054,6 +1054,59 @@ mod tests {
         assert_eq!(show.stdout, b"staged\n");
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn nested_repository_boundary_stales_review_before_commit_effect() {
+        let (git, root) = fixture();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/tracked.txt"), b"base\n").unwrap();
+        assert!(
+            Command::new(&git)
+                .args(["add", "nested/tracked.txt"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new(&git)
+                .args(["commit", "--quiet", "-m", "nested base"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(root.join("nested/tracked.txt"), b"staged\n").unwrap();
+        assert!(
+            Command::new(&git)
+                .args(["add", "nested/tracked.txt"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let policy = policy(&git, &root);
+        let authorization = policy.authorize().await.unwrap();
+        fs::create_dir(root.join("nested/.git")).unwrap();
+
+        assert_eq!(
+            policy.commit(authorization, "nested boundary".into()).await,
+            CommitDisposition::PreconditionFailed
+        );
+        assert_eq!(policy.attempts(), 0);
+        assert_eq!(
+            Command::new(&git)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            true
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn invalid_messages_and_changed_index_refuse_before_spawn() {
         let (git, root) = fixture();

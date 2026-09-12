@@ -1017,4 +1017,46 @@ mod tests {
             "the sole fixed unstage happened before abort"
         );
     }
+
+    #[tokio::test]
+    async fn nested_repository_targets_are_rejected_before_stage_or_unstage() {
+        let (_base, git, root) = TestDirectory::repository();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/target.txt"), "nested\n").unwrap();
+        run_git(&git, &root, &["add", "nested/target.txt"]);
+        run_git(
+            &git,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "nested target",
+            ],
+        );
+        fs::create_dir(root.join("nested/.git")).unwrap();
+
+        assert!(
+            GitStageTool::new(
+                &git,
+                &root,
+                "nested/target.txt",
+                root.join("nested/target.txt")
+            )
+            .is_err()
+        );
+        assert!(
+            GitUnstageTool::new(
+                &git,
+                &root,
+                "nested/target.txt",
+                root.join("nested/target.txt")
+            )
+            .is_err()
+        );
+    }
 }
