@@ -253,7 +253,7 @@ fn identity_error(_: impl std::fmt::Display) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::{RepositoryAdmissionIdentity, RepositoryAdmissionRelation};
-    use std::{fs, path::PathBuf};
+    use std::fs;
 
     #[test]
     fn relation_distinguishes_same_nested_and_sibling_roots() {
@@ -267,11 +267,7 @@ mod tests {
             fs::create_dir_all(path).unwrap();
             fs::create_dir(path.join(".git")).unwrap();
         }
-        let git = if cfg!(windows) {
-            PathBuf::from(r"C:\Windows\System32\cmd.exe")
-        } else {
-            PathBuf::from("/bin/sh")
-        };
+        let git = std::env::current_exe().unwrap();
         let ia = RepositoryAdmissionIdentity::capture(&git, &a).unwrap();
         let ichild = RepositoryAdmissionIdentity::capture(&git, &child).unwrap();
         let isibling = RepositoryAdmissionIdentity::capture(&git, &sibling).unwrap();
