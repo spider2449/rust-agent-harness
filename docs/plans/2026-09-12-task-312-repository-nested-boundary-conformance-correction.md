@@ -1,6 +1,6 @@
 # Task 312 — Repository Nested-Boundary Conformance Correction
 
-Status: correction implemented; delivery evidence pending commit/CI
+Status: correction implemented; production correction delivered; final evidence commit pending
 
 ## Authoritative checkpoint
 
@@ -72,7 +72,10 @@ the existing rename cross-direction/currentness/uncertainty tests. The
 the new `repository_nested_boundary` integration test passed 1 test. The
 full workspace test passed with 0 failures; 10 host-only tests remained
 ignored by their existing environment gates. Clippy, format, metadata, and
-diff checks passed.
+diff checks passed. The first exact-head CI run exposed one Unix regression in
+the pre-existing tracked-symlink diff contract; production commit `4bbeeac`
+corrected that narrow observer condition, and exact-head CI run
+`34671965449` passed formatting, workspace tests, and clippy.
 
 The exact changed-file scope is:
 
@@ -98,9 +101,13 @@ HostExplicit names. Bare nested repositories without a reliable child marker,
 race-free TOCTOU, Unix/macOS live certification, linked-worktree support,
 workspace membership, and new authority are explicit nonclaims.
 
-Production correction commit: pending.
-Later evidence commit: none planned.
-Exact-head CI: pending.
+Production correction commits:
+
+- `13409e80e15e98f80bd5150416d2d73132784790` — `fix: enforce repository nested boundaries`;
+- `4bbeeac98c0c3e4fd553616bd3cebf44edb4e49b` — `fix: preserve repository symlink observation`.
+
+Later evidence commit: pending.
+Exact-head CI for the production correction: `34671965449` — PASS.
 Final Git state and immutable v0.25 identity recheck: pending.
 
 Final verdict will be exactly one of:
