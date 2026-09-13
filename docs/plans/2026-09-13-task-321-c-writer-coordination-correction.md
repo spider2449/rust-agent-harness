@@ -126,7 +126,7 @@ the closure report after publication.
 
 Outcome A — WRITER COORDINATION CORRECTION CLOSED.
 
-- Production commit: `f1602ac`; documentation commit: `fdc24c2`.
+- Production commit: `f1602ac`; documentation commits: `fdc24c2`, `ed328a4`.
 - Parent chain: `eff11d7 -> f1602ac -> fdc24c2`.
 - The authorization-loses case rejects stale A by generation, workflow, and
   exact capability identity; it cannot re-arm the old pending slot or write
@@ -147,6 +147,6 @@ Outcome A — WRITER COORDINATION CORRECTION CLOSED.
   Cargo dependency manifests and `Cargo.lock` are unchanged. No live
   certification was run. The v0.25 immutable source remains
   `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
-- Exact-head CI for `fdc24c2` was run `34745160303` and passed. A final
-  documentation-only closure update follows this recorded run and must be
-  validated at its own exact head.
+- Exact-head CI for `fdc24c2` was run `34745160303` and passed. The final
+  documentation closure head is `ed328a4`; its exact-head CI was run
+  `34745248948` and passed all jobs.
