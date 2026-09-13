@@ -93,3 +93,41 @@ inertness/invalidations and Task 315 nested-boundary coverage remain in scope.
 
 No Cargo manifest or `Cargo.lock` drift was observed. No connected Codex live
 effect was run. Filesystem race freedom is not claimed.
+
+## Closure evidence
+
+**Outcome A — ACTIVATION CURRENTNESS CORRECTION CLOSED.**
+
+Production commit: `ad1e9a4361516c7ef984d0ab7eefa172d336cb15` (`fix: make
+repository activation publication current`). Documentation follow-up commit:
+this closure update. The production parent is Task 316 final docs commit
+`e741e14667fda69a7fe18358b90e6c088b397cc0`; Task 316 production and correction
+commits remain in the parent chain.
+
+The activation transaction captures target member ID, target admission
+generation and complete private admission binding, expected old active member,
+and expected active repository generation. Final publication uses the current
+catalog member and identity revalidation, rejects target removal/staleness,
+rejects a changed old member or generation, and increments the active
+repository generation exactly once for the winner. The shared lifecycle
+exclusion synchronizes connection, model/chat, and HostInvocation transitions;
+`HostPrepared` is invalidated inside the same final critical section, while
+`HostRunning` and `ModelTurn` fail closed. A prepared Confirm race and Connect,
+model-turn, HostRunning, B/C activation, member-removal, `.git` replacement,
+old-member, and generation races were deterministic and passed. Losing
+activation leaves the winner's active member/repository/workflow/conversation
+untouched. Old Commit authorization is withdrawn before publication and is
+never restored; successful activation clears workflow/action/review state and
+starts exactly one fresh conversation context.
+
+Task 316's inert-member guarantees remain intact, the exact HostExplicit set is
+11, Task 315 nested-boundary regression passes, package metadata remains 13 /
+`0.25.0` / edition 2024, and persistence or explicit switching UX remains
+absent. The immutable v0.25.0 source/tag identity remains
+`a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4` / tag object
+`ea3c31aaf5190b632d7ef86387f7aff6004ae664`; GitHub Release `387406579` is
+unchanged.
+
+Production-head exact CI: run `34728325462` passed for the production SHA.
+The documentation follow-up must receive its own exact-head CI pass before
+final publication closure.
