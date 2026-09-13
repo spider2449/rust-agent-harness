@@ -15914,6 +15914,30 @@ mod tests {
         }
         {
             let mut workflow = state.repository_workflow.lock().unwrap();
+            workflow.observation_generation = 7;
+            workflow.next_action = 8;
+            workflow.actions.insert(
+                "A-stage".to_owned(),
+                super::RepositoryIndexAction {
+                    kind: RepositoryIndexActionKind::Stage,
+                    repository_generation: generation,
+                    observation_generation: 7,
+                    target: repository_a.0.join("tracked.txt"),
+                    target_observation: super::TargetObservation {
+                        canonical_path: repository_a.0.join("tracked.txt"),
+                        length: 0,
+                        modified: None,
+                        content_digest: [0; 32],
+                    },
+                },
+            );
+            workflow.review = Some(super::StagedReviewDescriptor {
+                repository_generation: generation,
+                observation_generation: 7,
+                digest: "A-stage-review".to_owned(),
+                complete: true,
+                binary_supported: true,
+            });
             workflow.review_selector = Some("A-only-review".to_owned());
             workflow.authorization = CommitAuthorizationPresentation::AuthorizedPending;
         }
@@ -16001,6 +16025,12 @@ mod tests {
                 .review_selector
                 .is_none()
         );
+        let workflow = state.repository_workflow.lock().unwrap();
+        assert_eq!(workflow.observation_generation, 0);
+        assert_eq!(workflow.next_action, 0);
+        assert!(workflow.actions.is_empty());
+        assert!(workflow.review.is_none());
+        assert!(workflow.commit_review.is_none());
 
         let active_b = state
             .repository
