@@ -99,3 +99,39 @@ production commit `93cd67e` (`fix: make repository switch invalidation
 atomic`) and the documentation commit are recorded at closure. Exact-head CI
 and final Outcome A/B are recorded after publication. Explicit deferrals remain
 persistence, removal, live certification, release work, and Task 321 re-audit.
+
+## Closure evidence
+
+The corrected ordering is: candidate capture and construction; final member,
+active-generation, lifecycle, connection, HostInvocation, and fresh target
+identity validation under `membership_coordination` then
+`lifecycle_coordination`; nonblocking Commit revocation reservation; then the
+synchronous commit point. The commit point clears HostPrepared, removes the
+old Desktop Commit capability, resets the complete workflow, publishes active
+member/repository/generation coherently, selects the new persistence namespace,
+and starts one fresh conversation. There is no normal fallible check after
+invalidation begins.
+
+- Stale B after the second preparation check: A active member/root/generation,
+  workflow, Stage/Unstage actions, review, Commit capability and pending
+  authorization, HostPrepared ticket, conversation epoch/history, and
+  persistence namespace all preserved.
+- Loser C after B wins: B generation remained at its single winning increment;
+  B workflow/actions, Commit capability/authorization, HostPrepared state,
+  conversation, and persistence namespace were unchanged; C returned
+  `RepositoryBusy` before the commit point.
+- Successful switch: old pending Commit authorization and capability were
+  revoked, workflow reset, HostPrepared invalidated, and B published once.
+- Confirm winning, Connect, ModelTurn, and HostRunning races remained closed;
+  target removal, `.git` replacement, old-member/generation mismatch, and the
+  already-active zero-churn path remained closed.
+- Task 318 selector/IPC routing remained active-only; HostExplicit eligibility
+  remained exactly 11 names; Task 315 nested-boundary regressions remained
+  green. No persistence/removal/product/release scope was added.
+
+The two production/test commits are `93cd67e` and the plan commit `d4b9e76`.
+The pushed `d4b9e76a08fd85e433e76c6103c39faed274890d` passed exact-head CI
+run `34735031891`. This closure-document revision is pushed separately and
+will receive its own exact-head CI verification. Final result: **Outcome A —
+ACTIVATION INVALIDATION ATOMICITY CLOSED**. F-319-1 is closed, including the
+HostPrepared final-target-validation ordering extension.
