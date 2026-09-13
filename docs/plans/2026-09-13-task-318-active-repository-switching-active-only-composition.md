@@ -150,8 +150,18 @@ HostExplicit names; 39 Task 317 race suite; 40 Task 315 nested-boundary suite.
   `crates/rah-desktop/src/main.rs`,
   `crates/rah-desktop/src/repository_membership.rs`, and
   `crates/rah-desktop/tauri_permission_test.js`.
-- The final docs commit, exact-head CI, clean worktree, remote alignment, and
-  immutable v0.25 identity recheck will be recorded after this closure update.
+- Docs closure commit: `c07c6cee7686d12dd1bf32792fcdab0bbd3711f1`, subject
+  `docs: close Task 318 evidence`.
+- Docs closure exact-head CI: run `34731217120`, PASS, for
+  `c07c6cee7686d12dd1bf32792fcdab0bbd3711f1`.
+- Final remote alignment: `HEAD == origin/master ==
+  c07c6cee7686d12dd1bf32792fcdab0bbd3711f1`; the worktree is clean.
+- Immutable v0.25 recheck: annotated tag object
+  `ea3c31aaf5190b632d7ef86387f7aff6004ae664` resolves to source commit
+  `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`; GitHub Release `387406579`
+  remains tagged `v0.25.0`.
+- Final changed-file scope is the ten production/test/permission files listed
+  above plus this required plan file; no Cargo or lockfile changes exist.
 
 Closure outcome must be exactly one of:
 
