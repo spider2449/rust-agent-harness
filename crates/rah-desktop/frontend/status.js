@@ -22,6 +22,8 @@ let resumeUsed = false;
 let renderedModelConfiguration = null;
 let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
+let renderedRepositoryMembership = null;
+let repositorySwitchBlocked = false;
 let activePreparedHostReview = null;
 const maxActivityEntries = 100;
 const multiFileMaxTargets = 4;
@@ -151,6 +153,9 @@ function errorMessage(error) {
     repository_observation_failed: "Repository observation failed",
     repository_dialog_failed: "Repository picker failed",
     repository_busy: "Repository selection is unavailable while chat is running",
+    repository_member_selector_invalid: "That repository selection is invalid",
+    repository_member_not_found: "That repository is no longer admitted",
+    repository_member_stale: "The selected repository is stale and was not activated",
     repository_action_invalid: "That repository action is no longer available. Refresh and choose it again.",
     repository_action_stale: "Repository changed after it was displayed. Refresh and choose a new action.",
     model_configuration_invalid: "Invalid model configuration",
@@ -1352,6 +1357,34 @@ function emptyEntry(text) {
   return item;
 }
 
+function renderRepositoryMembership(presentation) {
+  renderedRepositoryMembership = presentation;
+  const selector = document.querySelector("#repository-member-selector");
+  const members = Array.isArray(presentation?.members) ? presentation.members : [];
+  selector.replaceChildren(...members.map((member) => {
+    const option = document.createElement("option");
+    option.value = String(member.memberId ?? "");
+    option.textContent = `${String(member.displayName ?? "Repository")}${member.active === true ? " (Active)" : ""}`;
+    option.dataset.active = member.active === true ? "true" : "false";
+    return option;
+  }));
+  selector.value = presentation?.activeMemberId ?? "";
+  updateRepositoryMembershipControls();
+}
+
+function updateRepositoryMembershipControls() {
+  const selector = document.querySelector("#repository-member-selector");
+  const button = document.querySelector("#activate-repository-member");
+  const selected = selector.value;
+  const active = renderedRepositoryMembership?.activeMemberId ?? null;
+  selector.disabled = repositorySwitchBlocked;
+  button.disabled = repositorySwitchBlocked || !selected || selected === active;
+}
+
+async function refreshRepositoryMembership(invoke) {
+  renderRepositoryMembership(await invoke("repository_membership"));
+}
+
 async function refreshRepository(invoke) {
   const error = document.querySelector("#repository-error");
   error.hidden = true;
@@ -1460,6 +1493,8 @@ async function loadStatus(invoke) {
     || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
   document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
+  repositorySwitchBlocked = status.codexStatus === "connecting" || status.codexStatus === "connected" || status.codexStatus === "disconnecting" || chatRunning;
+  updateRepositoryMembershipControls();
   const profileSelectionAllowed = ["not connected", "error"].includes(status.codexStatus) && !chatRunning;
   document.querySelector("#choose-trusted-profile").disabled = !profileSelectionAllowed;
   document.querySelector("#restore-trusted-profile").disabled = !profileSelectionAllowed || !renderedTrustedProfileSelection?.remembered;
@@ -1687,6 +1722,7 @@ async function initializeDesktop() {
     error.hidden = true;
     try {
       await invoke("choose_repository");
+      await refreshRepositoryMembership(invoke);
       await replaceTranscript(invoke);
       await loadStatus(invoke);
       await refreshRepository(invoke);
@@ -1694,6 +1730,33 @@ async function initializeDesktop() {
     } catch (repositoryError) {
       error.textContent = errorMessage(repositoryError);
       error.hidden = false;
+    }
+  });
+  document.querySelector("#repository-member-selector").addEventListener("change", () => {
+    updateRepositoryMembershipControls();
+  });
+  document.querySelector("#activate-repository-member").addEventListener("click", async () => {
+    const error = document.querySelector("#repository-error");
+    const selector = document.querySelector("#repository-member-selector");
+    const button = document.querySelector("#activate-repository-member");
+    error.hidden = true;
+    button.disabled = true;
+    try {
+      const result = await invoke("activate_repository_member", { memberId: selector.value });
+      renderRepositoryMembership(result.membership);
+      if (result.outcome === "activated") {
+        await replaceTranscript(invoke);
+        await refreshRepository(invoke);
+        await refreshEffectiveAuthority(invoke);
+      }
+      await loadStatus(invoke);
+    } catch (repositoryError) {
+      error.textContent = errorMessage(repositoryError);
+      error.hidden = false;
+      await refreshRepositoryMembership(invoke).catch(() => {});
+      await loadStatus(invoke).catch(() => {});
+    } finally {
+      updateRepositoryMembershipControls();
     }
   });
   document.querySelector("#refresh-repository").addEventListener("click", () => {
@@ -1887,6 +1950,7 @@ async function initializeDesktop() {
     }
   });
   await refreshTrustedProfileSelection(invoke);
+  await refreshRepositoryMembership(invoke);
   await loadStatus(invoke);
   await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);

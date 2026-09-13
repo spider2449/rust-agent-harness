@@ -90,6 +90,13 @@
         <section class="repository" aria-labelledby="repository-title">
           <h2 id="repository-title">Repository</h2>
           <p id="repository-error" class="connection-error" hidden></p>
+          <section aria-labelledby="repository-membership-title">
+            <h3 id="repository-membership-title">Admitted repositories</h3>
+            <label for="repository-member-selector">Current repository</label>
+            <select id="repository-member-selector" aria-describedby="repository-membership-hint"></select>
+            <button id="activate-repository-member" type="button" disabled>Switch Repository</button>
+            <p id="repository-membership-hint" class="model-hint">Only the selected repository supplies executable repository authority. Admission is process-local and ends when Desktop exits.</p>
+          </section>
           <div class="repository-actions">
             <button id="choose-repository" type="button">Choose Repository</button>
             <button id="refresh-repository" type="button">Refresh</button>

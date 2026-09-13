@@ -17,6 +17,8 @@ fn main() {
             "desktop_preferences_warning",
             "test_llama_cpp_endpoint",
             "choose_repository",
+            "repository_membership",
+            "activate_repository_member",
             "connect_codex",
             "disconnect_codex",
             "repository_snapshot",

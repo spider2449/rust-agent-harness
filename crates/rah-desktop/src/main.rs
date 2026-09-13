@@ -1339,6 +1339,7 @@ pub(crate) enum FrontendError {
     RepositoryNestedMembershipConflict,
     RepositoryMemberStale,
     RepositoryMemberNotFound,
+    RepositoryMemberSelectorInvalid,
     RepositoryObservationFailed,
     RepositoryDialogFailed,
     RepositoryBusy,
@@ -6030,7 +6031,22 @@ fn publish_activation_if_current(
 async fn activate_admitted_member(
     state: &DesktopAppState,
     member_id: RepositoryMemberId,
-) -> Result<(), FrontendError> {
+) -> Result<ActivationOutcome, FrontendError> {
+    {
+        let _membership_coordination = state
+            .membership_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .workspace_membership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_member()
+            == Some(member_id)
+        {
+            return Ok(ActivationOutcome::AlreadyActive);
+        }
+    }
     let (transaction, member) = capture_activation_transaction(state, member_id)?;
     let git = selected_git_executable().map_err(|_| FrontendError::RepositoryMemberStale)?;
     member
@@ -6048,7 +6064,126 @@ async fn activate_admitted_member(
         .map_err(|_| FrontendError::RepositoryMemberStale)?;
     revoke_repository_commit_context(state).await;
     activation_pre_publication_barrier(state);
-    publish_activation_if_current(state, &transaction, repository)
+    publish_activation_if_current(state, &transaction, repository)?;
+    Ok(ActivationOutcome::Activated)
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationOutcome {
+    Activated,
+    AlreadyActive,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryMemberPresentation {
+    member_id: String,
+    display_name: String,
+    active: bool,
+    availability: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRepositoryMembershipPresentation {
+    members: Vec<RepositoryMemberPresentation>,
+    active_member_id: Option<String>,
+    membership_generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RepositoryActivationOutcomePresentation {
+    Activated,
+    AlreadyActive,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryActivationResult {
+    outcome: RepositoryActivationOutcomePresentation,
+    membership: WorkspaceRepositoryMembershipPresentation,
+}
+
+#[cfg(target_os = "windows")]
+fn bounded_repository_display_name(root: &Path) -> String {
+    const MAX_DISPLAY_NAME_CHARS: usize = 128;
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Repository");
+    name.chars().take(MAX_DISPLAY_NAME_CHARS).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn repository_membership_presentation(
+    state: &DesktopAppState,
+) -> WorkspaceRepositoryMembershipPresentation {
+    let membership = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let active_member = membership.active_member();
+    let members = membership
+        .members()
+        .map(|member| RepositoryMemberPresentation {
+            member_id: member.id.selector(),
+            display_name: bounded_repository_display_name(&member.root),
+            active: active_member == Some(member.id),
+            availability: if active_member == Some(member.id) {
+                "active"
+            } else {
+                "inactive"
+            },
+        })
+        .collect();
+    WorkspaceRepositoryMembershipPresentation {
+        members,
+        active_member_id: active_member.map(RepositoryMemberId::selector),
+        membership_generation: membership.membership_generation(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn repository_membership(
+    state: State<'_, DesktopAppState>,
+) -> WorkspaceRepositoryMembershipPresentation {
+    repository_membership_presentation(state.inner())
+}
+
+#[cfg(target_os = "windows")]
+async fn activate_repository_member_selector(
+    state: &DesktopAppState,
+    selector: &str,
+) -> Result<RepositoryActivationResult, FrontendError> {
+    let member_id = RepositoryMemberId::parse_selector(selector)
+        .ok_or(FrontendError::RepositoryMemberSelectorInvalid)?;
+    let outcome = activate_admitted_member(state, member_id).await?;
+    Ok(RepositoryActivationResult {
+        outcome: match outcome {
+            ActivationOutcome::Activated => RepositoryActivationOutcomePresentation::Activated,
+            ActivationOutcome::AlreadyActive => {
+                RepositoryActivationOutcomePresentation::AlreadyActive
+            }
+        },
+        membership: repository_membership_presentation(state),
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn activate_repository_member(
+    state: State<'_, DesktopAppState>,
+    member_id: String,
+) -> Result<RepositoryActivationResult, FrontendError> {
+    activate_repository_member_selector(state.inner(), &member_id).await
 }
 
 #[cfg(target_os = "windows")]
@@ -8134,6 +8269,8 @@ fn main() -> ExitCode {
             reset_model_preferences,
             test_llama_cpp_endpoint,
             choose_repository,
+            repository_membership,
+            activate_repository_member,
             connect_codex,
             disconnect_codex,
             repository_snapshot,
@@ -8222,14 +8359,14 @@ mod tests {
         REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
         RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
         SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
-        activate_admitted_member, activity_event, activity_event_with_composition,
-        admit_repository, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        branch_result_classification, classify_repository_delete_file_result,
-        classify_repository_multi_file_output, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation, connect_codex,
-        connect_prepared_codex, connection_activation_publication_is_current, current_app_status,
-        current_host_generation_tuple, delete_file_host_terminal_state,
+        activate_admitted_member, activate_repository_member_selector, activity_event,
+        activity_event_with_composition, admit_repository, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, branch_result_classification,
+        classify_repository_delete_file_result, classify_repository_multi_file_output,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
+        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
+        current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
         desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
         empty_composition_metadata, forget_trusted_profile_preference, frontend_error,
@@ -15718,6 +15855,178 @@ mod tests {
                 .filter(|name| host_kind(name).is_some())
                 .count(),
             11
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_318_membership_presentation_and_selector_route_are_active_only() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+
+        let empty = super::repository_membership_presentation(&state);
+        assert!(empty.members.is_empty());
+        assert_eq!(empty.active_member_id, None);
+        assert_eq!(empty.membership_generation, 0);
+
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let listed = super::repository_membership_presentation(&state);
+        assert_eq!(listed.members.len(), 2);
+        assert_eq!(listed.active_member_id, Some(member_a.selector()));
+        assert_eq!(
+            listed.members.iter().filter(|member| member.active).count(),
+            1
+        );
+        assert_ne!(member_a.selector(), member_b.selector());
+        assert!(
+            listed
+                .members
+                .iter()
+                .all(|member| member.member_id.len() <= 42)
+        );
+        let serialized =
+            serde_json::to_string(&listed).expect("membership presentation serializes");
+        assert!(!serialized.contains("RepositoryAdmissionIdentity"));
+        assert!(!serialized.contains("FileIdentity"));
+        assert!(!serialized.contains("ToolRegistry"));
+        assert!(!serialized.contains(repository_a.0.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(repository_b.0.to_string_lossy().as_ref()));
+
+        let generation = *state.repository_generation.lock().unwrap();
+        let conversation_epoch = state.conversation.lock().unwrap().epoch;
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .expect("prepare test HostExplicit state");
+        {
+            let mut conversation = state.conversation.lock().unwrap();
+            conversation
+                .history
+                .push(message(MessageRole::User, "A-only"));
+        }
+        {
+            let mut workflow = state.repository_workflow.lock().unwrap();
+            workflow.review_selector = Some("A-only-review".to_owned());
+            workflow.authorization = CommitAuthorizationPresentation::AuthorizedPending;
+        }
+        let already_active = activate_repository_member_selector(&state, &member_a.selector())
+            .await
+            .expect("active selection is accepted as a no-op");
+        assert_eq!(
+            already_active.outcome,
+            super::RepositoryActivationOutcomePresentation::AlreadyActive
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+        assert_eq!(state.conversation.lock().unwrap().epoch, conversation_epoch);
+        assert_eq!(state.conversation.lock().unwrap().history.len(), 1);
+        assert_eq!(
+            state
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .review_selector
+                .as_deref(),
+            Some("A-only-review")
+        );
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::AuthorizedPending
+        );
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostPrepared
+        );
+
+        assert_eq!(
+            activate_repository_member_selector(&state, "malformed")
+                .await
+                .unwrap_err(),
+            FrontendError::RepositoryMemberSelectorInvalid
+        );
+        assert_eq!(
+            activate_repository_member_selector(
+                &state,
+                &format!("m{}-999999", member_a.as_debug_tuple().0)
+            )
+            .await
+            .unwrap_err(),
+            FrontendError::RepositoryMemberNotFound
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+
+        let switched = activate_repository_member_selector(&state, &member_b.selector())
+            .await
+            .expect("selector route activates B");
+        assert_eq!(
+            switched.outcome,
+            super::RepositoryActivationOutcomePresentation::Activated
+        );
+        assert_eq!(
+            switched.membership.active_member_id,
+            Some(member_b.selector())
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation + 1);
+        assert_eq!(
+            state
+                .repository
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("active B")
+                .root,
+            fs::canonicalize(&repository_b.0).unwrap()
+        );
+        assert_eq!(state.conversation.lock().unwrap().history.len(), 0);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::ReviewRequired
+        );
+        assert!(
+            state
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .review_selector
+                .is_none()
+        );
+
+        let active_b = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("B remains the only active repository");
+        assert_ne!(active_b.root, fs::canonicalize(&repository_a.0).unwrap());
+        let registry_b = desktop_tool_registry(Some(&active_b), None)
+            .expect("fresh B repository registry builds");
+        let composition_b = desktop_tool_composition_from_registry(
+            Arc::clone(&registry_b),
+            Some(&active_b),
+            false,
+            &[],
+        )
+        .expect("fresh B composition builds");
+        assert!(
+            composition_b
+                .tools
+                .iter()
+                .any(|tool| tool.public_tool_name == "repo.status" && tool.repository_bound)
+        );
+        assert_eq!(
+            composition_b.registry.definitions(),
+            registry_b.definitions()
         );
     }
 

@@ -20,6 +20,8 @@
     "allow-desktop-preferences-warning",
     "allow-test-llama-cpp-endpoint",
     "allow-choose-repository",
+    "allow-repository-membership",
+    "allow-activate-repository-member",
     "allow-connect-codex",
     "allow-disconnect-codex",
     "allow-repository-snapshot",

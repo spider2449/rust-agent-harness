@@ -10,6 +10,9 @@ use rah_tools::{RepositoryAdmissionIdentity, RepositoryAdmissionRelation};
 
 static NEXT_WORKSPACE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+const MEMBER_SELECTOR_PREFIX: &str = "m";
+const MEMBER_SELECTOR_MAX_BYTES: usize = 42;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RepositoryMemberId {
     workspace_epoch: u64,
@@ -17,6 +20,41 @@ pub(crate) struct RepositoryMemberId {
 }
 
 impl RepositoryMemberId {
+    pub(crate) fn selector(self) -> String {
+        format!(
+            "{MEMBER_SELECTOR_PREFIX}{}-{}",
+            self.workspace_epoch, self.ordinal
+        )
+    }
+
+    pub(crate) fn parse_selector(selector: &str) -> Option<Self> {
+        if selector.len() > MEMBER_SELECTOR_MAX_BYTES
+            || !selector.starts_with(MEMBER_SELECTOR_PREFIX)
+        {
+            return None;
+        }
+        let body = selector.strip_prefix(MEMBER_SELECTOR_PREFIX)?;
+        let (workspace_epoch, ordinal) = body.split_once('-')?;
+        if workspace_epoch.is_empty()
+            || ordinal.is_empty()
+            || (workspace_epoch.len() > 1 && workspace_epoch.starts_with('0'))
+            || (ordinal.len() > 1 && ordinal.starts_with('0'))
+            || !workspace_epoch.bytes().all(|byte| byte.is_ascii_digit())
+            || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let workspace_epoch = workspace_epoch.parse().ok()?;
+        let ordinal = ordinal.parse().ok()?;
+        if workspace_epoch == 0 || ordinal == 0 {
+            return None;
+        }
+        Some(Self {
+            workspace_epoch,
+            ordinal,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn as_debug_tuple(self) -> (u64, u64) {
         (self.workspace_epoch, self.ordinal)
@@ -53,7 +91,6 @@ impl WorkspaceMembershipState {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn membership_generation(&self) -> u64 {
         self.membership_generation
     }
@@ -69,6 +106,10 @@ impl WorkspaceMembershipState {
 
     pub(crate) fn member(&self, id: RepositoryMemberId) -> Option<&InertRepositoryMember> {
         self.members.get(&id)
+    }
+
+    pub(crate) fn members(&self) -> impl Iterator<Item = &InertRepositoryMember> {
+        self.members.values()
     }
 
     pub(crate) fn admit(
@@ -120,5 +161,46 @@ impl WorkspaceMembershipState {
             .values()
             .map(|member| member.identity.relation(identity))
             .find(|relation| *relation != RepositoryAdmissionRelation::Distinct)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MEMBER_SELECTOR_MAX_BYTES, RepositoryMemberId};
+
+    #[test]
+    fn selectors_are_bounded_opaque_and_strictly_parseable() {
+        let member = RepositoryMemberId {
+            workspace_epoch: 7,
+            ordinal: 11,
+        };
+        let selector = member.selector();
+        assert_eq!(selector, "m7-11");
+        assert!(selector.len() <= MEMBER_SELECTOR_MAX_BYTES);
+        assert_eq!(RepositoryMemberId::parse_selector(&selector), Some(member));
+
+        for malformed in [
+            "",
+            "m",
+            "m0-1",
+            "m1-0",
+            "m01-1",
+            "m1-01",
+            "m1",
+            "m1-1-extra",
+            "x1-1",
+            "m1-1/path",
+            "m18446744073709551616-1",
+        ] {
+            assert_eq!(
+                RepositoryMemberId::parse_selector(malformed),
+                None,
+                "{malformed}"
+            );
+        }
+        assert_eq!(
+            RepositoryMemberId::parse_selector(&"m1-1".repeat(MEMBER_SELECTOR_MAX_BYTES)),
+            None
+        );
     }
 }

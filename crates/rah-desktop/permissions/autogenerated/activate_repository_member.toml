@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-activate-repository-member"
+description = "Enables the activate_repository_member command without any pre-configured scope."
+commands.allow = ["activate_repository_member"]
+
+[[permission]]
+identifier = "deny-activate-repository-member"
+description = "Denies the activate_repository_member command without any pre-configured scope."
+commands.deny = ["activate_repository_member"]

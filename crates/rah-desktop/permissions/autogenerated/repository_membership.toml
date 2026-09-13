@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repository-membership"
+description = "Enables the repository_membership command without any pre-configured scope."
+commands.allow = ["repository_membership"]
+
+[[permission]]
+identifier = "deny-repository-membership"
+description = "Denies the repository_membership command without any pre-configured scope."
+commands.deny = ["repository_membership"]
