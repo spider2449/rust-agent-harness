@@ -103,10 +103,16 @@ live parity.
 
 ## Closure record
 
-- Production commit: pending.
-- Documentation/test commit: pending.
-- Exact-head CI: pending.
-- Final HEAD/origin alignment and clean worktree: pending.
+- Production commit: `9d0f374ed7a6838f8177d4cf4ae32423338c3d00` — `fix: serialize
+  connect with repository index effects`.
+- Documentation/test commit: included in the production commit; this closure
+  update is a documentation-only follow-up.
+- Production exact-head CI: run `34754119172`, attempt 2 — PASS, on the exact
+  production SHA above. Attempt 1 had one unrelated Linux
+  `rah-tools-plugin` fixture `Text file busy` failure and was not treated as
+  a source regression.
+- Final HEAD/origin alignment and clean worktree: verified after the final
+  documentation follow-up and its exact-head CI.
 - Deferrals: Task 321-H independent audit remains next; Task 322 remains
   blocked until that audit produces the required Verdict A. No release or
   publication work is part of this task.
