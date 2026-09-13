@@ -101,6 +101,22 @@ pub struct RepositoryCommitReview {
     presentation_sha256: [u8; 32],
 }
 
+/// Opaque host-only authorization prepared for one exact Commit control. It
+/// grants no authority until the originating control installs it into its
+/// single pending slot.
+pub struct PreparedRepositoryCommitAuthorization {
+    policy: Arc<RepositoryCommitPolicy>,
+    authorization: ReviewedCommitAuthorization,
+}
+
+/// The synchronous final-publication outcomes for a prepared authorization.
+/// This type is host-only and is not serialized or exposed through a Tool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedRepositoryCommitAuthorizationError {
+    ControlMismatch,
+    PendingSlotBusy,
+}
+
 /// One host-selected repository, executable, identity, and empty hook root.
 /// Construction is deliberately private: no model input can select any field.
 struct RepositoryCommitPolicy {
@@ -617,6 +633,40 @@ impl RepositoryCommitControl {
         true
     }
 
+    /// Performs asynchronous review validation without changing the shared
+    /// pending authorization slot. The returned candidate is bound to this
+    /// exact policy and must be synchronously installed by this control.
+    pub async fn prepare_reviewed_authorization(
+        &self,
+        review: RepositoryCommitReview,
+    ) -> Result<PreparedRepositoryCommitAuthorization, ToolError> {
+        let authorization = self.policy.authorize_review(&review).await?;
+        Ok(PreparedRepositoryCommitAuthorization {
+            policy: Arc::clone(&self.policy),
+            authorization,
+        })
+    }
+
+    /// Installs one prepared authorization without waiting on the pending
+    /// mutex. Consuming the candidate makes every failed or successful
+    /// publication one-shot; a mismatched control or busy slot never mutates
+    /// the slot.
+    pub fn try_install_prepared_authorization_now(
+        &self,
+        prepared: PreparedRepositoryCommitAuthorization,
+    ) -> Result<(), PreparedRepositoryCommitAuthorizationError> {
+        if !Arc::ptr_eq(&self.policy, &prepared.policy)
+            || prepared.authorization.generation != self.policy.generation
+        {
+            return Err(PreparedRepositoryCommitAuthorizationError::ControlMismatch);
+        }
+        let Some(mut pending) = self.pending.try_lock() else {
+            return Err(PreparedRepositoryCommitAuthorizationError::PendingSlotBusy);
+        };
+        *pending = Some(prepared.authorization);
+        Ok(())
+    }
+
     /// Compares a host-created review with the current semantic state and arms
     /// a fresh ADR 0016 snapshot while retaining one lease throughout.
     pub async fn authorize_reviewed_snapshot(
@@ -1038,6 +1088,77 @@ mod tests {
         assert!(!control.try_clear_authorization_now());
         drop(pending);
         assert!(control.try_clear_authorization_now());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_authorization_is_unarmed_bound_and_single_use() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"prepared\n");
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .unwrap();
+        let (_other_tool, other_control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let review = review.unwrap();
+        let prepared = control
+            .prepare_reviewed_authorization(review)
+            .await
+            .unwrap();
+        assert!(!control.has_pending_authorization().await);
+        assert_eq!(
+            other_control.try_install_prepared_authorization_now(prepared),
+            Err(PreparedRepositoryCommitAuthorizationError::ControlMismatch)
+        );
+        assert!(!other_control.has_pending_authorization().await);
+
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let prepared = control
+            .prepare_reviewed_authorization(review.unwrap())
+            .await
+            .unwrap();
+        assert!(
+            control
+                .try_install_prepared_authorization_now(prepared)
+                .is_ok()
+        );
+        assert!(control.has_pending_authorization().await);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_authorization_busy_install_does_not_publish_or_wait() {
+        let (git, root) = fixture();
+        stage(&git, &root, b"prepared busy\n");
+        let (_tool, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let prepared = control
+            .prepare_reviewed_authorization(review.unwrap())
+            .await
+            .unwrap();
+        let pending = control.pending.lock().await;
+        assert_eq!(
+            control.try_install_prepared_authorization_now(prepared),
+            Err(PreparedRepositoryCommitAuthorizationError::PendingSlotBusy)
+        );
+        drop(pending);
+        assert!(!control.has_pending_authorization().await);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -58,6 +58,7 @@ pub use repository_branch_create::{
     RepositoryBranchCreationTool,
 };
 pub use repository_commit::{
+    PreparedRepositoryCommitAuthorization, PreparedRepositoryCommitAuthorizationError,
     RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
 };
 pub use repository_create_directory::{

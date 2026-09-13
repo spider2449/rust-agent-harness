@@ -71,22 +71,23 @@ use rah_runtime_codex::{
 #[cfg(target_os = "windows")]
 use rah_tools::{
     AuthorizedDispatchError, AuthorizedDispatchRejection, EchoTool, FsReadTool, GitStageTool,
-    GitUnstageTool, REPOSITORY_CREATE_BRANCH_TOOL_NAME, RepositoryAdmissionIdentity,
-    RepositoryAdmissionRelation, RepositoryBranchCreationAuthority, RepositoryBranchCreationTool,
-    RepositoryCommitControl, RepositoryCommitReview, RepositoryCommitTool,
-    RepositoryCreateFilePreparationError, RepositoryCreateFilePreparationRequest,
-    RepositoryDeleteFilePreparationError, RepositoryDeleteFilePreparationRequest,
-    RepositoryDiffStagedTool, RepositoryDiffTool, RepositoryDirectoryCreationAuthority,
-    RepositoryDirectoryCreationTool, RepositoryFileCreationTool, RepositoryFileDeletionAuthority,
-    RepositoryFileDeletionTool, RepositoryFileInfoTool, RepositoryFileRenameAuthority,
-    RepositoryFileRenameTool, RepositoryMultiFileEditPreparationError,
-    RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
-    RepositoryMultiFileEditTextReplacement, RepositoryMultiFileEditTool,
-    RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
-    RepositoryPatchResultClassification, RepositoryRenameFilePreparationError,
-    RepositoryRenameFilePreparationRequest, RepositoryRenameFileProof, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
-    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
+    GitUnstageTool, PreparedRepositoryCommitAuthorizationError, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+    RepositoryAdmissionIdentity, RepositoryAdmissionRelation, RepositoryBranchCreationAuthority,
+    RepositoryBranchCreationTool, RepositoryCommitControl, RepositoryCommitReview,
+    RepositoryCommitTool, RepositoryCreateFilePreparationError,
+    RepositoryCreateFilePreparationRequest, RepositoryDeleteFilePreparationError,
+    RepositoryDeleteFilePreparationRequest, RepositoryDiffStagedTool, RepositoryDiffTool,
+    RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
+    RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
+    RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
+    RepositoryMultiFileEditPreparationError, RepositoryMultiFileEditPreparationRequest,
+    RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditTextReplacement,
+    RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
+    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification,
+    RepositoryRenameFilePreparationError, RepositoryRenameFilePreparationRequest,
+    RepositoryRenameFileProof, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
+    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
+    classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use repository_membership::{InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipState};
@@ -410,6 +411,8 @@ struct DesktopAppState {
     close_started: AtomicBool,
     #[cfg(test)]
     activation_test_hook: Mutex<Option<Arc<ActivationTestHook>>>,
+    #[cfg(test)]
+    authorization_test_hook: Mutex<Option<Arc<AuthorizationTestHook>>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -418,6 +421,13 @@ struct ActivationTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
     release: Arc<std::sync::Barrier>,
     target_member: Option<RepositoryMemberId>,
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+struct AuthorizationTestHook {
+    reached: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<std::sync::Barrier>,
 }
 
 #[cfg(target_os = "windows")]
@@ -504,6 +514,8 @@ impl DesktopAppState {
             close_started: AtomicBool::new(false),
             #[cfg(test)]
             activation_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            authorization_test_hook: Mutex::new(None),
         }
     }
 }
@@ -1929,6 +1941,7 @@ struct PendingConnectedPublication {
     repository_fingerprint: Option<String>,
     composition: Arc<DesktopToolComposition>,
     allowed_permissions: Vec<PermissionLevel>,
+    commit_capability: Option<DesktopCommitCapability>,
 }
 
 #[cfg(target_os = "windows")]
@@ -2034,6 +2047,7 @@ fn publish_connected_provider_state(
         repository_fingerprint,
         composition,
         allowed_permissions,
+        commit_capability,
     } = pending;
     *published_provider = activation;
     *connection = ConnectionState::Connected {
@@ -2047,6 +2061,10 @@ fn publish_connected_provider_state(
         composition,
         allowed_permissions,
     };
+    *state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = commit_capability;
     Ok(())
 }
 
@@ -4725,6 +4743,10 @@ fn set_model_configuration(
     model: Option<String>,
     llama_cpp_endpoint: Option<ProviderEndpointInput>,
 ) -> Result<(), FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ordering = state
         .preference_ordering
         .lock()
@@ -4741,6 +4763,13 @@ fn set_model_configuration(
         model,
         llama_cpp_endpoint,
     };
+    if chat != ChatState::Idle {
+        return Err(FrontendError::ModelConfigurationBusy);
+    }
+    selection.validate()?;
+    // Commit revocation is the first authoritative transition. A busy
+    // pending slot leaves model, capability, and workflow state untouched.
+    reserve_commit_revocation(state.inner())?;
     let mut current = state
         .model
         .lock()
@@ -4756,14 +4785,7 @@ fn set_model_configuration(
     {
         emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
     }
-    *state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    *state
-        .repository_workflow
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+    withdraw_commit_capability_and_workflow(state.inner());
     Ok(())
 }
 
@@ -4794,6 +4816,10 @@ fn set_commit_identity(
     name: String,
     email: String,
 ) -> Result<(), FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ordering = state
         .preference_ordering
         .lock()
@@ -4802,6 +4828,7 @@ fn set_commit_identity(
     identity
         .validate()
         .map_err(|_| FrontendError::CommitIdentityInvalid)?;
+    reserve_commit_revocation(state.inner())?;
     let selection = state
         .model
         .lock()
@@ -4825,14 +4852,7 @@ fn set_commit_identity(
         .commit_identity_generation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
-    *state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    *state
-        .repository_workflow
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+    withdraw_commit_capability_and_workflow(state.inner());
     Ok(())
 }
 
@@ -4842,6 +4862,10 @@ fn reset_model_preferences(
     app: AppHandle,
     state: State<'_, DesktopAppState>,
 ) -> Result<(), FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ordering = state
         .preference_ordering
         .lock()
@@ -4850,6 +4874,10 @@ fn reset_model_preferences(
         .chat
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if chat != ChatState::Idle {
+        return Err(FrontendError::ModelConfigurationBusy);
+    }
+    reserve_commit_revocation(state.inner())?;
     let mut current = state
         .model
         .lock()
@@ -4865,6 +4893,7 @@ fn reset_model_preferences(
     {
         emit_preferences_warning(&app, PreferencesWarning::SaveFailed);
     }
+    withdraw_commit_capability_and_workflow(state.inner());
     Ok(())
 }
 
@@ -5648,20 +5677,32 @@ async fn refresh_repository_workflow(
 
 #[cfg(target_os = "windows")]
 async fn revoke_repository_commit_context(state: &DesktopAppState) {
-    let capability = state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(capability) = capability {
-        // Dropping Desktop's capability must not rely on every Arc holder
-        // disappearing before the one-shot approval becomes unusable.
-        capability.control.clear_authorization().await;
+    let control = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let control = state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|capability| capability.control);
+        *state
+            .repository_workflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            RepositoryWorkflowState::default();
+        control
+    };
+    if let Some(control) = control {
+        // The lifecycle gate already prevents stale writers from reaching
+        // publication. If the shared pending slot is temporarily busy, wait
+        // only after releasing the blocking lifecycle guard.
+        if !control.try_clear_authorization_now() {
+            control.clear_authorization().await;
+        }
     }
-    *state
-        .repository_workflow
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
 }
 
 #[cfg(target_os = "windows")]
@@ -5951,6 +5992,21 @@ fn activation_pre_publication_barrier(
 }
 
 #[cfg(target_os = "windows")]
+fn authorization_pre_publication_barrier(_state: &DesktopAppState) {
+    #[cfg(test)]
+    let hook = _state
+        .authorization_test_hook
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        let _ = hook.reached.send(());
+        hook.release.wait();
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn reserve_commit_revocation(state: &DesktopAppState) -> Result<(), FrontendError> {
     let control = state
         .commit_capability
@@ -5962,6 +6018,19 @@ fn reserve_commit_revocation(state: &DesktopAppState) -> Result<(), FrontendErro
         return Err(FrontendError::RepositoryBusy);
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn withdraw_commit_capability_and_workflow(state: &DesktopAppState) {
+    state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
 }
 
 #[cfg(target_os = "windows")]
@@ -6279,39 +6348,115 @@ struct CommitAuthorizationResult {
 }
 
 #[cfg(target_os = "windows")]
-async fn authorize_repository_commit_review(
+struct CommitAuthorizationCapture {
+    repository_generation: u64,
+    model_generation: u64,
+    identity_generation: u64,
+    observation_generation: u64,
+    review_id: String,
+    control: Arc<RepositoryCommitControl>,
+}
+
+#[cfg(target_os = "windows")]
+fn commit_authorization_capture_is_current(
     state: &DesktopAppState,
-    review_id: &str,
-) -> Result<CommitAuthorizationResult, FrontendError> {
-    let repository_generation = *state
+    capture: &CommitAuthorizationCapture,
+) -> bool {
+    if *state
         .repository_generation
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let model_generation = state
-        .model
-        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .generation;
-    let identity_generation = *state
-        .commit_identity_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let control = state
+        != capture.repository_generation
+        || state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation
+            != capture.model_generation
+        || *state
+            .commit_identity_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            != capture.identity_generation
+        || matches!(
+            *state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ConnectionState::Disconnecting
+        )
+    {
+        return false;
+    }
+    let capability_current = state
         .commit_capability
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        .filter(|capability| {
-            capability.repository_generation == repository_generation
-                && capability.model_generation == model_generation
-                && capability.identity_generation == identity_generation
-        })
-        .map(|capability| Arc::clone(&capability.control))
-        .ok_or(FrontendError::CommitAuthorizationUnavailable)?;
-    // Every explicit human attempt supersedes any earlier one-shot approval,
-    // including stale or duplicate selector submissions.
-    control.clear_authorization().await;
-    let review = {
+        .is_some_and(|capability| {
+            capability.repository_generation == capture.repository_generation
+                && capability.model_generation == capture.model_generation
+                && capability.identity_generation == capture.identity_generation
+                && Arc::ptr_eq(&capability.control, &capture.control)
+        });
+    let workflow_current = state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let review_current = workflow_current.review.as_ref().is_some_and(|review| {
+        review.repository_generation == capture.repository_generation
+            && review.observation_generation == capture.observation_generation
+            && review.complete
+            && review.binary_supported
+    });
+    capability_current
+        && review_current
+        && workflow_current.observation_generation == capture.observation_generation
+        && workflow_current.review_selector.as_deref() == Some(capture.review_id.as_str())
+}
+
+#[cfg(target_os = "windows")]
+async fn authorize_repository_commit_review(
+    state: &DesktopAppState,
+    review_id: &str,
+) -> Result<CommitAuthorizationResult, FrontendError> {
+    // Capture and supersession are synchronous. The lifecycle guard is
+    // released before review validation so no blocking guard crosses await.
+    let (capture, review) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repository_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model_generation = state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
+        let identity_generation = *state
+            .commit_identity_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let control = state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|capability| {
+                capability.repository_generation == repository_generation
+                    && capability.model_generation == model_generation
+                    && capability.identity_generation == identity_generation
+            })
+            .map(|capability| Arc::clone(&capability.control))
+            .ok_or(FrontendError::CommitAuthorizationUnavailable)?;
+        // Every explicit human attempt supersedes an older approval, but the
+        // shared slot is cleared before any review is taken from workflow.
+        if !control.try_clear_authorization_now() {
+            return Err(FrontendError::RepositoryBusy);
+        }
         let mut workflow = state
             .repository_workflow
             .lock()
@@ -6326,15 +6471,56 @@ async fn authorize_repository_commit_review(
             workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
             return Err(FrontendError::CommitAuthorizationStale);
         }
-        match workflow.commit_review.take() {
+        let review = match workflow.commit_review.take() {
             Some(review) => review,
             None => {
                 workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
                 return Err(FrontendError::CommitAuthorizationStale);
             }
+        };
+        (
+            CommitAuthorizationCapture {
+                repository_generation,
+                model_generation,
+                identity_generation,
+                observation_generation: workflow.observation_generation,
+                review_id: review_id.to_owned(),
+                control,
+            },
+            review,
+        )
+    };
+
+    let prepared = match capture.control.prepare_reviewed_authorization(review).await {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let _lifecycle_coordination = state
+                .lifecycle_coordination
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if commit_authorization_capture_is_current(state, &capture) {
+                state
+                    .repository_workflow
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .authorization = CommitAuthorizationPresentation::ReviewStale;
+            }
+            return Err(FrontendError::CommitAuthorizationFailed);
         }
     };
-    match control.authorize_reviewed_snapshot(&review).await {
+    authorization_pre_publication_barrier(state);
+
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !commit_authorization_capture_is_current(state, &capture) {
+        return Err(FrontendError::CommitAuthorizationStale);
+    }
+    match capture
+        .control
+        .try_install_prepared_authorization_now(prepared)
+    {
         Ok(()) => {
             let mut workflow = state
                 .repository_workflow
@@ -6345,13 +6531,11 @@ async fn authorize_repository_commit_review(
                 authorization_state: workflow.authorization,
             })
         }
-        Err(_) => {
-            let mut workflow = state
-                .repository_workflow
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            workflow.authorization = CommitAuthorizationPresentation::ReviewStale;
-            Err(FrontendError::CommitAuthorizationFailed)
+        Err(PreparedRepositoryCommitAuthorizationError::PendingSlotBusy) => {
+            Err(FrontendError::RepositoryBusy)
+        }
+        Err(PreparedRepositoryCommitAuthorizationError::ControlMismatch) => {
+            Err(FrontendError::CommitAuthorizationStale)
         }
     }
 }
@@ -6823,10 +7007,18 @@ async fn connect_codex(
             identity.email,
         )
         .ok()
-        .map(|(tool, control)| (Arc::new(tool), Arc::new(control))),
+        .map(|(tool, control)| DesktopCommitCapability {
+            repository_generation,
+            model_generation,
+            identity_generation,
+            _tool: Arc::new(tool),
+            control: Arc::new(control),
+        }),
         _ => None,
     };
-    let commit_tool = commit_capability.as_ref().map(|(tool, _)| Arc::clone(tool));
+    let commit_tool = commit_capability
+        .as_ref()
+        .map(|capability| Arc::clone(&capability._tool));
     let first_party_registry =
         match desktop_tool_registry(repository.as_deref(), commit_tool.clone()) {
             Ok(registry) => registry,
@@ -7038,6 +7230,7 @@ async fn connect_codex(
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
                 allowed_permissions: retained_allowed_permissions,
+                commit_capability,
             };
             if let Err(rejected) = publish_connected_provider_state(state.inner(), pending) {
                 let RejectedProviderPublication {
@@ -7086,19 +7279,6 @@ async fn connect_codex(
                 "connection_generation": connection_generation,
                 "profile_active": selected_profile,
             }));
-            if let Some((tool, control)) = commit_capability {
-                *state
-                    .commit_capability
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(DesktopCommitCapability {
-                        repository_generation,
-                        model_generation,
-                        identity_generation,
-                        _tool: tool,
-                        control,
-                    });
-            }
             Ok(ConnectionResult::connected())
         }
         Err(frontend_error) => {
@@ -8381,9 +8561,9 @@ mod tests {
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
         ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
-        BranchActivityClassification, CancelRecoveryOutcome, ChatEvent, ChatState,
-        CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
-        ConnectionState, ConversationContextChange, ConversationContextIdentity,
+        AuthorizationTestHook, BranchActivityClassification, CancelRecoveryOutcome, ChatEvent,
+        ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
+        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
         CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
         DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
@@ -14717,6 +14897,7 @@ mod tests {
                     PermissionLevel::Read,
                     PermissionLevel::Execute,
                 ],
+                commit_capability: None,
             },
         )
         .map_err(|_| "Desktop connection publication was rejected".to_owned())?;
@@ -15205,6 +15386,7 @@ mod tests {
                     PermissionLevel::Read,
                     PermissionLevel::Execute,
                 ],
+                commit_capability: None,
             },
         )
         .map_err(|_| "Desktop connection publication was rejected".to_owned())?;
@@ -16137,6 +16319,29 @@ mod tests {
         release.wait();
     }
 
+    fn install_authorization_barrier(
+        state: &DesktopAppState,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.authorization_test_hook.lock().unwrap() = Some(Arc::new(AuthorizationTestHook {
+            reached,
+            release: Arc::new(std::sync::Barrier::new(2)),
+        }));
+        receiver
+    }
+
+    fn release_authorization_barrier(state: &DesktopAppState) {
+        let release = state
+            .authorization_test_hook
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .release
+            .clone();
+        release.wait();
+    }
+
     async fn activation_fixture() -> (
         Arc<DesktopAppState>,
         TestRepository,
@@ -16155,6 +16360,85 @@ mod tests {
             .await
             .expect("activate A");
         (state, repository_a, repository_b, member_a, member_b)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_321_c_authorization_preparation_cannot_rearm_after_activation() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let active_a = state.repository.lock().unwrap().clone().expect("active A");
+        let control = authorize_test_commit(&state, active_a.clone()).await;
+
+        // Re-observe a fresh review so the racing request can pause after
+        // async preparation while retaining the current workflow selector.
+        invalidate_repository_commit_review(&state).await;
+        let generation = *state.repository_generation.lock().unwrap();
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let (snapshot, review) =
+            desktop_repository_snapshot_with_review(&active_a, Some(Arc::clone(&control)))
+                .await
+                .expect("fresh review observes");
+        let snapshot = install_repository_workflow(
+            &state,
+            &active_a,
+            generation,
+            snapshot,
+            review,
+            identity_generation,
+        );
+        let StagedReviewPresentation::ReviewAvailable {
+            review_id: Some(review_id),
+            ..
+        } = snapshot.review
+        else {
+            panic!("fresh review should be authorizable");
+        };
+
+        let mut reached = install_authorization_barrier(&state);
+        let authorization_state = Arc::clone(&state);
+        let authorization = tokio::spawn(async move {
+            authorize_repository_commit_review(&authorization_state, &review_id).await
+        });
+        reached
+            .recv()
+            .await
+            .expect("authorization reached post-preparation barrier");
+
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        assert_eq!(activation.await.unwrap(), Ok(ActivationOutcome::Activated));
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_b)
+        );
+        assert!(!control.has_pending_authorization().await);
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        // Install meaningful B presentation state while the old A writer is
+        // still paused; resumption must not overwrite it.
+        state.repository_workflow.lock().unwrap().authorization =
+            CommitAuthorizationPresentation::ReadyToAuthorize;
+
+        release_authorization_barrier(&state);
+        assert!(matches!(
+            authorization.await.unwrap(),
+            Err(FrontendError::CommitAuthorizationStale)
+        ));
+        assert!(!control.has_pending_authorization().await);
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::ReadyToAuthorize
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
