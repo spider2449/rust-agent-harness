@@ -231,6 +231,7 @@ enum ConnectionState {
         model_generation: u64,
         profile_generation: u64,
         connection_generation: u64,
+        identity_generation: u64,
         repository_fingerprint: Option<String>,
         composition: Arc<DesktopToolComposition>,
         allowed_permissions: Vec<PermissionLevel>,
@@ -389,6 +390,10 @@ struct DesktopAppState {
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     repository_workflow: Mutex<RepositoryWorkflowState>,
+    /// At most one process-local asynchronous Stage/Unstage effect may hold
+    /// the active repository lifecycle epoch at a time.
+    repository_index_effect_reservation: Mutex<Option<RepositoryIndexEffectReservation>>,
+    next_repository_index_effect_token: Mutex<u64>,
     commit_identity: Mutex<Option<DesktopCommitIdentity>>,
     commit_identity_generation: Mutex<u64>,
     commit_capability: Mutex<Option<DesktopCommitCapability>>,
@@ -413,6 +418,10 @@ struct DesktopAppState {
     activation_test_hook: Mutex<Option<Arc<ActivationTestHook>>>,
     #[cfg(test)]
     authorization_test_hook: Mutex<Option<Arc<AuthorizationTestHook>>>,
+    #[cfg(test)]
+    connect_publication_test_hook: Mutex<Option<Arc<ConnectPublicationTestHook>>>,
+    #[cfg(test)]
+    index_effect_test_hook: Mutex<Option<Arc<IndexEffectTestHook>>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -426,6 +435,20 @@ struct ActivationTestHook {
 #[cfg(target_os = "windows")]
 #[cfg(test)]
 struct AuthorizationTestHook {
+    reached: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+struct ConnectPublicationTestHook {
+    reached: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+struct IndexEffectTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
     release: Arc<std::sync::Barrier>,
 }
@@ -494,6 +517,8 @@ impl DesktopAppState {
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
+            repository_index_effect_reservation: Mutex::new(None),
+            next_repository_index_effect_token: Mutex::new(0),
             commit_identity: Mutex::new(identity),
             commit_identity_generation: Mutex::new(0),
             commit_capability: Mutex::new(None),
@@ -516,6 +541,10 @@ impl DesktopAppState {
             activation_test_hook: Mutex::new(None),
             #[cfg(test)]
             authorization_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            connect_publication_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            index_effect_test_hook: Mutex::new(None),
         }
     }
 }
@@ -1263,12 +1292,23 @@ enum RepositoryIndexActionKind {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone)]
 struct RepositoryIndexAction {
     kind: RepositoryIndexActionKind,
     repository_generation: u64,
     observation_generation: u64,
     target: PathBuf,
     target_observation: TargetObservation,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct RepositoryIndexEffectReservation {
+    token: u64,
+    repository_generation: u64,
+    member_id: Option<RepositoryMemberId>,
+    kind: RepositoryIndexActionKind,
+    repository: Arc<DesktopRepository>,
 }
 
 #[cfg(target_os = "windows")]
@@ -1899,6 +1939,24 @@ fn connection_activation_publication_is_current(captured: [u64; 4], current: [u6
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConnectionPublicationCurrentness {
+    repository_generation: u64,
+    model_generation: u64,
+    profile_generation: u64,
+    connection_generation: u64,
+    identity_generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn connection_publication_is_current(
+    captured: ConnectionPublicationCurrentness,
+    current: ConnectionPublicationCurrentness,
+) -> bool {
+    captured == current
+}
+
+#[cfg(target_os = "windows")]
 fn current_host_generation_tuple(state: &DesktopAppState) -> [u64; 4] {
     [
         *state
@@ -1938,6 +1996,7 @@ struct PendingConnectedPublication {
     model_generation: u64,
     profile_generation: u64,
     connection_generation: u64,
+    identity_generation: u64,
     repository_fingerprint: Option<String>,
     composition: Arc<DesktopToolComposition>,
     allowed_permissions: Vec<PermissionLevel>,
@@ -1993,19 +2052,24 @@ fn publish_connected_provider_state(
         .next_connection_generation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !connection_activation_publication_is_current(
-        [
-            pending.repository_generation,
-            pending.model_generation,
-            pending.profile_generation,
-            pending.connection_generation,
-        ],
-        [
-            *current_repository_generation,
-            current_model.generation,
-            *current_profile_generation,
-            *current_connection_generation,
-        ],
+    if !connection_publication_is_current(
+        ConnectionPublicationCurrentness {
+            repository_generation: pending.repository_generation,
+            model_generation: pending.model_generation,
+            profile_generation: pending.profile_generation,
+            connection_generation: pending.connection_generation,
+            identity_generation: pending.identity_generation,
+        },
+        ConnectionPublicationCurrentness {
+            repository_generation: *current_repository_generation,
+            model_generation: current_model.generation,
+            profile_generation: *current_profile_generation,
+            connection_generation: *current_connection_generation,
+            identity_generation: *state
+                .commit_identity_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        },
     ) {
         let PendingConnectedPublication {
             runtime,
@@ -2044,6 +2108,7 @@ fn publish_connected_provider_state(
         model_generation,
         profile_generation,
         connection_generation,
+        identity_generation,
         repository_fingerprint,
         composition,
         allowed_permissions,
@@ -2057,6 +2122,7 @@ fn publish_connected_provider_state(
         model_generation,
         profile_generation,
         connection_generation,
+        identity_generation,
         repository_fingerprint,
         composition,
         allowed_permissions,
@@ -2117,6 +2183,7 @@ fn get_effective_authority_snapshot(
             model_generation,
             profile_generation,
             connection_generation,
+            identity_generation,
             composition,
             ..
         } => {
@@ -2128,6 +2195,10 @@ fn get_effective_authority_snapshot(
                 .next_connection_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current_identity_generation = *state
+                .commit_identity_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let context_current = [
                 *repository_generation,
                 *model_generation,
@@ -2137,19 +2208,21 @@ fn get_effective_authority_snapshot(
                 current_model_generation,
                 current_profile_generation,
             ];
-            let publication_current = connection_activation_publication_is_current(
-                [
-                    *repository_generation,
-                    *model_generation,
-                    *profile_generation,
-                    *connection_generation,
-                ],
-                [
-                    current_repository_generation,
-                    current_model_generation,
-                    current_profile_generation,
-                    current_connection_generation,
-                ],
+            let publication_current = connection_publication_is_current(
+                ConnectionPublicationCurrentness {
+                    repository_generation: *repository_generation,
+                    model_generation: *model_generation,
+                    profile_generation: *profile_generation,
+                    connection_generation: *connection_generation,
+                    identity_generation: *identity_generation,
+                },
+                ConnectionPublicationCurrentness {
+                    repository_generation: current_repository_generation,
+                    model_generation: current_model_generation,
+                    profile_generation: current_profile_generation,
+                    connection_generation: current_connection_generation,
+                    identity_generation: current_identity_generation,
+                },
             );
             let repository_context_matches = selected || *repository_generation == 0;
             let current = context_current
@@ -2388,6 +2461,7 @@ fn current_host_composition(
         model_generation,
         profile_generation,
         connection_generation,
+        identity_generation,
         repository_fingerprint,
         composition,
         allowed_permissions,
@@ -2402,7 +2476,12 @@ fn current_host_composition(
         *profile_generation,
         *connection_generation,
     ];
+    let current_identity_generation = *state
+        .commit_identity_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if generations != current_generations
+        || *identity_generation != current_identity_generation
         || repository_identity != *repository_fingerprint
         || composition.registry.definitions().len() != composition.tools.len()
         || composition.expected_definitions.len() != composition.tools.len()
@@ -4747,6 +4826,9 @@ fn set_model_configuration(
         .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if repository_index_effect_is_active(state.inner()) {
+        return Err(FrontendError::RepositoryBusy);
+    }
     let _ordering = state
         .preference_ordering
         .lock()
@@ -4820,6 +4902,9 @@ fn set_commit_identity(
         .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if repository_index_effect_is_active(state.inner()) {
+        return Err(FrontendError::RepositoryBusy);
+    }
     let _ordering = state
         .preference_ordering
         .lock()
@@ -4866,6 +4951,9 @@ fn reset_model_preferences(
         .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if repository_index_effect_is_active(state.inner()) {
+        return Err(FrontendError::RepositoryBusy);
+    }
     let _ordering = state
         .preference_ordering
         .lock()
@@ -6007,6 +6095,36 @@ fn authorization_pre_publication_barrier(_state: &DesktopAppState) {
 }
 
 #[cfg(target_os = "windows")]
+fn connect_pre_publication_barrier(_state: &DesktopAppState) {
+    #[cfg(test)]
+    let hook = _state
+        .connect_publication_test_hook
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        let _ = hook.reached.send(());
+        hook.release.wait();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn index_effect_pre_execution_barrier(_state: &DesktopAppState) {
+    #[cfg(test)]
+    let hook = _state
+        .index_effect_test_hook
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        let _ = hook.reached.send(());
+        hook.release.wait();
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn reserve_commit_revocation(state: &DesktopAppState) -> Result<(), FrontendError> {
     let control = state
         .commit_capability
@@ -6018,6 +6136,216 @@ fn reserve_commit_revocation(state: &DesktopAppState) -> Result<(), FrontendErro
         return Err(FrontendError::RepositoryBusy);
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn repository_index_effect_is_active(state: &DesktopAppState) -> bool {
+    state
+        .repository_index_effect_reservation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+#[cfg(target_os = "windows")]
+fn repository_index_effect_binding_is_current(
+    state: &DesktopAppState,
+    reservation: &RepositoryIndexEffectReservation,
+) -> bool {
+    let current_member = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .active_member();
+    let current_repository = state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    current_member == reservation.member_id
+        && *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == reservation.repository_generation
+        && current_repository
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &reservation.repository))
+}
+
+#[cfg(target_os = "windows")]
+fn begin_repository_index_effect(
+    state: &DesktopAppState,
+    action_id: &str,
+    kind: RepositoryIndexActionKind,
+) -> Result<(RepositoryIndexEffectReservation, RepositoryIndexAction), FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if repository_index_effect_is_active(state) {
+        return Err(FrontendError::RepositoryBusy);
+    }
+
+    let repository = state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or(FrontendError::RepositoryNotSelected)?;
+    let member_id = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .active_member();
+    let generation = *state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let action = {
+        let workflow = state
+            .repository_workflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let action = workflow
+            .actions
+            .get(action_id)
+            .cloned()
+            .ok_or(FrontendError::RepositoryActionInvalid)?;
+        if action.kind != kind
+            || action.repository_generation != generation
+            || action.observation_generation != workflow.observation_generation
+        {
+            return Err(FrontendError::RepositoryActionStale);
+        }
+        action
+    };
+    if !repository_index_effect_binding_is_current(
+        state,
+        &RepositoryIndexEffectReservation {
+            token: 0,
+            repository_generation: generation,
+            member_id,
+            kind,
+            repository: Arc::clone(&repository),
+        },
+    ) {
+        return Err(FrontendError::RepositoryActionStale);
+    }
+
+    // This is the last fallible transition before the reservation and action
+    // consumption are published. A busy pending Commit slot leaves all state
+    // intact and performs no index work.
+    reserve_commit_revocation(state)?;
+    let token = {
+        let mut next = state
+            .next_repository_index_effect_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *next = next.checked_add(1).ok_or(FrontendError::RepositoryBusy)?;
+        *next
+    };
+    let reservation = RepositoryIndexEffectReservation {
+        token,
+        repository_generation: generation,
+        member_id,
+        kind,
+        repository,
+    };
+    {
+        let mut workflow = state
+            .repository_workflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        workflow.actions.remove(action_id);
+        workflow.actions.clear();
+        workflow.review = None;
+        workflow.commit_review = None;
+        workflow.review_selector = None;
+        workflow.authorization = CommitAuthorizationPresentation::AuthorizationRevoked;
+    }
+    *state
+        .repository_index_effect_reservation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reservation.clone());
+    Ok((reservation, action))
+}
+
+#[cfg(target_os = "windows")]
+async fn refresh_repository_workflow_for_index_effect(
+    state: &DesktopAppState,
+    reservation: &RepositoryIndexEffectReservation,
+) -> Result<RepositorySnapshot, FrontendError> {
+    {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|current| {
+                current.token == reservation.token
+                    && current.kind == reservation.kind
+                    && repository_index_effect_binding_is_current(state, current)
+            });
+        if !current {
+            return Err(FrontendError::RepositoryBusy);
+        }
+    }
+    let refreshed = refresh_repository_workflow(state).await;
+    {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|current| {
+                current.token == reservation.token
+                    && current.kind == reservation.kind
+                    && repository_index_effect_binding_is_current(state, current)
+            });
+        if !current {
+            return Err(FrontendError::RepositoryBusy);
+        }
+    }
+    refreshed
+}
+
+#[cfg(target_os = "windows")]
+async fn complete_repository_index_effect(
+    state: &DesktopAppState,
+    reservation: &RepositoryIndexEffectReservation,
+) -> Result<(), FrontendError> {
+    let refresh_result = refresh_repository_workflow_for_index_effect(state, reservation).await;
+    let current = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current_reservation = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match current_reservation.as_ref() {
+            Some(current) if current.token == reservation.token => {
+                let binding_current = repository_index_effect_binding_is_current(state, current);
+                current_reservation.take();
+                binding_current
+            }
+            Some(_) | None => false,
+        }
+    };
+    if !current {
+        return Err(FrontendError::RepositoryBusy);
+    }
+    refresh_result.map(|_| ())
 }
 
 #[cfg(target_os = "windows")]
@@ -6051,6 +6379,9 @@ fn publish_activation_if_current(
         .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if repository_index_effect_is_active(state) {
+        return Err(FrontendError::RepositoryBusy);
+    }
 
     let member = state
         .workspace_membership
@@ -6427,6 +6758,9 @@ async fn authorize_repository_commit_review(
             .lifecycle_coordination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if repository_index_effect_is_active(state) {
+            return Err(FrontendError::RepositoryBusy);
+        }
         let repository_generation = *state
             .repository_generation
             .lock()
@@ -6567,54 +6901,16 @@ async fn repository_index_action(
     action_id: String,
     kind: RepositoryIndexActionKind,
 ) -> Result<RepositoryIndexActionResult, FrontendError> {
-    let control = state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .map(|capability| Arc::clone(&capability.control));
-    if let Some(control) = control {
-        control.clear_authorization().await;
-    }
-    let generation = *state
-        .repository_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let action = {
-        let mut workflow = state
-            .repository_workflow
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let action = workflow
-            .actions
-            .remove(&action_id)
-            .ok_or(FrontendError::RepositoryActionInvalid)?;
-        // Every attempt consumes the complete observed catalog: no action can
-        // survive a possible index effect, including known failure/uncertainty.
-        workflow.actions.clear();
-        workflow.review = None;
-        if action.kind != kind
-            || action.repository_generation != generation
-            || action.observation_generation != workflow.observation_generation
-        {
-            return Err(FrontendError::RepositoryActionStale);
-        }
-        action
-    };
-    let repository = state
-        .repository
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .ok_or(FrontendError::RepositoryNotSelected)?;
+    let (reservation, action) = begin_repository_index_effect(state, &action_id, kind)?;
     if !target_is_current(&action.target_observation) {
-        let _ = refresh_repository_workflow(state).await;
+        complete_repository_index_effect(state, &reservation).await?;
         return Err(FrontendError::RepositoryActionStale);
     }
-    let result = match kind {
+    index_effect_pre_execution_barrier(state);
+    let result = match reservation.kind {
         RepositoryIndexActionKind::Stage => match GitStageTool::new(
-            &repository.git_executable,
-            &repository.root,
+            &reservation.repository.git_executable,
+            &reservation.repository.root,
             action.target.to_string_lossy(),
             &action.target,
         ) {
@@ -6625,8 +6921,8 @@ async fn repository_index_action(
             Err(error) => Err(error),
         },
         RepositoryIndexActionKind::Unstage => match GitUnstageTool::new(
-            &repository.git_executable,
-            &repository.root,
+            &reservation.repository.git_executable,
+            &reservation.repository.root,
             action.target.to_string_lossy(),
             &action.target,
         ) {
@@ -6637,7 +6933,7 @@ async fn repository_index_action(
             Err(error) => Err(error),
         },
     };
-    let _ = refresh_repository_workflow(state).await;
+    complete_repository_index_effect(state, &reservation).await?;
     let output = result.map_err(|_| FrontendError::RepositoryObservationFailed)?;
     let value = observer_json(output)?;
     let status = value
@@ -7123,6 +7419,7 @@ async fn connect_codex(
                 "model_generation": model_generation,
                 "profile_generation": profile_generation,
                 "connection_generation": connection_generation,
+                "identity_generation": identity_generation,
                 "selected_repository": repository.is_some(),
                 "selected_profile": selected_profile,
                 "deletion_authority_present": repository
@@ -7160,6 +7457,7 @@ async fn connect_codex(
     {
         Ok((runtime, source)) => {
             let runtime = Arc::new(runtime);
+            connect_pre_publication_barrier(state.inner());
             let published_fingerprint = repository_fingerprint.clone();
             let current_repository_generation = *state
                 .repository_generation
@@ -7178,19 +7476,25 @@ async fn connect_codex(
                 .next_connection_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let stale = !connection_activation_publication_is_current(
-                [
+            let current_identity_generation = *state
+                .commit_identity_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stale = !connection_publication_is_current(
+                ConnectionPublicationCurrentness {
                     repository_generation,
                     model_generation,
                     profile_generation,
                     connection_generation,
-                ],
-                [
-                    current_repository_generation,
-                    current_model_generation,
-                    current_profile_generation,
-                    current_connection_generation,
-                ],
+                    identity_generation,
+                },
+                ConnectionPublicationCurrentness {
+                    repository_generation: current_repository_generation,
+                    model_generation: current_model_generation,
+                    profile_generation: current_profile_generation,
+                    connection_generation: current_connection_generation,
+                    identity_generation: current_identity_generation,
+                },
             );
             if stale {
                 append_live_evidence(serde_json::json!({
@@ -7201,6 +7505,8 @@ async fn connect_codex(
                     "current_model_generation": current_model_generation,
                     "captured_profile_generation": profile_generation,
                     "current_profile_generation": current_profile_generation,
+                    "captured_identity_generation": identity_generation,
+                    "current_identity_generation": current_identity_generation,
                     "connection_generation": connection_generation,
                 }));
                 if let Err(error) = runtime.shutdown().await {
@@ -7227,6 +7533,7 @@ async fn connect_codex(
                 model_generation,
                 profile_generation,
                 connection_generation,
+                identity_generation,
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
                 allowed_permissions: retained_allowed_permissions,
@@ -7305,6 +7612,9 @@ async fn disconnect_codex(
             .lifecycle_coordination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if repository_index_effect_is_active(state.inner()) {
+            return Err(FrontendError::RepositoryBusy);
+        }
         if *state
             .chat
             .lock()
@@ -8563,13 +8873,14 @@ mod tests {
         ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
         AuthorizationTestHook, BranchActivityClassification, CancelRecoveryOutcome, ChatEvent,
         ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
-        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
-        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
-        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
-        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
-        HostActivityEvent, HostActivityState, HostInvocationCoordinator,
-        HostInvocationUnavailableReason, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
+        ConnectPublicationTestHook, ConnectRequest, ConnectionState, ConversationContextChange,
+        ConversationContextIdentity, CreateFileResultClassification, DESKTOP_TOOL_NAME,
+        DeleteFileResultClassification, DesktopAppState, DesktopCommitCapability,
+        DesktopCommitIdentity, DesktopConversationState, DesktopModelProvider,
+        DesktopModelSelection, DesktopModelState, DesktopRepository, DesktopToolComposition,
+        FrontendError, GracefulCancelOutcome, HardShutdownOutcome, HostActivityEvent,
+        HostActivityState, HostInvocationCoordinator, HostInvocationUnavailableReason,
+        IndexEffectTestHook, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
         MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
         MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
         Preferences, PreferencesWarning, PreparedDeleteFileResponse, PreparedHostInvocation,
@@ -8599,15 +8910,16 @@ mod tests {
         publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
-        repository_context_fingerprint, repository_index_action, repository_selection_allowed,
-        repository_selection_allowed_for_connection, repository_snapshot,
-        repository_tool_authority, request_connect, reset_startup_activation_counters,
-        resolve_codex_executable, resolve_prepare_and_connect_codex,
-        restore_trusted_profile_selection, revoke_repository_commit_context, run_host_tool,
-        safe_delete_file_activity_result, same_arc, save_trusted_profile_preference,
-        selected_git_executable, set_commit_identity, startup_activation_snapshot,
-        uncertain_repository_effect_pending, uncertain_repository_effect_requires_refresh,
-        validate_host_confirmation_ticket, validate_prompt,
+        repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
+        repository_selection_allowed, repository_selection_allowed_for_connection,
+        repository_snapshot, repository_tool_authority, request_connect,
+        reset_startup_activation_counters, resolve_codex_executable,
+        resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
+        revoke_repository_commit_context, run_host_tool, safe_delete_file_activity_result,
+        same_arc, save_trusted_profile_preference, selected_git_executable, set_commit_identity,
+        startup_activation_snapshot, uncertain_repository_effect_pending,
+        uncertain_repository_effect_requires_refresh, validate_host_confirmation_ticket,
+        validate_prompt,
     };
     use super::{SUPPORTED_CODEX_VERSION, current_host_composition};
     use async_trait::async_trait;
@@ -14890,6 +15202,10 @@ mod tests {
                 model_generation,
                 profile_generation,
                 connection_generation,
+                identity_generation: *state
+                    .commit_identity_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
                 repository_fingerprint,
                 composition: Arc::clone(&composition),
                 allowed_permissions: vec![
@@ -15379,6 +15695,10 @@ mod tests {
                 model_generation,
                 profile_generation,
                 connection_generation,
+                identity_generation: *state
+                    .commit_identity_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
                 repository_fingerprint: Some(repository_context_fingerprint(&selected.root)),
                 composition: Arc::clone(&composition),
                 allowed_permissions: vec![
@@ -15809,6 +16129,51 @@ mod tests {
             [4, 5, 6, 9],
             [4, 5, 6, 10],
         ));
+    }
+
+    #[test]
+    fn connect_publication_currentness_includes_commit_identity_generation() {
+        let captured = super::ConnectionPublicationCurrentness {
+            repository_generation: 4,
+            model_generation: 5,
+            profile_generation: 6,
+            connection_generation: 9,
+            identity_generation: 10,
+        };
+        assert!(super::connection_publication_is_current(captured, captured));
+        let mut changed = captured;
+        changed.identity_generation += 1;
+        assert!(!super::connection_publication_is_current(captured, changed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_321_e_identity_change_at_connect_publication_barrier_is_stale() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let captured = super::ConnectionPublicationCurrentness {
+            repository_generation: 1,
+            model_generation: 0,
+            profile_generation: 0,
+            connection_generation: 1,
+            identity_generation: *state.commit_identity_generation.lock().unwrap(),
+        };
+        let mut reached = install_connect_publication_barrier(&state);
+        let barrier_state = Arc::clone(&state);
+        let barrier = tokio::task::spawn_blocking(move || {
+            super::connect_pre_publication_barrier(&barrier_state);
+        });
+        reached
+            .recv()
+            .await
+            .expect("Connect reached final publication barrier");
+        *state.commit_identity_generation.lock().unwrap() += 1;
+        let current = super::ConnectionPublicationCurrentness {
+            identity_generation: *state.commit_identity_generation.lock().unwrap(),
+            ..captured
+        };
+        assert!(!super::connection_publication_is_current(captured, current));
+        release_connect_publication_barrier(&state);
+        barrier.await.unwrap();
     }
 
     #[test]
@@ -16342,6 +16707,55 @@ mod tests {
         release.wait();
     }
 
+    fn install_connect_publication_barrier(
+        state: &DesktopAppState,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.connect_publication_test_hook.lock().unwrap() =
+            Some(Arc::new(ConnectPublicationTestHook {
+                reached,
+                release: Arc::new(std::sync::Barrier::new(2)),
+            }));
+        receiver
+    }
+
+    fn release_connect_publication_barrier(state: &DesktopAppState) {
+        let release = state
+            .connect_publication_test_hook
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .release
+            .clone();
+        release.wait();
+        *state.connect_publication_test_hook.lock().unwrap() = None;
+    }
+
+    fn install_index_effect_barrier(
+        state: &DesktopAppState,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.index_effect_test_hook.lock().unwrap() = Some(Arc::new(IndexEffectTestHook {
+            reached,
+            release: Arc::new(std::sync::Barrier::new(2)),
+        }));
+        receiver
+    }
+
+    fn release_index_effect_barrier(state: &DesktopAppState) {
+        let release = state
+            .index_effect_test_hook
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .release
+            .clone();
+        release.wait();
+        *state.index_effect_test_hook.lock().unwrap() = None;
+    }
+
     async fn activation_fixture() -> (
         Arc<DesktopAppState>,
         TestRepository,
@@ -16824,6 +17238,154 @@ mod tests {
             review_selector: workflow.review_selector.clone(),
             authorization: workflow.authorization,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_321_e_stage_reservation_wins_over_activation() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Modified);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        refresh_repository_workflow(&state)
+            .await
+            .expect("observe A stage action");
+        let action_id = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .actions
+            .iter()
+            .find(|(_, action)| action.kind == RepositoryIndexActionKind::Stage)
+            .map(|(id, _)| id.clone())
+            .expect("A should expose a Stage action");
+
+        let mut reached = install_index_effect_barrier(&state);
+        let stage_state = Arc::clone(&state);
+        let stage = tokio::spawn(async move {
+            repository_index_action(&stage_state, action_id, RepositoryIndexActionKind::Stage).await
+        });
+        reached
+            .recv()
+            .await
+            .expect("Stage reached the pre-effect barrier");
+        let generation = *state.repository_generation.lock().unwrap();
+        assert!(repository_index_effect_is_active(&state));
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+
+        release_index_effect_barrier(&state);
+        let result = stage.await.unwrap().expect("Stage should finish once");
+        assert_eq!(result.status, "ok");
+        assert!(!repository_index_effect_is_active(&state));
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Ok(ActivationOutcome::Activated)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_321_e_unstage_reservation_wins_over_activation() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        refresh_repository_workflow(&state)
+            .await
+            .expect("observe A unstage action");
+        let action_id = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .actions
+            .iter()
+            .find(|(_, action)| action.kind == RepositoryIndexActionKind::Unstage)
+            .map(|(id, _)| id.clone())
+            .expect("A should expose an Unstage action");
+
+        let mut reached = install_index_effect_barrier(&state);
+        let unstage_state = Arc::clone(&state);
+        let unstage = tokio::spawn(async move {
+            repository_index_action(
+                &unstage_state,
+                action_id,
+                RepositoryIndexActionKind::Unstage,
+            )
+            .await
+        });
+        reached
+            .recv()
+            .await
+            .expect("Unstage reached the pre-effect barrier");
+        assert!(repository_index_effect_is_active(&state));
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Err(FrontendError::RepositoryBusy)
+        );
+        release_index_effect_barrier(&state);
+        let result = unstage.await.unwrap().expect("Unstage should finish once");
+        assert_eq!(result.status, "ok");
+        assert!(!repository_index_effect_is_active(&state));
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Ok(ActivationOutcome::Activated)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_321_e_old_index_completion_cannot_clear_newer_reservation() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let fixture = TestRepository::git_repository(GitRepositoryState::Modified);
+        let git = TestRepository::native_git();
+        let member = admit_repository(&state, &git, &fixture.0).expect("admit repository");
+        activate_admitted_member(&state, member)
+            .await
+            .expect("activate repository");
+        let repository = state.repository.lock().unwrap().clone().unwrap();
+        let old = super::RepositoryIndexEffectReservation {
+            token: 1,
+            repository_generation: *state.repository_generation.lock().unwrap(),
+            member_id: Some(member),
+            kind: RepositoryIndexActionKind::Stage,
+            repository: Arc::clone(&repository),
+        };
+        let newer = super::RepositoryIndexEffectReservation {
+            token: 2,
+            ..old.clone()
+        };
+        *state.repository_index_effect_reservation.lock().unwrap() = Some(newer);
+        assert_eq!(
+            super::complete_repository_index_effect(&state, &old).await,
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|reservation| reservation.token),
+            Some(2)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
