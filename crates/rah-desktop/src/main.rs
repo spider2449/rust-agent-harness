@@ -8914,29 +8914,32 @@ mod tests {
         ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
         AuthorizationTestHook, BranchActivityClassification, CancelRecoveryOutcome, ChatEvent,
         ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
-        ConnectPublicationTestHook, ConnectRequest, ConnectionState, ConversationContextChange,
-        ConversationContextIdentity, CreateFileResultClassification, DESKTOP_TOOL_NAME,
-        DeleteFileResultClassification, DesktopAppState, DesktopCommitCapability,
-        DesktopCommitIdentity, DesktopConversationState, DesktopModelProvider,
-        DesktopModelSelection, DesktopModelState, DesktopRepository, DesktopToolComposition,
-        FrontendError, GracefulCancelOutcome, HardShutdownOutcome, HostActivityEvent,
-        HostActivityState, HostInvocationCoordinator, HostInvocationUnavailableReason,
-        IndexEffectTestHook, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
-        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
-        MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
-        Preferences, PreferencesWarning, PreparedDeleteFileResponse, PreparedHostInvocation,
-        PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput, ProviderEndpointPresentation,
-        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
-        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RepositoryIndexActionKind,
+        ConnectPublicationTestHook, ConnectRequest, ConnectionPublicationCurrentness,
+        ConnectionState, ConversationContextChange, ConversationContextIdentity,
+        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
+        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
+        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
+        HostActivityEvent, HostActivityState, HostInvocationCoordinator,
+        HostInvocationUnavailableReason, IndexEffectTestHook, LlamaCppReadinessProbe,
+        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
+        ModelConfigurationPresentation, MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY,
+        PendingConnectedPublication, Preferences, PreferencesWarning, PreparedDeleteFileResponse,
+        PreparedHostInvocation, PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput,
+        ProviderEndpointPresentation, ProviderPublicationRejectionReason, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ReadinessState, RejectedProviderPublication, RepositoryIndexActionKind,
         RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
         SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
         activate_admitted_member, activate_repository_member_selector, activity_event,
         activity_event_with_composition, admit_repository, apply_model_selection,
         authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, begin_connect, branch_result_classification,
-        classify_repository_delete_file_result, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
+        await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
+        branch_result_classification, classify_repository_delete_file_result,
+        classify_repository_multi_file_output, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation,
+        complete_repository_index_effect, connect_codex, connect_prepared_codex,
+        connection_activation_publication_is_current, connection_publication_is_current,
         current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
         desktop_repository_snapshot, desktop_repository_snapshot_with_review,
         desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
@@ -9004,7 +9007,7 @@ mod tests {
         path::{Path, PathBuf},
         process::Command,
         sync::{
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         thread,
@@ -9190,6 +9193,7 @@ mod tests {
     }
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    static FAKE_CODEX_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 
     #[test]
     fn desktop_connect_preparation_keeps_equivalent_auto_and_override_inputs_identical() {
@@ -16797,132 +16801,431 @@ mod tests {
         *state.index_effect_test_hook.lock().unwrap() = None;
     }
 
-    fn install_test_index_effect_reservation(
+    async fn start_real_index_reservation(
         state: &DesktopAppState,
         kind: RepositoryIndexActionKind,
+    ) -> (
+        String,
+        super::RepositoryIndexEffectReservation,
+        super::RepositoryIndexAction,
     ) {
-        let repository = state
-            .repository
+        refresh_repository_workflow(state)
+            .await
+            .expect("normal repository observation should produce an action");
+        let action_id = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .actions
+            .iter()
+            .find(|(_, action)| action.kind == kind)
+            .map(|(id, _)| id.clone())
+            .expect("workflow should expose the requested real index action");
+        let (reservation, action) = begin_repository_index_effect(state, &action_id, kind)
+            .expect("real index action should install its reservation");
+        let installed = state
+            .repository_index_effect_reservation
             .lock()
             .unwrap()
             .clone()
-            .expect("test repository should be selected");
-        let repository_generation = *state.repository_generation.lock().unwrap();
-        *state.repository_index_effect_reservation.lock().unwrap() =
-            Some(super::RepositoryIndexEffectReservation {
-                token: 1,
-                repository_generation,
-                member_id: None,
-                kind,
-                repository,
-            });
-    }
-
-    #[test]
-    fn task_321_g_connect_admission_rejects_stage_and_unstage_reservations() {
-        for kind in [
-            RepositoryIndexActionKind::Stage,
-            RepositoryIndexActionKind::Unstage,
-        ] {
-            let storage = TestRepository::new();
-            let state = DesktopAppState::new(storage.0.clone());
-            let repository = TestRepository::git_repository(GitRepositoryState::Clean);
-            replace_selected_repository(&state, repository.desktop_repository());
-            install_test_index_effect_reservation(&state, kind);
-            reset_startup_activation_counters();
-
-            assert_eq!(begin_connect(&state), Err(FrontendError::RepositoryBusy));
-            assert!(matches!(
-                *state.connection.lock().unwrap(),
-                ConnectionState::NotConnected
-            ));
-            assert_eq!(*state.next_connection_generation.lock().unwrap(), 0);
-            assert_eq!(
-                startup_activation_snapshot(),
-                StartupActivationCounters::default()
-            );
-            assert!(state.provider_activation.lock().unwrap().is_none());
-            assert!(state.commit_capability.lock().unwrap().is_none());
-            let reservation = state
-                .repository_index_effect_reservation
+            .expect("real reservation should be published in Desktop state");
+        assert_eq!(installed.token, reservation.token);
+        assert_eq!(
+            installed.repository_generation,
+            reservation.repository_generation
+        );
+        assert_eq!(installed.member_id, reservation.member_id);
+        assert!(matches!(
+            (installed.kind, reservation.kind),
+            (
+                RepositoryIndexActionKind::Stage,
+                RepositoryIndexActionKind::Stage
+            ) | (
+                RepositoryIndexActionKind::Unstage,
+                RepositoryIndexActionKind::Unstage
+            )
+        ));
+        assert!(Arc::ptr_eq(&installed.repository, &reservation.repository));
+        assert!(reservation.token > 0);
+        assert!(
+            !state
+                .repository_workflow
                 .lock()
                 .unwrap()
-                .clone()
-                .expect("Connect must not clear the reservation");
-            assert_eq!(reservation.token, 1);
-            match (reservation.kind, kind) {
-                (RepositoryIndexActionKind::Stage, RepositoryIndexActionKind::Stage)
-                | (RepositoryIndexActionKind::Unstage, RepositoryIndexActionKind::Unstage) => {}
-                _ => panic!("Connect must preserve the reservation action kind"),
-            }
+                .actions
+                .contains_key(&action_id)
+        );
+        assert!(state.repository_workflow.lock().unwrap().actions.is_empty());
+        assert!(state.repository_workflow.lock().unwrap().review.is_none());
+        assert!(
             state
-                .repository_index_effect_reservation
+                .repository_workflow
                 .lock()
                 .unwrap()
-                .take();
-            assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
-            assert!(matches!(
-                *state.connection.lock().unwrap(),
-                ConnectionState::Connecting
-            ));
-        }
+                .commit_review
+                .is_none()
+        );
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::AuthorizationRevoked
+        );
+        (action_id, reservation, action)
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_321_g_stage_reservation_rejects_connect_at_final_publication_gate() {
+    async fn activate_real_index_fixture(
+        kind: RepositoryIndexActionKind,
+    ) -> (
+        Arc<DesktopAppState>,
+        TestRepository,
+        RepositoryMemberId,
+        String,
+        super::RepositoryIndexEffectReservation,
+        super::RepositoryIndexAction,
+    ) {
         let storage = TestRepository::new();
         let state = Arc::new(DesktopAppState::new(storage.0.clone()));
-        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
-        replace_selected_repository(&state, repository.desktop_repository());
+        let repository = TestRepository::git_repository(match kind {
+            RepositoryIndexActionKind::Stage => GitRepositoryState::Modified,
+            RepositoryIndexActionKind::Unstage => GitRepositoryState::Staged,
+        });
+        let member = admit_repository(&state, &TestRepository::native_git(), &repository.0)
+            .expect("repository admission should succeed");
+        activate_admitted_member(&state, member)
+            .await
+            .expect("repository activation should succeed");
+        let (action_id, reservation, action) = start_real_index_reservation(&state, kind).await;
+        assert_eq!(reservation.member_id, Some(member));
+        let selected = state.repository.lock().unwrap().clone().unwrap();
+        assert!(Arc::ptr_eq(&selected, &reservation.repository));
+        assert_eq!(
+            reservation.repository_generation,
+            *state.repository_generation.lock().unwrap()
+        );
+        (state, repository, member, action_id, reservation, action)
+    }
+
+    fn fake_codex_executable() -> PathBuf {
+        FAKE_CODEX_EXECUTABLE
+            .get_or_init(|| {
+                let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+                let root = std::env::temp_dir().join(format!(
+                    "rah-desktop-fake-codex-{}-{sequence}",
+                    std::process::id()
+                ));
+                fs::create_dir(&root).expect("fake Codex fixture directory should be created");
+                let source = root.join("main.rs");
+                let executable = root.join("codex.exe");
+                let program = r##"
+use std::{env, fs, io::{self, BufRead, Write}, path::PathBuf};
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|arg| arg == "--version") {
+        println!("codex-cli 0.149.0");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("app-server")
+        && args.get(2).map(String::as_str) == Some("generate-json-schema")
+    {
+        let out = args
+            .iter()
+            .position(|arg| arg == "--out")
+            .and_then(|index| args.get(index + 1))
+            .map(PathBuf::from)
+            .expect("schema output directory");
+        let files = [
+            ("v1/InitializeParams.json", "[\"clientInfo\"]", ""),
+            ("v2/ThreadStartResponse.json", "[\"thread\",\"cwd\"]", "\"instructionSources\":{}"),
+            ("v2/ThreadStartParams.json", "[]", "\"cwd\":{},\"dynamicTools\":{}"),
+            ("v2/TurnStartParams.json", "[\"threadId\",\"input\"]", ""),
+            ("v2/TurnStartResponse.json", "[\"turn\"]", ""),
+            ("v2/ThreadResumeParams.json", "[\"threadId\"]", ""),
+            ("v2/AgentMessageDeltaNotification.json", "[\"threadId\",\"turnId\",\"itemId\",\"delta\"]", ""),
+            ("v2/TurnCompletedNotification.json", "[\"threadId\",\"turn\"]", ""),
+            ("v2/TurnInterruptParams.json", "[\"threadId\",\"turnId\"]", ""),
+            ("DynamicToolCallParams.json", "[\"threadId\",\"turnId\",\"callId\",\"tool\",\"arguments\"]", ""),
+            ("DynamicToolCallResponse.json", "[\"contentItems\",\"success\"]", ""),
+        ];
+        for (path, required, properties) in files {
+            let path = out.join(path);
+            fs::create_dir_all(path.parent().expect("schema parent")).expect("schema parent");
+            let body = String::from("{\"required\":") + required
+                + ",\"properties\":{" + properties + "}}";
+            fs::write(path, body).expect("schema file");
+        }
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("app-server")
+        && args.get(2).map(String::as_str) == Some("--stdio")
+    {
+        for line in io::stdin().lock().lines() {
+            let line = line.expect("stdio request");
+            if line.contains("\"method\":\"initialize\"") {
+                let id = line
+                    .split("\"id\":")
+                    .nth(1)
+                    .and_then(|rest| rest.split(',').next())
+                    .expect("request id");
+                println!("{{\"id\":{},\"result\":{{}}}}", id);
+                io::stdout().flush().expect("stdio response");
+            }
+        }
+    }
+}
+"##;
+                fs::write(&source, program).expect("fake Codex source should be written");
+                let output = Command::new("rustc")
+                    .args(["--edition", "2024"])
+                    .arg(&source)
+                    .args(["-o"])
+                    .arg(&executable)
+                    .output()
+                    .expect("rustc should compile fake Codex");
+                assert!(
+                    output.status.success(),
+                    "fake Codex compilation failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let _ = fs::remove_file(source);
+                executable
+            })
+            .clone()
+    }
+
+    async fn test_codex_runtime(
+        workspace: &Path,
+        registry: Arc<ToolRegistry>,
+    ) -> Arc<CodexRuntime> {
+        Arc::new(
+            CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
+                fake_codex_executable(),
+                registry,
+                vec![
+                    PermissionLevel::None,
+                    PermissionLevel::Read,
+                    PermissionLevel::Execute,
+                ],
+                CodexModelConfig::Inherit,
+                workspace,
+            )
+            .await
+            .expect("deterministic fake Codex runtime should connect"),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_321_i_real_stage_reservation_rejects_real_connect_admission() {
+        let (state, _repository, _member, _action_id, reservation, _action) =
+            activate_real_index_fixture(RepositoryIndexActionKind::Stage).await;
+        let token = reservation.token;
+        let generation = *state.repository_generation.lock().unwrap();
+        reset_startup_activation_counters();
+
+        assert_eq!(begin_connect(&state), Err(FrontendError::RepositoryBusy));
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert_eq!(*state.next_connection_generation.lock().unwrap(), 0);
+        assert_eq!(
+            startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        let preserved = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("Connect must preserve the real Stage reservation");
+        assert_eq!(preserved.token, token);
+        assert_eq!(preserved.repository_generation, generation);
+        assert!(matches!(preserved.kind, RepositoryIndexActionKind::Stage));
+
+        complete_repository_index_effect(&state, &reservation)
+            .await
+            .expect("real Stage reservation should complete normally");
+        assert!(!repository_index_effect_is_active(&state));
         assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
         assert!(matches!(
             *state.connection.lock().unwrap(),
             ConnectionState::Connecting
         ));
+    }
 
-        let mut reached = install_connect_publication_barrier(&state);
-        let barrier_state = Arc::clone(&state);
-        let barrier = tokio::task::spawn_blocking(move || {
-            super::connect_pre_publication_barrier(&barrier_state);
-        });
-        reached
-            .recv()
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_321_i_real_unstage_reservation_rejects_connect_admission() {
+        let (state, _repository, _member, _action_id, reservation, _action) =
+            activate_real_index_fixture(RepositoryIndexActionKind::Unstage).await;
+        let token = reservation.token;
+        assert_eq!(begin_connect(&state), Err(FrontendError::RepositoryBusy));
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        let preserved = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("Connect must preserve the real Unstage reservation");
+        assert_eq!(preserved.token, token);
+        assert!(matches!(preserved.kind, RepositoryIndexActionKind::Unstage));
+
+        complete_repository_index_effect(&state, &reservation)
             .await
-            .expect("Connect reached final publication barrier");
+            .expect("real Unstage reservation should complete normally");
+        assert!(!repository_index_effect_is_active(&state));
+        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+    }
 
-        install_test_index_effect_reservation(&state, RepositoryIndexActionKind::Stage);
-        assert!(repository_index_effect_is_active(&state));
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_321_i_real_stage_reservation_rejects_real_connect_publication() {
+        let (state, repository_fixture, _member, _action_id, initial_reservation, _action) =
+            activate_real_index_fixture(RepositoryIndexActionKind::Stage).await;
+        complete_repository_index_effect(&state, &initial_reservation)
+            .await
+            .expect("initial real Stage fixture reservation should complete");
+        assert!(!repository_index_effect_is_active(&state));
+        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+        let connection_generation = {
+            let mut generation = state.next_connection_generation.lock().unwrap();
+            *generation += 1;
+            *generation
+        };
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::Connecting
+        ));
+
+        let selected = state.repository.lock().unwrap().clone().unwrap();
+        let registry = desktop_tool_registry(Some(&selected), None)
+            .expect("real Desktop registry should compose");
+        let composition = desktop_tool_composition_from_registry(
+            Arc::clone(&registry),
+            Some(&selected),
+            false,
+            &[],
+        )
+        .expect("real Desktop composition should classify");
+        let runtime = test_codex_runtime(&selected.root, Arc::clone(&registry)).await;
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let model_generation = state.model.lock().unwrap().generation;
+        let profile_generation = *state.trusted_profile_generation.lock().unwrap();
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let (commit_tool, commit_control) = RepositoryCommitTool::compose(
+            &selected.git_executable,
+            &selected.root,
+            "RAH Task 321-I".to_owned(),
+            "rah-task-321-i@example.invalid".to_owned(),
+        )
+        .expect("pending Commit capability should compose");
+        let commit_control = Arc::new(commit_control);
+        let pending = PendingConnectedPublication {
+            runtime: Arc::clone(&runtime),
+            activation: None,
+            source: CodexExecutableSource::Path,
+            repository_generation,
+            model_generation,
+            profile_generation,
+            connection_generation,
+            identity_generation,
+            repository_fingerprint: Some(repository_context_fingerprint(&selected.root)),
+            composition,
+            allowed_permissions: vec![
+                PermissionLevel::None,
+                PermissionLevel::Read,
+                PermissionLevel::Execute,
+            ],
+            commit_capability: Some(DesktopCommitCapability {
+                repository_generation,
+                model_generation,
+                identity_generation,
+                _tool: Arc::new(commit_tool),
+                control: Arc::clone(&commit_control),
+            }),
+        };
+        let pending_control_count = Arc::strong_count(&commit_control);
+        assert!(connection_publication_is_current(
+            ConnectionPublicationCurrentness {
+                repository_generation,
+                model_generation,
+                profile_generation,
+                connection_generation,
+                identity_generation,
+            },
+            ConnectionPublicationCurrentness {
+                repository_generation: *state.repository_generation.lock().unwrap(),
+                model_generation: state.model.lock().unwrap().generation,
+                profile_generation: *state.trusted_profile_generation.lock().unwrap(),
+                connection_generation: *state.next_connection_generation.lock().unwrap(),
+                identity_generation: *state.commit_identity_generation.lock().unwrap(),
+            }
+        ));
+
+        let (_, real_reservation, _) =
+            start_real_index_reservation(&state, RepositoryIndexActionKind::Stage).await;
+        assert!(real_reservation.token > initial_reservation.token);
+        let rejected = publish_connected_provider_state(&state, pending)
+            .expect_err("real publication must reject the active real reservation");
+        let RejectedProviderPublication {
+            runtime: rejected_runtime,
+            activation,
+            reason,
+        } = *rejected;
         assert_eq!(
-            super::connected_publication_index_effect_rejection(&state),
-            Some(super::ProviderPublicationRejectionReason::IndexEffectActive)
+            reason,
+            ProviderPublicationRejectionReason::IndexEffectActive
         );
+        assert!(Arc::ptr_eq(&rejected_runtime, &runtime));
+        assert!(activation.is_none());
         assert!(matches!(
             *state.connection.lock().unwrap(),
             ConnectionState::Connecting
         ));
         assert!(state.provider_activation.lock().unwrap().is_none());
         assert!(state.commit_capability.lock().unwrap().is_none());
-
-        release_connect_publication_barrier(&state);
-        barrier.await.unwrap();
-        assert!(repository_index_effect_is_active(&state));
-        *state.repository_index_effect_reservation.lock().unwrap() = None;
-        *state.connection.lock().unwrap() = ConnectionState::NotConnected;
-        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
-    }
-
-    #[test]
-    fn task_321_g_unstage_reservation_is_seen_by_final_publication_gate() {
-        let storage = TestRepository::new();
-        let state = DesktopAppState::new(storage.0.clone());
-        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
-        replace_selected_repository(&state, repository.desktop_repository());
-        install_test_index_effect_reservation(&state, RepositoryIndexActionKind::Unstage);
-
         assert_eq!(
-            super::connected_publication_index_effect_rejection(&state),
-            Some(super::ProviderPublicationRejectionReason::IndexEffectActive)
+            Arc::strong_count(&commit_control),
+            pending_control_count - 1
         );
+        rejected_runtime
+            .shutdown()
+            .await
+            .expect("rejected runtime ownership should be cleanly shut down");
+
+        let mapped = match reason {
+            ProviderPublicationRejectionReason::IndexEffectActive => {
+                let mut connection = state.connection.lock().unwrap();
+                if matches!(*connection, ConnectionState::Connecting) {
+                    *connection = ConnectionState::NotConnected;
+                }
+                FrontendError::RepositoryBusy
+            }
+            other => panic!("unexpected publication rejection: {other:?}"),
+        };
+        assert_eq!(mapped, FrontendError::RepositoryBusy);
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        let preserved = state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("publication rejection must preserve the real reservation");
+        assert_eq!(preserved.token, real_reservation.token);
+        assert!(matches!(preserved.kind, RepositoryIndexActionKind::Stage));
+        assert!(Arc::ptr_eq(&preserved.repository, &selected));
+        assert!(repository_fixture.0.exists());
+
+        complete_repository_index_effect(&state, &real_reservation)
+            .await
+            .expect("real reservation completion should remain available after rejection");
+        assert!(!repository_index_effect_is_active(&state));
+        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
     }
 
     async fn activation_fixture() -> (
