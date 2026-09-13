@@ -58,7 +58,6 @@ impl WorkspaceMembershipState {
         self.membership_generation
     }
 
-    #[cfg(test)]
     pub(crate) fn active_member(&self) -> Option<RepositoryMemberId> {
         self.active_member
     }

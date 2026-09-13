@@ -156,6 +156,16 @@ impl RepositoryAdmissionIdentity {
         Ok(())
     }
 
+    /// Compares the complete private admission binding without exposing its
+    /// filesystem identities or turning it into a generic filesystem ID.
+    pub fn same_binding(&self, other: &Self) -> bool {
+        self.canonical_root == other.canonical_root
+            && self.root_identity.same_object(&other.root_identity)
+            && self.dot_git_identity.same_object(&other.dot_git_identity)
+            && self.git_executable == other.git_executable
+            && self.git_identity.same_object(&other.git_identity)
+    }
+
     /// Compares two safely captured roots without exposing their raw evidence.
     pub fn relation(&self, other: &Self) -> RepositoryAdmissionRelation {
         if self.root_identity.same_object(&other.root_identity)

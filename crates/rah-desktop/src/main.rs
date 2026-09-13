@@ -89,7 +89,7 @@ use rah_tools::{
     authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
-use repository_membership::{RepositoryMemberId, WorkspaceMembershipState};
+use repository_membership::{InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipState};
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -381,6 +381,10 @@ struct DesktopAppState {
     workspace_membership: Mutex<WorkspaceMembershipState>,
     /// Serializes admission and activation publication transactions.
     membership_coordination: Mutex<()>,
+    /// Excludes activation publication from lifecycle transitions that can
+    /// change connection, model, or HostExplicit authority state. Every
+    /// mutating transition acquires this first, then its state locks.
+    lifecycle_coordination: Mutex<()>,
     repository: Mutex<Option<Arc<DesktopRepository>>>,
     repository_generation: Mutex<u64>,
     repository_workflow: Mutex<RepositoryWorkflowState>,
@@ -404,6 +408,15 @@ struct DesktopAppState {
     conversation: Mutex<DesktopConversationState>,
     persistence: Mutex<Persistence>,
     close_started: AtomicBool,
+    #[cfg(test)]
+    activation_test_hook: Mutex<Option<Arc<ActivationTestHook>>>,
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+struct ActivationTestHook {
+    reached: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<std::sync::Barrier>,
 }
 
 #[cfg(target_os = "windows")]
@@ -466,6 +479,7 @@ impl DesktopAppState {
             next_connection_generation: Mutex::new(0),
             workspace_membership: Mutex::new(WorkspaceMembershipState::new()),
             membership_coordination: Mutex::new(()),
+            lifecycle_coordination: Mutex::new(()),
             repository: Mutex::new(None),
             repository_generation: Mutex::new(0),
             repository_workflow: Mutex::new(RepositoryWorkflowState::default()),
@@ -487,6 +501,8 @@ impl DesktopAppState {
             conversation: Mutex::new(DesktopConversationState::default()),
             persistence: Mutex::new(persistence),
             close_started: AtomicBool::new(false),
+            #[cfg(test)]
+            activation_test_hook: Mutex::new(None),
         }
     }
 }
@@ -699,6 +715,10 @@ impl DesktopConversationState {
 #[cfg(target_os = "windows")]
 impl DesktopAppState {
     fn start_chat(&self) -> Result<u64, FrontendError> {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut coordinator = self
                 .host_invocation
@@ -790,6 +810,10 @@ impl DesktopAppState {
         runtime: &Arc<CodexRuntime>,
         session_id: &SessionId,
     ) -> bool {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let active = self
             .active_chat
             .lock()
@@ -818,6 +842,10 @@ impl DesktopAppState {
         runtime: &Arc<CodexRuntime>,
         session_id: &SessionId,
     ) -> bool {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut active = self
             .active_chat
             .lock()
@@ -868,6 +896,10 @@ impl DesktopAppState {
     }
 
     fn claim_start_failure(&self, generation: u64) -> bool {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut active = self
             .active_chat
             .lock()
@@ -892,6 +924,10 @@ impl DesktopAppState {
     }
 
     fn finish_chat(&self, generation: u64) {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut active = self
                 .active_chat
@@ -1029,6 +1065,10 @@ impl DesktopAppState {
     }
 
     fn begin_hard_recovery(&self, runtime: &Arc<CodexRuntime>) -> bool {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut connection = self
             .connection
             .lock()
@@ -1041,6 +1081,10 @@ impl DesktopAppState {
     }
 
     fn finish_hard_recovery(&self, success: bool) {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut connection = self
             .connection
             .lock()
@@ -1897,6 +1941,10 @@ fn publish_connected_provider_state(
     state: &DesktopAppState,
     pending: PendingConnectedPublication,
 ) -> Result<(), Box<RejectedProviderPublication>> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut connection = state
         .connection
         .lock()
@@ -3097,6 +3145,10 @@ async fn host_invoke_read(
 ) -> Result<HostInvocationResponse, FrontendError> {
     let (kind, name, input) =
         read_request(request).map_err(|_| FrontendError::HostInvocationInvalidInput)?;
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut coordinator = state
         .host_invocation
         .lock()
@@ -3167,6 +3219,10 @@ fn host_prepare_repo_create_branch(
     if !validate_bounded_string(&request.name, DESKTOP_HOST_BRANCH_NAME_MAX_BYTES) {
         return Err(FrontendError::HostInvocationInvalidInput);
     }
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut coordinator = state
         .host_invocation
         .lock()
@@ -3461,6 +3517,10 @@ fn rename_file_preparation_frontend_error(
 
 #[cfg(target_os = "windows")]
 fn abort_host_patch_prepare(state: &DesktopAppState) {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     state
         .host_invocation
         .lock()
@@ -3476,6 +3536,10 @@ async fn host_prepare_repo_patch(
     state: State<'_, DesktopAppState>,
 ) -> Result<PreparedPatchResponse, FrontendError> {
     {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3542,6 +3606,10 @@ async fn host_prepare_repo_patch(
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
     let (ticket_id, activity_id, ticket) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3589,6 +3657,10 @@ async fn host_prepare_repo_edit_files(
     state: State<'_, DesktopAppState>,
 ) -> Result<PreparedMultiFileEditResponse, FrontendError> {
     {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3663,6 +3735,10 @@ async fn host_prepare_repo_edit_files(
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
     let (ticket_id, activity_id) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3707,6 +3783,10 @@ async fn host_prepare_repo_create_file(
     state: State<'_, DesktopAppState>,
 ) -> Result<PreparedCreateFileResponse, FrontendError> {
     {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3770,6 +3850,10 @@ async fn host_prepare_repo_create_file(
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
     let (ticket_id, activity_id) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3856,6 +3940,10 @@ async fn prepare_repo_delete_file_with_current(
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
     let (ticket_id, activity_id) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3900,6 +3988,10 @@ async fn host_prepare_repo_delete_file(
     state: State<'_, DesktopAppState>,
 ) -> Result<PreparedDeleteFileResponse, FrontendError> {
     {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -3973,6 +4065,10 @@ async fn prepare_repo_rename_file_with_current(
     let review = preparation.review().clone();
     let call = host_call(name.clone(), preparation.tool_input().clone());
     let (ticket_id, activity_id) = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -4017,6 +4113,10 @@ async fn host_prepare_repo_rename_file(
     state: State<'_, DesktopAppState>,
 ) -> Result<PreparedRenameFileResponse, FrontendError> {
     {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -4158,6 +4258,10 @@ async fn host_confirm_tool_invocation(
     state: State<'_, DesktopAppState>,
 ) -> Result<HostInvocationResponse, FrontendError> {
     let ticket = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coordinator = state
             .host_invocation
             .lock()
@@ -4266,6 +4370,10 @@ fn host_cancel_tool_invocation(
     app: AppHandle,
     state: State<'_, DesktopAppState>,
 ) -> Result<(), FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut coordinator = state
         .host_invocation
         .lock()
@@ -5751,12 +5859,29 @@ fn publish_active_repository(
 }
 
 #[cfg(target_os = "windows")]
-async fn activate_admitted_member(
+#[derive(Clone)]
+struct ActivationTransaction {
+    target_member_id: RepositoryMemberId,
+    target_admission_generation: u64,
+    target_identity: RepositoryAdmissionIdentity,
+    expected_active_member: Option<RepositoryMemberId>,
+    expected_repository_generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn capture_activation_transaction(
     state: &DesktopAppState,
     member_id: RepositoryMemberId,
-) -> Result<(), FrontendError> {
-    let _coordination = state
+) -> Result<(ActivationTransaction, InertRepositoryMember), FrontendError> {
+    // Lock order for activation is membership coordination, lifecycle
+    // coordination, then the individual host state locks. The first two
+    // locks are held only for synchronous state capture/checks.
+    let _membership_coordination = state
         .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     repository_selection_allowed(
@@ -5784,14 +5909,129 @@ async fn activate_admitted_member(
             }
         }
     }
+    let membership = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let member = membership
+        .member(member_id)
+        .cloned()
+        .ok_or(FrontendError::RepositoryMemberNotFound)?;
+    let transaction = ActivationTransaction {
+        target_member_id: member.id,
+        target_admission_generation: member.admission_generation,
+        target_identity: member.identity.clone(),
+        expected_active_member: membership.active_member(),
+        expected_repository_generation: *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    };
+    Ok((transaction, member))
+}
+
+#[cfg(target_os = "windows")]
+fn activation_pre_publication_barrier(_state: &DesktopAppState) {
+    #[cfg(test)]
+    let hook = _state
+        .activation_test_hook
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        let _ = hook.reached.send(());
+        hook.release.wait();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn publish_activation_if_current(
+    state: &DesktopAppState,
+    transaction: &ActivationTransaction,
+    repository: DesktopRepository,
+) -> Result<(), FrontendError> {
+    // This is the linearization point for activation. Lifecycle transitions
+    // acquire the same exclusion before changing connection, chat/model, or
+    // HostExplicit state. Prepared is invalidated while that exclusion is
+    // held, so Confirm cannot consume it between invalidation and publication.
+    let _membership_coordination = state
+        .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let member = state
         .workspace_membership
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .member(member_id)
+        .member(transaction.target_member_id)
         .cloned()
-        .ok_or(FrontendError::RepositoryMemberNotFound)?;
+        .ok_or(FrontendError::RepositoryMemberStale)?;
+    if member.id != transaction.target_member_id
+        || member.admission_generation != transaction.target_admission_generation
+        || !member.identity.same_binding(&transaction.target_identity)
+    {
+        return Err(FrontendError::RepositoryMemberStale);
+    }
+    if state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .active_member()
+        != transaction.expected_active_member
+        || *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            != transaction.expected_repository_generation
+    {
+        return Err(FrontendError::RepositoryBusy);
+    }
+
+    repository_selection_allowed(
+        *state
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    repository_selection_allowed_for_connection(
+        &state
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )?;
+    {
+        let mut coordinator = state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        coordinator.reap_expired(std::time::Instant::now());
+        match coordinator.state() {
+            CoordinatorState::Idle => {}
+            CoordinatorState::HostPrepared => coordinator.clear_prepared(),
+            CoordinatorState::ModelTurn | CoordinatorState::HostRunning => {
+                return Err(FrontendError::HostInvocationBusy);
+            }
+        }
+    }
+    let git = selected_git_executable().map_err(|_| FrontendError::RepositoryMemberStale)?;
+    member
+        .identity
+        .revalidate(&git, &member.root)
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
+    publish_active_repository(state, member.id, repository)
+}
+
+#[cfg(target_os = "windows")]
+async fn activate_admitted_member(
+    state: &DesktopAppState,
+    member_id: RepositoryMemberId,
+) -> Result<(), FrontendError> {
+    let (transaction, member) = capture_activation_transaction(state, member_id)?;
     let git = selected_git_executable().map_err(|_| FrontendError::RepositoryMemberStale)?;
     member
         .identity
@@ -5806,31 +6046,9 @@ async fn activate_admitted_member(
         .identity
         .revalidate(&git, &member.root)
         .map_err(|_| FrontendError::RepositoryMemberStale)?;
-
-    repository_selection_allowed(
-        *state
-            .chat
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )?;
-    repository_selection_allowed_for_connection(
-        &state
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )?;
-    drop(_coordination);
     revoke_repository_commit_context(state).await;
-    state
-        .host_invocation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear_prepared();
-    let _publication_coordination = state
-        .membership_coordination
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    publish_active_repository(state, member.id, repository)
+    activation_pre_publication_barrier(state);
+    publish_activation_if_current(state, &transaction, repository)
 }
 
 #[cfg(target_os = "windows")]
@@ -6339,16 +6557,20 @@ where
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
-    if state
-        .host_invocation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .state()
-        != CoordinatorState::Idle
     {
-        return Err(FrontendError::HostInvocationBusy);
-    }
-    {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::Idle
+        {
+            return Err(FrontendError::HostInvocationBusy);
+        }
         let mut connection = state
             .connection
             .lock()
@@ -6724,26 +6946,29 @@ async fn connect_codex(
 async fn disconnect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
-    if *state
-        .chat
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        != ChatState::Idle
-    {
-        return Err(FrontendError::ChatAlreadyRunning);
-    }
-    if matches!(
-        state
-            .host_invocation
+    let runtime = {
+        let _lifecycle_coordination = state
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state
+            .chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state(),
-        CoordinatorState::ModelTurn | CoordinatorState::HostPrepared
-    ) {
-        return Err(FrontendError::HostInvocationBusy);
-    }
-    let runtime = {
-        revoke_repository_commit_context(state.inner()).await;
+            != ChatState::Idle
+        {
+            return Err(FrontendError::ChatAlreadyRunning);
+        }
+        if matches!(
+            state
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state(),
+            CoordinatorState::ModelTurn | CoordinatorState::HostPrepared
+        ) {
+            return Err(FrontendError::HostInvocationBusy);
+        }
         let mut connection = state
             .connection
             .lock()
@@ -6756,6 +6981,7 @@ async fn disconnect_codex(
             }
         }
     };
+    revoke_repository_commit_context(state.inner()).await;
 
     let activation = state
         .provider_activation
@@ -6784,6 +7010,10 @@ async fn disconnect_codex(
         return Err(frontend_error);
     }
 
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut connection = state
         .connection
         .lock()
@@ -6825,10 +7055,11 @@ fn repository_selection_allowed(chat: ChatState) -> Result<(), FrontendError> {
 fn repository_selection_allowed_for_connection(
     connection: &ConnectionState,
 ) -> Result<(), FrontendError> {
-    if matches!(connection, ConnectionState::Connecting) {
-        Err(FrontendError::RepositoryBusy)
-    } else {
-        Ok(())
+    match connection {
+        ConnectionState::NotConnected | ConnectionState::Error(_) => Ok(()),
+        ConnectionState::Connecting
+        | ConnectionState::Connected { .. }
+        | ConnectionState::Disconnecting => Err(FrontendError::RepositoryBusy),
     }
 }
 
@@ -7970,13 +8201,15 @@ mod tests {
         HostPrepareMultiFileEditTarget, HostPreparePatchRequest, HostPrepareRenameFileRequest,
         HostReadRequest, host_descriptor, host_descriptor_with_rename,
     };
+    use super::repository_membership::RepositoryMemberId;
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
-        ActivityEvent, ActivityResult, BranchActivityClassification, CancelRecoveryOutcome,
-        ChatEvent, ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
-        ConnectRequest, ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
-        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        ActivationTestHook, ActivityEvent, ActivityResult, BranchActivityClassification,
+        CancelRecoveryOutcome, ChatEvent, ChatState, CodexExecutableSourcePresentation,
+        CommitAuthorizationPresentation, ConnectRequest, ConnectionState,
+        ConversationContextChange, ConversationContextIdentity, CreateFileResultClassification,
+        DESKTOP_TOOL_NAME, DeleteFileResultClassification, DesktopAppState,
+        DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
         DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
         HostActivityEvent, HostActivityState, HostInvocationCoordinator,
@@ -15486,6 +15719,371 @@ mod tests {
                 .count(),
             11
         );
+    }
+
+    fn install_activation_barrier(
+        state: &DesktopAppState,
+        parties: usize,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.activation_test_hook.lock().unwrap() = Some(Arc::new(ActivationTestHook {
+            reached,
+            release: Arc::new(std::sync::Barrier::new(parties)),
+        }));
+        receiver
+    }
+
+    fn release_activation_barrier(state: &DesktopAppState) {
+        let release = state
+            .activation_test_hook
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .release
+            .clone();
+        release.wait();
+    }
+
+    async fn activation_fixture() -> (
+        Arc<DesktopAppState>,
+        TestRepository,
+        TestRepository,
+        RepositoryMemberId,
+        RepositoryMemberId,
+    ) {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        (state, repository_a, repository_b, member_a, member_b)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activation_connection_transition_wins_before_publication() {
+        let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final barrier");
+        {
+            let _lifecycle = state.lifecycle_coordination.lock().unwrap();
+            let mut connection = state.connection.lock().unwrap();
+            assert_eq!(request_connect(&mut connection), ConnectRequest::Start);
+        }
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activation_model_turn_transition_wins_before_publication() {
+        let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final barrier");
+        state
+            .start_chat()
+            .expect("model turn starts under lifecycle gate");
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prepared_confirm_wins_before_activation_publication() {
+        let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .unwrap();
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final barrier");
+        {
+            let _lifecycle = state.lifecycle_coordination.lock().unwrap();
+            let mut coordinator = state.host_invocation.lock().unwrap();
+            coordinator
+                .take_prepared("test-ticket", std::time::Instant::now())
+                .expect("Confirm consumes the prepared ticket");
+        }
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::HostInvocationBusy)
+        );
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostRunning
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn host_running_at_activation_final_gate_blocks_publication() {
+        let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final barrier");
+        {
+            let _lifecycle = state.lifecycle_coordination.lock().unwrap();
+            state.host_invocation.lock().unwrap().begin_read().unwrap();
+        }
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::HostInvocationBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_activations_from_one_generation_have_one_winner() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_c = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let member_c = admit_repository(&state, &git, &repository_c.0).expect("admit C");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let mut reached = install_activation_barrier(&state, 3);
+        let state_b = Arc::clone(&state);
+        let state_c = Arc::clone(&state);
+        let activation_b =
+            tokio::spawn(async move { activate_admitted_member(&state_b, member_b).await });
+        let activation_c =
+            tokio::spawn(async move { activate_admitted_member(&state_c, member_c).await });
+        reached.recv().await.expect("B reached final barrier");
+        reached.recv().await.expect("C reached final barrier");
+        release_activation_barrier(&state);
+        let result_b = activation_b.await.unwrap();
+        let result_c = activation_c.await.unwrap();
+        assert_eq!(
+            [result_b.is_ok(), result_c.is_ok()]
+                .into_iter()
+                .filter(|winner| *winner)
+                .count(),
+            1
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
+        let active = state
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .active_member()
+            .unwrap();
+        assert!(active == member_b || active == member_c);
+        let active_root = state
+            .repository
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .root
+            .clone();
+        let expected_root = if active == member_b {
+            &repository_b.0
+        } else {
+            &repository_c.0
+        };
+        assert_eq!(active_root, fs::canonicalize(expected_root).unwrap());
+        let loser = if active == member_b {
+            result_c
+        } else {
+            result_b
+        };
+        assert_eq!(loser, Err(FrontendError::RepositoryBusy));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn target_removed_or_replaced_during_activation_fails_closed() {
+        let (state, _repository_a, repository_b, member_a, member_b) = activation_fixture().await;
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final barrier");
+        {
+            let _coordination = state.membership_coordination.lock().unwrap();
+            assert!(
+                state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .remove(member_b)
+                    .is_some()
+            );
+        }
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+
+        let member_b = admit_repository(&state, &TestRepository::native_git(), &repository_b.0)
+            .expect("re-admit B");
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("second activation reached final barrier");
+        fs::remove_dir_all(repository_b.0.join(".git")).expect("remove B metadata");
+        fs::create_dir(repository_b.0.join(".git")).expect("replace B metadata");
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activation_rejects_changed_previous_member_or_generation() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_c = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let member_c = admit_repository(&state, &git, &repository_c.0).expect("admit C");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached member barrier");
+        {
+            let _coordination = state.membership_coordination.lock().unwrap();
+            assert!(
+                state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .publish_active(member_c)
+            );
+        }
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryBusy)
+        );
+
+        state
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .publish_active(member_a);
+        *state.repository_generation.lock().unwrap() = 1;
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached generation barrier");
+        *state.repository_generation.lock().unwrap() = 2;
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
     }
 
     #[test]
