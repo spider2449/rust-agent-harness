@@ -129,9 +129,10 @@ invalidation begins.
   remained exactly 11 names; Task 315 nested-boundary regressions remained
   green. No persistence/removal/product/release scope was added.
 
-The two production/test commits are `93cd67e` and the plan commit `d4b9e76`.
-The pushed `d4b9e76a08fd85e433e76c6103c39faed274890d` passed exact-head CI
-run `34735031891`. This closure-document revision is pushed separately and
+Production commits are `93cd67e` and `82b64b3`; documentation commits are
+`d4b9e76` and `71695f1`. The final pushed head is
+`82b64b3944e0d794779160e2708e7f0c8881e769` and passed exact-head CI run
+`34735460593`. The closure-document revision was pushed separately and
 will receive its own exact-head CI verification. Final result: **Outcome A —
 ACTIVATION INVALIDATION ATOMICITY CLOSED**. F-319-1 is closed, including the
 HostPrepared final-target-validation ordering extension.
