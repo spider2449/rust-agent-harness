@@ -1984,6 +1984,7 @@ fn current_host_generation_tuple(state: &DesktopAppState) -> [u64; 4] {
 enum ProviderPublicationRejectionReason {
     Superseded,
     Stale,
+    IndexEffectActive,
     DuplicateOwner,
 }
 
@@ -2033,6 +2034,18 @@ fn publish_connected_provider_state(
             runtime,
             activation,
             reason: ProviderPublicationRejectionReason::Superseded,
+        }));
+    }
+    if let Some(reason) = connected_publication_index_effect_rejection(state) {
+        let PendingConnectedPublication {
+            runtime,
+            activation,
+            ..
+        } = pending;
+        return Err(Box::new(RejectedProviderPublication {
+            runtime,
+            activation,
+            reason,
         }));
     }
 
@@ -6148,6 +6161,14 @@ fn repository_index_effect_is_active(state: &DesktopAppState) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn connected_publication_index_effect_rejection(
+    state: &DesktopAppState,
+) -> Option<ProviderPublicationRejectionReason> {
+    repository_index_effect_is_active(state)
+        .then_some(ProviderPublicationRejectionReason::IndexEffectActive)
+}
+
+#[cfg(target_os = "windows")]
 fn repository_index_effect_binding_is_current(
     state: &DesktopAppState,
     reservation: &RepositoryIndexEffectReservation,
@@ -7207,33 +7228,43 @@ where
 }
 
 #[cfg(target_os = "windows")]
+fn begin_connect(state: &DesktopAppState) -> Result<ConnectRequest, FrontendError> {
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        != CoordinatorState::Idle
+    {
+        return Err(FrontendError::HostInvocationBusy);
+    }
+    let mut connection = state
+        .connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(
+        *connection,
+        ConnectionState::NotConnected | ConnectionState::Error(_)
+    ) && repository_index_effect_is_active(state)
+    {
+        return Err(FrontendError::RepositoryBusy);
+    }
+    Ok(request_connect(&mut connection))
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
-    {
-        let _lifecycle_coordination = state
-            .lifecycle_coordination
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state()
-            != CoordinatorState::Idle
-        {
-            return Err(FrontendError::HostInvocationBusy);
-        }
-        let mut connection = state
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match request_connect(&mut connection) {
-            ConnectRequest::AlreadyConnected => return Ok(ConnectionResult::connected()),
-            ConnectRequest::InProgress => return Ok(ConnectionResult::connecting()),
-            ConnectRequest::Start => {}
-        }
+    match begin_connect(state.inner())? {
+        ConnectRequest::AlreadyConnected => return Ok(ConnectionResult::connected()),
+        ConnectRequest::InProgress => return Ok(ConnectionResult::connecting()),
+        ConnectRequest::Start => {}
     }
 
     let connection_generation = {
@@ -7562,6 +7593,16 @@ async fn connect_codex(
                             *connection = ConnectionState::NotConnected;
                         }
                         Err(FrontendError::CodexReconnectRequired)
+                    }
+                    ProviderPublicationRejectionReason::IndexEffectActive => {
+                        let mut connection = state
+                            .connection
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if matches!(*connection, ConnectionState::Connecting) {
+                            *connection = ConnectionState::NotConnected;
+                        }
+                        Err(FrontendError::RepositoryBusy)
                     }
                     ProviderPublicationRejectionReason::DuplicateOwner => {
                         state.shutdown_provider_activation().await;
@@ -8892,7 +8933,7 @@ mod tests {
         activate_admitted_member, activate_repository_member_selector, activity_event,
         activity_event_with_composition, admit_repository, apply_model_selection,
         authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, branch_result_classification,
+        await_hard_shutdown, begin_chat, begin_connect, branch_result_classification,
         classify_repository_delete_file_result, classify_repository_multi_file_output,
         clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
         connect_codex, connect_prepared_codex, connection_activation_publication_is_current,
@@ -16754,6 +16795,134 @@ mod tests {
             .clone();
         release.wait();
         *state.index_effect_test_hook.lock().unwrap() = None;
+    }
+
+    fn install_test_index_effect_reservation(
+        state: &DesktopAppState,
+        kind: RepositoryIndexActionKind,
+    ) {
+        let repository = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("test repository should be selected");
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        *state.repository_index_effect_reservation.lock().unwrap() =
+            Some(super::RepositoryIndexEffectReservation {
+                token: 1,
+                repository_generation,
+                member_id: None,
+                kind,
+                repository,
+            });
+    }
+
+    #[test]
+    fn task_321_g_connect_admission_rejects_stage_and_unstage_reservations() {
+        for kind in [
+            RepositoryIndexActionKind::Stage,
+            RepositoryIndexActionKind::Unstage,
+        ] {
+            let storage = TestRepository::new();
+            let state = DesktopAppState::new(storage.0.clone());
+            let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+            replace_selected_repository(&state, repository.desktop_repository());
+            install_test_index_effect_reservation(&state, kind);
+            reset_startup_activation_counters();
+
+            assert_eq!(begin_connect(&state), Err(FrontendError::RepositoryBusy));
+            assert!(matches!(
+                *state.connection.lock().unwrap(),
+                ConnectionState::NotConnected
+            ));
+            assert_eq!(*state.next_connection_generation.lock().unwrap(), 0);
+            assert_eq!(
+                startup_activation_snapshot(),
+                StartupActivationCounters::default()
+            );
+            assert!(state.provider_activation.lock().unwrap().is_none());
+            assert!(state.commit_capability.lock().unwrap().is_none());
+            let reservation = state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("Connect must not clear the reservation");
+            assert_eq!(reservation.token, 1);
+            match (reservation.kind, kind) {
+                (RepositoryIndexActionKind::Stage, RepositoryIndexActionKind::Stage)
+                | (RepositoryIndexActionKind::Unstage, RepositoryIndexActionKind::Unstage) => {}
+                _ => panic!("Connect must preserve the reservation action kind"),
+            }
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .take();
+            assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+            assert!(matches!(
+                *state.connection.lock().unwrap(),
+                ConnectionState::Connecting
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_321_g_stage_reservation_rejects_connect_at_final_publication_gate() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        replace_selected_repository(&state, repository.desktop_repository());
+        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::Connecting
+        ));
+
+        let mut reached = install_connect_publication_barrier(&state);
+        let barrier_state = Arc::clone(&state);
+        let barrier = tokio::task::spawn_blocking(move || {
+            super::connect_pre_publication_barrier(&barrier_state);
+        });
+        reached
+            .recv()
+            .await
+            .expect("Connect reached final publication barrier");
+
+        install_test_index_effect_reservation(&state, RepositoryIndexActionKind::Stage);
+        assert!(repository_index_effect_is_active(&state));
+        assert_eq!(
+            super::connected_publication_index_effect_rejection(&state),
+            Some(super::ProviderPublicationRejectionReason::IndexEffectActive)
+        );
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::Connecting
+        ));
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(state.commit_capability.lock().unwrap().is_none());
+
+        release_connect_publication_barrier(&state);
+        barrier.await.unwrap();
+        assert!(repository_index_effect_is_active(&state));
+        *state.repository_index_effect_reservation.lock().unwrap() = None;
+        *state.connection.lock().unwrap() = ConnectionState::NotConnected;
+        assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+    }
+
+    #[test]
+    fn task_321_g_unstage_reservation_is_seen_by_final_publication_gate() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        replace_selected_repository(&state, repository.desktop_repository());
+        install_test_index_effect_reservation(&state, RepositoryIndexActionKind::Unstage);
+
+        assert_eq!(
+            super::connected_publication_index_effect_rejection(&state),
+            Some(super::ProviderPublicationRejectionReason::IndexEffectActive)
+        );
     }
 
     async fn activation_fixture() -> (
