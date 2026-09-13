@@ -121,3 +121,32 @@ member removal, connected repository migration, workspace-wide authority,
 release/version changes, live certification, and Task 322 remain deferred.
 Exact-head CI, final Git alignment, and the final Outcome A/B are recorded in
 the closure report after publication.
+
+## Final closure report
+
+Outcome A — WRITER COORDINATION CORRECTION CLOSED.
+
+- Production commit: `f1602ac`; documentation commit: `fdc24c2`.
+- Parent chain: `eff11d7 -> f1602ac -> fdc24c2`.
+- The authorization-loses case rejects stale A by generation, workflow, and
+  exact capability identity; it cannot re-arm the old pending slot or write
+  B workflow state. The authorization-wins case publishes coherently and is
+  revoked by the normal subsequent activation gate.
+- Model configuration, model reset, Commit identity, and Disconnect all share
+  the lifecycle ordering with activation. Commit revocation precedes capability
+  and workflow withdrawal; busy revocation has no partial writer publication.
+- Task 320 stale-target, loser-after-winner, and successful-switch atomicity
+  remain passing. Task 317 activation races, Task 318 switching/selector,
+  Task 315 nested boundaries, and HostExplicit exact-count coverage remain
+  passing. HostExplicit remains exactly 11 eligible names; `repo.commit` is
+  ineligible.
+- Public Tool names/schemas, PermissionLevel, selector authority, provider
+  protocol, Trusted Profile schema, frontend, and Tauri permissions are
+  unchanged. No persistence or member removal was added.
+- Package/version/edition remain 13 packages, `0.25.0`, and Rust edition 2024.
+  Cargo dependency manifests and `Cargo.lock` are unchanged. No live
+  certification was run. The v0.25 immutable source remains
+  `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
+- Exact-head CI for `fdc24c2` was run `34745160303` and passed. A final
+  documentation-only closure update follows this recorded run and must be
+  validated at its own exact head.
