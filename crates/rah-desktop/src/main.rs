@@ -417,6 +417,7 @@ struct DesktopAppState {
 struct ActivationTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
     release: Arc<std::sync::Barrier>,
+    target_member: Option<RepositoryMemberId>,
 }
 
 #[cfg(target_os = "windows")]
@@ -5819,28 +5820,31 @@ fn publish_active_repository(
     state: &DesktopAppState,
     member_id: RepositoryMemberId,
     repository: DesktopRepository,
-) -> Result<(), FrontendError> {
+) {
     let repository_fingerprint = repository_context_fingerprint(&repository.root);
     let repository = Arc::new(repository);
-    let repository_generation = {
-        let mut membership = state
-            .workspace_membership
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !membership.publish_active(member_id) {
-            return Err(FrontendError::RepositoryMemberNotFound);
-        }
-        *state
-            .repository
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(repository);
-        let mut generation = state
-            .repository_generation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *generation = generation.wrapping_add(1);
-        *generation
-    };
+    let mut membership = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    debug_assert!(membership.member(member_id).is_some());
+    let published = membership.publish_active(member_id);
+    assert!(
+        published,
+        "activation commit member precondition was violated"
+    );
+    *state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(repository);
+    let mut generation = state
+        .repository_generation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *generation = generation.wrapping_add(1);
+    let repository_generation = *generation;
+    drop(generation);
+    drop(membership);
     append_live_evidence(serde_json::json!({
         "event": "repository_selected",
         "repository_generation": repository_generation,
@@ -5856,7 +5860,6 @@ fn publish_active_repository(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .start_new();
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -5898,11 +5901,10 @@ fn capture_activation_transaction(
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
     {
-        let mut coordinator = state
+        let coordinator = state
             .host_invocation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.reap_expired(std::time::Instant::now());
         match coordinator.state() {
             CoordinatorState::Idle | CoordinatorState::HostPrepared => {}
             CoordinatorState::ModelTurn | CoordinatorState::HostRunning => {
@@ -5932,7 +5934,10 @@ fn capture_activation_transaction(
 }
 
 #[cfg(target_os = "windows")]
-fn activation_pre_publication_barrier(_state: &DesktopAppState) {
+fn activation_pre_publication_barrier(
+    _state: &DesktopAppState,
+    _target_member: RepositoryMemberId,
+) {
     #[cfg(test)]
     let hook = _state
         .activation_test_hook
@@ -5940,10 +5945,27 @@ fn activation_pre_publication_barrier(_state: &DesktopAppState) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     #[cfg(test)]
-    if let Some(hook) = hook {
+    if let Some(hook) = hook.filter(|hook| {
+        hook.target_member
+            .is_none_or(|target_member| target_member == _target_member)
+    }) {
         let _ = hook.reached.send(());
         hook.release.wait();
     }
+}
+
+#[cfg(target_os = "windows")]
+fn reserve_commit_revocation(state: &DesktopAppState) -> Result<(), FrontendError> {
+    let control = state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|capability| Arc::clone(&capability.control));
+    if control.is_some_and(|control| !control.try_clear_authorization_now()) {
+        return Err(FrontendError::RepositoryBusy);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -6006,14 +6028,12 @@ fn publish_activation_if_current(
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )?;
     {
-        let mut coordinator = state
+        let coordinator = state
             .host_invocation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        coordinator.reap_expired(std::time::Instant::now());
         match coordinator.state() {
-            CoordinatorState::Idle => {}
-            CoordinatorState::HostPrepared => coordinator.clear_prepared(),
+            CoordinatorState::Idle | CoordinatorState::HostPrepared => {}
             CoordinatorState::ModelTurn | CoordinatorState::HostRunning => {
                 return Err(FrontendError::HostInvocationBusy);
             }
@@ -6024,7 +6044,29 @@ fn publish_activation_if_current(
         .identity
         .revalidate(&git, &member.root)
         .map_err(|_| FrontendError::RepositoryMemberStale)?;
-    publish_active_repository(state, member.id, repository)
+    // This is the final fallible target check. Once Commit revocation is
+    // reserved below, the commit point contains only infallible transitions.
+    reserve_commit_revocation(state)?;
+
+    // No ordinary failure is permitted after this point. The old active
+    // state is invalidated and the new active composition is published as one
+    // synchronous transition under the coordination locks above.
+    state
+        .host_invocation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear_prepared();
+    state
+        .commit_capability
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    *state
+        .repository_workflow
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
+    publish_active_repository(state, member.id, repository);
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -6062,8 +6104,9 @@ async fn activate_admitted_member(
         .identity
         .revalidate(&git, &member.root)
         .map_err(|_| FrontendError::RepositoryMemberStale)?;
-    revoke_repository_commit_context(state).await;
-    activation_pre_publication_barrier(state);
+    // Test synchronization is deliberately before the final gate so stale
+    // and loser candidates cannot pass through post-invalidation state.
+    activation_pre_publication_barrier(state, member_id);
     publish_activation_if_current(state, &transaction, repository)?;
     Ok(ActivationOutcome::Activated)
 }
@@ -8341,12 +8384,12 @@ mod tests {
     use super::repository_membership::RepositoryMemberId;
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
-        ActivationTestHook, ActivityEvent, ActivityResult, BranchActivityClassification,
-        CancelRecoveryOutcome, ChatEvent, ChatState, CodexExecutableSourcePresentation,
-        CommitAuthorizationPresentation, ConnectRequest, ConnectionState,
-        ConversationContextChange, ConversationContextIdentity, CreateFileResultClassification,
-        DESKTOP_TOOL_NAME, DeleteFileResultClassification, DesktopAppState,
-        DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
+        ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
+        BranchActivityClassification, CancelRecoveryOutcome, ChatEvent, ChatState,
+        CodexExecutableSourcePresentation, CommitAuthorizationPresentation, ConnectRequest,
+        ConnectionState, ConversationContextChange, ConversationContextIdentity,
+        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
+        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
         DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
         DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
         HostActivityEvent, HostActivityState, HostInvocationCoordinator,
@@ -16068,6 +16111,20 @@ mod tests {
         *state.activation_test_hook.lock().unwrap() = Some(Arc::new(ActivationTestHook {
             reached,
             release: Arc::new(std::sync::Barrier::new(parties)),
+            target_member: None,
+        }));
+        receiver
+    }
+
+    fn install_activation_member_barrier(
+        state: &DesktopAppState,
+        target_member: RepositoryMemberId,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.activation_test_hook.lock().unwrap() = Some(Arc::new(ActivationTestHook {
+            reached,
+            release: Arc::new(std::sync::Barrier::new(2)),
+            target_member: Some(target_member),
         }));
         receiver
     }
@@ -16421,6 +16478,305 @@ mod tests {
         assert_eq!(
             state.workspace_membership.lock().unwrap().active_member(),
             Some(member_a)
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), 2);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ActivationActionSnapshot {
+        id: String,
+        kind: u8,
+        repository_generation: u64,
+        observation_generation: u64,
+        target: PathBuf,
+        canonical_path: PathBuf,
+        length: u64,
+        modified: Option<SystemTime>,
+        content_digest: [u8; 32],
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ActivationWorkflowSnapshot {
+        observation_generation: u64,
+        next_action: u64,
+        actions: Vec<ActivationActionSnapshot>,
+        review: Option<(u64, u64, String, bool, bool)>,
+        commit_review_present: bool,
+        review_selector: Option<String>,
+        authorization: CommitAuthorizationPresentation,
+    }
+
+    fn activation_workflow_snapshot(state: &DesktopAppState) -> ActivationWorkflowSnapshot {
+        let workflow = state.repository_workflow.lock().unwrap();
+        let mut actions = workflow
+            .actions
+            .iter()
+            .map(|(id, action)| ActivationActionSnapshot {
+                id: id.clone(),
+                kind: match action.kind {
+                    RepositoryIndexActionKind::Stage => 0,
+                    RepositoryIndexActionKind::Unstage => 1,
+                },
+                repository_generation: action.repository_generation,
+                observation_generation: action.observation_generation,
+                target: action.target.clone(),
+                canonical_path: action.target_observation.canonical_path.clone(),
+                length: action.target_observation.length,
+                modified: action.target_observation.modified,
+                content_digest: action.target_observation.content_digest,
+            })
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| left.id.cmp(&right.id));
+        ActivationWorkflowSnapshot {
+            observation_generation: workflow.observation_generation,
+            next_action: workflow.next_action,
+            actions,
+            review: workflow.review.as_ref().map(|review| {
+                (
+                    review.repository_generation,
+                    review.observation_generation,
+                    review.digest.clone(),
+                    review.complete,
+                    review.binary_supported,
+                )
+            }),
+            commit_review_present: workflow.commit_review.is_some(),
+            review_selector: workflow.review_selector.clone(),
+            authorization: workflow.authorization,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_320_stale_target_after_final_preparation_preserves_active_state() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let active_a = state.repository.lock().unwrap().clone().expect("active A");
+        let control = authorize_test_commit(&state, active_a.clone()).await;
+        let generation = *state.repository_generation.lock().unwrap();
+        {
+            let target = repository_a.0.join("tracked.txt").canonicalize().unwrap();
+            let metadata = fs::metadata(&target).unwrap();
+            let mut workflow = state.repository_workflow.lock().unwrap();
+            let observation_generation = workflow.observation_generation;
+            workflow.actions.insert(
+                "A-stage-extra".to_owned(),
+                super::RepositoryIndexAction {
+                    kind: RepositoryIndexActionKind::Stage,
+                    repository_generation: generation,
+                    observation_generation,
+                    target: target.clone(),
+                    target_observation: super::TargetObservation {
+                        canonical_path: target.clone(),
+                        length: metadata.len(),
+                        modified: metadata.modified().ok(),
+                        content_digest: Sha256::digest(fs::read(&target).unwrap()).into(),
+                    },
+                },
+            );
+        }
+        let workflow_before = activation_workflow_snapshot(&state);
+        let conversation_history_len = state.conversation.lock().unwrap().history.len();
+        state
+            .conversation
+            .lock()
+            .unwrap()
+            .history
+            .push(message(MessageRole::User, "A preserved conversation"));
+        let conversation_epoch = state.conversation.lock().unwrap().epoch;
+        let conversation_history = state.conversation.lock().unwrap().history.clone();
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .unwrap();
+        let namespace_before = state.persistence_namespace();
+        let capability_control = state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|capability| Arc::clone(&capability.control))
+            .expect("A Commit capability");
+
+        let mut reached = install_activation_barrier(&state, 2);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("B passed the earlier candidate validation");
+        fs::remove_dir_all(repository_b.0.join(".git")).expect("remove B metadata");
+        fs::create_dir(repository_b.0.join(".git")).expect("replace B metadata");
+        release_activation_barrier(&state);
+
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(
+            state.repository.lock().unwrap().as_ref().unwrap().root,
+            active_a.root
+        );
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+        assert_eq!(activation_workflow_snapshot(&state), workflow_before);
+        assert!(Arc::ptr_eq(
+            &state
+                .commit_capability
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .control,
+            &capability_control
+        ));
+        assert!(control.has_pending_authorization().await);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostPrepared
+        );
+        assert_eq!(state.persistence_namespace(), namespace_before);
+        assert_eq!(state.conversation.lock().unwrap().epoch, conversation_epoch);
+        assert_eq!(
+            state.conversation.lock().unwrap().history,
+            conversation_history
+        );
+        assert_eq!(conversation_history_len + 1, conversation_history.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_320_loser_after_winner_preserves_winner_state() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_c = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let member_c = admit_repository(&state, &git, &repository_c.0).expect("admit C");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+
+        let mut reached_c = install_activation_member_barrier(&state, member_c);
+        let state_c = Arc::clone(&state);
+        let activation_c =
+            tokio::spawn(async move { activate_admitted_member(&state_c, member_c).await });
+        reached_c
+            .recv()
+            .await
+            .expect("C completed candidate preparation");
+
+        let state_b = Arc::clone(&state);
+        let activation_b =
+            tokio::spawn(async move { activate_admitted_member(&state_b, member_b).await });
+        assert_eq!(
+            activation_b.await.unwrap(),
+            Ok(ActivationOutcome::Activated)
+        );
+        let active_b = state.repository.lock().unwrap().clone().expect("active B");
+        let control = authorize_test_commit(&state, active_b).await;
+        let workflow_before = activation_workflow_snapshot(&state);
+        let generation_before = *state.repository_generation.lock().unwrap();
+        let conversation_epoch = state.conversation.lock().unwrap().epoch;
+        state
+            .conversation
+            .lock()
+            .unwrap()
+            .history
+            .push(message(MessageRole::Assistant, "B preserved conversation"));
+        let conversation_history = state.conversation.lock().unwrap().history.clone();
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .unwrap();
+        let namespace_before = state.persistence_namespace();
+
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation_c.await.unwrap(),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_b)
+        );
+        assert_eq!(
+            *state.repository_generation.lock().unwrap(),
+            generation_before
+        );
+        assert_eq!(activation_workflow_snapshot(&state), workflow_before);
+        assert!(control.has_pending_authorization().await);
+        assert!(state.commit_capability.lock().unwrap().is_some());
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostPrepared
+        );
+        assert_eq!(state.persistence_namespace(), namespace_before);
+        assert_eq!(state.conversation.lock().unwrap().epoch, conversation_epoch);
+        assert_eq!(
+            state.conversation.lock().unwrap().history,
+            conversation_history
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_320_successful_switch_invalidates_old_commit_and_workflow_state() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let active_a = state.repository.lock().unwrap().clone().expect("active A");
+        let control = authorize_test_commit(&state, active_a).await;
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .unwrap();
+        assert!(control.has_pending_authorization().await);
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Ok(ActivationOutcome::Activated)
+        );
+        assert!(!control.has_pending_authorization().await);
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::ReviewRequired
+        );
+        assert!(state.repository_workflow.lock().unwrap().actions.is_empty());
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_b)
         );
         assert_eq!(*state.repository_generation.lock().unwrap(), 2);
     }

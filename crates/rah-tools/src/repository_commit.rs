@@ -606,6 +606,17 @@ impl RepositoryCommitControl {
         self.pending.lock().await.take();
     }
 
+    /// Attempts to revoke the one-shot authorization without waiting. This
+    /// narrow host-only seam lets activation fail busy before changing the
+    /// active repository when the pending lock is unavailable.
+    pub fn try_clear_authorization_now(&self) -> bool {
+        let Some(mut pending) = self.pending.try_lock() else {
+            return false;
+        };
+        pending.take();
+        true
+    }
+
     /// Compares a host-created review with the current semantic state and arms
     /// a fresh ADR 0016 snapshot while retaining one lease throughout.
     pub async fn authorize_reviewed_snapshot(
@@ -1011,6 +1022,23 @@ mod tests {
             "rah-host@example.invalid".into(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn try_clear_authorization_now_is_nonblocking_and_preserves_busy_state() {
+        let (git, root) = fixture();
+        let (_, control) = RepositoryCommitTool::compose(
+            &git,
+            &root,
+            "RAH Host".to_owned(),
+            "rah-host@example.invalid".to_owned(),
+        )
+        .unwrap();
+        let pending = control.pending.lock().await;
+        assert!(!control.try_clear_authorization_now());
+        drop(pending);
+        assert!(control.try_clear_authorization_now());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn stage(git: &Path, root: &Path, bytes: &[u8]) {
