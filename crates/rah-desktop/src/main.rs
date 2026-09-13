@@ -5850,10 +5850,6 @@ fn publish_active_repository(
         "repository_generation": repository_generation,
         "repository_fingerprint": repository_fingerprint,
     }));
-    *state
-        .repository_workflow
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
     state.select_persistence_namespace();
     state
         .conversation
