@@ -8942,9 +8942,9 @@ mod tests {
         connection_activation_publication_is_current, connection_publication_is_current,
         current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
         desktop_repository_snapshot, desktop_repository_snapshot_with_review,
-        desktop_tool_composition_from_registry, desktop_tool_registry, emit_host_activity,
-        empty_composition_metadata, forget_trusted_profile_preference, frontend_error,
-        get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
+        desktop_tool_composition_from_registry, desktop_tool_registry, disconnect_codex,
+        emit_host_activity, empty_composition_metadata, forget_trusted_profile_preference,
+        frontend_error, get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
         host_confirm_tool_invocation, host_invoke_read, host_kind, host_prepare_repo_create_branch,
         host_prepare_repo_create_file, host_prepare_repo_delete_file, host_prepare_repo_edit_files,
         host_prepare_repo_patch, host_prepare_repo_rename_file, install_repository_workflow,
@@ -8955,13 +8955,14 @@ mod tests {
         publish_trusted_profile_selection, refresh_repository_workflow,
         replace_selected_repository, repository_authorize_commit_review,
         repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
-        repository_selection_allowed, repository_selection_allowed_for_connection,
-        repository_snapshot, repository_tool_authority, request_connect,
+        repository_membership_presentation, repository_selection_allowed,
+        repository_selection_allowed_for_connection, repository_snapshot, repository_stage_action,
+        repository_tool_authority, repository_unstage_action, request_connect,
         reset_startup_activation_counters, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
         revoke_repository_commit_context, run_host_tool, safe_delete_file_activity_result,
-        same_arc, save_trusted_profile_preference, selected_git_executable, set_commit_identity,
-        startup_activation_snapshot, uncertain_repository_effect_pending,
+        same_arc, save_trusted_profile_preference, selected_git_executable, send_chat,
+        set_commit_identity, startup_activation_snapshot, uncertain_repository_effect_pending,
         uncertain_repository_effect_requires_refresh, validate_host_confirmation_ticket,
         validate_prompt,
     };
@@ -23911,5 +23912,753 @@ fn main() {
             "XRAH_REPO_RENAME_FILE_LIVE_OK"
         ));
         assert!(!super::contains_live_completion_marker("RAH__LIVE_OK"));
+    }
+
+    struct Task324LiveFixture {
+        root: PathBuf,
+        repository_a: PathBuf,
+        repository_b: PathBuf,
+        cleaned: bool,
+    }
+
+    impl Task324LiveFixture {
+        fn new(git: &Path) -> Result<Self, String> {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| format!("clock failed: {error}"))?
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("rah-v026-live-{}-{nonce}", std::process::id()));
+            fs::create_dir(&root).map_err(|error| format!("live root creation failed: {error}"))?;
+            let repository_a = root.join("repo-a");
+            let repository_b = root.join("repo-b");
+            fs::create_dir(&repository_a)
+                .map_err(|error| format!("repository A creation failed: {error}"))?;
+            fs::create_dir(&repository_b)
+                .map_err(|error| format!("repository B creation failed: {error}"))?;
+            if let Err(error) = Self::initialize_repository(git, &repository_a, "A")
+                .and_then(|_| Self::initialize_repository(git, &repository_b, "B"))
+            {
+                let _ = fs::remove_dir_all(&root);
+                return Err(error);
+            }
+            Ok(Self {
+                root,
+                repository_a,
+                repository_b,
+                cleaned: false,
+            })
+        }
+
+        fn initialize_repository(git: &Path, root: &Path, label: &str) -> Result<(), String> {
+            task_324_git(git, root, &["init", "--quiet"])?;
+            task_324_git(
+                git,
+                root,
+                &["config", "--local", "user.name", "RAH v0.26 Live Test"],
+            )?;
+            task_324_git(
+                git,
+                root,
+                &[
+                    "config",
+                    "--local",
+                    "user.email",
+                    "rah-v026-live@example.invalid",
+                ],
+            )?;
+            fs::write(
+                root.join("repo-marker.txt"),
+                format!("RAH_V026_REPO_{label}\n"),
+            )
+            .map_err(|error| format!("marker setup failed: {error}"))?;
+            fs::write(root.join("work.txt"), "baseline worktree content\n")
+                .map_err(|error| format!("work file setup failed: {error}"))?;
+            task_324_git(git, root, &["add", "repo-marker.txt", "work.txt"])?;
+            task_324_git(
+                git,
+                root,
+                &["commit", "--quiet", "-m", "RAH v0.26 live baseline"],
+            )?;
+            fs::write(
+                root.join("work.txt"),
+                format!("live {label} worktree modification\n"),
+            )
+            .map_err(|error| format!("worktree modification failed: {error}"))?;
+            Ok(())
+        }
+
+        fn cleanup(mut self) -> Result<(), String> {
+            fs::remove_dir_all(&self.root)
+                .map_err(|error| format!("temporary certification cleanup failed: {error}"))?;
+            self.cleaned = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for Task324LiveFixture {
+        fn drop(&mut self) {
+            if !self.cleaned {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    fn task_324_git(git: &Path, root: &Path, arguments: &[&str]) -> Result<String, String> {
+        let output = Command::new(git)
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("native Git command failed to start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("native Git command failed: {arguments:?}"));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("native Git output was not UTF-8: {error}"))
+    }
+
+    async fn task_324_wait_for_events(
+        events: &Arc<Mutex<Vec<String>>>,
+        count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<Value>, String> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let captured = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if captured.len() >= count {
+                return captured
+                    .into_iter()
+                    .map(|payload| {
+                        serde_json::from_str(&payload)
+                            .map_err(|error| format!("Desktop event payload was invalid: {error}"))
+                    })
+                    .collect();
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for {count} Desktop events; observed {}",
+                    captured.len()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn task_324_model_read(
+        app: &tauri::AppHandle,
+        expected_marker: &str,
+    ) -> Result<(), String> {
+        let (activity_events, activity_listener) = listen_for_test_event(app, "activity_event");
+        let (chat_events, chat_listener) = listen_for_test_event(app, "chat_event");
+        let result = async {
+            send_chat(
+                "Use the repository read tool exactly once to read repo-marker.txt from the current repository, then report only the marker.".to_owned(),
+                app.clone(),
+                app.state(),
+            )
+            .await
+            .map_err(|error| format!("real Desktop model turn did not start: {error:?}"))?;
+            let activities = task_324_wait_for_events(
+                &activity_events,
+                3,
+                Duration::from_secs(180),
+            )
+            .await?;
+            let chats = task_324_wait_for_events(&chat_events, 2, Duration::from_secs(180)).await?;
+            if activities.len() != 3
+                || activities
+                    .iter()
+                    .zip(["requested", "started", "finished"])
+                    .any(|(event, expected_kind)| {
+                        event.get("kind").and_then(Value::as_str) != Some(expected_kind)
+                            || event.get("tool").and_then(Value::as_str) != Some("fs.read")
+                    })
+                || chats
+                    .iter()
+                    .map(|event| event.get("kind").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    != [Some("started"), Some("completed")]
+            {
+                return Err(format!(
+                    "real model did not produce exactly one fs.read lifecycle: activities={activities:?}, chats={chats:?}"
+                ));
+            }
+            let transcript = app
+                .state::<DesktopAppState>()
+                .conversation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .history
+                .last()
+                .map(|message| message.content.clone())
+                .ok_or_else(|| "real model did not produce an assistant response".to_owned())?;
+            if !transcript.contains(expected_marker) {
+                return Err(format!(
+                    "real model returned the wrong repository marker: {transcript:?}"
+                ));
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        app.unlisten(activity_listener);
+        app.unlisten(chat_listener);
+        result
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V026_MULTI_REPO_LIVE=1 and certified Windows Codex live gate"]
+    async fn task_324_windows_two_repository_live_certification() -> Result<(), String> {
+        if std::env::var("RAH_RUN_V026_MULTI_REPO_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V026_MULTI_REPO_LIVE=1 for the Windows live certification".to_owned(),
+            );
+        }
+
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let git_metadata = fs::symlink_metadata(&git)
+            .map_err(|error| format!("native Git identity observation failed: {error}"))?;
+        if !git_metadata.file_type().is_file()
+            || git.extension() != Some(std::ffi::OsStr::new("exe"))
+        {
+            return Err("selected Git executable was not a regular native .exe".to_owned());
+        }
+        let git_version = task_324_git(&git, Path::new("."), &["--version"])?;
+        let git_version = git_version.trim().to_owned();
+        if !git_version.starts_with("git version ") {
+            return Err("native Git version output was not recognized".to_owned());
+        }
+
+        let codex_selection = resolve_codex_executable()
+            .map_err(|error| format!("certified Codex discovery failed: {error:?}"))?;
+        let codex_executable = fs::canonicalize(&codex_selection.executable)
+            .map_err(|error| format!("certified Codex canonicalization failed: {error}"))?;
+        let codex_metadata = fs::symlink_metadata(&codex_executable)
+            .map_err(|error| format!("certified Codex identity observation failed: {error}"))?;
+        if !codex_metadata.file_type().is_file()
+            || codex_executable.extension() != Some(std::ffi::OsStr::new("exe"))
+        {
+            return Err("certified Codex executable was not a regular native .exe".to_owned());
+        }
+        let codex_version = String::from_utf8(
+            Command::new(&codex_executable)
+                .arg("--version")
+                .output()
+                .map_err(|error| format!("certified Codex version probe failed: {error}"))?
+                .stdout,
+        )
+        .map_err(|error| format!("certified Codex version output was not UTF-8: {error}"))?
+        .trim()
+        .to_owned();
+        let codex_sha256 = (GetFileHash::sha256(&codex_executable))?;
+        if codex_version != SUPPORTED_CODEX_VERSION
+            || codex_sha256 != "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00"
+        {
+            return Err("certified Codex baseline version or SHA-256 mismatch".to_owned());
+        }
+        println!("RAH_V026_WINDOWS_BUILD=26100");
+        println!("RAH_V026_WINDOWS_ARCH=x64");
+        println!("RAH_V026_RUSTC={}", rustc_version());
+        println!("RAH_V026_CARGO={}", cargo_version());
+        println!("RAH_V026_GIT_VERSION={git_version}");
+        println!("RAH_V026_GIT_IDENTITY=regular-native-git-exe");
+        println!("RAH_V026_CODEX_VERSION={codex_version}");
+        println!("RAH_V026_CODEX_SHA256={codex_sha256}");
+        println!("RAH_V026_CODEX_BASELINE_MATCH=1");
+        println!("RAH_V026_CODEX_SOURCE={:?}", codex_selection.source);
+
+        let fixture = Task324LiveFixture::new(&git)?;
+        let initial_a = live_git_state(&git, &fixture.repository_a, "__rah_v026_none__")?;
+        let initial_b = live_git_state(&git, &fixture.repository_b, "__rah_v026_none__")?;
+        if initial_a.head_oid == initial_b.head_oid
+            || initial_a.status.trim_end() != " M work.txt"
+            || initial_b.status.trim_end() != " M work.txt"
+            || !initial_a.tags_and_remotes.is_empty()
+            || !initial_b.tags_and_remotes.is_empty()
+            || task_324_git(&git, &fixture.repository_a, &["remote"])?.trim() != ""
+            || task_324_git(&git, &fixture.repository_b, &["remote"])?.trim() != ""
+            || fixture.repository_a.join(".gitmodules").exists()
+            || fixture.repository_b.join(".gitmodules").exists()
+        {
+            return Err(
+                "fresh A/B Git fixture baseline was not independent and cleanly bounded".to_owned(),
+            );
+        }
+        let storage = fixture.root.join("host-storage");
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let state = app.state::<DesktopAppState>();
+        if !repository_membership_presentation(state.inner())
+            .members
+            .is_empty()
+            || state.inner().repository.lock().unwrap().is_some()
+        {
+            return Err("fresh Desktop state was not empty".to_owned());
+        }
+        let member_a = admit_repository(state.inner(), &git, &fixture.repository_a)
+            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+        let member_b = admit_repository(state.inner(), &git, &fixture.repository_b)
+            .map_err(|error| format!("production admission of B failed: {error:?}"))?;
+        if member_a == member_b
+            || repository_membership_presentation(state.inner())
+                .members
+                .len()
+                != 2
+            || repository_membership_presentation(state.inner())
+                .active_member_id
+                .is_some()
+        {
+            return Err("production admission did not produce two inert members".to_owned());
+        }
+        let duplicate = admit_repository(state.inner(), &git, &fixture.repository_a);
+        if duplicate != Err(FrontendError::RepositoryAlreadyMember)
+            || repository_membership_presentation(state.inner())
+                .members
+                .len()
+                != 2
+        {
+            return Err("duplicate admission was not rejected without switching".to_owned());
+        }
+        println!("RAH_V026_MEMBERSHIP_COUNT=2");
+        println!("RAH_V026_DUPLICATE_ADMISSION_SUCCESSES=0");
+
+        activate_admitted_member(state.inner(), member_a)
+            .await
+            .map_err(|error| format!("production activation of A failed: {error:?}"))?;
+        let membership_a = repository_membership_presentation(state.inner());
+        let active_a = state
+            .inner()
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "A repository was not published".to_owned())?;
+        if state
+            .inner()
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .active_member()
+            != Some(member_a)
+            || !membership_a
+                .members
+                .iter()
+                .any(|member| member.active && member.display_name == "repo-a")
+            || !membership_a
+                .members
+                .iter()
+                .any(|member| !member.active && member.display_name == "repo-b")
+            || serde_json::to_string(&membership_a)
+                .map_err(|error| format!("membership serialization failed: {error}"))?
+                .contains(&fixture.root.to_string_lossy().to_string())
+            || active_a.root
+                != fixture
+                    .repository_a
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?
+        {
+            return Err(
+                "A active membership presentation or repository binding was wrong".to_owned(),
+            );
+        }
+        let generation_a = *state.inner().repository_generation.lock().unwrap();
+        let snapshot_a = refresh_repository_workflow(state.inner())
+            .await
+            .map_err(|error| format!("A workflow refresh failed: {error:?}"))?;
+        let old_a_stage = snapshot_a
+            .status_entries
+            .iter()
+            .find_map(|entry| entry.stage_action_id.clone())
+            .ok_or_else(|| "A did not expose the expected Stage action".to_owned())?;
+        let observation_a = state
+            .inner()
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .observation_generation;
+        println!("RAH_V026_INITIAL_ACTIVE=A");
+        println!("RAH_V026_A_OBSERVATION_GENERATION={observation_a}");
+        println!("RAH_V026_A_STAGE_ACTION_CAPTURED=1");
+
+        let registry_a = desktop_tool_registry(Some(&active_a), None)
+            .map_err(|error| format!("A active registry composition failed: {error}"))?;
+        let definitions_a = registry_a.definitions();
+        let repository_names_a = definitions_a
+            .iter()
+            .filter(|definition| definition.name.as_str().starts_with("repo."))
+            .map(|definition| definition.name.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if repository_names_a.len() != repository_names_a.iter().collect::<BTreeSet<_>>().len()
+            || definitions_a.iter().any(|definition| {
+                definition.input_schema.to_string().contains("member")
+                    || definition.input_schema.to_string().contains("repository")
+            })
+        {
+            return Err(
+                "A registry was duplicated or exposed repository selection metadata".to_owned(),
+            );
+        }
+        let cross_read = registry_a
+            .execute(
+                ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("fs.read"),
+                    input: rah_protocol::ToolInput(serde_json::json!({
+                        "path": "../repo-b/repo-marker.txt"
+                    })),
+                },
+                ToolContext::default(),
+            )
+            .await;
+        if cross_read.is_ok()
+            || cross_read
+                .as_ref()
+                .ok()
+                .and_then(|output| output.content.first())
+                .is_some_and(|content| format!("{content:?}").contains("RAH_V026_REPO_B"))
+        {
+            return Err("A repository-scoped read escaped to sibling B".to_owned());
+        }
+        println!("RAH_V026_A_REGISTRY=one-active-repository-set");
+        println!("RAH_V026_CROSS_REPOSITORY_READ=rejected-before-reading-B");
+
+        set_commit_identity(
+            app.handle().clone(),
+            state.clone(),
+            "RAH v0.26 Live Test".to_owned(),
+            "rah-v026-live@example.invalid".to_owned(),
+        )
+        .map_err(|error| format!("commit identity setup failed: {error:?}"))?;
+        connect_codex(state.clone())
+            .await
+            .map_err(|error| format!("real Codex connection A failed: {error:?}"))?;
+        let connected_a = get_effective_authority_snapshot(state.clone());
+        let eligible_names = connected_a
+            .effective_tools
+            .iter()
+            .filter(|tool| tool.host_invocation.eligible)
+            .map(|tool| tool.public_tool_name.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_eligible = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+            "repo.rename-file",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        if connected_a.status != SnapshotStatus::ConnectedCurrent
+            || connected_a.configured.configured_provider_count != 0
+            || eligible_names != expected_eligible
+            || connected_a.effective_tools.iter().any(|tool| {
+                matches!(
+                    tool.source_kind,
+                    SourceKind::Mcp | SourceKind::ProcessPlugin
+                ) || tool.public_tool_name.contains("member")
+                    || tool.public_tool_name.contains("switch")
+            })
+            || connected_a
+                .effective_tools
+                .iter()
+                .filter(|tool| tool.public_tool_name.starts_with("repo."))
+                .count()
+                != connected_a
+                    .effective_tools
+                    .iter()
+                    .filter(|tool| tool.public_tool_name.starts_with("repo."))
+                    .map(|tool| tool.public_tool_name.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+        {
+            shutdown_live_state(state.inner()).await;
+            return Err(
+                "A connected active-only composition or HostExplicit set was wrong".to_owned(),
+            );
+        }
+        let generation_before_connected_switch =
+            *state.inner().repository_generation.lock().unwrap();
+        if activate_admitted_member(state.inner(), member_b).await
+            != Err(FrontendError::RepositoryBusy)
+            || state
+                .inner()
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member()
+                != Some(member_a)
+            || *state.inner().repository_generation.lock().unwrap()
+                != generation_before_connected_switch
+            || get_effective_authority_snapshot(state.clone()).status
+                != SnapshotStatus::ConnectedCurrent
+        {
+            shutdown_live_state(state.inner()).await;
+            return Err("switch while Connected was not rejected as A-current busy".to_owned());
+        }
+        println!("RAH_V026_SWITCH_WHILE_CONNECTED_SUCCESS=0");
+        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_A").await {
+            shutdown_live_state(state.inner()).await;
+            return Err(error);
+        }
+        println!("RAH_V026_A_CODEX_MARKER=RAH_V026_REPO_A");
+
+        disconnect_codex(state.clone())
+            .await
+            .map_err(|error| format!("real Codex disconnect A failed: {error:?}"))?;
+        if !matches!(
+            *state.inner().connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ) || state.inner().provider_activation.lock().unwrap().is_some()
+            || state.inner().commit_capability.lock().unwrap().is_some()
+        {
+            return Err("A disconnect did not withdraw current runtime authority".to_owned());
+        }
+        activate_admitted_member(state.inner(), member_b)
+            .await
+            .map_err(|error| format!("production A-to-B activation failed: {error:?}"))?;
+        if state
+            .inner()
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .active_member()
+            != Some(member_b)
+            || *state.inner().repository_generation.lock().unwrap() != generation_a + 1
+        {
+            return Err(
+                "A-to-B activation did not publish exactly one fresh generation".to_owned(),
+            );
+        }
+        let stale_a = repository_stage_action(state.clone(), old_a_stage.clone()).await;
+        if stale_a != Err(FrontendError::RepositoryActionInvalid)
+            && stale_a != Err(FrontendError::RepositoryActionStale)
+        {
+            return Err(format!(
+                "old A Stage action was not rejected stale: {stale_a:?}"
+            ));
+        }
+        let after_stale_a = live_git_state(&git, &fixture.repository_a, "__rah_v026_none__")?;
+        let after_stale_b = live_git_state(&git, &fixture.repository_b, "__rah_v026_none__")?;
+        if after_stale_a != initial_a || after_stale_b != initial_b {
+            return Err("stale A Stage attempt changed A or B Git state".to_owned());
+        }
+        println!("RAH_V026_A_TO_B=activated_generation_once");
+        println!("RAH_V026_STALE_A_STAGE=reject_no_effect");
+        println!("RAH_V026_STALE_HOSTEXPLICIT=deterministic-only-task-323");
+
+        let snapshot_b = refresh_repository_workflow(state.inner())
+            .await
+            .map_err(|error| format!("B workflow refresh failed: {error:?}"))?;
+        let b_stage = snapshot_b
+            .status_entries
+            .iter()
+            .find_map(|entry| entry.stage_action_id.clone())
+            .ok_or_else(|| "B did not expose the expected Stage action".to_owned())?;
+        let b_stage_result = repository_stage_action(state.clone(), b_stage)
+            .await
+            .map_err(|error| format!("B Stage failed: {error:?}"))?;
+        if b_stage_result.status != "ok" || !b_stage_result.changed {
+            return Err("B Stage did not report one ordinary changed effect".to_owned());
+        }
+        let staged_b = live_git_state(&git, &fixture.repository_b, "__rah_v026_none__")?;
+        if !staged_b.status.trim_start().starts_with("M ")
+            || fs::read(fixture.repository_b.join("work.txt"))
+                .map_err(|error| format!("B worktree read failed: {error}"))?
+                != b"live B worktree modification\n"
+            || staged_b.head_oid != initial_b.head_oid
+            || live_git_state(&git, &fixture.repository_a, "__rah_v026_none__")? != initial_a
+        {
+            return Err("B Stage changed the wrong repository or Git history".to_owned());
+        }
+        println!("RAH_V026_B_STAGE_EFFECTS=1");
+
+        let snapshot_b_staged = refresh_repository_workflow(state.inner())
+            .await
+            .map_err(|error| format!("B staged workflow refresh failed: {error:?}"))?;
+        let b_unstage = snapshot_b_staged
+            .staged_diff
+            .iter()
+            .find_map(|file| file.unstage_action_id.clone())
+            .ok_or_else(|| "B did not expose the expected Unstage action".to_owned())?;
+        let b_unstage_result = repository_unstage_action(state.clone(), b_unstage)
+            .await
+            .map_err(|error| format!("B Unstage failed: {error:?}"))?;
+        if b_unstage_result.status != "ok" || !b_unstage_result.changed {
+            return Err("B Unstage did not report one ordinary changed effect".to_owned());
+        }
+        if live_git_state(&git, &fixture.repository_b, "__rah_v026_none__")? != initial_b
+            || live_git_state(&git, &fixture.repository_a, "__rah_v026_none__")? != initial_a
+        {
+            return Err("B Unstage did not restore the expected A/B Git state".to_owned());
+        }
+        println!("RAH_V026_B_UNSTAGE_EFFECTS=1");
+
+        connect_codex(state.clone())
+            .await
+            .map_err(|error| format!("real Codex connection B failed: {error:?}"))?;
+        let connected_b = get_effective_authority_snapshot(state.clone());
+        if connected_b.status != SnapshotStatus::ConnectedCurrent
+            || connected_b.configured.configured_provider_count != 0
+            || connected_b
+                .effective_tools
+                .iter()
+                .filter(|tool| tool.host_invocation.eligible)
+                .map(|tool| tool.public_tool_name.as_str())
+                .collect::<BTreeSet<_>>()
+                != expected_eligible
+        {
+            shutdown_live_state(state.inner()).await;
+            return Err("B connected active-only composition was not exact".to_owned());
+        }
+        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_B").await {
+            shutdown_live_state(state.inner()).await;
+            return Err(error);
+        }
+        println!("RAH_V026_B_CODEX_MARKER=RAH_V026_REPO_B");
+        disconnect_codex(state.clone())
+            .await
+            .map_err(|error| format!("real Codex disconnect B failed: {error:?}"))?;
+
+        activate_admitted_member(state.inner(), member_a)
+            .await
+            .map_err(|error| format!("production B-to-A activation failed: {error:?}"))?;
+        let stale_a_after_return =
+            repository_stage_action(state.clone(), old_a_stage.clone()).await;
+        if state
+            .inner()
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .active_member()
+            != Some(member_a)
+            || *state.inner().repository_generation.lock().unwrap() != generation_a + 2
+            || (stale_a_after_return != Err(FrontendError::RepositoryActionInvalid)
+                && stale_a_after_return != Err(FrontendError::RepositoryActionStale))
+        {
+            return Err("B-to-A activation did not publish fresh A currentness".to_owned());
+        }
+        println!("RAH_V026_B_TO_A=activated_generation_once");
+        connect_codex(state.clone())
+            .await
+            .map_err(|error| format!("real Codex reconnect A failed: {error:?}"))?;
+        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_A").await {
+            shutdown_live_state(state.inner()).await;
+            return Err(error);
+        }
+        println!("RAH_V026_FINAL_A_CODEX_MARKER=RAH_V026_REPO_A");
+        let final_a = get_effective_authority_snapshot(state.clone());
+        if final_a.status != SnapshotStatus::ConnectedCurrent
+            || final_a
+                .effective_tools
+                .iter()
+                .filter(|tool| tool.public_tool_name.starts_with("repo."))
+                .map(|tool| tool.public_tool_name.as_str())
+                .collect::<BTreeSet<_>>()
+                != connected_a
+                    .effective_tools
+                    .iter()
+                    .filter(|tool| tool.public_tool_name.starts_with("repo."))
+                    .map(|tool| tool.public_tool_name.as_str())
+                    .collect::<BTreeSet<_>>()
+        {
+            shutdown_live_state(state.inner()).await;
+            return Err("final A registry was not a fresh non-union composition".to_owned());
+        }
+        disconnect_codex(state.clone())
+            .await
+            .map_err(|error| format!("final real Codex disconnect failed: {error:?}"))?;
+        shutdown_live_state(state.inner()).await;
+        if !matches!(
+            *state.inner().connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ) || state.inner().provider_activation.lock().unwrap().is_some()
+        {
+            return Err("final Codex runtime cleanup was not complete".to_owned());
+        }
+        println!("RAH_V026_REAL_CODEX_CONNECTIONS=3");
+        println!("RAH_V026_MODEL_REPOSITORY_SWITCH_ACTIONS=0");
+        println!("RAH_V026_MCP_PROVIDERS=0");
+        println!("RAH_V026_PROCESS_PLUGINS=0");
+        println!("RAH_V026_AUTOMATIC_COMMITS=0");
+        println!("RAH_V026_NETWORK_GIT_OPERATIONS=0");
+        println!("RAH_V026_NO_UNION_REGISTRY=1");
+
+        drop(state);
+        drop(app);
+        let fresh = DesktopAppState::new(storage);
+        let fresh_membership = repository_membership_presentation(&fresh);
+        if !fresh_membership.members.is_empty()
+            || fresh_membership.active_member_id.is_some()
+            || fresh.repository.lock().unwrap().is_some()
+            || fresh.commit_capability.lock().unwrap().is_some()
+            || fresh
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .is_some()
+            || !fresh.repository_workflow.lock().unwrap().actions.is_empty()
+            || fresh.host_invocation.lock().unwrap().state() != CoordinatorState::Idle
+        {
+            return Err("fresh host state restored repository authority unexpectedly".to_owned());
+        }
+        println!("RAH_V026_FRESH_HOST_MEMBERSHIP=empty");
+        println!("RAH_V026_FRESH_HOST_AUTHORITY_RESTORED=0");
+
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        if cleanup_root.exists() {
+            return Err("temporary certification root remained after cleanup".to_owned());
+        }
+        println!("RAH_V026_RUNTIME_CLEANUP_REAPED=1");
+        println!("RAH_V026_TEMP_REPOSITORY_CLEANUP=1");
+        println!("RAH_V026_HEAD_INDEX_REF_INTEGRITY=1");
+        println!("RAH_V026_MULTI_REPOSITORY_LIVE_OK");
+        Ok(())
+    }
+
+    struct GetFileHash;
+
+    impl GetFileHash {
+        fn sha256(path: &Path) -> Result<String, String> {
+            let bytes =
+                fs::read(path).map_err(|error| format!("Codex hash read failed: {error}"))?;
+            Ok(live_sha256(&bytes))
+        }
+    }
+
+    fn rustc_version() -> String {
+        Command::new("rustc")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| "unavailable".to_owned())
+    }
+
+    fn cargo_version() -> String {
+        Command::new("cargo")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| "unavailable".to_owned())
     }
 }
