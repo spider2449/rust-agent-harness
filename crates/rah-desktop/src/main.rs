@@ -23914,6 +23914,115 @@ fn main() {
         assert!(!super::contains_live_completion_marker("RAH__LIVE_OK"));
     }
 
+    fn task_324_event(stream: Task324EventStream, payload: Value) -> Task324ObservedEvent {
+        Task324ObservedEvent {
+            stream,
+            payload: serde_json::to_string(&payload).unwrap(),
+        }
+    }
+
+    #[test]
+    fn task_324_observer_reports_chat_terminal_without_waiting_for_activity() {
+        let mut observer = Task324TurnObserver::new();
+        assert!(
+            !observer
+                .observe(
+                    &task_324_event(
+                        Task324EventStream::Chat,
+                        serde_json::json!({
+                            "kind": "started"
+                        })
+                    ),
+                    None,
+                )
+                .unwrap()
+        );
+        let failure = observer
+            .observe(
+                &task_324_event(
+                    Task324EventStream::Chat,
+                    serde_json::json!({
+                        "kind": "completed"
+                    }),
+                ),
+                None,
+            )
+            .unwrap_err();
+        assert!(failure.contains("completed_without_required_tool"));
+        assert!(failure.contains("last_observed_stage=chat_completed"));
+    }
+
+    #[test]
+    fn task_324_observer_reports_chat_failure_immediately() {
+        let mut observer = Task324TurnObserver::new();
+        observer
+            .observe(
+                &task_324_event(
+                    Task324EventStream::Chat,
+                    serde_json::json!({
+                        "kind": "started"
+                    }),
+                ),
+                None,
+            )
+            .unwrap();
+        let failure = observer
+            .observe(
+                &task_324_event(
+                    Task324EventStream::Chat,
+                    serde_json::json!({
+                        "kind": "failed",
+                        "code": "chat_start_failed"
+                    }),
+                ),
+                None,
+            )
+            .unwrap_err();
+        assert!(failure.contains("thread_session_start_failed"));
+        assert!(failure.contains("chat_code=chat_start_failed"));
+    }
+
+    #[test]
+    fn task_324_observer_accepts_only_the_complete_fs_read_lifecycle() {
+        let mut observer = Task324TurnObserver::new();
+        let events = [
+            task_324_event(
+                Task324EventStream::Chat,
+                serde_json::json!({
+                    "kind": "started"
+                }),
+            ),
+            task_324_event(
+                Task324EventStream::Activity,
+                serde_json::json!({"kind": "tool_requested", "tool": "fs.read"}),
+            ),
+            task_324_event(
+                Task324EventStream::Activity,
+                serde_json::json!({"kind": "tool_started", "tool": "fs.read"}),
+            ),
+            task_324_event(
+                Task324EventStream::Activity,
+                serde_json::json!({"kind": "tool_finished", "tool": "fs.read"}),
+            ),
+        ];
+        for event in &events {
+            assert!(!observer.observe(event, None).unwrap());
+        }
+        assert!(
+            observer
+                .observe(
+                    &task_324_event(
+                        Task324EventStream::Chat,
+                        serde_json::json!({
+                            "kind": "completed"
+                        })
+                    ),
+                    None,
+                )
+                .unwrap()
+        );
+    }
+
     struct Task324LiveFixture {
         root: PathBuf,
         repository_a: PathBuf,
@@ -24017,30 +24126,321 @@ fn main() {
             .map_err(|error| format!("native Git output was not UTF-8: {error}"))
     }
 
-    async fn task_324_wait_for_events(
-        events: &Arc<Mutex<Vec<String>>>,
-        count: usize,
-        timeout: Duration,
-    ) -> Result<Vec<Value>, String> {
-        let deadline = std::time::Instant::now() + timeout;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Task324EventStream {
+        Chat,
+        Activity,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Task324ObservedEvent {
+        stream: Task324EventStream,
+        payload: String,
+    }
+
+    struct Task324LiveEvidenceCapture {
+        path: PathBuf,
+        owns_environment: bool,
+    }
+
+    impl Task324LiveEvidenceCapture {
+        fn begin() -> Self {
+            if let Some(path) = std::env::var_os("RAH_LIVE_EVIDENCE_PATH") {
+                return Self {
+                    path: PathBuf::from(path),
+                    owns_environment: false,
+                };
+            }
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let path = std::env::temp_dir().join(format!(
+                "rah-v026-turn-evidence-{}-{nonce}.jsonl",
+                std::process::id()
+            ));
+            unsafe { std::env::set_var("RAH_LIVE_EVIDENCE_PATH", &path) };
+            Self {
+                path,
+                owns_environment: true,
+            }
+        }
+
+        fn safe_failure_stage(&self) -> Option<&'static str> {
+            let contents = fs::read_to_string(&self.path).ok()?;
+            contents
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|record| {
+                    record.get("event").and_then(Value::as_str) == Some("desktop_failure")
+                })
+                .filter_map(
+                    |record| match record.get("failure_stage").and_then(Value::as_str) {
+                        Some("pre_turn_async_stale_generation_rejection") => {
+                            Some("pre_turn_async_stale_generation_rejection")
+                        }
+                        Some("pre_turn_stale_generation_rejection") => {
+                            Some("pre_turn_stale_generation_rejection")
+                        }
+                        Some("thread_or_turn_start_failure") => {
+                            Some("thread_or_turn_start_failure")
+                        }
+                        Some("tool_dispatch_failure") => Some("tool_dispatch_failure"),
+                        Some("model_runtime_failure") => Some("model_runtime_failure"),
+                        Some("terminal_disconnect_failure") => Some("terminal_disconnect_failure"),
+                        _ => None,
+                    },
+                )
+                .next_back()
+        }
+
+        fn finish(self) -> Result<(), String> {
+            if !self.owns_environment {
+                return Ok(());
+            }
+            unsafe { std::env::remove_var("RAH_LIVE_EVIDENCE_PATH") };
+            if self.path.exists() {
+                fs::remove_file(&self.path)
+                    .map_err(|error| format!("temporary live evidence cleanup failed: {error}"))?;
+            }
+            Ok(())
+        }
+    }
+
+    fn listen_for_task_324_event(
+        app: &tauri::AppHandle,
+        event_name: &'static str,
+        stream: Task324EventStream,
+        events: &Arc<Mutex<Vec<Task324ObservedEvent>>>,
+    ) -> tauri::EventId {
+        let captured = Arc::clone(events);
+        app.listen(event_name, move |event| {
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Task324ObservedEvent {
+                    stream,
+                    payload: event.payload().to_owned(),
+                });
+        })
+    }
+
+    fn listen_for_task_324_events(
+        app: &tauri::AppHandle,
+    ) -> (
+        Arc<Mutex<Vec<Task324ObservedEvent>>>,
+        tauri::EventId,
+        tauri::EventId,
+    ) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let chat_listener =
+            listen_for_task_324_event(app, "chat_event", Task324EventStream::Chat, &events);
+        let activity_listener =
+            listen_for_task_324_event(app, "activity_event", Task324EventStream::Activity, &events);
+        (events, chat_listener, activity_listener)
+    }
+
+    struct Task324TurnObserver {
+        chat_started: bool,
+        last_stage: &'static str,
+        activity_sequence: Vec<(String, String)>,
+        observed_events: usize,
+    }
+
+    impl Task324TurnObserver {
+        fn new() -> Self {
+            Self {
+                chat_started: false,
+                last_stage: "send_chat accepted; awaiting chat_started",
+                activity_sequence: Vec::new(),
+                observed_events: 0,
+            }
+        }
+
+        fn safe_activity_summary(&self) -> String {
+            self.activity_sequence
+                .iter()
+                .map(|(kind, tool)| format!("{kind}:{tool}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+
+        fn observe(
+            &mut self,
+            observed: &Task324ObservedEvent,
+            evidence: Option<&Task324LiveEvidenceCapture>,
+        ) -> Result<bool, String> {
+            self.observed_events += 1;
+            let payload = serde_json::from_str::<Value>(&observed.payload)
+                .map_err(|error| format!("Desktop event payload was invalid: {error}"))?;
+            match observed.stream {
+                Task324EventStream::Chat => {
+                    let kind = payload
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "Chat event omitted its kind".to_owned())?;
+                    match kind {
+                        "started" => {
+                            if self.chat_started {
+                                return Err("failure_stage=duplicate_chat_started".to_owned());
+                            }
+                            self.chat_started = true;
+                            self.last_stage = "chat_started; awaiting tool lifecycle or terminal";
+                        }
+                        "delta" => {
+                            self.last_stage = "model_delta";
+                        }
+                        "failed" => {
+                            let code = payload
+                                .get("code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            let stage = match code {
+                                "chat_start_failed" => "thread_session_start_failed",
+                                "chat_cancelled" => "chat_cancelled",
+                                _ => evidence
+                                    .and_then(Task324LiveEvidenceCapture::safe_failure_stage)
+                                    .unwrap_or("runtime_agent_event_failed_or_disconnected"),
+                            };
+                            return Err(format!(
+                                "failure_stage={stage}; chat_code={code}; last_observed_stage={}",
+                                self.last_stage
+                            ));
+                        }
+                        "cancelled" => {
+                            return Err(format!(
+                                "failure_stage=chat_cancelled; last_observed_stage={}",
+                                self.last_stage
+                            ));
+                        }
+                        "completed" => {
+                            if !self.chat_started {
+                                return Err(
+                                    "failure_stage=chat_completed_before_started".to_owned()
+                                );
+                            }
+                            self.last_stage = "chat_completed";
+                            let expected_sequence = [
+                                ("tool_requested", "fs.read"),
+                                ("tool_started", "fs.read"),
+                                ("tool_finished", "fs.read"),
+                            ];
+                            if self.activity_sequence.len() == 1
+                                && self.activity_sequence[0]
+                                    == ("tool_requested".to_owned(), "fs.read".to_owned())
+                            {
+                                return Err(format!(
+                                    "failure_stage=tool_requested_but_never_started; last_observed_stage={}; activity_sequence={}",
+                                    self.last_stage,
+                                    self.safe_activity_summary()
+                                ));
+                            }
+                            if self.activity_sequence.len() == 2
+                                && self.activity_sequence[0]
+                                    == ("tool_requested".to_owned(), "fs.read".to_owned())
+                                && self.activity_sequence[1]
+                                    == ("tool_started".to_owned(), "fs.read".to_owned())
+                            {
+                                return Err(format!(
+                                    "failure_stage=tool_started_but_no_finish; last_observed_stage={}; activity_sequence={}",
+                                    self.last_stage,
+                                    self.safe_activity_summary()
+                                ));
+                            }
+                            if self.activity_sequence
+                                != expected_sequence
+                                    .into_iter()
+                                    .map(|(kind, tool)| (kind.to_owned(), tool.to_owned()))
+                                    .collect::<Vec<_>>()
+                            {
+                                return Err(format!(
+                                    "failure_stage=completed_without_required_tool; last_observed_stage={}; activity_sequence={}",
+                                    self.last_stage,
+                                    self.safe_activity_summary()
+                                ));
+                            }
+                            return Ok(true);
+                        }
+                        _ => {
+                            return Err(format!(
+                                "failure_stage=unknown_chat_event; last_observed_stage={}",
+                                self.last_stage
+                            ));
+                        }
+                    }
+                }
+                Task324EventStream::Activity => {
+                    if !self.chat_started {
+                        return Err(
+                            "failure_stage=activity_before_chat_started; last_observed_stage=send_chat_accepted"
+                                .to_owned(),
+                        );
+                    }
+                    let kind = payload
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let tool = payload
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let expected_kind = ["tool_requested", "tool_started", "tool_finished"]
+                        .get(self.activity_sequence.len())
+                        .copied();
+                    if tool != "fs.read" {
+                        return Err(format!(
+                            "failure_stage=tool_requested_but_wrong_tool; tool={tool}; last_observed_stage={}",
+                            self.last_stage
+                        ));
+                    }
+                    if expected_kind != Some(kind) {
+                        return Err(format!(
+                            "failure_stage=invalid_tool_lifecycle; observed={kind}; expected={expected_kind:?}; last_observed_stage={}",
+                            self.last_stage
+                        ));
+                    }
+                    self.activity_sequence
+                        .push((kind.to_owned(), tool.to_owned()));
+                    self.last_stage = match kind {
+                        "tool_requested" => "tool_requested",
+                        "tool_started" => "tool_started",
+                        "tool_finished" => "tool_finished",
+                        _ => unreachable!("activity kind was checked above"),
+                    };
+                }
+            }
+            Ok(false)
+        }
+    }
+
+    async fn task_324_observe_model_turn(
+        events: &Arc<Mutex<Vec<Task324ObservedEvent>>>,
+        evidence: &Task324LiveEvidenceCapture,
+    ) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        let mut observer = Task324TurnObserver::new();
+        let mut next_event = 0;
         loop {
             let captured = events
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if captured.len() >= count {
-                return captured
-                    .into_iter()
-                    .map(|payload| {
-                        serde_json::from_str(&payload)
-                            .map_err(|error| format!("Desktop event payload was invalid: {error}"))
-                    })
-                    .collect();
+            while next_event < captured.len() {
+                let completed = observer.observe(&captured[next_event], Some(evidence))?;
+                next_event += 1;
+                if completed {
+                    return Ok(());
+                }
             }
             if std::time::Instant::now() >= deadline {
+                let failure_stage = if observer.last_stage == "tool_finished" {
+                    "tool_finished_but_no_model_continuation"
+                } else {
+                    "terminal_timeout"
+                };
                 return Err(format!(
-                    "timed out waiting for {count} Desktop events; observed {}",
-                    captured.len()
+                    "failure_stage={failure_stage}; last_observed_stage={}; observed_events={}",
+                    observer.last_stage, observer.observed_events
                 ));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -24051,8 +24451,8 @@ fn main() {
         app: &tauri::AppHandle,
         expected_marker: &str,
     ) -> Result<(), String> {
-        let (activity_events, activity_listener) = listen_for_test_event(app, "activity_event");
-        let (chat_events, chat_listener) = listen_for_test_event(app, "chat_event");
+        let (events, chat_listener, activity_listener) = listen_for_task_324_events(app);
+        let evidence = Task324LiveEvidenceCapture::begin();
         let result = async {
             send_chat(
                 "Use the repository read tool exactly once to read repo-marker.txt from the current repository, then report only the marker.".to_owned(),
@@ -24060,32 +24460,8 @@ fn main() {
                 app.state(),
             )
             .await
-            .map_err(|error| format!("real Desktop model turn did not start: {error:?}"))?;
-            let activities = task_324_wait_for_events(
-                &activity_events,
-                3,
-                Duration::from_secs(180),
-            )
-            .await?;
-            let chats = task_324_wait_for_events(&chat_events, 2, Duration::from_secs(180)).await?;
-            if activities.len() != 3
-                || activities
-                    .iter()
-                    .zip(["requested", "started", "finished"])
-                    .any(|(event, expected_kind)| {
-                        event.get("kind").and_then(Value::as_str) != Some(expected_kind)
-                            || event.get("tool").and_then(Value::as_str) != Some("fs.read")
-                    })
-                || chats
-                    .iter()
-                    .map(|event| event.get("kind").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    != [Some("started"), Some("completed")]
-            {
-                return Err(format!(
-                    "real model did not produce exactly one fs.read lifecycle: activities={activities:?}, chats={chats:?}"
-                ));
-            }
+            .map_err(|error| format!("failure_stage=send_chat_rejected_before_spawn; error={error:?}"))?;
+            task_324_observe_model_turn(&events, &evidence).await?;
             let transcript = app
                 .state::<DesktopAppState>()
                 .conversation
@@ -24103,9 +24479,15 @@ fn main() {
             Ok::<(), String>(())
         }
         .await;
-        app.unlisten(activity_listener);
         app.unlisten(chat_listener);
-        result
+        app.unlisten(activity_listener);
+        let cleanup = evidence.finish();
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(format!("{error}; {cleanup_error}")),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24412,7 +24794,7 @@ fn main() {
             return Err("switch while Connected was not rejected as A-current busy".to_owned());
         }
         println!("RAH_V026_SWITCH_WHILE_CONNECTED_SUCCESS=0");
-        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_A").await {
+        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_A").await {
             shutdown_live_state(state.inner()).await;
             return Err(error);
         }
@@ -24526,7 +24908,7 @@ fn main() {
             shutdown_live_state(state.inner()).await;
             return Err("B connected active-only composition was not exact".to_owned());
         }
-        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_B").await {
+        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_B").await {
             shutdown_live_state(state.inner()).await;
             return Err(error);
         }
@@ -24557,7 +24939,7 @@ fn main() {
         connect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex reconnect A failed: {error:?}"))?;
-        if let Err(error) = task_324_model_read(&app.handle(), "RAH_V026_REPO_A").await {
+        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_A").await {
             shutdown_live_state(state.inner()).await;
             return Err(error);
         }
@@ -24599,7 +24981,6 @@ fn main() {
         println!("RAH_V026_NETWORK_GIT_OPERATIONS=0");
         println!("RAH_V026_NO_UNION_REGISTRY=1");
 
-        drop(state);
         drop(app);
         let fresh = DesktopAppState::new(storage);
         let fresh_membership = repository_membership_presentation(&fresh);
