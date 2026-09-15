@@ -24129,6 +24129,109 @@ fn main() {
         Ok(())
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_324_c_managed_desktop_state_releases_fixture_persistence_before_cleanup()
+    -> Result<(), String> {
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let fixture = Task324LiveFixture::new(&git)?;
+        let storage = fixture.root.join("host-storage");
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let state = app.state::<DesktopAppState>();
+        if state
+            .inner()
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presentation()
+            .warning
+            .is_some()
+            || !storage.join("conversation-transcript.sqlite3").exists()
+        {
+            return Err("managed Desktop state did not initialize fixture persistence".to_owned());
+        }
+
+        admit_repository(state.inner(), &git, &fixture.repository_a)
+            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+        if repository_membership_presentation(state.inner())
+            .members
+            .len()
+            != 1
+        {
+            return Err(
+                "managed Desktop state did not retain ordinary repository state".to_owned(),
+            );
+        }
+        shutdown_live_state(state.inner()).await;
+        if !matches!(
+            *state
+                .inner()
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ConnectionState::NotConnected
+        ) || state
+            .inner()
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Err("managed Desktop state did not reach the normal shutdown state".to_owned());
+        }
+
+        let inert_replacement = Persistence::start(fixture.repository_a.join("repo-marker.txt"));
+        if inert_replacement.presentation().warning
+            != Some(super::ConversationPersistenceWarning::RestoreFailed)
+        {
+            return Err(
+                "inert persistence replacement unexpectedly retained a fixture database connection"
+                    .to_owned(),
+            );
+        }
+        let old_persistence = {
+            let mut persistence = state
+                .inner()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *persistence, inert_replacement)
+        };
+        drop(old_persistence);
+        drop(state);
+        drop(app);
+
+        let fresh = DesktopAppState::new(storage);
+        let fresh_membership = repository_membership_presentation(&fresh);
+        if !fresh_membership.members.is_empty()
+            || fresh_membership.active_member_id.is_some()
+            || fresh.repository.lock().unwrap().is_some()
+            || fresh.commit_capability.lock().unwrap().is_some()
+            || fresh
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .is_some()
+            || !fresh.repository_workflow.lock().unwrap().actions.is_empty()
+            || fresh.host_invocation.lock().unwrap().state() != CoordinatorState::Idle
+        {
+            return Err("fresh host state restored repository authority unexpectedly".to_owned());
+        }
+        drop(fresh);
+
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        if cleanup_root.exists() {
+            return Err("managed Desktop state fixture root remained after cleanup".to_owned());
+        }
+        println!("RAH_V026_C_MANAGED_STATE_TEARDOWN_REGRESSION=1");
+        Ok(())
+    }
+
     #[allow(clippy::permissions_set_readonly_false)]
     fn clear_task_324_fixture_readonly_attributes(path: &Path) -> Result<(), String> {
         let metadata = fs::symlink_metadata(path)
