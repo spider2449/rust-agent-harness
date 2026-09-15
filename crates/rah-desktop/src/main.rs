@@ -24135,16 +24135,27 @@ fn main() {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             clear_task_324_fixture_readonly_attributes(path)?;
-            match fs::remove_dir_all(path) {
-                Ok(()) => return Ok(()),
-                Err(error) if std::time::Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(100));
-                    let _ = error;
-                }
-                Err(error) => {
-                    return Err(format!("temporary certification cleanup failed: {error}"));
-                }
+            let status = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "if (Test-Path -LiteralPath $env:RAH_TASK_324_D_CLEANUP_ROOT) { [IO.Directory]::Delete($env:RAH_TASK_324_D_CLEANUP_ROOT, $true) }",
+                ])
+                .env("RAH_TASK_324_D_CLEANUP_ROOT", path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_err(|error| format!("temporary certification cleanup failed to start: {error}"))?;
+            if status.success() && !path.exists() {
+                return Ok(());
             }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "temporary certification cleanup failed with status {status}"
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
