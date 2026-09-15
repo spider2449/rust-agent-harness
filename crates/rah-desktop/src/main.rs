@@ -8898,7 +8898,7 @@ fn main() {
 mod tests {
     use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
     use super::effective_authority::{
-        AuthorityCategory, EffectClass, EffectiveToolEntry, SnapshotStatus,
+        AuthorityCategory, EffectClass, EffectiveToolEntry, RepositoryIdentity, SnapshotStatus,
     };
     use super::host_invocation::{
         BranchReview, CoordinatorState, EmptyHostRequest, HostConfirmRequest,
@@ -24426,42 +24426,16 @@ fn main() {
         Ok((lines[0].clone(), lines[1].clone(), lines[2].clone()))
     }
 
-    fn task_324_codex_process_ids(executable: &Path) -> Result<BTreeSet<u32>, String> {
-        let output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$target = [IO.Path]::GetFullPath($env:RAH_TASK_324_CODEX_EXECUTABLE); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target -and $_.CommandLine -match 'app-server\\s+--stdio' } | ForEach-Object { $_.ProcessId }",
-            ])
-            .env("RAH_TASK_324_CODEX_EXECUTABLE", executable)
-            .output()
-            .map_err(|error| format!("Codex process ownership probe failed to start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Codex process ownership probe failed with status {}",
-                output.status
-            ));
-        }
-        String::from_utf8(output.stdout)
-            .map_err(|error| format!("Codex process ownership output was not UTF-8: {error}"))?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                line.parse::<u32>()
-                    .map_err(|error| format!("Codex process ID was invalid: {error}"))
-            })
-            .collect()
-    }
-
     async fn task_324_wait_for_codex_process_exit(
         executable: &Path,
         process_id: u32,
     ) -> Result<(), String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
-            if !task_324_codex_process_ids(executable)?.contains(&process_id) {
+            if !task_324_d_process_census(executable)?
+                .iter()
+                .any(|process| process.pid == process_id)
+            {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -24664,6 +24638,34 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .iter()
             .map(|process| process.pid)
             .filter(|pid| !before.contains(pid))
+            .collect()
+    }
+
+    fn task_324_d_is_codex_basename(basename: &str) -> bool {
+        let basename = basename.to_ascii_lowercase();
+        let Some(stem) = basename.strip_suffix(".exe") else {
+            return false;
+        };
+        stem == "codex"
+            || stem
+                .strip_prefix("codex-")
+                .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('.'))
+    }
+
+    fn task_324_d_new_app_server_process_ids(
+        before: &[Task324DProcessObservation],
+        after: &[Task324DProcessObservation],
+    ) -> BTreeSet<u32> {
+        let new_process_ids = task_324_d_new_process_ids(before, after);
+        after
+            .iter()
+            .filter(|process| {
+                new_process_ids.contains(&process.pid)
+                    && task_324_d_is_codex_basename(&process.executable_basename)
+                    && process.command_line_contains_app_server
+                    && process.command_line_contains_stdio
+            })
+            .map(|process| process.pid)
             .collect()
     }
 
@@ -25156,6 +25158,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         }
         println!("RAH_V026_A_REGISTRY=one-active-repository-set");
         println!("RAH_V026_CROSS_REPOSITORY_READ=rejected-before-reading-B");
+        task_324_host_registry_read(Arc::clone(&registry_a), "RAH_V026_REPO_A").await?;
+        println!("RAH_V026_A_HOST_MARKER=RAH_V026_REPO_A");
 
         set_commit_identity(
             app.handle().clone(),
@@ -25164,23 +25168,44 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "rah-v026-live@example.invalid".to_owned(),
         )
         .map_err(|error| format!("commit identity setup failed: {error:?}"))?;
-        let codex_processes_before_a = task_324_codex_process_ids(&codex_executable)?;
+        let codex_processes_before_a = task_324_d_process_census(&codex_executable)?;
         connect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex connection A failed: {error:?}"))?;
-        let codex_processes_after_a = task_324_codex_process_ids(&codex_executable)?;
-        let new_codex_processes_a = codex_processes_after_a
-            .difference(&codex_processes_before_a)
-            .copied()
-            .collect::<Vec<_>>();
-        if new_codex_processes_a.len() != 1 {
+        let runtime_retained_a = matches!(
+            &*state.inner().connection.lock().unwrap(),
+            ConnectionState::Connected { runtime, .. } if Arc::strong_count(runtime) >= 1
+        );
+        let codex_processes_after_a = task_324_d_process_census(&codex_executable)?;
+        let new_codex_processes_a = task_324_d_new_app_server_process_ids(
+            &codex_processes_before_a,
+            &codex_processes_after_a,
+        );
+        if !runtime_retained_a || new_codex_processes_a.len() != 1 {
             shutdown_live_state(state.inner()).await;
             return Err(format!(
-                "A Connect did not publish exactly one RAH-owned Codex app-server child: {}",
+                "A Connect ownership proof failed: retained_runtime={}, new_app_server_count={}",
+                u8::from(runtime_retained_a),
                 new_codex_processes_a.len()
             ));
         }
-        let codex_process_a = new_codex_processes_a[0];
+        let codex_process_a = *new_codex_processes_a
+            .iter()
+            .next()
+            .ok_or_else(|| "A Connect ownership proof had no candidate".to_owned())?;
+        let process_a = codex_processes_after_a
+            .iter()
+            .find(|process| process.pid == codex_process_a)
+            .ok_or_else(|| {
+                "A Connect candidate was absent from the post-Connect census".to_owned()
+            })?;
+        if process_a.parent_pid != 0 && process_a.parent_pid != std::process::id() {
+            shutdown_live_state(state.inner()).await;
+            return Err("A Connect candidate did not have the expected direct parent".to_owned());
+        }
+        println!("RAH_V026_A_CONNECTED_RUNTIME_RETAINED=1");
+        println!("RAH_V026_A_NEW_ATTRIBUTABLE_APP_SERVER_COUNT=1");
+        println!("RAH_V026_A_PARENT_RELATION=expected-direct-or-unavailable");
         let connected_a = get_effective_authority_snapshot(state.clone());
         let eligible_names = connected_a
             .effective_tools
@@ -25204,6 +25229,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         .into_iter()
         .collect::<BTreeSet<_>>();
         if connected_a.status != SnapshotStatus::ConnectedCurrent
+            || !connected_a.repository.selected
+            || connected_a.repository.identity != RepositoryIdentity::Current
+            || connected_a.repository.captured_generation != Some(generation_a)
             || connected_a.configured.configured_provider_count != 0
             || eligible_names != expected_eligible
             || connected_a.effective_tools.iter().any(|tool| {
@@ -25251,13 +25279,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             return Err("switch while Connected was not rejected as A-current busy".to_owned());
         }
         println!("RAH_V026_SWITCH_WHILE_CONNECTED_SUCCESS=0");
-        if let Err(error) =
-            task_324_host_registry_read(Arc::clone(&registry_a), "RAH_V026_REPO_A").await
-        {
-            shutdown_live_state(state.inner()).await;
-            return Err(error);
-        }
-        println!("RAH_V026_A_HOST_MARKER=RAH_V026_REPO_A");
 
         disconnect_codex(state.clone())
             .await
@@ -25287,6 +25308,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 "A-to-B activation did not publish exactly one fresh generation".to_owned(),
             );
         }
+        let generation_b = *state.inner().repository_generation.lock().unwrap();
         let active_b = state
             .inner()
             .repository
@@ -25314,6 +25336,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 "B active registry was not the same ordinary non-union namespace".to_owned(),
             );
         }
+        task_324_host_registry_read(Arc::clone(&registry_b), "RAH_V026_REPO_B").await?;
+        println!("RAH_V026_B_HOST_MARKER=RAH_V026_REPO_B");
         let stale_a = repository_stage_action(state.clone(), old_a_stage.clone()).await;
         if stale_a != Err(FrontendError::RepositoryActionInvalid)
             && stale_a != Err(FrontendError::RepositoryActionStale)
@@ -25378,25 +25402,49 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         }
         println!("RAH_V026_B_UNSTAGE_EFFECTS=1");
 
-        let codex_processes_before_b = task_324_codex_process_ids(&codex_executable)?;
+        let codex_processes_before_b = task_324_d_process_census(&codex_executable)?;
         connect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex connection B failed: {error:?}"))?;
-        let codex_processes_after_b = task_324_codex_process_ids(&codex_executable)?;
-        let new_codex_processes_b = codex_processes_after_b
-            .difference(&codex_processes_before_b)
-            .copied()
-            .collect::<Vec<_>>();
-        if new_codex_processes_b.len() != 1 {
+        let runtime_retained_b = matches!(
+            &*state.inner().connection.lock().unwrap(),
+            ConnectionState::Connected { runtime, .. } if Arc::strong_count(runtime) >= 1
+        );
+        let codex_processes_after_b = task_324_d_process_census(&codex_executable)?;
+        let new_codex_processes_b = task_324_d_new_app_server_process_ids(
+            &codex_processes_before_b,
+            &codex_processes_after_b,
+        );
+        if !runtime_retained_b || new_codex_processes_b.len() != 1 {
             shutdown_live_state(state.inner()).await;
             return Err(format!(
-                "B Connect did not publish exactly one RAH-owned Codex app-server child: {}",
+                "B Connect ownership proof failed: retained_runtime={}, new_app_server_count={}",
+                u8::from(runtime_retained_b),
                 new_codex_processes_b.len()
             ));
         }
-        let codex_process_b = new_codex_processes_b[0];
+        let codex_process_b = *new_codex_processes_b
+            .iter()
+            .next()
+            .ok_or_else(|| "B Connect ownership proof had no candidate".to_owned())?;
+        let process_b = codex_processes_after_b
+            .iter()
+            .find(|process| process.pid == codex_process_b)
+            .ok_or_else(|| {
+                "B Connect candidate was absent from the post-Connect census".to_owned()
+            })?;
+        if process_b.parent_pid != 0 && process_b.parent_pid != std::process::id() {
+            shutdown_live_state(state.inner()).await;
+            return Err("B Connect candidate did not have the expected direct parent".to_owned());
+        }
+        println!("RAH_V026_B_CONNECTED_RUNTIME_RETAINED=1");
+        println!("RAH_V026_B_NEW_ATTRIBUTABLE_APP_SERVER_COUNT=1");
+        println!("RAH_V026_B_PARENT_RELATION=expected-direct-or-unavailable");
         let connected_b = get_effective_authority_snapshot(state.clone());
         if connected_b.status != SnapshotStatus::ConnectedCurrent
+            || !connected_b.repository.selected
+            || connected_b.repository.identity != RepositoryIdentity::Current
+            || connected_b.repository.captured_generation != Some(generation_b)
             || connected_b.configured.configured_provider_count != 0
             || connected_b
                 .effective_tools
@@ -25409,13 +25457,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             shutdown_live_state(state.inner()).await;
             return Err("B connected active-only composition was not exact".to_owned());
         }
-        if let Err(error) =
-            task_324_host_registry_read(Arc::clone(&registry_b), "RAH_V026_REPO_B").await
-        {
-            shutdown_live_state(state.inner()).await;
-            return Err(error);
-        }
-        println!("RAH_V026_B_HOST_MARKER=RAH_V026_REPO_B");
         disconnect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex disconnect B failed: {error:?}"))?;
