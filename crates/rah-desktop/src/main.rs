@@ -24034,8 +24034,7 @@ fn main() {
             if let Err(error) = Self::initialize_repository(git, &repository_a, "A")
                 .and_then(|_| Self::initialize_repository(git, &repository_b, "B"))
             {
-                let _ = clear_task_324_fixture_readonly_attributes(&root);
-                let _ = fs::remove_dir_all(&root);
+                let _ = remove_task_324_fixture_root(&root);
                 return Err(error);
             }
             Ok(Self {
@@ -24085,9 +24084,7 @@ fn main() {
         }
 
         fn cleanup(mut self) -> Result<(), String> {
-            clear_task_324_fixture_readonly_attributes(&self.root)?;
-            fs::remove_dir_all(&self.root)
-                .map_err(|error| format!("temporary certification cleanup failed: {error}"))?;
+            remove_task_324_fixture_root(&self.root)?;
             self.cleaned = true;
             Ok(())
         }
@@ -24096,8 +24093,7 @@ fn main() {
     impl Drop for Task324LiveFixture {
         fn drop(&mut self) {
             if !self.cleaned {
-                let _ = clear_task_324_fixture_readonly_attributes(&self.root);
-                let _ = fs::remove_dir_all(&self.root);
+                let _ = remove_task_324_fixture_root(&self.root);
             }
         }
     }
@@ -24109,6 +24105,8 @@ fn main() {
             let wildcard = path.join("*");
             let status = Command::new("attrib")
                 .args(["-R", wildcard.to_string_lossy().as_ref(), "/S", "/D"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map_err(|error| format!("fixture attribute reset failed to start: {error}"))?;
             if !status.success() {
@@ -24131,6 +24129,23 @@ fn main() {
                 .map_err(|error| format!("fixture attribute reset failed: {error}"))?;
         }
         Ok(())
+    }
+
+    fn remove_task_324_fixture_root(path: &Path) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            clear_task_324_fixture_readonly_attributes(path)?;
+            match fs::remove_dir_all(path) {
+                Ok(()) => return Ok(()),
+                Err(error) if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(100));
+                    let _ = error;
+                }
+                Err(error) => {
+                    return Err(format!("temporary certification cleanup failed: {error}"));
+                }
+            }
+        }
     }
 
     fn task_324_git(git: &Path, root: &Path, arguments: &[&str]) -> Result<String, String> {
