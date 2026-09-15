@@ -24761,20 +24761,21 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_D_CODEX_SOURCE={:?}", codex_selection.source);
 
         let fixture = Task324LiveFixture::new(&git)?;
-        let storage = fixture.root.join("host-storage");
-        let app = tauri::Builder::default()
-            .any_thread()
-            .manage(DesktopAppState::new(storage))
-            .build(tauri::generate_context!())
-            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
-        let state = app.state::<DesktopAppState>();
-        let member_a = admit_repository(state.inner(), &git, &fixture.repository_a)
-            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
-        activate_admitted_member(state.inner(), member_a)
-            .await
-            .map_err(|error| format!("production activation of A failed: {error:?}"))?;
+        let diagnostic = {
+            let storage = fixture.root.join("host-storage");
+            let app = tauri::Builder::default()
+                .any_thread()
+                .manage(DesktopAppState::new(storage))
+                .build(tauri::generate_context!())
+                .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+            let state = app.state::<DesktopAppState>();
+            let member_a = admit_repository(state.inner(), &git, &fixture.repository_a)
+                .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+            activate_admitted_member(state.inner(), member_a)
+                .await
+                .map_err(|error| format!("production activation of A failed: {error:?}"))?;
 
-        let diagnostic = async {
+            let diagnostic = async {
             let desktop_before = task_324_d_process_census(&codex_executable)?;
             task_324_d_print_census("DESKTOP_BEFORE_CONNECT", &desktop_before);
             let desktop_connect = connect_codex(state.clone()).await;
@@ -24873,11 +24874,13 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             }
             println!("RAH_V026_D_CORRECTED_OWNERSHIP_PROOF=runtime_connect_and_owned_shutdown");
             Ok::<(), String>(())
-        }
-        .await;
+            }
+            .await;
 
-        shutdown_live_state(state.inner()).await;
-        drop(app);
+            shutdown_live_state(state.inner()).await;
+            drop(app);
+            diagnostic
+        };
         let cleanup_root = fixture.root.clone();
         fixture.cleanup()?;
         if cleanup_root.exists() {
