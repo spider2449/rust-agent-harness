@@ -24106,6 +24106,16 @@ fn main() {
         let metadata = fs::symlink_metadata(path)
             .map_err(|error| format!("fixture attribute inspection failed: {error}"))?;
         if metadata.is_dir() {
+            let wildcard = path.join("*");
+            let status = Command::new("attrib")
+                .args(["-R", wildcard.to_string_lossy().as_ref(), "/S", "/D"])
+                .status()
+                .map_err(|error| format!("fixture attribute reset failed to start: {error}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "fixture attribute reset failed with status {status}"
+                ));
+            }
             for entry in fs::read_dir(path)
                 .map_err(|error| format!("fixture directory inspection failed: {error}"))?
             {
