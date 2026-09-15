@@ -1,4 +1,74 @@
-# RAH v0.25.0 Security Model — released
+# RAH v0.26.0 Security Model — prepared, not yet published
+
+This section records the prepared v0.26 security boundary. RAH v0.25.0
+remains the current immutable published release; v0.26.0 is not published.
+
+## Repository membership and active authority
+
+- Repository membership is not repository authority.
+- An inactive member is not executable authority.
+- Explicit human/host admission and activation are required.
+- Exactly one repository is active at a time; there is no workspace-wide
+  filesystem authority or cross-repository Tool selector.
+- Active composition is fresh and repository-bound.
+- Model and provider output cannot select or admit a repository.
+- Stale actions, tickets, and authorization fail closed across switching.
+- Stage/Unstage asynchronous effects are repository/currentness bound.
+- Connect publication includes repository, model, profile, connection, and
+  identity currentness.
+- Nested repository boundaries are enforced for repository-bound paths.
+- Restart restores no repository membership authority.
+
+Persisted membership is absent by design in v0.26. Member removal is also
+absent by design. These omissions do not create authority; they keep the
+membership set process-local and require fresh host admission after restart.
+
+Stage/Unstage are separate host index authority, not HostExplicit. An old A
+action cannot revive after A→B or A→B→A. Commit remains separate
+repository-bound reviewed authority; `repo.commit` is not HostExplicit.
+
+The exact HostExplicit set remains 11 names:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixtures/diagnostics, and unknown/provider-defined Tools remain ineligible.
+
+The Windows certification was host-driven and ran with MCP 0 and Process
+Plugin 0. **MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE
+APPROVED GPT-5.6-TERRA LIVE GATE.** This is not a RAH authority failure and is
+not model Tool PASS evidence.
+
+## v0.26 Windows evidence boundary
+
+Task 324-C-R4 certifies the host-owned authority/effect plane and real Codex
+process lifecycle on Windows 10 Professional build 19045 x64 with Rust/Cargo
+1.96.0, Git 2.54.0.windows.1, and Codex 0.149.0 SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`. It does
+not establish Windows 11, Linux, or macOS live parity.
+
+## Preserved generic limitations
+
+Process supervision is not OS sandboxing. TOCTOU hardening is not race-free
+proof. RAH provides no network isolation guarantee and no rollback guarantee.
+Uncertain external effects are not replayed. Parallel active repositories,
+cross-repository operations, model-selected or provider-selected repository
+routing, network Git, and HostExplicit `repo.commit` are not claims of this
+release. Network MCP is outside the v0.26 milestone scope.
+
+## Historical v0.25.0 Security Model — released
 
 This document records the released v0.25.0 security posture.
 

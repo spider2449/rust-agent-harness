@@ -5,6 +5,24 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.26.0 prepared — not yet published
+
+RAH v0.26.0 is prepared, not yet published. v0.25.0 remains the immutable
+current published release. The v0.26 theme is **Explicit Multi-Repository
+Membership and Active-Only Repository Switching**: Desktop can explicitly admit
+multiple repositories per process, explicitly switch between them, and expose
+repository Tools and workflow authority only for one active repository at a
+time. Switching creates fresh active-only composition and invalidates stale
+repository-bound actions.
+
+Membership is process-local and descriptive, not workspace-wide filesystem or
+Git authority. Inactive members are inert; model/provider routing and
+cross-repository operations are unavailable. Membership is not persisted:
+restart restores zero repository membership authority. The release is prepared
+from Task 323 READY and the Task 324-C-R4 host-driven Windows certification;
+model-selected dynamic Tool dispatch is not established under the approved
+GPT-5.6-Terra live gate.
+
 ## RAH v0.25.0 released
 
 RAH v0.25.0 is the current immutable published release. v0.24.0 is the prior

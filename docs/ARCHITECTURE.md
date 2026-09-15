@@ -1,4 +1,79 @@
-# RAH v0.25.0 Architecture — released
+# RAH v0.26.0 Architecture — prepared, not yet published
+
+This document records the prepared v0.26 architecture. RAH v0.25.0 remains
+the current immutable published release; v0.26.0 has not been tagged or
+published.
+
+## Explicit multi-repository membership and active-only switching
+
+ADR 0027 — Workspace/Repository Identity and Authority-Composition Boundary —
+defines the v0.26 product boundary:
+
+```text
+trusted/human repository admission
+  -> process-local WorkspaceMembershipState
+  -> inert admitted members
+  -> one active RepositoryMemberId
+  -> fresh DesktopRepository
+  -> fresh active-only ToolRegistry/composition
+  -> repository-bound workflow/authority
+```
+
+Workspace membership is descriptive and organizational, not filesystem or Git
+authority. An inactive member retains no executable repository objects. The
+member selector is opaque and process-local; path spelling alone is not
+repository identity. Fresh activation revalidates private repository identity.
+Nested or alias-duplicate admission fails closed, and nested `.git` ancestry
+remains independently blocked for repository-bound path capabilities.
+
+There is one active repository or zero during setup and transition. There is
+no union registry and no model/provider repository selection. A successful
+switch withdraws the old executable composition and builds a fresh one for the
+new active member.
+
+Currentness is separated across membership/lifecycle coordination, repository
+generation, model generation, profile generation, connection generation,
+Commit identity generation, Stage/Unstage reservation currentness, and
+repository-bound HostExplicit tickets/actions. This keeps workflow effects,
+runtime publication, and authorization bound to the active repository and its
+current lifecycle.
+
+Membership is process-local in v0.26. Persistence and member removal are
+intentionally absent. Restart therefore restores no repository membership
+authority.
+
+The exact HostExplicit set remains 11 names:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+Stage/Unstage remain separate host index authority, not HostExplicit. Their
+actions are repository/currentness bound; an old A action does not revive after
+A→B or A→B→A. Commit remains separate repository-bound reviewed authority and
+`repo.commit` is not HostExplicit.
+
+Trusted Profile remains global host-owned composition. MCP and Process Plugin
+providers do not select repositories. The Windows evidence was host-driven
+with MCP 0 and Process Plugin 0; it does not establish provider-specific live
+multi-repository certification.
+
+**MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED
+GPT-5.6-TERRA LIVE GATE.** The host-driven certification proves the host-owned
+authority/effect plane and real Codex process lifecycle, not current model
+selection of an RAH dynamic Tool.
+
+## Historical v0.25.0 Architecture — released
 
 This document records the released v0.25.0 architecture.
 

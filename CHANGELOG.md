@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.26.0 — release preparation (2026-09-15)
+
+RAH v0.26.0 is **PREPARED, NOT PUBLISHED**. RAH v0.25.0 remains the current
+immutable published release until the later publication task succeeds. This
+preparation contains version and release documentation only; no production or
+test source changed.
+
+This release theme is **Explicit Multi-Repository Membership and Active-Only
+Repository Switching**. RAH Desktop can explicitly admit multiple repositories
+into one process-local membership set while executable repository authority
+remains singular. A human/host explicitly selects the one active repository.
+Only that repository receives `DesktopRepository`, repository ToolRegistry and
+composition, workflow actions, Stage/Unstage authority, Commit
+authorization/currentness, HostExplicit repository-bound currentness, and
+conversation repository context. Inactive members remain inert. Switching
+A→B→A builds fresh active-only authority and invalidates stale
+repository-bound state.
+
+The v0.26 milestone records Task 323 **READY**, Task 322 Recommendation A to
+stop feature expansion, Task 324-B's host-driven certification disposition,
+and Task 324-C-R4 **PASS — WINDOWS HOST-DRIVEN MULTI-REPOSITORY
+AUTHORITY/EFFECT CERTIFICATION PASSED**. The live certification source was
+`e59319166dc0776458c9c0bee61f4c73d9d6399c`, and the final certification
+documentation head was `21bc151efab969dcd725842459c049f2d6dd74c8`.
+
+The host-driven success marker is
+`RAH_V026_HOST_DRIVEN_MULTI_REPOSITORY_LIVE_OK`.
+
+The approved live evidence certifies host-owned authority/effects and the real
+Codex process lifecycle. It does not claim provider-specific multi-repository
+certification: Task 324-C-R4 ran with MCP 0 and Process Plugin 0.
+
+**MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED
+GPT-5.6-TERRA LIVE GATE.** Task 324-A showed real Codex/model turns completed
+but selected no RAH dynamic Tool. Task 324-B therefore followed established
+RAH policy that model selection is not host authorization. This is not a RAH
+authority failure and not a model Tool PASS.
+
+The exact production HostExplicit set remains 11 names:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixtures/diagnostics, and unknown/provider-defined Tools remain ineligible.
+Stage/Unstage remain separate host index authority, and Commit remains separate
+repository-bound reviewed authority.
+
 ## v0.25.0 — released (2026-09-12)
 
 RAH v0.25.0 is the current immutable published release. v0.24.0 is the prior
