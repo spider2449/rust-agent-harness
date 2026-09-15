@@ -8961,8 +8961,8 @@ mod tests {
         reset_startup_activation_counters, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
         revoke_repository_commit_context, run_host_tool, safe_delete_file_activity_result,
-        same_arc, save_trusted_profile_preference, selected_git_executable, send_chat,
-        set_commit_identity, startup_activation_snapshot, uncertain_repository_effect_pending,
+        same_arc, save_trusted_profile_preference, selected_git_executable, set_commit_identity,
+        startup_activation_snapshot, uncertain_repository_effect_pending,
         uncertain_repository_effect_requires_refresh, validate_host_confirmation_ticket,
         validate_prompt,
     };
@@ -8985,16 +8985,16 @@ mod tests {
         RepositoryFileRenameTool, RepositoryMultiFileEditPreparationRequest,
         RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditPreparer,
         RepositoryMultiFileEditTextReplacement, RepositoryPatchResultClassification, Tool,
-        ToolContext, ToolRegistry, classify_repository_patch_output,
-        classify_repository_rename_file_output, clear_live_test_create_file_native_attempts,
-        clear_live_test_create_file_tool_executions, clear_live_test_delete_file_native_attempts,
-        clear_live_test_delete_file_tool_executions, clear_live_test_multi_file_native_attempts,
-        clear_live_test_multi_file_tool_executions, clear_live_test_rename_file_native_attempts,
-        clear_live_test_rename_file_tool_executions, live_test_create_file_native_attempts,
-        live_test_create_file_tool_executions, live_test_delete_file_native_attempts,
-        live_test_delete_file_tool_executions, live_test_multi_file_native_attempts,
-        live_test_multi_file_tool_executions, live_test_rename_file_native_attempts,
-        live_test_rename_file_tool_executions,
+        ToolContext, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
+        classify_repository_patch_output, classify_repository_rename_file_output,
+        clear_live_test_create_file_native_attempts, clear_live_test_create_file_tool_executions,
+        clear_live_test_delete_file_native_attempts, clear_live_test_delete_file_tool_executions,
+        clear_live_test_multi_file_native_attempts, clear_live_test_multi_file_tool_executions,
+        clear_live_test_rename_file_native_attempts, clear_live_test_rename_file_tool_executions,
+        live_test_create_file_native_attempts, live_test_create_file_tool_executions,
+        live_test_delete_file_native_attempts, live_test_delete_file_tool_executions,
+        live_test_multi_file_native_attempts, live_test_multi_file_tool_executions,
+        live_test_rename_file_native_attempts, live_test_rename_file_tool_executions,
     };
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -23926,27 +23926,21 @@ fn main() {
         let mut observer = Task324TurnObserver::new();
         assert!(
             !observer
-                .observe(
-                    &task_324_event(
-                        Task324EventStream::Chat,
-                        serde_json::json!({
-                            "kind": "started"
-                        })
-                    ),
-                    None,
-                )
+                .observe(&task_324_event(
+                    Task324EventStream::Chat,
+                    serde_json::json!({
+                        "kind": "started"
+                    })
+                ),)
                 .unwrap()
         );
         let failure = observer
-            .observe(
-                &task_324_event(
-                    Task324EventStream::Chat,
-                    serde_json::json!({
-                        "kind": "completed"
-                    }),
-                ),
-                None,
-            )
+            .observe(&task_324_event(
+                Task324EventStream::Chat,
+                serde_json::json!({
+                    "kind": "completed"
+                }),
+            ))
             .unwrap_err();
         assert!(failure.contains("completed_without_required_tool"));
         assert!(failure.contains("last_observed_stage=chat_completed"));
@@ -23956,27 +23950,21 @@ fn main() {
     fn task_324_observer_reports_chat_failure_immediately() {
         let mut observer = Task324TurnObserver::new();
         observer
-            .observe(
-                &task_324_event(
-                    Task324EventStream::Chat,
-                    serde_json::json!({
-                        "kind": "started"
-                    }),
-                ),
-                None,
-            )
+            .observe(&task_324_event(
+                Task324EventStream::Chat,
+                serde_json::json!({
+                    "kind": "started"
+                }),
+            ))
             .unwrap();
         let failure = observer
-            .observe(
-                &task_324_event(
-                    Task324EventStream::Chat,
-                    serde_json::json!({
-                        "kind": "failed",
-                        "code": "chat_start_failed"
-                    }),
-                ),
-                None,
-            )
+            .observe(&task_324_event(
+                Task324EventStream::Chat,
+                serde_json::json!({
+                    "kind": "failed",
+                    "code": "chat_start_failed"
+                }),
+            ))
             .unwrap_err();
         assert!(failure.contains("thread_session_start_failed"));
         assert!(failure.contains("chat_code=chat_start_failed"));
@@ -24006,19 +23994,16 @@ fn main() {
             ),
         ];
         for event in &events {
-            assert!(!observer.observe(event, None).unwrap());
+            assert!(!observer.observe(event).unwrap());
         }
         assert!(
             observer
-                .observe(
-                    &task_324_event(
-                        Task324EventStream::Chat,
-                        serde_json::json!({
-                            "kind": "completed"
-                        })
-                    ),
-                    None,
-                )
+                .observe(&task_324_event(
+                    Task324EventStream::Chat,
+                    serde_json::json!({
+                        "kind": "completed"
+                    })
+                ),)
                 .unwrap()
         );
     }
@@ -24138,108 +24123,6 @@ fn main() {
         payload: String,
     }
 
-    struct Task324LiveEvidenceCapture {
-        path: PathBuf,
-        owns_environment: bool,
-    }
-
-    impl Task324LiveEvidenceCapture {
-        fn begin() -> Self {
-            if let Some(path) = std::env::var_os("RAH_LIVE_EVIDENCE_PATH") {
-                return Self {
-                    path: PathBuf::from(path),
-                    owns_environment: false,
-                };
-            }
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
-            let path = std::env::temp_dir().join(format!(
-                "rah-v026-turn-evidence-{}-{nonce}.jsonl",
-                std::process::id()
-            ));
-            unsafe { std::env::set_var("RAH_LIVE_EVIDENCE_PATH", &path) };
-            Self {
-                path,
-                owns_environment: true,
-            }
-        }
-
-        fn safe_failure_stage(&self) -> Option<&'static str> {
-            let contents = fs::read_to_string(&self.path).ok()?;
-            contents
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .filter(|record| {
-                    record.get("event").and_then(Value::as_str) == Some("desktop_failure")
-                })
-                .filter_map(
-                    |record| match record.get("failure_stage").and_then(Value::as_str) {
-                        Some("pre_turn_async_stale_generation_rejection") => {
-                            Some("pre_turn_async_stale_generation_rejection")
-                        }
-                        Some("pre_turn_stale_generation_rejection") => {
-                            Some("pre_turn_stale_generation_rejection")
-                        }
-                        Some("thread_or_turn_start_failure") => {
-                            Some("thread_or_turn_start_failure")
-                        }
-                        Some("tool_dispatch_failure") => Some("tool_dispatch_failure"),
-                        Some("model_runtime_failure") => Some("model_runtime_failure"),
-                        Some("terminal_disconnect_failure") => Some("terminal_disconnect_failure"),
-                        _ => None,
-                    },
-                )
-                .next_back()
-        }
-
-        fn finish(self) -> Result<(), String> {
-            if !self.owns_environment {
-                return Ok(());
-            }
-            unsafe { std::env::remove_var("RAH_LIVE_EVIDENCE_PATH") };
-            if self.path.exists() {
-                fs::remove_file(&self.path)
-                    .map_err(|error| format!("temporary live evidence cleanup failed: {error}"))?;
-            }
-            Ok(())
-        }
-    }
-
-    fn listen_for_task_324_event(
-        app: &tauri::AppHandle,
-        event_name: &'static str,
-        stream: Task324EventStream,
-        events: &Arc<Mutex<Vec<Task324ObservedEvent>>>,
-    ) -> tauri::EventId {
-        let captured = Arc::clone(events);
-        app.listen(event_name, move |event| {
-            captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(Task324ObservedEvent {
-                    stream,
-                    payload: event.payload().to_owned(),
-                });
-        })
-    }
-
-    fn listen_for_task_324_events(
-        app: &tauri::AppHandle,
-    ) -> (
-        Arc<Mutex<Vec<Task324ObservedEvent>>>,
-        tauri::EventId,
-        tauri::EventId,
-    ) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let chat_listener =
-            listen_for_task_324_event(app, "chat_event", Task324EventStream::Chat, &events);
-        let activity_listener =
-            listen_for_task_324_event(app, "activity_event", Task324EventStream::Activity, &events);
-        (events, chat_listener, activity_listener)
-    }
-
     struct Task324TurnObserver {
         chat_started: bool,
         last_stage: &'static str,
@@ -24265,11 +24148,7 @@ fn main() {
                 .join(",")
         }
 
-        fn observe(
-            &mut self,
-            observed: &Task324ObservedEvent,
-            evidence: Option<&Task324LiveEvidenceCapture>,
-        ) -> Result<bool, String> {
+        fn observe(&mut self, observed: &Task324ObservedEvent) -> Result<bool, String> {
             self.observed_events += 1;
             let payload = serde_json::from_str::<Value>(&observed.payload)
                 .map_err(|error| format!("Desktop event payload was invalid: {error}"))?;
@@ -24298,9 +24177,7 @@ fn main() {
                             let stage = match code {
                                 "chat_start_failed" => "thread_session_start_failed",
                                 "chat_cancelled" => "chat_cancelled",
-                                _ => evidence
-                                    .and_then(Task324LiveEvidenceCapture::safe_failure_stage)
-                                    .unwrap_or("runtime_agent_event_failed_or_disconnected"),
+                                _ => "runtime_agent_event_failed_or_disconnected",
                             };
                             return Err(format!(
                                 "failure_stage={stage}; chat_code={code}; last_observed_stage={}",
@@ -24413,93 +24290,137 @@ fn main() {
         }
     }
 
-    async fn task_324_observe_model_turn(
-        events: &Arc<Mutex<Vec<Task324ObservedEvent>>>,
-        evidence: &Task324LiveEvidenceCapture,
-    ) -> Result<(), String> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(180);
-        let mut observer = Task324TurnObserver::new();
-        let mut next_event = 0;
-        loop {
-            let captured = events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            while next_event < captured.len() {
-                let completed = observer.observe(&captured[next_event], Some(evidence))?;
-                next_event += 1;
-                if completed {
-                    return Ok(());
-                }
-            }
-            if std::time::Instant::now() >= deadline {
-                let failure_stage = if observer.last_stage == "tool_finished" {
-                    "tool_finished_but_no_model_continuation"
-                } else {
-                    "terminal_timeout"
-                };
-                return Err(format!(
-                    "failure_stage={failure_stage}; last_observed_stage={}; observed_events={}",
-                    observer.last_stage, observer.observed_events
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    async fn task_324_model_read(
-        app: &tauri::AppHandle,
+    async fn task_324_host_registry_read(
+        registry: Arc<ToolRegistry>,
         expected_marker: &str,
     ) -> Result<(), String> {
-        let (events, chat_listener, activity_listener) = listen_for_task_324_events(app);
-        let evidence = Task324LiveEvidenceCapture::begin();
-        let result = async {
-            send_chat(
-                "Use the repository read tool exactly once to read repo-marker.txt from the current repository, then report only the marker.".to_owned(),
-                app.clone(),
-                app.state(),
-            )
-            .await
-            .map_err(|error| format!("failure_stage=send_chat_rejected_before_spawn; error={error:?}"))?;
-            task_324_observe_model_turn(&events, &evidence).await?;
-            let transcript = app
-                .state::<DesktopAppState>()
-                .conversation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .history
-                .last()
-                .map(|message| message.content.clone())
-                .ok_or_else(|| "real model did not produce an assistant response".to_owned())?;
-            if !transcript.contains(expected_marker) {
-                return Err(format!(
-                    "real model returned the wrong repository marker: {transcript:?}"
-                ));
-            }
-            Ok::<(), String>(())
+        let expected_definition = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "fs.read")
+            .ok_or_else(|| "active registry omitted fs.read".to_owned())?;
+        let call = host_call(
+            ToolName::new("fs.read"),
+            ToolInput(serde_json::json!({"path": "repo-marker.txt"})),
+        );
+        authorize_tool_dispatch(
+            &registry,
+            &expected_definition,
+            &[PermissionLevel::Read],
+            &call,
+        )
+        .map_err(|error| format!("host fs.read authorization failed: {error:?}"))?;
+        let output = authorized_tool_dispatch(
+            &registry,
+            &expected_definition,
+            &[PermissionLevel::Read],
+            call,
+            ToolContext::default(),
+        )
+        .await
+        .map_err(|error| format!("host fs.read dispatch failed: {error:?}"))?;
+        let marker = output
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ToolContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .ok_or_else(|| "host fs.read returned no text content".to_owned())?;
+        if output.is_error || !marker.contains(expected_marker) {
+            return Err(format!(
+                "host fs.read returned the wrong repository marker: {marker:?}"
+            ));
         }
-        .await;
-        app.unlisten(chat_listener);
-        app.unlisten(activity_listener);
-        let cleanup = evidence.finish();
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-            (Err(error), Err(cleanup_error)) => Err(format!("{error}; {cleanup_error}")),
+        Ok(())
+    }
+
+    fn task_324_windows_identity() -> Result<(String, String, String), String> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$os = Get-CimInstance Win32_OperatingSystem; [Console]::WriteLine($os.Caption); [Console]::WriteLine($os.BuildNumber); [Console]::WriteLine($os.OSArchitecture)",
+            ])
+            .output()
+            .map_err(|error| format!("Windows identity probe failed to start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Windows identity probe failed with status {}",
+                output.status
+            ));
+        }
+        let lines = String::from_utf8(output.stdout)
+            .map_err(|error| format!("Windows identity output was not UTF-8: {error}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if lines.len() != 3 {
+            return Err("Windows identity probe returned an unexpected shape".to_owned());
+        }
+        Ok((lines[0].clone(), lines[1].clone(), lines[2].clone()))
+    }
+
+    fn task_324_codex_process_ids(executable: &Path) -> Result<BTreeSet<u32>, String> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$target = [IO.Path]::GetFullPath($env:RAH_TASK_324_CODEX_EXECUTABLE); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target -and $_.CommandLine -match 'app-server\\s+--stdio' } | ForEach-Object { $_.ProcessId }",
+            ])
+            .env("RAH_TASK_324_CODEX_EXECUTABLE", executable)
+            .output()
+            .map_err(|error| format!("Codex process ownership probe failed to start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Codex process ownership probe failed with status {}",
+                output.status
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("Codex process ownership output was not UTF-8: {error}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.parse::<u32>()
+                    .map_err(|error| format!("Codex process ID was invalid: {error}"))
+            })
+            .collect()
+    }
+
+    async fn task_324_wait_for_codex_process_exit(
+        executable: &Path,
+        process_id: u32,
+    ) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if !task_324_codex_process_ids(executable)?.contains(&process_id) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("RAH-owned Codex app-server process was not reaped".to_owned());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires explicit RAH_RUN_V026_MULTI_REPO_LIVE=1 and certified Windows Codex live gate"]
-    async fn task_324_windows_two_repository_live_certification() -> Result<(), String> {
-        if std::env::var("RAH_RUN_V026_MULTI_REPO_LIVE")
+    #[ignore = "requires explicit RAH_RUN_V026_HOST_DRIVEN_MULTI_REPO_LIVE=1 and certified Windows Codex live gate"]
+    async fn task_324_c_windows_host_driven_two_repository_live_certification() -> Result<(), String>
+    {
+        if std::env::var("RAH_RUN_V026_HOST_DRIVEN_MULTI_REPO_LIVE")
             .ok()
             .as_deref()
             != Some("1")
         {
             return Err(
-                "set RAH_RUN_V026_MULTI_REPO_LIVE=1 for the Windows live certification".to_owned(),
+                "set RAH_RUN_V026_HOST_DRIVEN_MULTI_REPO_LIVE=1 for the Windows live certification"
+                    .to_owned(),
             );
         }
 
@@ -24545,8 +24466,10 @@ fn main() {
         {
             return Err("certified Codex baseline version or SHA-256 mismatch".to_owned());
         }
-        println!("RAH_V026_WINDOWS_BUILD=26100");
-        println!("RAH_V026_WINDOWS_ARCH=x64");
+        let (windows_edition, windows_build, windows_arch) = task_324_windows_identity()?;
+        println!("RAH_V026_WINDOWS_EDITION={windows_edition}");
+        println!("RAH_V026_WINDOWS_BUILD={windows_build}");
+        println!("RAH_V026_WINDOWS_ARCH={windows_arch}");
         println!("RAH_V026_RUSTC={}", rustc_version());
         println!("RAH_V026_CARGO={}", cargo_version());
         println!("RAH_V026_GIT_VERSION={git_version}");
@@ -24690,18 +24613,34 @@ fn main() {
                 "A registry was duplicated or exposed repository selection metadata".to_owned(),
             );
         }
-        let cross_read = registry_a
-            .execute(
-                ToolCall {
-                    id: ToolCallId::new(),
-                    name: ToolName::new("fs.read"),
-                    input: rah_protocol::ToolInput(serde_json::json!({
-                        "path": "../repo-b/repo-marker.txt"
-                    })),
-                },
-                ToolContext::default(),
-            )
-            .await;
+        let fs_read_definition = definitions_a
+            .iter()
+            .find(|definition| definition.name.as_str() == "fs.read")
+            .cloned()
+            .ok_or_else(|| "A registry omitted fs.read".to_owned())?;
+        let cross_call = host_call(
+            ToolName::new("fs.read"),
+            ToolInput(serde_json::json!({
+                "path": "../repo-b/repo-marker.txt"
+            })),
+        );
+        authorize_tool_dispatch(
+            &registry_a,
+            &fs_read_definition,
+            &[PermissionLevel::Read],
+            &cross_call,
+        )
+        .map_err(|error| {
+            format!("cross-repository read authorization failed unexpectedly: {error:?}")
+        })?;
+        let cross_read = authorized_tool_dispatch(
+            &registry_a,
+            &fs_read_definition,
+            &[PermissionLevel::Read],
+            cross_call,
+            ToolContext::default(),
+        )
+        .await;
         if cross_read.is_ok()
             || cross_read
                 .as_ref()
@@ -24721,9 +24660,23 @@ fn main() {
             "rah-v026-live@example.invalid".to_owned(),
         )
         .map_err(|error| format!("commit identity setup failed: {error:?}"))?;
+        let codex_processes_before_a = task_324_codex_process_ids(&codex_executable)?;
         connect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex connection A failed: {error:?}"))?;
+        let codex_processes_after_a = task_324_codex_process_ids(&codex_executable)?;
+        let new_codex_processes_a = codex_processes_after_a
+            .difference(&codex_processes_before_a)
+            .copied()
+            .collect::<Vec<_>>();
+        if new_codex_processes_a.len() != 1 {
+            shutdown_live_state(state.inner()).await;
+            return Err(format!(
+                "A Connect did not publish exactly one RAH-owned Codex app-server child: {}",
+                new_codex_processes_a.len()
+            ));
+        }
+        let codex_process_a = new_codex_processes_a[0];
         let connected_a = get_effective_authority_snapshot(state.clone());
         let eligible_names = connected_a
             .effective_tools
@@ -24794,15 +24747,18 @@ fn main() {
             return Err("switch while Connected was not rejected as A-current busy".to_owned());
         }
         println!("RAH_V026_SWITCH_WHILE_CONNECTED_SUCCESS=0");
-        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_A").await {
+        if let Err(error) =
+            task_324_host_registry_read(Arc::clone(&registry_a), "RAH_V026_REPO_A").await
+        {
             shutdown_live_state(state.inner()).await;
             return Err(error);
         }
-        println!("RAH_V026_A_CODEX_MARKER=RAH_V026_REPO_A");
+        println!("RAH_V026_A_HOST_MARKER=RAH_V026_REPO_A");
 
         disconnect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex disconnect A failed: {error:?}"))?;
+        task_324_wait_for_codex_process_exit(&codex_executable, codex_process_a).await?;
         if !matches!(
             *state.inner().connection.lock().unwrap(),
             ConnectionState::NotConnected
@@ -24825,6 +24781,33 @@ fn main() {
         {
             return Err(
                 "A-to-B activation did not publish exactly one fresh generation".to_owned(),
+            );
+        }
+        let active_b = state
+            .inner()
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "B repository was not published".to_owned())?;
+        let registry_b = desktop_tool_registry(Some(&active_b), None)
+            .map_err(|error| format!("B active registry composition failed: {error}"))?;
+        let definitions_b = registry_b.definitions();
+        if definitions_b
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<BTreeSet<_>>()
+            != definitions_a
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<BTreeSet<_>>()
+            || definitions_b.iter().any(|definition| {
+                definition.input_schema.to_string().contains("member")
+                    || definition.input_schema.to_string().contains("repository")
+            })
+        {
+            return Err(
+                "B active registry was not the same ordinary non-union namespace".to_owned(),
             );
         }
         let stale_a = repository_stage_action(state.clone(), old_a_stage.clone()).await;
@@ -24891,9 +24874,23 @@ fn main() {
         }
         println!("RAH_V026_B_UNSTAGE_EFFECTS=1");
 
+        let codex_processes_before_b = task_324_codex_process_ids(&codex_executable)?;
         connect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex connection B failed: {error:?}"))?;
+        let codex_processes_after_b = task_324_codex_process_ids(&codex_executable)?;
+        let new_codex_processes_b = codex_processes_after_b
+            .difference(&codex_processes_before_b)
+            .copied()
+            .collect::<Vec<_>>();
+        if new_codex_processes_b.len() != 1 {
+            shutdown_live_state(state.inner()).await;
+            return Err(format!(
+                "B Connect did not publish exactly one RAH-owned Codex app-server child: {}",
+                new_codex_processes_b.len()
+            ));
+        }
+        let codex_process_b = new_codex_processes_b[0];
         let connected_b = get_effective_authority_snapshot(state.clone());
         if connected_b.status != SnapshotStatus::ConnectedCurrent
             || connected_b.configured.configured_provider_count != 0
@@ -24908,14 +24905,17 @@ fn main() {
             shutdown_live_state(state.inner()).await;
             return Err("B connected active-only composition was not exact".to_owned());
         }
-        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_B").await {
+        if let Err(error) =
+            task_324_host_registry_read(Arc::clone(&registry_b), "RAH_V026_REPO_B").await
+        {
             shutdown_live_state(state.inner()).await;
             return Err(error);
         }
-        println!("RAH_V026_B_CODEX_MARKER=RAH_V026_REPO_B");
+        println!("RAH_V026_B_HOST_MARKER=RAH_V026_REPO_B");
         disconnect_codex(state.clone())
             .await
             .map_err(|error| format!("real Codex disconnect B failed: {error:?}"))?;
+        task_324_wait_for_codex_process_exit(&codex_executable, codex_process_b).await?;
 
         activate_admitted_member(state.inner(), member_a)
             .await
@@ -24936,35 +24936,29 @@ fn main() {
             return Err("B-to-A activation did not publish fresh A currentness".to_owned());
         }
         println!("RAH_V026_B_TO_A=activated_generation_once");
-        connect_codex(state.clone())
-            .await
-            .map_err(|error| format!("real Codex reconnect A failed: {error:?}"))?;
-        if let Err(error) = task_324_model_read(app.handle(), "RAH_V026_REPO_A").await {
-            shutdown_live_state(state.inner()).await;
-            return Err(error);
-        }
-        println!("RAH_V026_FINAL_A_CODEX_MARKER=RAH_V026_REPO_A");
-        let final_a = get_effective_authority_snapshot(state.clone());
-        if final_a.status != SnapshotStatus::ConnectedCurrent
-            || final_a
-                .effective_tools
+        let final_active_a = state
+            .inner()
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "final A repository was not published".to_owned())?;
+        let final_registry_a = desktop_tool_registry(Some(&final_active_a), None)
+            .map_err(|error| format!("final A registry composition failed: {error}"))?;
+        if final_registry_a
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<BTreeSet<_>>()
+            != definitions_a
                 .iter()
-                .filter(|tool| tool.public_tool_name.starts_with("repo."))
-                .map(|tool| tool.public_tool_name.as_str())
+                .map(|definition| definition.name.as_str())
                 .collect::<BTreeSet<_>>()
-                != connected_a
-                    .effective_tools
-                    .iter()
-                    .filter(|tool| tool.public_tool_name.starts_with("repo."))
-                    .map(|tool| tool.public_tool_name.as_str())
-                    .collect::<BTreeSet<_>>()
         {
-            shutdown_live_state(state.inner()).await;
             return Err("final A registry was not a fresh non-union composition".to_owned());
         }
-        disconnect_codex(state.clone())
-            .await
-            .map_err(|error| format!("final real Codex disconnect failed: {error:?}"))?;
+        task_324_host_registry_read(Arc::clone(&final_registry_a), "RAH_V026_REPO_A").await?;
+        println!("RAH_V026_FINAL_A_HOST_MARKER=RAH_V026_REPO_A");
         shutdown_live_state(state.inner()).await;
         if !matches!(
             *state.inner().connection.lock().unwrap(),
@@ -24973,7 +24967,9 @@ fn main() {
         {
             return Err("final Codex runtime cleanup was not complete".to_owned());
         }
-        println!("RAH_V026_REAL_CODEX_CONNECTIONS=3");
+        println!("RAH_V026_REAL_CODEX_CONNECTIONS=2");
+        println!("RAH_V026_MODEL_REQUESTS=0");
+        println!("RAH_V026_MODEL_TOOL_REQUESTS=0");
         println!("RAH_V026_MODEL_REPOSITORY_SWITCH_ACTIONS=0");
         println!("RAH_V026_MCP_PROVIDERS=0");
         println!("RAH_V026_PROCESS_PLUGINS=0");
@@ -25009,7 +25005,7 @@ fn main() {
         println!("RAH_V026_RUNTIME_CLEANUP_REAPED=1");
         println!("RAH_V026_TEMP_REPOSITORY_CLEANUP=1");
         println!("RAH_V026_HEAD_INDEX_REF_INTEGRITY=1");
-        println!("RAH_V026_MULTI_REPOSITORY_LIVE_OK");
+        println!("RAH_V026_HOST_DRIVEN_MULTI_REPOSITORY_LIVE_OK");
         Ok(())
     }
 
