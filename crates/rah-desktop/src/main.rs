@@ -24034,6 +24034,7 @@ fn main() {
             if let Err(error) = Self::initialize_repository(git, &repository_a, "A")
                 .and_then(|_| Self::initialize_repository(git, &repository_b, "B"))
             {
+                let _ = clear_task_324_fixture_readonly_attributes(&root);
                 let _ = fs::remove_dir_all(&root);
                 return Err(error);
             }
@@ -24084,6 +24085,7 @@ fn main() {
         }
 
         fn cleanup(mut self) -> Result<(), String> {
+            clear_task_324_fixture_readonly_attributes(&self.root)?;
             fs::remove_dir_all(&self.root)
                 .map_err(|error| format!("temporary certification cleanup failed: {error}"))?;
             self.cleaned = true;
@@ -24094,9 +24096,31 @@ fn main() {
     impl Drop for Task324LiveFixture {
         fn drop(&mut self) {
             if !self.cleaned {
+                let _ = clear_task_324_fixture_readonly_attributes(&self.root);
                 let _ = fs::remove_dir_all(&self.root);
             }
         }
+    }
+
+    fn clear_task_324_fixture_readonly_attributes(path: &Path) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("fixture attribute inspection failed: {error}"))?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)
+                .map_err(|error| format!("fixture directory inspection failed: {error}"))?
+            {
+                let entry =
+                    entry.map_err(|error| format!("fixture entry inspection failed: {error}"))?;
+                clear_task_324_fixture_readonly_attributes(&entry.path())?;
+            }
+        }
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)
+                .map_err(|error| format!("fixture attribute reset failed: {error}"))?;
+        }
+        Ok(())
     }
 
     fn task_324_git(git: &Path, root: &Path, arguments: &[&str]) -> Result<String, String> {
