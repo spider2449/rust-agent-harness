@@ -24098,6 +24098,38 @@ fn main() {
         }
     }
 
+    fn task_324_matching_root_count() -> Result<usize, String> {
+        let prefix = "rah-v026-live-";
+        let mut count = 0;
+        for entry in fs::read_dir(std::env::temp_dir())
+            .map_err(|error| format!("Task 324 temporary root enumeration failed: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("Task 324 temporary root entry failed: {error}"))?;
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                && entry.file_name().to_string_lossy().starts_with(prefix)
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn task_324_sanitized_root_label(path: &Path) -> Result<String, String> {
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Task 324 temporary root label was not valid UTF-8".to_owned())?;
+        if !label.starts_with("rah-v026-live-")
+            || !label
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err("Task 324 temporary root label was not sanitized".to_owned());
+        }
+        Ok(label.to_owned())
+    }
+
     #[test]
     fn task_324_c_fresh_host_state_is_dropped_before_fixture_cleanup() -> Result<(), String> {
         let git = selected_git_executable()
@@ -25125,7 +25157,11 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_CODEX_BASELINE_MATCH=1");
         println!("RAH_V026_CODEX_SOURCE={:?}", codex_selection.source);
 
+        let preexisting_root_count = task_324_matching_root_count()?;
         let fixture = Task324LiveFixture::new(&git)?;
+        let current_root_label = task_324_sanitized_root_label(&fixture.root)?;
+        println!("RAH_V026_PREEXISTING_TASK324_ROOT_COUNT={preexisting_root_count}");
+        println!("RAH_V026_CURRENT_R4_ROOT_LABEL={current_root_label}");
         let initial_a = live_git_state(&git, &fixture.repository_a, "__rah_v026_none__")?;
         let initial_b = live_git_state(&git, &fixture.repository_b, "__rah_v026_none__")?;
         if initial_a.head_oid == initial_b.head_oid
@@ -25662,6 +25698,25 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_NETWORK_GIT_OPERATIONS=0");
         println!("RAH_V026_NO_UNION_REGISTRY=1");
 
+        let inert_replacement = Persistence::start(fixture.repository_a.join("repo-marker.txt"));
+        if inert_replacement.presentation().warning
+            != Some(super::ConversationPersistenceWarning::RestoreFailed)
+        {
+            return Err(
+                "live inert persistence replacement unexpectedly retained a fixture database connection"
+                    .to_owned(),
+            );
+        }
+        let old_persistence = {
+            let mut persistence = state
+                .inner()
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *persistence, inert_replacement)
+        };
+        drop(old_persistence);
+        println!("RAH_V026_ORIGINAL_MANAGED_PERSISTENCE_RELEASED=1");
         drop(app);
         let fresh = DesktopAppState::new(storage);
         let fresh_membership = repository_membership_presentation(&fresh);
@@ -25688,6 +25743,15 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         if cleanup_root.exists() {
             return Err("temporary certification root remained after cleanup".to_owned());
         }
+        let post_run_root_count = task_324_matching_root_count()?;
+        if post_run_root_count > preexisting_root_count {
+            return Err(format!(
+                "R4 cleanup created a new matching temporary root: preexisting={preexisting_root_count}, post_run={post_run_root_count}"
+            ));
+        }
+        println!("RAH_V026_CURRENT_R4_ROOT_EXISTS_AFTER_CLEANUP=0");
+        println!("RAH_V026_POST_R4_MATCHING_ROOT_COUNT={post_run_root_count}");
+        println!("RAH_V026_NEW_LEAKED_ROOTS=0");
         println!("RAH_V026_RUNTIME_CLEANUP_REAPED=1");
         println!("RAH_V026_TEMP_REPOSITORY_CLEANUP=1");
         println!("RAH_V026_HEAD_INDEX_REF_INTEGRITY=1");
