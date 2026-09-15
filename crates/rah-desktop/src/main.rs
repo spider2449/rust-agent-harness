@@ -24770,6 +24770,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_D_CODEX_VERSION={codex_version}");
         println!("RAH_V026_D_CODEX_SHA256={codex_sha256}");
         println!("RAH_V026_D_CODEX_SOURCE={:?}", codex_selection.source);
+        println!("RAH_V026_D_DIAGNOSTIC_PROCESS_PID={}", std::process::id());
 
         let fixture = Task324LiveFixture::new(&git)?;
         let diagnostic = {

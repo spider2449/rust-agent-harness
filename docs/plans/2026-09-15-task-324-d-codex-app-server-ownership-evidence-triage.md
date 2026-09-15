@@ -1,8 +1,8 @@
 # Task 324-D — Codex App-Server Ownership Evidence Triage
 
-Status: in progress. This document is the task evidence record and will be
-closed only after the zero-model diagnostics, cleanup, validation, and exact
-head CI are complete.
+Status: in progress. The zero-model ownership diagnostic has passed; closure
+remains pending final-source rerun, standard validation, push, and exact-head
+CI.
 
 ## Authoritative checkpoint
 
@@ -69,8 +69,59 @@ normalization and case-insensitive Windows spelling normalization.
 
 ## Live evidence
 
-To be completed after the diagnostic commit is tested through the certified
-Codex gate:
+The diagnostic was run through `scripts/codex-live-gate.ps1` with an
+ephemeral-auth-file copy, isolated temporary Codex home, MCP `0`, plugins
+disabled, apps disabled, and no model request. The required baseline was
+`codex-cli 0.149.0` with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+
+The host was Windows 10 Professional build `19045`, `64-bit`; Git was
+`2.54.0.windows.1`. The selected source was the host override to the exact
+certified binary. The Desktop diagnostic used a fresh two-repository fixture,
+admitted and activated repository A, then performed one real Desktop Connect
+and normal Disconnect. It performed one direct `CodexRuntime::connect` and
+normal `shutdown` control afterward. No model, Stage, Unstage, Commit, or
+other repository effect path was called.
+
+The sanitized Desktop census was:
+
+| census | certified executable identity | app-server | `--stdio` | old regex | old observer intersection |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before Connect | 0 | 0 | 1 unrelated candidate | 0 | 0 |
+| after Connect | 0 | 1 new candidate | 2 total candidates | 1 | 0 |
+
+The one new candidate had executable basename `codex.exe`,
+`executable_path_present=true`,
+`executable_identity_matches_certified_binary=false`,
+`command_line_contains_app_server=true`,
+`command_line_contains_stdio=true`, and
+`command_line_matches_old_task_324_regex=true`. Thus the old observer lost
+the child on the certified full executable identity predicate; command-line
+matching was not the failing predicate. The corrected observer found exactly
+one new app-server candidate. Its parent PID was the diagnostic test process
+PID, establishing direct spawn by the test process for this production path;
+no launcher parent was observed. The unrelated pre-existing candidates were
+not treated as owned and were not touched.
+
+The Desktop result was `connected`, and the test observed
+`Connected { runtime: Arc<CodexRuntime>, ... }` with retained runtime ownership
+before Disconnect. Normal Disconnect published `NotConnected`. The direct
+runtime control produced the same one-new-candidate shape: basename `codex.exe`,
+path present, certified identity false, app-server true, stdio true, and old
+regex true. This independently rules out a Desktop-only integration failure.
+
+After each Disconnect/shutdown, the attributable new PID set was empty. The
+fresh fixture root was deleted successfully after the test-only cleanup
+released the Desktop persistence connection; no unrelated Codex process was
+killed or modified.
+
+The current evidence does not support Outcome C or D. Successful protocol
+initialization plus retained Desktop `Arc<CodexRuntime>` proves the runtime
+was live and published. It also does not support an OS-wide limitation:
+Win32/CIM returned all required sanitized fields and consistently identified
+the app-server by command tokens. The relevant Windows environment difference
+from Task 324-C is therefore not implicated; Windows 10 is not newly claimed
+as a full certification environment by this triage.
 
 - Windows edition/build/architecture:
 - Codex version/SHA-256:
@@ -85,7 +136,12 @@ Codex gate:
 
 ## Validation and closure
 
-To be completed:
+The first live attempt exposed only a test-fixture cleanup issue: Git object
+files were read-only. A test-only bounded attribute/deletion cleanup was added;
+the next attempts narrowed a remaining SQLite lock to the managed Desktop
+`Persistence` connection, which was released through a test-only replacement
+before app teardown. The final live diagnostic must be rerun on the resulting
+source SHA, and then the following results will be recorded:
 
 - deterministic classifier tests;
 - `cargo fmt --check`;
@@ -100,5 +156,14 @@ To be completed:
 - focused Task 321/320/318/315 regressions;
 - exact-head CI and clean `HEAD == origin/master`.
 
-Final outcome must be exactly one of Outcome A, B, C, or D. Task 325 remains
-NOT AUTHORIZED in every outcome.
+## Provisional outcome
+
+OUTCOME A — PROCESS EVIDENCE OBSERVER DEFECT CONFIRMED AND CLOSED, pending the
+final-source rerun and CI closure above. The defect is the old observer's
+assumption that CIM `ExecutablePath`, after string normalization, must equal
+the selected certified executable path. The app-server command identity and
+owned runtime lifecycle are real and stable; the test-only evidence method
+uses identity-aware sanitized census plus successful owned runtime
+initialization/shutdown.
+
+Task 325 remains NOT AUTHORIZED in every outcome.
