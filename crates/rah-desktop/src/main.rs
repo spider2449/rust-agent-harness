@@ -8996,6 +8996,7 @@ mod tests {
         live_test_multi_file_native_attempts, live_test_multi_file_tool_executions,
         live_test_rename_file_native_attempts, live_test_rename_file_tool_executions,
     };
+    use serde::{Deserialize, Serialize};
     use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::os::windows::io::AsRawHandle;
@@ -24407,6 +24408,434 @@ fn main() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+    struct Task324DProcessObservation {
+        pid: u32,
+        parent_pid: u32,
+        executable_basename: String,
+        executable_path_present: bool,
+        executable_identity_matches_certified_binary: bool,
+        command_line_contains_app_server: bool,
+        command_line_contains_stdio: bool,
+        command_line_matches_old_task_324_regex: bool,
+    }
+
+    fn task_324_d_normalize_windows_path(path: &str) -> String {
+        let mut normalized = path.trim().replace('/', "\\");
+        for prefix in [r"\\?\", r"\\.\"] {
+            if let Some(stripped) = normalized.strip_prefix(prefix) {
+                normalized = stripped.to_owned();
+                break;
+            }
+        }
+        normalized.to_ascii_lowercase()
+    }
+
+    fn task_324_d_classify_process(
+        pid: u32,
+        parent_pid: u32,
+        executable_basename: &str,
+        executable_path: Option<&str>,
+        certified_binary: &str,
+        command_line: &str,
+    ) -> Task324DProcessObservation {
+        let executable_path_present = executable_path.is_some_and(|path| !path.trim().is_empty());
+        let executable_identity_matches_certified_binary = executable_path_present
+            && task_324_d_normalize_windows_path(executable_path.unwrap_or_default())
+                == task_324_d_normalize_windows_path(certified_binary);
+        let command_tokens = command_line
+            .split_whitespace()
+            .map(|token| token.trim_matches(['"', '\'']))
+            .collect::<Vec<_>>();
+        let command_line_contains_app_server = command_tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("app-server"));
+        let command_line_contains_stdio = command_tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("--stdio"));
+        let command_line_matches_old_task_324_regex = command_line
+            .split_whitespace()
+            .map(|token| token.trim_matches(['"', '\'']))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|tokens| {
+                tokens[0].eq_ignore_ascii_case("app-server")
+                    && tokens[1].eq_ignore_ascii_case("--stdio")
+            });
+        Task324DProcessObservation {
+            pid,
+            parent_pid,
+            executable_basename: executable_basename.to_owned(),
+            executable_path_present,
+            executable_identity_matches_certified_binary,
+            command_line_contains_app_server,
+            command_line_contains_stdio,
+            command_line_matches_old_task_324_regex,
+        }
+    }
+
+    fn task_324_d_process_census(
+        executable: &Path,
+    ) -> Result<Vec<Task324DProcessObservation>, String> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"
+$target = (Get-Item -LiteralPath $env:RAH_TASK_324_D_CODEX_EXECUTABLE -Force -ErrorAction Stop).FullName
+$rows = @(
+    foreach ($process in Get-CimInstance Win32_Process) {
+        $commandLine = [string]$process.CommandLine
+        $executablePath = [string]$process.ExecutablePath
+        $pathPresent = -not [string]::IsNullOrWhiteSpace($executablePath)
+        $normalizedPath = ''
+        if ($pathPresent) {
+            try { $normalizedPath = (Get-Item -LiteralPath $executablePath -Force -ErrorAction Stop).FullName }
+            catch { $normalizedPath = [IO.Path]::GetFullPath($executablePath) }
+        }
+        $identity = $pathPresent -and [StringComparer]::OrdinalIgnoreCase.Equals($normalizedPath, $target)
+        $appServer = $commandLine -match '(?i)(^|\s)app-server(?=\s|$)'
+        $stdio = $commandLine -match '(?i)(^|\s)--stdio(?=\s|$)'
+        $oldRegex = $commandLine -match 'app-server\s+--stdio'
+        $basename = if ($pathPresent) { [IO.Path]::GetFileName($executablePath) } else { '' }
+        $codexBasename = $basename -match '(?i)^codex(?:-[^.]+)?\.exe$'
+        if ($identity -or $appServer -or $stdio -or $codexBasename) {
+            [pscustomobject]@{
+                pid = [uint32]$process.ProcessId
+                parent_pid = [uint32]$process.ParentProcessId
+                executable_basename = $basename
+                executable_path_present = [bool]$pathPresent
+                executable_identity_matches_certified_binary = [bool]$identity
+                command_line_contains_app_server = [bool]$appServer
+                command_line_contains_stdio = [bool]$stdio
+                command_line_matches_old_task_324_regex = [bool]$oldRegex
+            }
+        }
+    }
+)
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3 }
+"#,
+            ])
+            .env("RAH_TASK_324_D_CODEX_EXECUTABLE", executable)
+            .output()
+            .map_err(|error| format!("Codex sanitized process census failed to start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Codex sanitized process census failed with status {}",
+                output.status
+            ));
+        }
+        let value: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("Codex sanitized process census was not JSON: {error}"))?;
+        match value {
+            Value::Array(items) => items
+                .into_iter()
+                .map(|item| {
+                    serde_json::from_value(item).map_err(|error| {
+                        format!("sanitized process observation was invalid: {error}")
+                    })
+                })
+                .collect(),
+            Value::Object(_) => Ok(vec![serde_json::from_value(value).map_err(|error| {
+                format!("sanitized process observation was invalid: {error}")
+            })?]),
+            _ => Err("sanitized process census returned an unexpected JSON shape".to_owned()),
+        }
+    }
+
+    fn task_324_d_print_census(label: &str, census: &[Task324DProcessObservation]) {
+        println!(
+            "RAH_V026_D_CENSUS_{label}={}",
+            serde_json::to_string(census).expect("sanitized process census serialization")
+        );
+        println!(
+            "RAH_V026_D_{label}_CERTIFIED_EXECUTABLE_MATCH_COUNT={}",
+            census
+                .iter()
+                .filter(|process| process.executable_identity_matches_certified_binary)
+                .count()
+        );
+        println!(
+            "RAH_V026_D_{label}_APP_SERVER_COUNT={}",
+            census
+                .iter()
+                .filter(|process| process.command_line_contains_app_server)
+                .count()
+        );
+        println!(
+            "RAH_V026_D_{label}_STDIO_COUNT={}",
+            census
+                .iter()
+                .filter(|process| process.command_line_contains_stdio)
+                .count()
+        );
+        println!(
+            "RAH_V026_D_{label}_OLD_REGEX_COUNT={}",
+            census
+                .iter()
+                .filter(|process| process.command_line_matches_old_task_324_regex)
+                .count()
+        );
+        println!(
+            "RAH_V026_D_{label}_OLD_OBSERVER_MATCH_COUNT={}",
+            census
+                .iter()
+                .filter(|process| {
+                    process.executable_identity_matches_certified_binary
+                        && process.command_line_matches_old_task_324_regex
+                })
+                .count()
+        );
+    }
+
+    fn task_324_d_new_process_ids(
+        before: &[Task324DProcessObservation],
+        after: &[Task324DProcessObservation],
+    ) -> BTreeSet<u32> {
+        let before = before
+            .iter()
+            .map(|process| process.pid)
+            .collect::<BTreeSet<_>>();
+        after
+            .iter()
+            .map(|process| process.pid)
+            .filter(|pid| !before.contains(pid))
+            .collect()
+    }
+
+    #[test]
+    fn task_324_d_classifier_accepts_exact_old_process_format() {
+        let observation = task_324_d_classify_process(
+            10,
+            20,
+            "codex.exe",
+            Some(r"C:\Codex\codex.exe"),
+            r"C:\Codex\codex.exe",
+            r#""C:\Codex\codex.exe" app-server --stdio"#,
+        );
+        assert!(observation.executable_path_present);
+        assert!(observation.executable_identity_matches_certified_binary);
+        assert!(observation.command_line_contains_app_server);
+        assert!(observation.command_line_contains_stdio);
+        assert!(observation.command_line_matches_old_task_324_regex);
+    }
+
+    #[test]
+    fn task_324_d_classifier_normalizes_observed_windows_path_spellings() {
+        let observation = task_324_d_classify_process(
+            11,
+            21,
+            "codex.exe",
+            Some(r"\\?\c:\codex\codex.exe"),
+            r"C:/Codex/codex.exe",
+            "codex.exe app-server --stdio",
+        );
+        assert!(observation.executable_identity_matches_certified_binary);
+    }
+
+    #[test]
+    fn task_324_d_classifier_rejects_unrelated_codex_process() {
+        let observation = task_324_d_classify_process(
+            12,
+            22,
+            "codex-code-mode-host.exe",
+            Some(r"C:\Codex\codex-code-mode-host.exe"),
+            r"C:\Codex\codex.exe",
+            "codex-code-mode-host.exe --serve",
+        );
+        assert!(!observation.executable_identity_matches_certified_binary);
+        assert!(!observation.command_line_contains_app_server);
+        assert!(!observation.command_line_contains_stdio);
+        assert!(!observation.command_line_matches_old_task_324_regex);
+    }
+
+    #[test]
+    fn task_324_d_classifier_rejects_non_app_server_codex_process() {
+        let observation = task_324_d_classify_process(
+            13,
+            23,
+            "codex.exe",
+            Some(r"C:\Codex\codex.exe"),
+            r"C:\Codex\codex.exe",
+            "codex.exe --version",
+        );
+        assert!(observation.executable_identity_matches_certified_binary);
+        assert!(!observation.command_line_contains_app_server);
+        assert!(!observation.command_line_contains_stdio);
+        assert!(!observation.command_line_matches_old_task_324_regex);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V026_CODEX_OWNERSHIP_TRIAGE=1 and certified Windows Codex live gate"]
+    async fn task_324_d_windows_codex_app_server_ownership_evidence() -> Result<(), String> {
+        if std::env::var("RAH_RUN_V026_CODEX_OWNERSHIP_TRIAGE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V026_CODEX_OWNERSHIP_TRIAGE=1 for the Windows ownership triage"
+                    .to_owned(),
+            );
+        }
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let codex_selection = resolve_codex_executable()
+            .map_err(|error| format!("certified Codex discovery failed: {error:?}"))?;
+        let codex_executable = fs::canonicalize(&codex_selection.executable)
+            .map_err(|error| format!("certified Codex canonicalization failed: {error}"))?;
+        let codex_version = String::from_utf8(
+            Command::new(&codex_executable)
+                .arg("--version")
+                .output()
+                .map_err(|error| format!("certified Codex version probe failed: {error}"))?
+                .stdout,
+        )
+        .map_err(|error| format!("certified Codex version output was not UTF-8: {error}"))?
+        .trim()
+        .to_owned();
+        let codex_sha256 = GetFileHash::sha256(&codex_executable)?;
+        if codex_version != SUPPORTED_CODEX_VERSION
+            || codex_sha256 != "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00"
+        {
+            return Err("certified Codex baseline version or SHA-256 mismatch".to_owned());
+        }
+        let (windows_edition, windows_build, windows_arch) = task_324_windows_identity()?;
+        println!("RAH_V026_D_WINDOWS_EDITION={windows_edition}");
+        println!("RAH_V026_D_WINDOWS_BUILD={windows_build}");
+        println!("RAH_V026_D_WINDOWS_ARCH={windows_arch}");
+        println!("RAH_V026_D_CODEX_VERSION={codex_version}");
+        println!("RAH_V026_D_CODEX_SHA256={codex_sha256}");
+        println!("RAH_V026_D_CODEX_SOURCE={:?}", codex_selection.source);
+
+        let fixture = Task324LiveFixture::new(&git)?;
+        let storage = fixture.root.join("host-storage");
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
+        let state = app.state::<DesktopAppState>();
+        let member_a = admit_repository(state.inner(), &git, &fixture.repository_a)
+            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+        activate_admitted_member(state.inner(), member_a)
+            .await
+            .map_err(|error| format!("production activation of A failed: {error:?}"))?;
+
+        let diagnostic = async {
+            let desktop_before = task_324_d_process_census(&codex_executable)?;
+            task_324_d_print_census("DESKTOP_BEFORE_CONNECT", &desktop_before);
+            let desktop_connect = connect_codex(state.clone()).await;
+            let desktop_connect_result = desktop_connect
+                .map_err(|error| format!("real Desktop Connect failed: {error:?}"))?;
+            println!(
+                "RAH_V026_D_DESKTOP_CONNECT_RESULT={}",
+                desktop_connect_result.status
+            );
+            let desktop_runtime_retained = matches!(
+                &*state
+                    .inner()
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ConnectionState::Connected { runtime, .. } if Arc::strong_count(runtime) >= 1
+            );
+            println!(
+                "RAH_V026_D_DESKTOP_CONNECTED_RUNTIME_RETAINED={}",
+                u8::from(desktop_runtime_retained)
+            );
+            if !desktop_runtime_retained {
+                return Err(
+                    "Desktop Connect returned success without retained Connected runtime ownership"
+                        .to_owned(),
+                );
+            }
+            let desktop_after_result = task_324_d_process_census(&codex_executable);
+            let desktop_disconnect_result = disconnect_codex(state.clone()).await;
+            let desktop_after = desktop_after_result?;
+            desktop_disconnect_result
+                .map_err(|error| format!("real Desktop Disconnect failed: {error:?}"))?;
+            task_324_d_print_census("DESKTOP_AFTER_CONNECT", &desktop_after);
+            let desktop_new = task_324_d_new_process_ids(&desktop_before, &desktop_after);
+            println!("RAH_V026_D_DESKTOP_NEW_PIDS={desktop_new:?}");
+            let desktop_app_server_new = desktop_after
+                .iter()
+                .filter(|process| {
+                    desktop_new.contains(&process.pid)
+                        && process.command_line_contains_app_server
+                        && process.command_line_contains_stdio
+                })
+                .map(|process| process.pid)
+                .collect::<BTreeSet<_>>();
+            println!(
+                "RAH_V026_D_DESKTOP_NEW_APP_SERVER_PIDS={desktop_app_server_new:?}"
+            );
+            let desktop_state_published = matches!(
+                *state
+                    .inner()
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ConnectionState::NotConnected
+            );
+            println!(
+                "RAH_V026_D_DESKTOP_DISCONNECT_STATE_NOT_CONNECTED={}",
+                u8::from(desktop_state_published)
+            );
+            if desktop_app_server_new.is_empty() {
+                return Err(format!(
+                    "Desktop Connect produced no new sanitized app-server process: {desktop_new:?}"
+                ));
+            }
+
+            let standalone_before = task_324_d_process_census(&codex_executable)?;
+            task_324_d_print_census("STANDALONE_BEFORE_CONNECT", &standalone_before);
+            let standalone = CodexRuntime::connect(&codex_executable)
+                .await
+                .map_err(|error| format!("standalone CodexRuntime Connect failed: {error}"))?;
+            let standalone_after_result = task_324_d_process_census(&codex_executable);
+            let standalone_shutdown_result = standalone.shutdown().await;
+            let standalone_after = standalone_after_result?;
+            standalone_shutdown_result
+                .map_err(|error| format!("standalone CodexRuntime shutdown failed: {error}"))?;
+            task_324_d_print_census("STANDALONE_AFTER_CONNECT", &standalone_after);
+            let standalone_new = task_324_d_new_process_ids(&standalone_before, &standalone_after);
+            println!("RAH_V026_D_STANDALONE_NEW_PIDS={standalone_new:?}");
+            if standalone_new.is_empty() {
+                return Err(
+                    "standalone CodexRuntime Connect succeeded but sanitized census found no new process"
+                        .to_owned(),
+                );
+            }
+            let standalone_after_disconnect = task_324_d_process_census(&codex_executable)?;
+            task_324_d_print_census("STANDALONE_AFTER_DISCONNECT", &standalone_after_disconnect);
+            let remaining_standalone = task_324_d_new_process_ids(
+                &standalone_before,
+                &standalone_after_disconnect,
+            );
+            println!("RAH_V026_D_STANDALONE_REMAINING_NEW_PIDS={remaining_standalone:?}");
+            if !remaining_standalone.is_empty() {
+                return Err(format!(
+                    "standalone CodexRuntime shutdown left attributable processes: {remaining_standalone:?}"
+                ));
+            }
+            println!("RAH_V026_D_CORRECTED_OWNERSHIP_PROOF=runtime_connect_and_owned_shutdown");
+            Ok::<(), String>(())
+        }
+        .await;
+
+        shutdown_live_state(state.inner()).await;
+        drop(app);
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        if cleanup_root.exists() {
+            return Err("Task 324-D temporary root remained after cleanup".to_owned());
+        }
+        println!("RAH_V026_D_DISCONNECT_CLEANUP=1");
+        diagnostic
     }
 
     #[tokio::test(flavor = "current_thread")]
