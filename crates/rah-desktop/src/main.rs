@@ -8924,15 +8924,15 @@ mod tests {
         HostInvocationUnavailableReason, IndexEffectTestHook, LlamaCppReadinessProbe,
         MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
         ModelConfigurationPresentation, MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY,
-        PendingConnectedPublication, Preferences, PreferencesWarning, PreparedDeleteFileResponse,
-        PreparedHostInvocation, PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput,
-        ProviderEndpointPresentation, ProviderPublicationRejectionReason, ProviderScheme,
-        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-        ReadinessState, RejectedProviderPublication, RepositoryIndexActionKind,
-        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
-        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
-        activate_admitted_member, activate_repository_member_selector, activity_event,
-        activity_event_with_composition, admit_repository, apply_model_selection,
+        PendingConnectedPublication, Persistence, Preferences, PreferencesWarning,
+        PreparedDeleteFileResponse, PreparedHostInvocation, PreparedHostPayload, ProviderEndpoint,
+        ProviderEndpointInput, ProviderEndpointPresentation, ProviderPublicationRejectionReason,
+        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
+        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RejectedProviderPublication,
+        RepositoryIndexActionKind, RepositoryObservationStage, RepositoryRefreshReason, ResumePair,
+        SendChatResult, SourceKind, StagedReviewPresentation, StartupActivationCounters,
+        TerminalOwnership, activate_admitted_member, activate_repository_member_selector,
+        activity_event, activity_event_with_composition, admit_repository, apply_model_selection,
         authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
         await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
         branch_result_classification, classify_repository_delete_file_result,
@@ -24889,6 +24889,16 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .await;
 
             shutdown_live_state(state.inner()).await;
+            let persistence_replacement =
+                Persistence::start(fixture.repository_a.join("repo-marker.txt"));
+            let _ = std::mem::replace(
+                &mut *state
+                    .inner()
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                persistence_replacement,
+            );
             drop(app);
             diagnostic
         };
