@@ -24141,68 +24141,74 @@ fn main() {
             .manage(DesktopAppState::new(storage.clone()))
             .build(tauri::generate_context!())
             .map_err(|error| format!("Desktop test app construction failed: {error}"))?;
-        let state = app.state::<DesktopAppState>();
-        if state
-            .inner()
-            .persistence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .presentation()
-            .warning
-            .is_some()
-            || !storage.join("conversation-transcript.sqlite3").exists()
         {
-            return Err("managed Desktop state did not initialize fixture persistence".to_owned());
-        }
-
-        admit_repository(state.inner(), &git, &fixture.repository_a)
-            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
-        if repository_membership_presentation(state.inner())
-            .members
-            .len()
-            != 1
-        {
-            return Err(
-                "managed Desktop state did not retain ordinary repository state".to_owned(),
-            );
-        }
-        shutdown_live_state(state.inner()).await;
-        if !matches!(
-            *state
-                .inner()
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ConnectionState::NotConnected
-        ) || state
-            .inner()
-            .provider_activation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-        {
-            return Err("managed Desktop state did not reach the normal shutdown state".to_owned());
-        }
-
-        let inert_replacement = Persistence::start(fixture.repository_a.join("repo-marker.txt"));
-        if inert_replacement.presentation().warning
-            != Some(super::ConversationPersistenceWarning::RestoreFailed)
-        {
-            return Err(
-                "inert persistence replacement unexpectedly retained a fixture database connection"
-                    .to_owned(),
-            );
-        }
-        let old_persistence = {
-            let mut persistence = state
+            let state = app.state::<DesktopAppState>();
+            if state
                 .inner()
                 .persistence
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::replace(&mut *persistence, inert_replacement)
-        };
-        drop(old_persistence);
-        drop(state);
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .presentation()
+                .warning
+                .is_some()
+                || !storage.join("conversation-transcript.sqlite3").exists()
+            {
+                return Err(
+                    "managed Desktop state did not initialize fixture persistence".to_owned(),
+                );
+            }
+
+            admit_repository(state.inner(), &git, &fixture.repository_a)
+                .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+            if repository_membership_presentation(state.inner())
+                .members
+                .len()
+                != 1
+            {
+                return Err(
+                    "managed Desktop state did not retain ordinary repository state".to_owned(),
+                );
+            }
+            shutdown_live_state(state.inner()).await;
+            if !matches!(
+                *state
+                    .inner()
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ConnectionState::NotConnected
+            ) || state
+                .inner()
+                .provider_activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                return Err(
+                    "managed Desktop state did not reach the normal shutdown state".to_owned(),
+                );
+            }
+
+            let inert_replacement =
+                Persistence::start(fixture.repository_a.join("repo-marker.txt"));
+            if inert_replacement.presentation().warning
+                != Some(super::ConversationPersistenceWarning::RestoreFailed)
+            {
+                return Err(
+                    "inert persistence replacement unexpectedly retained a fixture database connection"
+                        .to_owned(),
+                );
+            }
+            let old_persistence = {
+                let mut persistence = state
+                    .inner()
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                std::mem::replace(&mut *persistence, inert_replacement)
+            };
+            drop(old_persistence);
+        }
         drop(app);
 
         let fresh = DesktopAppState::new(storage);
