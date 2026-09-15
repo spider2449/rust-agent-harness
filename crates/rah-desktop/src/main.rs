@@ -24098,6 +24098,37 @@ fn main() {
         }
     }
 
+    #[test]
+    fn task_324_c_fresh_host_state_is_dropped_before_fixture_cleanup() -> Result<(), String> {
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let fixture = Task324LiveFixture::new(&git)?;
+        let storage = fixture.root.join("host-storage");
+        let fresh = DesktopAppState::new(storage);
+        let membership = repository_membership_presentation(&fresh);
+        if !membership.members.is_empty()
+            || membership.active_member_id.is_some()
+            || fresh.repository.lock().unwrap().is_some()
+            || fresh.commit_capability.lock().unwrap().is_some()
+            || fresh
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .is_some()
+            || !fresh.repository_workflow.lock().unwrap().actions.is_empty()
+            || fresh.host_invocation.lock().unwrap().state() != CoordinatorState::Idle
+        {
+            return Err("fresh host state restored repository authority unexpectedly".to_owned());
+        }
+        drop(fresh);
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        if cleanup_root.exists() {
+            return Err("temporary certification root remained after cleanup".to_owned());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::permissions_set_readonly_false)]
     fn clear_task_324_fixture_readonly_attributes(path: &Path) -> Result<(), String> {
         let metadata = fs::symlink_metadata(path)
@@ -25542,6 +25573,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_FRESH_HOST_MEMBERSHIP=empty");
         println!("RAH_V026_FRESH_HOST_AUTHORITY_RESTORED=0");
 
+        drop(fresh);
         let cleanup_root = fixture.root.clone();
         fixture.cleanup()?;
         if cleanup_root.exists() {
