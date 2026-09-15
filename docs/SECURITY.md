@@ -1,7 +1,18 @@
-# RAH v0.26.0 Security Model — prepared, not yet published
+# RAH v0.26.0 Security Model — released
 
-This section records the prepared v0.26 security boundary. RAH v0.25.0
-remains the current immutable published release; v0.26.0 is not published.
+This section records the released v0.26 security boundary. RAH v0.26.0 is the
+current immutable published release and v0.25.0 is the prior immutable
+published release. The v0.26 release source is
+`8b22b18739a54b752ce11e791fe380e522c10049`, annotated tag `v0.26.0`, tag
+object `f60ee2465c1819b59b5671f20387b74734ace019`, and peeled target
+`8b22b18739a54b752ce11e791fe380e522c10049`. Release-preparation CI
+`34965819523` and tag CI `34966821012` passed; GitHub Release `389111343` was
+published at `2026-09-15T12:07:53Z`.
+
+Task 325 prepared the immutable source and Task 326 published it without a
+repository commit. Task 327 is a later documentation-only descendant. That
+cleanup does not alter repository identity, currentness, HostExplicit,
+Commit, Stage/Unstage, Trusted Profile, providers, or Codex integration.
 
 ## Repository membership and active authority
 
@@ -47,9 +58,8 @@ repo.rename-file
 fixtures/diagnostics, and unknown/provider-defined Tools remain ineligible.
 
 The Windows certification was host-driven and ran with MCP 0 and Process
-Plugin 0. **MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE
-APPROVED GPT-5.6-TERRA LIVE GATE.** This is not a RAH authority failure and is
-not model Tool PASS evidence.
+Plugin 0. `MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+This is not a RAH authority failure and is not model Tool PASS evidence.
 
 ## v0.26 Windows evidence boundary
 

@@ -1,8 +1,13 @@
-# RAH v0.26.0 Architecture — prepared, not yet published
+# RAH v0.26.0 Architecture — released
 
-This document records the prepared v0.26 architecture. RAH v0.25.0 remains
-the current immutable published release; v0.26.0 has not been tagged or
-published.
+This document records the released v0.26 architecture. The current immutable
+release is `v0.26.0`, with release source
+`8b22b18739a54b752ce11e791fe380e522c10049`; the prior immutable release is
+`v0.25.0`. The v0.26 annotated tag is `v0.26.0`, its tag object is
+`f60ee2465c1819b59b5671f20387b74734ace019`, and its peeled target is the
+release source. Task 325 prepared the source, Task 326 published it without a
+repository commit, and Task 327 is a later documentation-only descendant,
+not the v0.26.0 release source.
 
 ## Explicit multi-repository membership and active-only switching
 
@@ -68,10 +73,10 @@ providers do not select repositories. The Windows evidence was host-driven
 with MCP 0 and Process Plugin 0; it does not establish provider-specific live
 multi-repository certification.
 
-**MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED
-GPT-5.6-TERRA LIVE GATE.** The host-driven certification proves the host-owned
-authority/effect plane and real Codex process lifecycle, not current model
-selection of an RAH dynamic Tool.
+`MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+The host-driven certification proves the host-owned authority/effect plane and
+real Codex process lifecycle, not current model selection of an RAH dynamic
+Tool.
 
 ## Historical v0.25.0 Architecture — released
 

@@ -1,11 +1,24 @@
 # Changelog
 
-## v0.26.0 — release preparation (2026-09-15)
+## v0.26.0 — released (2026-09-15)
 
-RAH v0.26.0 is **PREPARED, NOT PUBLISHED**. RAH v0.25.0 remains the current
-immutable published release until the later publication task succeeds. This
-preparation contains version and release documentation only; no production or
-test source changed.
+RAH v0.26.0 is the current immutable published release. RAH v0.25.0 is the
+prior immutable published release. Task 325 prepared the immutable source;
+Task 326 published the annotated tag and GitHub Release without a repository
+commit; Task 327 is a later documentation-only cleanup and is not the v0.26.0
+release source.
+
+### Immutable release record
+
+- Release source: `8b22b18739a54b752ce11e791fe380e522c10049`.
+- Annotated tag: `v0.26.0`.
+- Tag object: `f60ee2465c1819b59b5671f20387b74734ace019`.
+- Peeled target: `8b22b18739a54b752ce11e791fe380e522c10049`.
+- Release-preparation CI: `34965819523` — PASS.
+- Tag CI: `34966821012` — PASS.
+- GitHub Release: `389111343` — `RAH v0.26.0`.
+- Published: `2026-09-15T12:07:53Z` (`draft=false`, `prerelease=false`).
+- Assets: 0.
 
 This release theme is **Explicit Multi-Repository Membership and Active-Only
 Repository Switching**. RAH Desktop can explicitly admit multiple repositories
@@ -32,11 +45,11 @@ The approved live evidence certifies host-owned authority/effects and the real
 Codex process lifecycle. It does not claim provider-specific multi-repository
 certification: Task 324-C-R4 ran with MCP 0 and Process Plugin 0.
 
-**MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED
-GPT-5.6-TERRA LIVE GATE.** Task 324-A showed real Codex/model turns completed
-but selected no RAH dynamic Tool. Task 324-B therefore followed established
-RAH policy that model selection is not host authorization. This is not a RAH
-authority failure and not a model Tool PASS.
+`MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+Task 324-A showed real Codex/model turns completed but selected no RAH dynamic
+Tool. Task 324-B therefore followed established RAH policy that model
+selection is not host authorization. This is not a RAH authority failure and
+not a model Tool PASS.
 
 The exact production HostExplicit set remains 11 names:
 

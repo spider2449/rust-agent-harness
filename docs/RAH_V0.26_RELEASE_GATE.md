@@ -1,21 +1,35 @@
-# RAH v0.26.0 Release Gate — prepared, not published
+# RAH v0.26.0 Release Gate — released historical record
 
 ## Status
 
-**PREPARED, NOT PUBLISHED.** This document is the Task 325 release gate for
-RAH v0.26.0. It authorizes only a later, separately authorized publication
-task. Task 325 creates no tag and no GitHub Release.
+**RELEASED — HISTORICAL RECORD.** RAH v0.26.0 is the current immutable
+published release. Task 327 records the post-release documentation cleanup;
+this later descendant is not the release source.
 
-RAH v0.25.0 remains the current immutable published release:
+## Immutable publication identity
+
+- Release source: `8b22b18739a54b752ce11e791fe380e522c10049`.
+- Annotated tag: `v0.26.0`.
+- Tag object: `f60ee2465c1819b59b5671f20387b74734ace019`.
+- Peeled source: `8b22b18739a54b752ce11e791fe380e522c10049`.
+- Tag message: `RAH v0.26.0`.
+- Release-preparation CI: `34965819523` — PASS.
+- Tag CI: `34966821012` — PASS.
+- GitHub Release ID: `389111343`.
+- GitHub Release name: `RAH v0.26.0`.
+- Published: `2026-09-15T12:07:53Z`.
+- `draft=false`; `prerelease=false`; assets: 0.
+
+RAH v0.25.0 remains the prior immutable published release:
 
 - annotated tag: `v0.25.0`;
 - tag object: `ea3c31aaf5190b632d7ef86387f7aff6004ae664`;
 - peeled source: `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`;
 - GitHub Release ID: `387406579`, `draft=false`, `prerelease=false`.
 
-The final Task 325 commit is the candidate immutable v0.26.0 release source.
-Its exact SHA is recorded in the Task 325 closure evidence after commit
-creation; it must be the sole target of the later publication task.
+Task 325 prepared the immutable v0.26.0 source at the release source above.
+Task 326 published the annotated tag and GitHub Release without a repository
+commit. Task 327 is the later documentation-only cleanup descendant.
 
 ## Release theme and authority boundary
 
@@ -50,6 +64,13 @@ absent by design; restart restores zero membership authority.
    PASS — **WINDOWS HOST-DRIVEN MULTI-REPOSITORY AUTHORITY/EFFECT
    CERTIFICATION PASSED**.
 3. **Model-selected GPT-5.6 Terra dynamic Tool dispatch:** NOT ESTABLISHED.
+
+The historical task sequence is: Task 322 stop-expansion decision; Task 323
+READY milestone audit; Task 324 original model-driven live attempt BLOCKED;
+Task 324-A external/generic model-selection block; Task 324-B host-driven
+certification disposition; Task 324-C attempts and corrections; Task 324-C-R4
+final host-driven PASS; Task 325 release preparation; Task 326 immutable
+publication; and Task 327 documentation-only post-release cleanup.
 
 Historical intermediate evidence remains distinct: the original Task 324 was
 BLOCKED; Task 324-A found an external/generic model-selection block; Task
@@ -121,13 +142,13 @@ Plugin 0, so no provider-specific live certification is claimed.
 
 ## Required nonclaim
 
-**MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED
-GPT-5.6-TERRA LIVE GATE.** Task 324-A showed real Codex/model turns completed
-but selected no RAH dynamic Tool. Task 324-B applied the established policy
-that model selection is not host authorization. The Windows evidence certifies
-the host-owned authority/effect plane and real Codex process lifecycle, not
-current GPT-5.6 Terra model-selected Tool behavior. This is not a RAH
-authority failure and not model Tool PASS evidence.
+`MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+Task 324-A showed real Codex/model turns completed but selected no RAH dynamic
+Tool. Task 324-B applied the established policy that model selection is not
+host authorization. The Windows evidence certifies the host-owned
+authority/effect plane and real Codex process lifecycle, not current GPT-5.6
+Terra model-selected Tool behavior. This is not a RAH authority failure and
+not model Tool PASS evidence.
 
 ## Validation and release conditions
 
@@ -139,7 +160,8 @@ membership semantics, persistence, and removal are unchanged.
 
 Task 325 closure records PASS for the full deterministic validation, Desktop
 release build, frontend/Tauri checks, focused regressions, metadata, and
-dependency-drift audit. The workspace remains 13 packages, all `0.26.0`, all
+dependency-drift audit. Task 327's cleanup is documentation-only and leaves
+those facts unchanged. The workspace remains 13 packages, all `0.26.0`, all
 edition 2024. Cargo.lock contains only the 13 internal RAH package-version
 updates; no external crate version, checksum, source, or dependency drift.
 
@@ -151,14 +173,15 @@ removal, parallel active repositories, cross-repository operations,
 model/provider-selected routing, HostExplicit `repo.commit`, and network Git
 are not release claims.
 
-## Publication boundary
+## Publication checklist — completed
 
-Task 325 must end with `HEAD == origin/master`, a clean worktree, and
-successful exact-head CI for the final preparation SHA. It must leave tag
-`v0.26.0` absent and GitHub Release `v0.26.0` absent. No tag push, `gh release
-create`, or publication is part of this task.
+- [x] Task 325 prepared the immutable source and passed release-preparation CI.
+- [x] Task 326 created the annotated `v0.26.0` tag at the exact source.
+- [x] Tag object and peeled target were verified.
+- [x] Tag CI `34966821012` passed.
+- [x] GitHub Release `389111343` was published non-draft and non-prerelease.
+- [x] Task 327 converted preparation wording to this released historical record.
 
-The next separately authorized task is **Task 326 — RAH v0.26.0 Release
-Publication**. It must independently verify this immutable preparation SHA and
-CI, create only the annotated tag targeting it, verify tag identity/CI, and
-create the non-draft, non-prerelease GitHub Release without source changes.
+The Task 327 cleanup commit is a later docs-only descendant. It does not
+change the immutable release source, tag object, peeled target, or GitHub
+Release metadata.
