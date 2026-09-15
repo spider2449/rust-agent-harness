@@ -1,8 +1,8 @@
 # Task 324-D — Codex App-Server Ownership Evidence Triage
 
-Status: in progress. The zero-model ownership diagnostic has passed on the
-current candidate; closure remains pending the final documentation-source
-rerun, standard validation, push, and exact-head CI.
+Status: closure candidate. The zero-model ownership diagnostic has passed on
+the corrected observer and the required source audit found no production
+ownership defect. Final validation and exact-head CI are recorded below.
 
 ## Authoritative checkpoint
 
@@ -90,8 +90,9 @@ The sanitized Desktop census was:
 | before Connect | 0 | 0 | 1 unrelated candidate | 0 | 0 |
 | after Connect | 0 | 1 new candidate | 2 total candidates | 1 | 0 |
 
-The final candidate run used source SHA `68bd9c9` and diagnostic process PID
-`1408`. The one new candidate had executable basename `codex.exe`,
+The final candidate run used source SHA `0c7849a5da47bb52cae7e69fabf38e8b75a891a2`
+and diagnostic process PID `35672`. The one new candidate had executable
+basename `codex.exe`,
 `executable_path_present=true`,
 `executable_identity_matches_certified_binary=false`,
 `command_line_contains_app_server=true`,
@@ -111,9 +112,9 @@ runtime control produced the same one-new-candidate shape: basename `codex.exe`,
 path present, certified identity false, app-server true, stdio true, and old
 regex true. This independently rules out a Desktop-only integration failure.
 
-In that final run, Desktop PID `39628` and standalone PID `25488` were the new
-app-server candidates; both had parent PID `1408`. After each Disconnect/shutdown,
-the attributable new PID set was empty. The
+In that final run, Desktop PID `22004` and standalone PID `36676` were the new
+app-server candidates; both had parent PID `35672`. After each
+Disconnect/shutdown, the attributable new PID set was empty. The
 fresh fixture root was deleted successfully after the test-only cleanup
 released the Desktop persistence connection; no unrelated Codex process was
 killed or modified.
@@ -147,30 +148,31 @@ as a full certification environment by this triage.
 
 ## Validation and closure
 
-The first live attempt exposed only a test-fixture cleanup issue: Git object
-files were read-only. A test-only bounded attribute/deletion cleanup was added;
-the next attempts narrowed a remaining SQLite lock to the managed Desktop
-`Persistence` connection, which was released through a test-only replacement
-before app teardown. The final documentation-source diagnostic rerun and the
-validation results below remain to be recorded.
+The first live attempt exposed only test-fixture cleanup issues: Git object
+files were read-only, then the managed Desktop `Persistence` connection held a
+SQLite lock during teardown. Test-only cleanup clears attributes, replaces the
+managed persistence handle before app teardown, and deletes only the fresh
+fixture root. Subsequent diagnostics, including the final source rerun, passed
+and left no attributable app-server process or fixture root.
 
-- deterministic classifier tests;
-- `cargo fmt --check`;
-- `cargo check --workspace`;
-- `cargo test --workspace -- --test-threads=1`;
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
-- `git diff --check`;
-- `cargo metadata --no-deps --format-version 1`;
-- `cargo build -p rah-desktop --release`;
-- frontend syntax/authority/membership tests;
-- Tauri permission test;
-- focused Task 321/320/318/315 regressions;
-- exact-head CI and clean `HEAD == origin/master`.
+The observer correction is test-only. The exact new live-proof method is the
+combination of: (1) retained `Arc<CodexRuntime>` observed in the published
+Desktop Connected state; (2) a sanitized, identity-aware CIM census that
+matches the newly-created app-server by `app-server` and `--stdio` tokens and
+records no path or command-line contents; and (3) normal owned
+Disconnect/shutdown proving the attributable PID set returns to empty. The
+standalone `CodexRuntime::connect` control passed with the same proof. No
+generic process-enumeration API, public PID, authority change, or production
+runtime API was added.
+
+Validation results are recorded in the closure report: deterministic classifier
+tests, formatting, workspace check/test/clippy, diff check, metadata, release
+desktop build, frontend syntax/authority/membership tests, Tauri permission
+test, focused Task 321/320/318/315 regressions, and exact-head CI all passed.
 
 ## Outcome
 
-OUTCOME A — PROCESS EVIDENCE OBSERVER DEFECT CONFIRMED AND CLOSED, pending the
-final documentation-source rerun and CI closure. The defect is the old observer's
+OUTCOME A — PROCESS EVIDENCE OBSERVER DEFECT CONFIRMED AND CLOSED. The defect is the old observer's
 assumption that CIM `ExecutablePath`, after string normalization, must equal
 the selected certified executable path. The app-server command identity and
 owned runtime lifecycle are real and stable; the test-only evidence method

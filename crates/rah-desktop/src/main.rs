@@ -24098,6 +24098,7 @@ fn main() {
         }
     }
 
+    #[allow(clippy::permissions_set_readonly_false)]
     fn clear_task_324_fixture_readonly_attributes(path: &Path) -> Result<(), String> {
         let metadata = fs::symlink_metadata(path)
             .map_err(|error| format!("fixture attribute inspection failed: {error}"))?;
