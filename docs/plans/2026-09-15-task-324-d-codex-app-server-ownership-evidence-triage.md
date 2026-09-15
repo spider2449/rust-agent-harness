@@ -1,8 +1,8 @@
 # Task 324-D — Codex App-Server Ownership Evidence Triage
 
-Status: in progress. The zero-model ownership diagnostic has passed; closure
-remains pending final-source rerun, standard validation, push, and exact-head
-CI.
+Status: in progress. The zero-model ownership diagnostic has passed on the
+current candidate; closure remains pending the final documentation-source
+rerun, standard validation, push, and exact-head CI.
 
 ## Authoritative checkpoint
 
@@ -90,7 +90,8 @@ The sanitized Desktop census was:
 | before Connect | 0 | 0 | 1 unrelated candidate | 0 | 0 |
 | after Connect | 0 | 1 new candidate | 2 total candidates | 1 | 0 |
 
-The one new candidate had executable basename `codex.exe`,
+The final candidate run used source SHA `68bd9c9` and diagnostic process PID
+`1408`. The one new candidate had executable basename `codex.exe`,
 `executable_path_present=true`,
 `executable_identity_matches_certified_binary=false`,
 `command_line_contains_app_server=true`,
@@ -98,9 +99,9 @@ The one new candidate had executable basename `codex.exe`,
 `command_line_matches_old_task_324_regex=true`. Thus the old observer lost
 the child on the certified full executable identity predicate; command-line
 matching was not the failing predicate. The corrected observer found exactly
-one new app-server candidate. Its parent PID was the diagnostic test process
-PID, establishing direct spawn by the test process for this production path;
-no launcher parent was observed. The unrelated pre-existing candidates were
+one new app-server candidate. Its parent PID was `1408`, the diagnostic test
+process PID, establishing direct spawn by the test process for this production
+path; no launcher parent was observed. The unrelated pre-existing candidates were
 not treated as owned and were not touched.
 
 The Desktop result was `connected`, and the test observed
@@ -110,7 +111,9 @@ runtime control produced the same one-new-candidate shape: basename `codex.exe`,
 path present, certified identity false, app-server true, stdio true, and old
 regex true. This independently rules out a Desktop-only integration failure.
 
-After each Disconnect/shutdown, the attributable new PID set was empty. The
+In that final run, Desktop PID `39628` and standalone PID `25488` were the new
+app-server candidates; both had parent PID `1408`. After each Disconnect/shutdown,
+the attributable new PID set was empty. The
 fresh fixture root was deleted successfully after the test-only cleanup
 released the Desktop persistence connection; no unrelated Codex process was
 killed or modified.
@@ -123,16 +126,24 @@ the app-server by command tokens. The relevant Windows environment difference
 from Task 324-C is therefore not implicated; Windows 10 is not newly claimed
 as a full certification environment by this triage.
 
-- Windows edition/build/architecture:
-- Codex version/SHA-256:
-- Desktop before/after census:
-- Old observer exact failure:
-- Predicate that failed:
-- Parent relationship:
-- Standalone runtime census:
-- Desktop Connect/Disconnect:
-- Corrected ownership proof:
-- Cleanup:
+- Windows edition/build/architecture: Windows 10 Professional / `19045` / `64-bit`.
+- Codex version/SHA-256: `0.149.0` /
+  `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+- Desktop before/after census: certified identity `0 -> 0`; app-server `0 -> 1`;
+  stdio `1 -> 2`; old regex `0 -> 1`; old observer intersection `0 -> 0`.
+- Old observer exact failure: zero new PID because the certified executable
+  identity predicate was false.
+- Predicate that failed: full certified `ExecutablePath` identity; app-server
+  and exact `app-server --stdio` command predicates were true.
+- Parent relationship: Desktop and standalone app-server candidates were direct
+  children of diagnostic process PID `1408`.
+- Standalone runtime census: same one-new-candidate shape and same old observer
+  miss; direct `CodexRuntime` initialization succeeded.
+- Desktop Connect/Disconnect: `connected`, retained runtime `1`, then
+  `NotConnected`.
+- Corrected ownership proof: one new sanitized app-server plus successful
+  owned runtime initialization and shutdown.
+- Cleanup: both attributable PID sets empty and fresh Task 324-D root absent.
 
 ## Validation and closure
 
@@ -140,8 +151,8 @@ The first live attempt exposed only a test-fixture cleanup issue: Git object
 files were read-only. A test-only bounded attribute/deletion cleanup was added;
 the next attempts narrowed a remaining SQLite lock to the managed Desktop
 `Persistence` connection, which was released through a test-only replacement
-before app teardown. The final live diagnostic must be rerun on the resulting
-source SHA, and then the following results will be recorded:
+before app teardown. The final documentation-source diagnostic rerun and the
+validation results below remain to be recorded.
 
 - deterministic classifier tests;
 - `cargo fmt --check`;
@@ -156,10 +167,10 @@ source SHA, and then the following results will be recorded:
 - focused Task 321/320/318/315 regressions;
 - exact-head CI and clean `HEAD == origin/master`.
 
-## Provisional outcome
+## Outcome
 
 OUTCOME A — PROCESS EVIDENCE OBSERVER DEFECT CONFIRMED AND CLOSED, pending the
-final-source rerun and CI closure above. The defect is the old observer's
+final documentation-source rerun and CI closure. The defect is the old observer's
 assumption that CIM `ExecutablePath`, after string normalization, must equal
 the selected certified executable path. The app-server command identity and
 owned runtime lifecycle are real and stable; the test-only evidence method
