@@ -15,7 +15,6 @@ mod host_invocation;
 #[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
-#[allow(dead_code)]
 mod remembered_workspace;
 #[cfg(target_os = "windows")]
 mod repository_membership;
@@ -91,6 +90,10 @@ use rah_tools::{
     RepositoryRenameFileProof, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
     ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
     classify_repository_patch_output,
+};
+#[cfg(target_os = "windows")]
+use remembered_workspace::{
+    RememberedWorkspaceStartupState, load_startup_state as load_remembered_workspace_startup,
 };
 #[cfg(target_os = "windows")]
 use repository_membership::{InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipState};
@@ -409,6 +412,10 @@ struct DesktopAppState {
     /// Kept outside `ConnectionState` so hard recovery can asynchronously reap providers
     /// after synchronously withdrawing the usable runtime state.
     provider_activation: Mutex<Option<DesktopProviderActivation>>,
+    /// Immutable descriptive remembered-workspace state loaded at process startup.
+    /// It never participates in repository membership or authority composition.
+    #[allow(dead_code)] // Presentation exposure is deferred to the later catalog UI task.
+    remembered_workspace: RememberedWorkspaceStartupState,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -500,6 +507,7 @@ impl DesktopAppState {
     }
 
     fn new(storage_directory: PathBuf) -> Self {
+        let remembered_workspace = load_remembered_workspace_startup(&storage_directory);
         let neutral_workspace = neutral_workspace(&storage_directory);
         let (preferences, selection) = Preferences::start(storage_directory.clone());
         let identity = preferences.identity();
@@ -529,6 +537,7 @@ impl DesktopAppState {
             trusted_profile_generation: Mutex::new(0),
             host_invocation: Mutex::new(HostInvocationCoordinator::default()),
             provider_activation: Mutex::new(None),
+            remembered_workspace,
             neutral_workspace,
             model: Mutex::new(DesktopModelState {
                 selection,
@@ -8932,15 +8941,15 @@ mod tests {
         ProviderEndpointInput, ProviderEndpointPresentation, ProviderPublicationRejectionReason,
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
         REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RejectedProviderPublication,
-        RepositoryIndexActionKind, RepositoryObservationStage, RepositoryRefreshReason, ResumePair,
-        SendChatResult, SourceKind, StagedReviewPresentation, StartupActivationCounters,
-        TerminalOwnership, activate_admitted_member, activate_repository_member_selector,
-        activity_event, activity_event_with_composition, admit_repository, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
-        branch_result_classification, classify_repository_delete_file_result,
-        classify_repository_multi_file_output, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation,
+        RememberedWorkspaceStartupState, RepositoryIndexActionKind, RepositoryObservationStage,
+        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
+        StartupActivationCounters, TerminalOwnership, activate_admitted_member,
+        activate_repository_member_selector, activity_event, activity_event_with_composition,
+        admit_repository, apply_model_selection, authorize_repository_commit_review,
+        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
+        begin_connect, begin_repository_index_effect, branch_result_classification,
+        classify_repository_delete_file_result, classify_repository_multi_file_output,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
         complete_repository_index_effect, connect_codex, connect_prepared_codex,
         connection_activation_publication_is_current, connection_publication_is_current,
         current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
@@ -23325,6 +23334,309 @@ fn main() {
         )
         .unwrap();
         assert_eq!(model.generation, 0);
+    }
+
+    fn task_332_catalog() -> (
+        super::remembered_workspace::RememberedWorkspaceCatalog,
+        super::remembered_workspace::RememberedCandidateId,
+        super::remembered_workspace::RememberedCandidateId,
+    ) {
+        let first_id = super::remembered_workspace::RememberedCandidateId::generate();
+        let second_id = super::remembered_workspace::RememberedCandidateId::generate();
+        let sentinel = super::remembered_workspace::RememberedLocationHint::parse(PathBuf::from(
+            r"C:\task-332-candidate-sentinel\must-never-be-probed",
+        ))
+        .expect("candidate sentinel is lexically valid");
+        let first = super::remembered_workspace::RememberedWorkspaceMember::new(
+            first_id.clone(),
+            "First remembered repository".to_owned(),
+            Some(sentinel),
+        )
+        .expect("first remembered candidate is valid");
+        let second = super::remembered_workspace::RememberedWorkspaceMember::new(
+            second_id.clone(),
+            "Second remembered repository".to_owned(),
+            None,
+        )
+        .expect("second remembered candidate is valid");
+        let workspace = super::remembered_workspace::RememberedWorkspace::new(
+            super::remembered_workspace::RememberedCandidateId::generate(),
+            "Task 332 workspace".to_owned(),
+            vec![first, second],
+            Some(second_id.clone()),
+        )
+        .expect("remembered workspace is valid");
+        (
+            super::remembered_workspace::RememberedWorkspaceCatalog::new(workspace)
+                .expect("remembered catalog is valid"),
+            first_id,
+            second_id,
+        )
+    }
+
+    fn assert_task_332_zero_repository_authority(state: &DesktopAppState) {
+        let membership = state.workspace_membership.lock().unwrap();
+        assert_eq!(membership.member_count(), 0);
+        assert_eq!(membership.active_member(), None);
+        drop(membership);
+
+        assert!(state.repository.lock().unwrap().is_none());
+        assert_eq!(*state.repository_generation.lock().unwrap(), 0);
+        assert!(state.commit_capability.lock().unwrap().is_none());
+        assert!(
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        let workflow = state.repository_workflow.lock().unwrap();
+        assert!(workflow.actions.is_empty());
+        assert!(workflow.review.is_none());
+        assert!(workflow.commit_review.is_none());
+        assert!(workflow.review_selector.is_none());
+        drop(workflow);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        let conversation = state.conversation.lock().unwrap();
+        assert!(conversation.identity.is_none());
+        assert!(conversation.history.is_empty());
+    }
+
+    #[test]
+    fn remembered_startup_valid_catalog_survives_restart_descriptively() {
+        let storage = TestRepository::new();
+        let expected = task_332_catalog().0;
+        let store = super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+            .expect("remembered store opens");
+        store.save(&expected).expect("catalog saves");
+        drop(store);
+
+        super::reset_startup_activation_counters();
+        let first = DesktopAppState::new(storage.0.clone());
+        assert!(matches!(
+            first.remembered_workspace,
+            RememberedWorkspaceStartupState::Available(_)
+        ));
+        assert_task_332_zero_repository_authority(&first);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+        drop(first);
+
+        super::reset_startup_activation_counters();
+        let second = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            second.remembered_workspace,
+            RememberedWorkspaceStartupState::Available(expected.clone())
+        );
+        let workspace = match &second.remembered_workspace {
+            RememberedWorkspaceStartupState::Available(catalog) => catalog.workspace(),
+            RememberedWorkspaceStartupState::Unavailable(_) => unreachable!(),
+        };
+        assert_eq!(
+            workspace
+                .members()
+                .iter()
+                .map(|member| member.label())
+                .collect::<Vec<_>>(),
+            vec![
+                "First remembered repository",
+                "Second remembered repository"
+            ]
+        );
+        assert_eq!(
+            workspace.last_active_member_id(),
+            workspace.members().get(1).map(|member| member.id())
+        );
+        assert_task_332_zero_repository_authority(&second);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_missing_catalog_is_empty_without_file_creation() {
+        let storage = TestRepository::new();
+        assert!(!storage.0.join("remembered-workspace.json").exists());
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        match &state.remembered_workspace {
+            RememberedWorkspaceStartupState::Available(catalog) => {
+                assert!(catalog.workspace().members().is_empty());
+                assert!(catalog.workspace().last_active_member_id().is_none());
+            }
+            RememberedWorkspaceStartupState::Unavailable(_) => {
+                panic!("missing catalog should be available as an empty catalog")
+            }
+        }
+        assert!(!storage.0.join("remembered-workspace.json").exists());
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_corrupt_catalog_continues_unavailable_without_rewrite() {
+        let storage = TestRepository::new();
+        let path = storage.0.join("remembered-workspace.json");
+        let bytes = b"{".to_vec();
+        std::fs::write(&path, &bytes).expect("corrupt catalog writes");
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            state.remembered_workspace,
+            RememberedWorkspaceStartupState::Unavailable(
+                super::remembered_workspace::RememberedWorkspaceLoadStatus::CatalogUnavailable
+            )
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_future_catalog_continues_unsupported_without_downgrade() {
+        let storage = TestRepository::new();
+        let path = storage.0.join("remembered-workspace.json");
+        let bytes = br#"{"version":2,"workspace":{"future":true}}"#.to_vec();
+        std::fs::write(&path, &bytes).expect("future catalog writes");
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        assert_eq!(
+            state.remembered_workspace,
+            RememberedWorkspaceStartupState::Unavailable(
+                super::remembered_workspace::RememberedWorkspaceLoadStatus::UnsupportedVersion
+            )
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_candidate_location_is_loaded_without_path_access() {
+        let storage = TestRepository::new();
+        let expected = task_332_catalog().0;
+        let store = super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+            .expect("remembered store opens");
+        store.save(&expected).expect("catalog saves");
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        assert!(matches!(
+            state.remembered_workspace,
+            RememberedWorkspaceStartupState::Available(_)
+        ));
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            0
+        );
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_last_active_hint_remains_inert() {
+        let storage = TestRepository::new();
+        let (expected, _first_id, second_id) = task_332_catalog();
+        let store = super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+            .expect("remembered store opens");
+        store.save(&expected).expect("catalog saves");
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage.0.clone());
+        let last_active = match &state.remembered_workspace {
+            RememberedWorkspaceStartupState::Available(catalog) => {
+                catalog.workspace().last_active_member_id().cloned()
+            }
+            RememberedWorkspaceStartupState::Unavailable(_) => None,
+        };
+        assert_eq!(last_active, Some(second_id));
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remembered_startup_does_not_restore_prior_process_repository_state() {
+        let storage = TestRepository::new();
+        let remembered = task_332_catalog().0;
+        let store = super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+            .expect("remembered store opens");
+        store.save(&remembered).expect("catalog saves");
+
+        let process_a = DesktopAppState::new(storage.0.clone());
+        let repository = TestRepository::new();
+        let git = TestRepository::native_git();
+        let member =
+            admit_repository(&process_a, &git, &repository.0).expect("process A admits repository");
+        activate_admitted_member(&process_a, member)
+            .await
+            .expect("process A activates repository");
+        assert_eq!(
+            process_a
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count(),
+            1
+        );
+        assert!(process_a.repository.lock().unwrap().is_some());
+        drop(process_a);
+
+        super::reset_startup_activation_counters();
+        let process_b = DesktopAppState::new(storage.0.clone());
+        assert_task_332_zero_repository_authority(&process_b);
+        assert!(matches!(
+            process_b.remembered_workspace,
+            RememberedWorkspaceStartupState::Available(_)
+        ));
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
+    }
+
+    #[test]
+    fn remembered_startup_storage_failure_continues_unavailable_without_fallback() {
+        let storage = TestRepository::new();
+        let storage_file = storage.0.join("remembered-storage-file");
+        std::fs::write(&storage_file, b"not a directory").expect("storage failure fixture writes");
+        super::reset_startup_activation_counters();
+        let state = DesktopAppState::new(storage_file);
+        assert_eq!(
+            state.remembered_workspace,
+            RememberedWorkspaceStartupState::Unavailable(
+                super::remembered_workspace::RememberedWorkspaceLoadStatus::StorageFailure
+            )
+        );
+        assert_task_332_zero_repository_authority(&state);
+        assert_eq!(
+            super::startup_activation_snapshot(),
+            StartupActivationCounters::default()
+        );
     }
 
     #[test]

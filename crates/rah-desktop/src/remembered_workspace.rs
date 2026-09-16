@@ -38,6 +38,9 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
+static LOCATION_HINT_PATH_ACCESSES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestFault {
     Coordination,
@@ -157,6 +160,7 @@ impl RememberedCandidateId {
         Ok(Self(value))
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -201,9 +205,22 @@ impl RememberedLocationHint {
         Ok(Self(path))
     }
 
+    #[allow(dead_code)] // Used by a later explicit human-facing presentation action.
     pub(crate) fn path(&self) -> &Path {
+        #[cfg(test)]
+        LOCATION_HINT_PATH_ACCESSES.fetch_add(1, Ordering::SeqCst);
         &self.0
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_location_hint_path_accesses() {
+    LOCATION_HINT_PATH_ACCESSES.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn test_location_hint_path_accesses() -> u64 {
+    LOCATION_HINT_PATH_ACCESSES.load(Ordering::SeqCst)
 }
 
 impl Serialize for RememberedLocationHint {
@@ -239,14 +256,17 @@ impl RememberedWorkspaceMember {
         })
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn id(&self) -> &RememberedCandidateId {
         &self.id
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn label(&self) -> &str {
         &self.label
     }
 
+    #[allow(dead_code)] // Used by later explicit catalog presentation/action routes.
     pub(crate) fn location_hint(&self) -> Option<&RememberedLocationHint> {
         self.location_hint.as_ref()
     }
@@ -293,18 +313,22 @@ impl RememberedWorkspace {
         })
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn id(&self) -> &RememberedCandidateId {
         &self.id
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn label(&self) -> &str {
         &self.label
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn members(&self) -> &[RememberedWorkspaceMember] {
         &self.members
     }
 
+    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn last_active_member_id(&self) -> Option<&RememberedCandidateId> {
         self.last_active_member_id.as_ref()
     }
@@ -338,6 +362,7 @@ impl RememberedWorkspaceCatalog {
         Self::new(workspace).expect("the fixed empty catalog is valid")
     }
 
+    #[allow(dead_code)] // Used by later presentation and catalog action routes.
     pub(crate) fn workspace(&self) -> &RememberedWorkspace {
         &self.workspace
     }
@@ -382,6 +407,49 @@ pub(crate) enum StoreError {
     StorageFailure,
 }
 
+/// Immutable descriptive state captured while Desktop starts.
+///
+/// This state is intentionally separate from process-local repository
+/// membership. Loading it never admits, validates, or activates a repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RememberedWorkspaceStartupState {
+    Available(RememberedWorkspaceCatalog),
+    Unavailable(RememberedWorkspaceLoadStatus),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RememberedWorkspaceLoadStatus {
+    CatalogUnavailable,
+    UnsupportedVersion,
+    StorageFailure,
+}
+
+/// Loads only the dedicated remembered-workspace catalog for startup.
+///
+/// In particular, this function never dereferences a candidate location hint.
+pub(crate) fn load_startup_state(directory: &Path) -> RememberedWorkspaceStartupState {
+    let store = match RememberedWorkspaceStore::open(directory.to_owned()) {
+        Ok(store) => store,
+        Err(StoreError::StorageFailure | StoreError::InvalidCatalog) => {
+            return RememberedWorkspaceStartupState::Unavailable(
+                RememberedWorkspaceLoadStatus::StorageFailure,
+            );
+        }
+    };
+    match store.load() {
+        Ok(catalog) => RememberedWorkspaceStartupState::Available(catalog),
+        Err(LoadError::CatalogUnavailable) => RememberedWorkspaceStartupState::Unavailable(
+            RememberedWorkspaceLoadStatus::CatalogUnavailable,
+        ),
+        Err(LoadError::UnsupportedVersion) => RememberedWorkspaceStartupState::Unavailable(
+            RememberedWorkspaceLoadStatus::UnsupportedVersion,
+        ),
+        Err(LoadError::StorageFailure) => RememberedWorkspaceStartupState::Unavailable(
+            RememberedWorkspaceLoadStatus::StorageFailure,
+        ),
+    }
+}
+
 /// Owns only the remembered-workspace catalog in the application data root.
 pub(crate) struct RememberedWorkspaceStore {
     directory: PathBuf,
@@ -397,6 +465,7 @@ impl RememberedWorkspaceStore {
         })
     }
 
+    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
     pub(crate) fn generate_candidate_id(&self) -> RememberedCandidateId {
         RememberedCandidateId::generate()
     }
@@ -417,6 +486,7 @@ impl RememberedWorkspaceStore {
         }
     }
 
+    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
     pub(crate) fn save(&self, catalog: &RememberedWorkspaceCatalog) -> Result<(), StoreError> {
         catalog.validate().map_err(|_| StoreError::InvalidCatalog)?;
         let bytes = serialize_catalog(catalog).map_err(|_| StoreError::InvalidCatalog)?;
@@ -433,6 +503,7 @@ impl RememberedWorkspaceStore {
         result.map_err(|_| StoreError::StorageFailure)
     }
 
+    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
     pub(crate) fn delete(&self) -> Result<(), StoreError> {
         let _guard = self
             .coordination
