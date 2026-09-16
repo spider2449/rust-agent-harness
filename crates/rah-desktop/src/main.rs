@@ -93,7 +93,8 @@ use rah_tools::{
 };
 #[cfg(target_os = "windows")]
 use remembered_workspace::{
-    RememberedWorkspaceStartupState, load_startup_state as load_remembered_workspace_startup,
+    RememberedCandidateId, RememberedLocationHint, RememberedWorkspaceLookupError,
+    RememberedWorkspaceMutationError, RememberedWorkspaceStartupState, RememberedWorkspaceState,
 };
 #[cfg(target_os = "windows")]
 use repository_membership::{InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipState};
@@ -412,10 +413,9 @@ struct DesktopAppState {
     /// Kept outside `ConnectionState` so hard recovery can asynchronously reap providers
     /// after synchronously withdrawing the usable runtime state.
     provider_activation: Mutex<Option<DesktopProviderActivation>>,
-    /// Immutable descriptive remembered-workspace state loaded at process startup.
+    /// Mutable descriptive remembered-workspace state.
     /// It never participates in repository membership or authority composition.
-    #[allow(dead_code)] // Presentation exposure is deferred to the later catalog UI task.
-    remembered_workspace: RememberedWorkspaceStartupState,
+    remembered_workspace: RememberedWorkspaceState,
     /// An app-owned non-project directory used only when no repository is selected.
     neutral_workspace: Option<PathBuf>,
     model: Mutex<DesktopModelState>,
@@ -507,7 +507,7 @@ impl DesktopAppState {
     }
 
     fn new(storage_directory: PathBuf) -> Self {
-        let remembered_workspace = load_remembered_workspace_startup(&storage_directory);
+        let remembered_workspace = RememberedWorkspaceState::open(storage_directory.clone());
         let neutral_workspace = neutral_workspace(&storage_directory);
         let (preferences, selection) = Preferences::start(storage_directory.clone());
         let identity = preferences.identity();
@@ -1410,6 +1410,12 @@ pub(crate) enum FrontendError {
     RepositoryBusy,
     RepositoryActionInvalid,
     RepositoryActionStale,
+    RememberedCatalogUnavailable,
+    RememberedCatalogSaveFailed,
+    RememberedCandidateIdInvalid,
+    RememberedCandidateNotFound,
+    RememberedCatalogRequestInvalid,
+    RememberedLocationRequired,
     ModelConfigurationInvalid,
     ModelConfigurationBusy,
     CommitIdentityInvalid,
@@ -6550,6 +6556,277 @@ enum ActivationOutcome {
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+struct RememberedCandidatePresentation {
+    candidate_id: String,
+    label: String,
+    order: usize,
+    has_location_hint: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RememberedWorkspaceCatalogPresentation {
+    status: &'static str,
+    candidates: Vec<RememberedCandidatePresentation>,
+    last_active_candidate_id: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RememberedCandidateAddRequest {
+    label: String,
+    #[serde(default)]
+    location_hint: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RememberedCandidateUpdateRequest {
+    candidate_id: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_remembered_location_hint_update"
+    )]
+    location_hint: RememberedLocationHintUpdate,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+enum RememberedLocationHintUpdate {
+    #[default]
+    Missing,
+    Clear,
+    Set(String),
+}
+
+#[cfg(target_os = "windows")]
+fn deserialize_remembered_location_hint_update<'de, D>(
+    deserializer: D,
+) -> Result<RememberedLocationHintUpdate, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(value) => RememberedLocationHintUpdate::Set(value),
+        None => RememberedLocationHintUpdate::Clear,
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RememberedCandidateReorderRequest {
+    candidate_ids: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RememberedAdmissionResult {
+    candidate_id: String,
+    member_id: String,
+    membership: WorkspaceRepositoryMembershipPresentation,
+}
+
+#[cfg(target_os = "windows")]
+fn remembered_catalog_presentation(
+    snapshot: RememberedWorkspaceStartupState,
+) -> RememberedWorkspaceCatalogPresentation {
+    let RememberedWorkspaceStartupState::Available(catalog) = snapshot else {
+        return RememberedWorkspaceCatalogPresentation {
+            status: "unavailable",
+            candidates: Vec::new(),
+            last_active_candidate_id: None,
+        };
+    };
+    let workspace = catalog.workspace();
+    RememberedWorkspaceCatalogPresentation {
+        status: "available",
+        candidates: workspace
+            .members()
+            .iter()
+            .enumerate()
+            .map(|(order, candidate)| RememberedCandidatePresentation {
+                candidate_id: candidate.id().as_str().to_owned(),
+                label: candidate.label().to_owned(),
+                order,
+                has_location_hint: candidate.location_hint().is_some(),
+            })
+            .collect(),
+        last_active_candidate_id: workspace
+            .last_active_member_id()
+            .map(|candidate_id| candidate_id.as_str().to_owned()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remembered_mutation_error(error: RememberedWorkspaceMutationError) -> FrontendError {
+    match error {
+        RememberedWorkspaceMutationError::Unavailable => {
+            FrontendError::RememberedCatalogUnavailable
+        }
+        RememberedWorkspaceMutationError::StorageFailure => {
+            FrontendError::RememberedCatalogSaveFailed
+        }
+        RememberedWorkspaceMutationError::InvalidCatalog
+        | RememberedWorkspaceMutationError::Rejected(_) => {
+            if matches!(
+                error,
+                RememberedWorkspaceMutationError::Rejected(
+                    remembered_workspace::ValidationError::CandidateNotFound
+                )
+            ) {
+                FrontendError::RememberedCandidateNotFound
+            } else {
+                FrontendError::RememberedCatalogRequestInvalid
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_remembered_candidate_id(value: String) -> Result<RememberedCandidateId, FrontendError> {
+    RememberedCandidateId::parse(value).map_err(|_| FrontendError::RememberedCandidateIdInvalid)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_remembered_location_hint(
+    value: Option<String>,
+) -> Result<Option<RememberedLocationHint>, FrontendError> {
+    value
+        .map(|value| {
+            RememberedLocationHint::parse(PathBuf::from(value))
+                .map_err(|_| FrontendError::RememberedCatalogRequestInvalid)
+        })
+        .transpose()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn remembered_workspace_catalog(
+    state: State<'_, DesktopAppState>,
+) -> RememberedWorkspaceCatalogPresentation {
+    remembered_catalog_presentation(state.remembered_workspace.snapshot())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn remember_workspace_candidate(
+    state: State<'_, DesktopAppState>,
+    request: RememberedCandidateAddRequest,
+) -> Result<RememberedWorkspaceCatalogPresentation, FrontendError> {
+    let location_hint = parse_remembered_location_hint(request.location_hint)?;
+    let catalog = state
+        .remembered_workspace
+        .add_candidate(request.label, location_hint)
+        .map_err(remembered_mutation_error)?;
+    Ok(remembered_catalog_presentation(
+        RememberedWorkspaceStartupState::Available(catalog),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn update_remembered_workspace_candidate(
+    state: State<'_, DesktopAppState>,
+    request: RememberedCandidateUpdateRequest,
+) -> Result<RememberedWorkspaceCatalogPresentation, FrontendError> {
+    let candidate_id = parse_remembered_candidate_id(request.candidate_id)?;
+    let location_hint = match request.location_hint {
+        RememberedLocationHintUpdate::Missing => None,
+        RememberedLocationHintUpdate::Clear => Some(None),
+        RememberedLocationHintUpdate::Set(value) => {
+            Some(parse_remembered_location_hint(Some(value))?)
+        }
+    };
+    let catalog = state
+        .remembered_workspace
+        .update_candidate(candidate_id, request.label, location_hint)
+        .map_err(remembered_mutation_error)?;
+    Ok(remembered_catalog_presentation(
+        RememberedWorkspaceStartupState::Available(catalog),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn delete_remembered_workspace_candidate(
+    state: State<'_, DesktopAppState>,
+    candidate_id: String,
+) -> Result<RememberedWorkspaceCatalogPresentation, FrontendError> {
+    let candidate_id = parse_remembered_candidate_id(candidate_id)?;
+    let catalog = state
+        .remembered_workspace
+        .delete_candidate(candidate_id)
+        .map_err(remembered_mutation_error)?;
+    Ok(remembered_catalog_presentation(
+        RememberedWorkspaceStartupState::Available(catalog),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn reorder_remembered_workspace_candidates(
+    state: State<'_, DesktopAppState>,
+    request: RememberedCandidateReorderRequest,
+) -> Result<RememberedWorkspaceCatalogPresentation, FrontendError> {
+    let candidate_ids = request
+        .candidate_ids
+        .into_iter()
+        .map(parse_remembered_candidate_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    let catalog = state
+        .remembered_workspace
+        .reorder_candidates(candidate_ids)
+        .map_err(remembered_mutation_error)?;
+    Ok(remembered_catalog_presentation(
+        RememberedWorkspaceStartupState::Available(catalog),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn admit_remembered_candidate(
+    state: &DesktopAppState,
+    candidate_id: RememberedCandidateId,
+) -> Result<RepositoryMemberId, FrontendError> {
+    let location = match state.remembered_workspace.location_hint(&candidate_id) {
+        Ok(Some(location)) => location,
+        Ok(None) => return Err(FrontendError::RememberedLocationRequired),
+        Err(RememberedWorkspaceLookupError::Unavailable) => {
+            return Err(FrontendError::RememberedCatalogUnavailable);
+        }
+        Err(RememberedWorkspaceLookupError::NotFound) => {
+            return Err(FrontendError::RememberedCandidateNotFound);
+        }
+    };
+    let git = selected_git_executable()?;
+    admit_repository(state, &git, &location)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn admit_remembered_workspace_candidate(
+    state: State<'_, DesktopAppState>,
+    candidate_id: String,
+) -> Result<RememberedAdmissionResult, FrontendError> {
+    let candidate_id = parse_remembered_candidate_id(candidate_id)?;
+    let member_id = admit_remembered_candidate(state.inner(), candidate_id.clone())?;
+    Ok(RememberedAdmissionResult {
+        candidate_id: candidate_id.as_str().to_owned(),
+        member_id: member_id.selector(),
+        membership: repository_membership_presentation(state.inner()),
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 struct RepositoryMemberPresentation {
     member_id: String,
     display_name: String,
@@ -8851,6 +9128,12 @@ fn main() -> ExitCode {
             reset_model_preferences,
             test_llama_cpp_endpoint,
             choose_repository,
+            remembered_workspace_catalog,
+            remember_workspace_candidate,
+            update_remembered_workspace_candidate,
+            delete_remembered_workspace_candidate,
+            reorder_remembered_workspace_candidates,
+            admit_remembered_workspace_candidate,
             repository_membership,
             activate_repository_member,
             connect_codex,
@@ -8920,6 +9203,7 @@ mod tests {
         HostPrepareMultiFileEditTarget, HostPreparePatchRequest, HostPrepareRenameFileRequest,
         HostReadRequest, host_descriptor, host_descriptor_with_rename,
     };
+    use super::remembered_workspace::RememberedCandidateId;
     use super::repository_membership::RepositoryMemberId;
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -23422,7 +23706,7 @@ fn main() {
         super::reset_startup_activation_counters();
         let first = DesktopAppState::new(storage.0.clone());
         assert!(matches!(
-            first.remembered_workspace,
+            first.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Available(_)
         ));
         assert_task_332_zero_repository_authority(&first);
@@ -23435,10 +23719,11 @@ fn main() {
         super::reset_startup_activation_counters();
         let second = DesktopAppState::new(storage.0.clone());
         assert_eq!(
-            second.remembered_workspace,
+            second.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Available(expected.clone())
         );
-        let workspace = match &second.remembered_workspace {
+        let second_snapshot = second.remembered_workspace.snapshot();
+        let workspace = match &second_snapshot {
             RememberedWorkspaceStartupState::Available(catalog) => catalog.workspace(),
             RememberedWorkspaceStartupState::Unavailable(_) => unreachable!(),
         };
@@ -23470,7 +23755,7 @@ fn main() {
         assert!(!storage.0.join("remembered-workspace.json").exists());
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage.0.clone());
-        match &state.remembered_workspace {
+        match &state.remembered_workspace.snapshot() {
             RememberedWorkspaceStartupState::Available(catalog) => {
                 assert!(catalog.workspace().members().is_empty());
                 assert!(catalog.workspace().last_active_member_id().is_none());
@@ -23496,7 +23781,7 @@ fn main() {
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage.0.clone());
         assert_eq!(
-            state.remembered_workspace,
+            state.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Unavailable(
                 super::remembered_workspace::RememberedWorkspaceLoadStatus::CatalogUnavailable
             )
@@ -23518,7 +23803,7 @@ fn main() {
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage.0.clone());
         assert_eq!(
-            state.remembered_workspace,
+            state.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Unavailable(
                 super::remembered_workspace::RememberedWorkspaceLoadStatus::UnsupportedVersion
             )
@@ -23542,7 +23827,7 @@ fn main() {
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage.0.clone());
         assert!(matches!(
-            state.remembered_workspace,
+            state.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Available(_)
         ));
         assert_eq!(
@@ -23565,7 +23850,8 @@ fn main() {
         store.save(&expected).expect("catalog saves");
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage.0.clone());
-        let last_active = match &state.remembered_workspace {
+        let remembered_snapshot = state.remembered_workspace.snapshot();
+        let last_active = match &remembered_snapshot {
             RememberedWorkspaceStartupState::Available(catalog) => {
                 catalog.workspace().last_active_member_id().cloned()
             }
@@ -23610,7 +23896,7 @@ fn main() {
         let process_b = DesktopAppState::new(storage.0.clone());
         assert_task_332_zero_repository_authority(&process_b);
         assert!(matches!(
-            process_b.remembered_workspace,
+            process_b.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Available(_)
         ));
         assert_eq!(
@@ -23627,7 +23913,7 @@ fn main() {
         super::reset_startup_activation_counters();
         let state = DesktopAppState::new(storage_file);
         assert_eq!(
-            state.remembered_workspace,
+            state.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Unavailable(
                 super::remembered_workspace::RememberedWorkspaceLoadStatus::StorageFailure
             )
@@ -23637,6 +23923,355 @@ fn main() {
             super::startup_activation_snapshot(),
             StartupActivationCounters::default()
         );
+    }
+
+    fn remembered_candidate_ids(state: &DesktopAppState) -> Vec<RememberedCandidateId> {
+        match state.remembered_workspace.snapshot() {
+            RememberedWorkspaceStartupState::Available(catalog) => catalog
+                .workspace()
+                .members()
+                .iter()
+                .map(|candidate| candidate.id().clone())
+                .collect(),
+            RememberedWorkspaceStartupState::Unavailable(_) => {
+                panic!("remembered catalog should be available")
+            }
+        }
+    }
+
+    fn add_remembered_candidate(
+        state: &DesktopAppState,
+        label: &str,
+        location: Option<PathBuf>,
+    ) -> RememberedCandidateId {
+        let hint = location.map(|path| {
+            super::remembered_workspace::RememberedLocationHint::parse(path)
+                .expect("remembered location is lexically valid")
+        });
+        let catalog = state
+            .remembered_workspace
+            .add_candidate(label.to_owned(), hint)
+            .expect("remembered candidate adds");
+        catalog
+            .workspace()
+            .members()
+            .last()
+            .expect("added candidate exists")
+            .id()
+            .clone()
+    }
+
+    #[test]
+    fn task_333_catalog_actions_are_durable_ordered_and_privacy_safe() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let sentinel = PathBuf::from(r"C:\task-333-private\remembered-repository");
+        let updated_sentinel = PathBuf::from(r"C:\task-333-private\updated-repository");
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+        let first = add_remembered_candidate(&state, "First", Some(sentinel.clone()));
+        let second = add_remembered_candidate(&state, "Second", None);
+        assert_ne!(first, second);
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            0
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+
+        state
+            .remembered_workspace
+            .update_candidate(
+                first.clone(),
+                Some("Updated".to_owned()),
+                Some(Some(
+                    super::remembered_workspace::RememberedLocationHint::parse(
+                        updated_sentinel.clone(),
+                    )
+                    .unwrap(),
+                )),
+            )
+            .expect("remembered candidate updates");
+        state
+            .remembered_workspace
+            .reorder_candidates(vec![second.clone(), first.clone()])
+            .expect("exact candidate permutation reorders");
+        assert_eq!(
+            remembered_candidate_ids(&state),
+            vec![second.clone(), first.clone()]
+        );
+
+        let presentation =
+            super::remembered_catalog_presentation(state.remembered_workspace.snapshot());
+        let serialized = serde_json::to_string(&presentation).expect("presentation serializes");
+        assert!(serialized.contains("Updated"));
+        assert!(serialized.contains("hasLocationHint"));
+        assert!(!serialized.contains("task-333-private"));
+
+        state
+            .remembered_workspace
+            .delete_candidate(second.clone())
+            .expect("remembered candidate deletes");
+        let durable =
+            super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+                .expect("remembered store opens")
+                .load()
+                .expect("durable catalog loads");
+        assert_eq!(
+            durable
+                .workspace()
+                .members()
+                .iter()
+                .map(|candidate| candidate.id().clone())
+                .collect::<Vec<_>>(),
+            vec![first.clone()]
+        );
+        assert_eq!(
+            durable
+                .workspace()
+                .members()
+                .first()
+                .and_then(|candidate| candidate.location_hint())
+                .map(|hint| hint.path()),
+            Some(updated_sentinel.as_path())
+        );
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert_eq!(state.model.lock().unwrap().generation, 0);
+        let restarted = DesktopAppState::new(storage.0.clone());
+        assert_eq!(remembered_candidate_ids(&restarted), vec![first]);
+    }
+
+    #[test]
+    fn task_333_failed_catalog_save_preserves_published_and_durable_state() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let first = add_remembered_candidate(&state, "Before", None);
+        let before = state.remembered_workspace.snapshot();
+        super::remembered_workspace::set_test_fault(
+            storage.0.join("remembered-workspace.json"),
+            super::remembered_workspace::TestFault::Write,
+        );
+        let result =
+            state
+                .remembered_workspace
+                .update_candidate(first, Some("After".to_owned()), None);
+        assert_eq!(
+            result,
+            Err(super::remembered_workspace::RememberedWorkspaceMutationError::StorageFailure)
+        );
+        super::remembered_workspace::clear_test_state();
+        assert_eq!(state.remembered_workspace.snapshot(), before.clone());
+        let durable =
+            super::remembered_workspace::RememberedWorkspaceStore::open(storage.0.clone())
+                .unwrap()
+                .load()
+                .unwrap();
+        assert_eq!(
+            durable,
+            match before {
+                RememberedWorkspaceStartupState::Available(catalog) => catalog,
+                RememberedWorkspaceStartupState::Unavailable(_) => unreachable!(),
+            }
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+    }
+
+    #[test]
+    fn task_333_reorder_rejects_non_permutations() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let first = add_remembered_candidate(&state, "First", None);
+        let second = add_remembered_candidate(&state, "Second", None);
+        let before = state.remembered_workspace.snapshot();
+        for ids in [
+            vec![first.clone(), first.clone()],
+            vec![first.clone()],
+            vec![first.clone(), RememberedCandidateId::generate()],
+        ] {
+            assert_eq!(
+                state.remembered_workspace.reorder_candidates(ids),
+                Err(
+                    super::remembered_workspace::RememberedWorkspaceMutationError::Rejected(
+                        super::remembered_workspace::ValidationError::InvalidReorder
+                    )
+                )
+            );
+        }
+        assert_eq!(state.remembered_workspace.snapshot(), before);
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_333_remembered_admission_is_fresh_full_pipeline_and_inert() {
+        let storage = TestRepository::new();
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        let state = DesktopAppState::new(storage.0.clone());
+        let candidate = add_remembered_candidate(&state, "Repository", Some(repository.0.clone()));
+        let member = super::admit_remembered_candidate(&state, candidate.clone())
+            .expect("remembered candidate admits");
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 1);
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            None
+        );
+        assert!(state.repository.lock().unwrap().is_none());
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert_eq!(
+            member.selector(),
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .members()
+                .next()
+                .unwrap()
+                .id
+                .selector()
+        );
+        assert_eq!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member)
+                .unwrap()
+                .root,
+            repository.0.canonicalize().unwrap()
+        );
+        assert_eq!(
+            super::admit_remembered_candidate(&state, RememberedCandidateId::generate()),
+            Err(FrontendError::RememberedCandidateNotFound)
+        );
+        assert_eq!(
+            super::remembered_workspace::RememberedWorkspaceState::open(storage.0.clone())
+                .location_hint(&candidate),
+            Ok(Some(repository.0.clone()))
+        );
+    }
+
+    #[test]
+    fn task_333_missing_hint_is_bounded_and_does_not_admit() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let candidate = add_remembered_candidate(&state, "Needs location", None);
+        assert_eq!(
+            super::admit_remembered_candidate(&state, candidate),
+            Err(FrontendError::RememberedLocationRequired)
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_333_catalog_identity_is_not_process_member_identity_and_isolated() {
+        let storage = TestRepository::new();
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let candidate = {
+            let process_a = DesktopAppState::new(storage.0.clone());
+            add_remembered_candidate(&process_a, "Repository B", Some(repository_b.0.clone()))
+        };
+        let process_a = DesktopAppState::new(storage.0.clone());
+        let member_a = admit_repository(&process_a, &TestRepository::native_git(), &repository_a.0)
+            .expect("process A admits repository A");
+        activate_admitted_member(&process_a, member_a)
+            .await
+            .expect("repository A activates");
+        let member_b = super::admit_remembered_candidate(&process_a, candidate.clone()).unwrap();
+        assert_eq!(
+            process_a
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member(),
+            Some(member_a)
+        );
+
+        let process_b = DesktopAppState::new(storage.0.clone());
+        let member_b_fresh =
+            super::admit_remembered_candidate(&process_b, candidate.clone()).unwrap();
+        assert_ne!(member_b, member_b_fresh);
+        assert_eq!(
+            process_b
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member(),
+            None
+        );
+
+        process_a
+            .remembered_workspace
+            .update_candidate(candidate.clone(), Some("Changed".to_owned()), None)
+            .expect("catalog update succeeds");
+        process_a
+            .remembered_workspace
+            .delete_candidate(candidate)
+            .expect("catalog delete succeeds");
+        assert_eq!(
+            process_a
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member(),
+            Some(member_a)
+        );
+        assert_eq!(
+            process_a.repository.lock().unwrap().as_ref().unwrap().root,
+            repository_a.0.canonicalize().unwrap()
+        );
+        assert!(
+            process_a
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b)
+                .is_some()
+        );
+        assert!(
+            process_b
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b_fresh)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn task_333_re_admission_rechecks_current_repository_facts() {
+        let storage = TestRepository::new();
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
+        let state = DesktopAppState::new(storage.0.clone());
+        let candidate = add_remembered_candidate(&state, "Repository", Some(repository.0.clone()));
+        fs::remove_dir_all(repository.0.join(".git")).expect("repository metadata removes");
+        assert_eq!(
+            super::admit_remembered_candidate(&state, candidate),
+            Err(FrontendError::RepositoryInvalid)
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+        assert!(state.repository.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn task_333_update_request_distinguishes_missing_and_explicit_clear_hint() {
+        let candidate_id = "candidate";
+        let missing: super::RememberedCandidateUpdateRequest =
+            serde_json::from_str(&format!(r#"{{"candidateId":"{candidate_id}"}}"#))
+                .expect("missing update hint parses");
+        assert!(matches!(
+            missing.location_hint,
+            super::RememberedLocationHintUpdate::Missing
+        ));
+        let clear: super::RememberedCandidateUpdateRequest = serde_json::from_str(&format!(
+            r#"{{"candidateId":"{candidate_id}","locationHint":null}}"#
+        ))
+        .expect("explicit clear update hint parses");
+        assert!(matches!(
+            clear.location_hint,
+            super::RememberedLocationHintUpdate::Clear
+        ));
     }
 
     #[test]

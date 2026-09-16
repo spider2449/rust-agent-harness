@@ -42,7 +42,7 @@ static LOCATION_HINT_PATH_ACCESSES: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TestFault {
+pub(crate) enum TestFault {
     Coordination,
     Create,
     Write,
@@ -108,7 +108,7 @@ fn record_operation(path: &Path, operation: TestOperation) {
 }
 
 #[cfg(test)]
-fn set_test_fault(path: PathBuf, fault: TestFault) {
+pub(crate) fn set_test_fault(path: PathBuf, fault: TestFault) {
     let mut state = test_state()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -117,7 +117,7 @@ fn set_test_fault(path: PathBuf, fault: TestFault) {
 }
 
 #[cfg(test)]
-fn clear_test_state() {
+pub(crate) fn clear_test_state() {
     *test_state()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = TestState::default();
@@ -147,7 +147,7 @@ impl RememberedCandidateId {
         Self(RequestId::new().to_string())
     }
 
-    fn parse(value: String) -> Result<Self, ValidationError> {
+    pub(crate) fn parse(value: String) -> Result<Self, ValidationError> {
         if value.is_empty()
             || value.len() > MAX_ID_BYTES
             || !value.is_ascii()
@@ -160,7 +160,6 @@ impl RememberedCandidateId {
         Ok(Self(value))
     }
 
-    #[allow(dead_code)] // Used by later closed catalog presentation/action DTOs.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -266,7 +265,6 @@ impl RememberedWorkspaceMember {
         &self.label
     }
 
-    #[allow(dead_code)] // Used by later explicit catalog presentation/action routes.
     pub(crate) fn location_hint(&self) -> Option<&RememberedLocationHint> {
         self.location_hint.as_ref()
     }
@@ -392,6 +390,9 @@ pub(crate) enum ValidationError {
     UnsupportedVersion,
     SerializedTooLarge,
     InvalidCatalog,
+    CandidateNotFound,
+    InvalidReorder,
+    EmptyUpdate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -404,6 +405,7 @@ pub(crate) enum LoadError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StoreError {
     InvalidCatalog,
+    MutationRejected(ValidationError),
     StorageFailure,
 }
 
@@ -424,32 +426,6 @@ pub(crate) enum RememberedWorkspaceLoadStatus {
     StorageFailure,
 }
 
-/// Loads only the dedicated remembered-workspace catalog for startup.
-///
-/// In particular, this function never dereferences a candidate location hint.
-pub(crate) fn load_startup_state(directory: &Path) -> RememberedWorkspaceStartupState {
-    let store = match RememberedWorkspaceStore::open(directory.to_owned()) {
-        Ok(store) => store,
-        Err(StoreError::StorageFailure | StoreError::InvalidCatalog) => {
-            return RememberedWorkspaceStartupState::Unavailable(
-                RememberedWorkspaceLoadStatus::StorageFailure,
-            );
-        }
-    };
-    match store.load() {
-        Ok(catalog) => RememberedWorkspaceStartupState::Available(catalog),
-        Err(LoadError::CatalogUnavailable) => RememberedWorkspaceStartupState::Unavailable(
-            RememberedWorkspaceLoadStatus::CatalogUnavailable,
-        ),
-        Err(LoadError::UnsupportedVersion) => RememberedWorkspaceStartupState::Unavailable(
-            RememberedWorkspaceLoadStatus::UnsupportedVersion,
-        ),
-        Err(LoadError::StorageFailure) => RememberedWorkspaceStartupState::Unavailable(
-            RememberedWorkspaceLoadStatus::StorageFailure,
-        ),
-    }
-}
-
 /// Owns only the remembered-workspace catalog in the application data root.
 pub(crate) struct RememberedWorkspaceStore {
     directory: PathBuf,
@@ -465,17 +441,16 @@ impl RememberedWorkspaceStore {
         })
     }
 
-    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
-    pub(crate) fn generate_candidate_id(&self) -> RememberedCandidateId {
-        RememberedCandidateId::generate()
-    }
-
     pub(crate) fn load(&self) -> Result<RememberedWorkspaceCatalog, LoadError> {
         let _guard = self
             .coordination
             .try_lock()
             .map_err(|_| LoadError::StorageFailure)?;
         validate_storage_directory(&self.directory).map_err(|_| LoadError::StorageFailure)?;
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&self) -> Result<RememberedWorkspaceCatalog, LoadError> {
         let Some(bytes) = read_catalog_bytes(&self.directory)? else {
             return Ok(RememberedWorkspaceCatalog::empty());
         };
@@ -486,10 +461,8 @@ impl RememberedWorkspaceStore {
         }
     }
 
-    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
+    #[cfg(test)]
     pub(crate) fn save(&self, catalog: &RememberedWorkspaceCatalog) -> Result<(), StoreError> {
-        catalog.validate().map_err(|_| StoreError::InvalidCatalog)?;
-        let bytes = serialize_catalog(catalog).map_err(|_| StoreError::InvalidCatalog)?;
         let _guard = self
             .coordination
             .try_lock()
@@ -498,12 +471,12 @@ impl RememberedWorkspaceStore {
         ensure_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
         let coordination =
             CoordinationFile::acquire(&self.directory).map_err(|_| StoreError::StorageFailure)?;
-        let result = atomic_replace(&self.directory, catalog, &bytes);
+        let result = self.save_locked(catalog);
         drop(coordination);
-        result.map_err(|_| StoreError::StorageFailure)
+        result
     }
 
-    #[allow(dead_code)] // Used by later explicit catalog mutation actions.
+    #[cfg(test)]
     pub(crate) fn delete(&self) -> Result<(), StoreError> {
         let _guard = self
             .coordination
@@ -524,9 +497,288 @@ impl RememberedWorkspaceStore {
         result
     }
 
+    pub(crate) fn mutate<F>(&self, update: F) -> Result<RememberedWorkspaceCatalog, StoreError>
+    where
+        F: FnOnce(
+            &RememberedWorkspaceCatalog,
+        ) -> Result<RememberedWorkspaceCatalog, ValidationError>,
+    {
+        let _guard = self
+            .coordination
+            .try_lock()
+            .map_err(|_| StoreError::StorageFailure)?;
+        validate_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
+        ensure_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
+        let coordination =
+            CoordinationFile::acquire(&self.directory).map_err(|_| StoreError::StorageFailure)?;
+        let result = (|| {
+            let current = self
+                .load_unlocked()
+                .map_err(|_| StoreError::StorageFailure)?;
+            let next = update(&current).map_err(StoreError::MutationRejected)?;
+            self.save_locked(&next)?;
+            Ok(next)
+        })();
+        drop(coordination);
+        result
+    }
+
+    fn save_locked(&self, catalog: &RememberedWorkspaceCatalog) -> Result<(), StoreError> {
+        catalog.validate().map_err(|_| StoreError::InvalidCatalog)?;
+        let bytes = serialize_catalog(catalog).map_err(|_| StoreError::InvalidCatalog)?;
+        atomic_replace(&self.directory, catalog, &bytes).map_err(|_| StoreError::StorageFailure)
+    }
+
+    #[cfg(test)]
     fn path(&self) -> PathBuf {
         self.directory.join(FILE_NAME)
     }
+}
+
+/// Mutable, process-local owner for descriptive remembered-workspace state.
+///
+/// The mutex protects the published snapshot and serializes the complete
+/// read-modify-persist-publish transaction. It never protects repository
+/// admission, activation, provider lifecycle, or runtime state.
+pub(crate) struct RememberedWorkspaceState {
+    store: Option<RememberedWorkspaceStore>,
+    catalog: Mutex<RememberedWorkspaceStartupState>,
+}
+
+impl RememberedWorkspaceState {
+    pub(crate) fn open(directory: PathBuf) -> Self {
+        let store = RememberedWorkspaceStore::open(directory).ok();
+        let startup = store.as_ref().map_or(
+            RememberedWorkspaceStartupState::Unavailable(
+                RememberedWorkspaceLoadStatus::StorageFailure,
+            ),
+            |store| match store.load() {
+                Ok(catalog) => RememberedWorkspaceStartupState::Available(catalog),
+                Err(LoadError::CatalogUnavailable) => RememberedWorkspaceStartupState::Unavailable(
+                    RememberedWorkspaceLoadStatus::CatalogUnavailable,
+                ),
+                Err(LoadError::UnsupportedVersion) => RememberedWorkspaceStartupState::Unavailable(
+                    RememberedWorkspaceLoadStatus::UnsupportedVersion,
+                ),
+                Err(LoadError::StorageFailure) => RememberedWorkspaceStartupState::Unavailable(
+                    RememberedWorkspaceLoadStatus::StorageFailure,
+                ),
+            },
+        );
+        Self {
+            store,
+            catalog: Mutex::new(startup),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> RememberedWorkspaceStartupState {
+        self.catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn mutate<F>(
+        &self,
+        update: F,
+    ) -> Result<RememberedWorkspaceCatalog, RememberedWorkspaceMutationError>
+    where
+        F: FnOnce(
+            &RememberedWorkspaceCatalog,
+        ) -> Result<RememberedWorkspaceCatalog, ValidationError>,
+    {
+        let mut published = self
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*published, RememberedWorkspaceStartupState::Available(_)) {
+            return Err(RememberedWorkspaceMutationError::Unavailable);
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(RememberedWorkspaceMutationError::Unavailable)?;
+        let next = store
+            .mutate(update)
+            .map_err(RememberedWorkspaceMutationError::from)?;
+        *published = RememberedWorkspaceStartupState::Available(next.clone());
+        Ok(next)
+    }
+
+    pub(crate) fn add_candidate(
+        &self,
+        label: String,
+        location_hint: Option<RememberedLocationHint>,
+    ) -> Result<RememberedWorkspaceCatalog, RememberedWorkspaceMutationError> {
+        let id = RememberedCandidateId::generate();
+        self.mutate(move |catalog| {
+            let member = RememberedWorkspaceMember::new(id, label, location_hint)?;
+            let mut members = catalog.workspace.members().to_vec();
+            members.push(member);
+            catalog_with_members(
+                catalog,
+                members,
+                catalog.workspace.last_active_member_id.clone(),
+            )
+        })
+    }
+
+    pub(crate) fn update_candidate(
+        &self,
+        candidate_id: RememberedCandidateId,
+        label: Option<String>,
+        location_hint: Option<Option<RememberedLocationHint>>,
+    ) -> Result<RememberedWorkspaceCatalog, RememberedWorkspaceMutationError> {
+        if label.is_none() && location_hint.is_none() {
+            return Err(RememberedWorkspaceMutationError::Rejected(
+                ValidationError::EmptyUpdate,
+            ));
+        }
+        self.mutate(move |catalog| {
+            let current = catalog
+                .workspace
+                .members()
+                .iter()
+                .find(|member| member.id() == &candidate_id)
+                .ok_or(ValidationError::CandidateNotFound)?;
+            let updated = RememberedWorkspaceMember::new(
+                candidate_id.clone(),
+                label.unwrap_or_else(|| current.label.clone()),
+                location_hint.unwrap_or_else(|| current.location_hint.clone()),
+            )?;
+            let members = catalog
+                .workspace
+                .members()
+                .iter()
+                .map(|member| {
+                    if member.id() == &candidate_id {
+                        updated.clone()
+                    } else {
+                        member.clone()
+                    }
+                })
+                .collect();
+            catalog_with_members(
+                catalog,
+                members,
+                catalog.workspace.last_active_member_id.clone(),
+            )
+        })
+    }
+
+    pub(crate) fn delete_candidate(
+        &self,
+        candidate_id: RememberedCandidateId,
+    ) -> Result<RememberedWorkspaceCatalog, RememberedWorkspaceMutationError> {
+        self.mutate(move |catalog| {
+            if !catalog
+                .workspace
+                .members()
+                .iter()
+                .any(|member| member.id() == &candidate_id)
+            {
+                return Err(ValidationError::CandidateNotFound);
+            }
+            let members = catalog
+                .workspace
+                .members()
+                .iter()
+                .filter(|member| member.id() != &candidate_id)
+                .cloned()
+                .collect();
+            let last_active = (catalog.workspace.last_active_member_id() != Some(&candidate_id))
+                .then(|| catalog.workspace.last_active_member_id.clone())
+                .flatten();
+            catalog_with_members(catalog, members, last_active)
+        })
+    }
+
+    pub(crate) fn reorder_candidates(
+        &self,
+        candidate_ids: Vec<RememberedCandidateId>,
+    ) -> Result<RememberedWorkspaceCatalog, RememberedWorkspaceMutationError> {
+        self.mutate(move |catalog| {
+            if candidate_ids.len() != catalog.workspace.members().len() {
+                return Err(ValidationError::InvalidReorder);
+            }
+            let mut remaining = catalog.workspace.members().to_vec();
+            let mut members = Vec::with_capacity(remaining.len());
+            for candidate_id in &candidate_ids {
+                let Some(index) = remaining
+                    .iter()
+                    .position(|member| member.id() == candidate_id)
+                else {
+                    return Err(ValidationError::InvalidReorder);
+                };
+                members.push(remaining.remove(index));
+            }
+            if !remaining.is_empty() {
+                return Err(ValidationError::InvalidReorder);
+            }
+            catalog_with_members(
+                catalog,
+                members,
+                catalog.workspace.last_active_member_id.clone(),
+            )
+        })
+    }
+
+    pub(crate) fn location_hint(
+        &self,
+        candidate_id: &RememberedCandidateId,
+    ) -> Result<Option<PathBuf>, RememberedWorkspaceLookupError> {
+        let published = self
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let RememberedWorkspaceStartupState::Available(catalog) = &*published else {
+            return Err(RememberedWorkspaceLookupError::Unavailable);
+        };
+        let member = catalog
+            .workspace()
+            .members()
+            .iter()
+            .find(|member| member.id() == candidate_id)
+            .ok_or(RememberedWorkspaceLookupError::NotFound)?;
+        Ok(member.location_hint().map(|hint| hint.path().to_path_buf()))
+    }
+}
+
+fn catalog_with_members(
+    catalog: &RememberedWorkspaceCatalog,
+    members: Vec<RememberedWorkspaceMember>,
+    last_active_member_id: Option<RememberedCandidateId>,
+) -> Result<RememberedWorkspaceCatalog, ValidationError> {
+    RememberedWorkspaceCatalog::new(RememberedWorkspace::new(
+        catalog.workspace.id.clone(),
+        catalog.workspace.label.clone(),
+        members,
+        last_active_member_id,
+    )?)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RememberedWorkspaceMutationError {
+    Unavailable,
+    InvalidCatalog,
+    StorageFailure,
+    Rejected(ValidationError),
+}
+
+impl From<StoreError> for RememberedWorkspaceMutationError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::InvalidCatalog => Self::InvalidCatalog,
+            StoreError::MutationRejected(error) => Self::Rejected(error),
+            StoreError::StorageFailure => Self::StorageFailure,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RememberedWorkspaceLookupError {
+    Unavailable,
+    NotFound,
 }
 
 fn validate_label(value: &str) -> Result<(), ValidationError> {
