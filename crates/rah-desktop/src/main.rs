@@ -15,6 +15,9 @@ mod host_invocation;
 #[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod remembered_workspace;
+#[cfg(target_os = "windows")]
 mod repository_membership;
 #[cfg(target_os = "windows")]
 mod trusted_profile_selection;
