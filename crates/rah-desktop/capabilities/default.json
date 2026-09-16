@@ -28,6 +28,7 @@
     "allow-reorder-remembered-workspace-candidates",
     "allow-admit-remembered-workspace-candidate",
     "allow-repository-membership",
+    "allow-remove-repository-member",
     "allow-activate-repository-member",
     "allow-connect-codex",
     "allow-disconnect-codex",

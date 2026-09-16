@@ -30,6 +30,7 @@ let rememberedCatalogMutationBusy = false;
 const revealedRememberedLocations = new Map();
 const admittedRememberedCandidates = new Set();
 let pendingRememberedDelete = null;
+let pendingRepositoryMemberRemoval = null;
 const maxActivityEntries = 100;
 const multiFileMaxTargets = 4;
 const multiFileMaxReplacements = 16;
@@ -160,6 +161,7 @@ function errorMessage(error) {
     repository_busy: "Repository selection is unavailable while chat is running",
     repository_member_selector_invalid: "That repository selection is invalid",
     repository_member_not_found: "That repository is no longer admitted",
+    repository_member_active: "This repository is active. Switch to another repository before removing it.",
     repository_member_stale: "The selected repository is stale and was not activated",
     repository_action_invalid: "That repository action is no longer available. Refresh and choose it again.",
     repository_action_stale: "Repository changed after it was displayed. Refresh and choose a new action.",
@@ -1375,7 +1377,7 @@ function renderRepositoryMembership(presentation) {
   selector.replaceChildren(...members.map((member) => {
     const option = document.createElement("option");
     option.value = String(member.memberId ?? "");
-    option.textContent = `${String(member.displayName ?? "Repository")}${member.active === true ? " (Active)" : ""}`;
+    option.textContent = `${String(member.displayName ?? "Repository")} (${member.active === true ? "Active" : "Inactive"})`;
     option.dataset.active = member.active === true ? "true" : "false";
     return option;
   }));
@@ -1385,15 +1387,81 @@ function renderRepositoryMembership(presentation) {
 
 function updateRepositoryMembershipControls() {
   const selector = document.querySelector("#repository-member-selector");
-  const button = document.querySelector("#activate-repository-member");
+  const activateButton = document.querySelector("#activate-repository-member");
+  const removeButton = document.querySelector("#remove-repository-member");
+  const removalHint = document.querySelector("#repository-member-removal-hint");
   const selected = selector.value;
   const active = renderedRepositoryMembership?.activeMemberId ?? null;
-  selector.disabled = repositorySwitchBlocked;
-  button.disabled = repositorySwitchBlocked || !selected || selected === active;
+  const selectedMember = renderedRepositoryMembership?.members?.find((member) => String(member.memberId ?? "") === selected);
+  const selectedIsActive = selectedMember?.active === true || selected === active;
+  selector.disabled = false;
+  activateButton.disabled = repositorySwitchBlocked || !selected || selected === active;
+  removeButton.disabled = !selectedMember || selectedIsActive;
+  removalHint.textContent = selectedIsActive
+    ? "Switch to another repository before removing this active repository."
+    : selectedMember
+      ? "Remove only removes this admitted repository from the current workspace."
+      : "";
 }
 
 async function refreshRepositoryMembership(invoke) {
   renderRepositoryMembership(await invoke("repository_membership"));
+}
+
+function repositoryMemberRemovalErrorMessage(error) {
+  return ({
+    repository_member_active: "This repository is active. Switch to another repository before removing it.",
+    repository_member_not_found: "This repository is no longer in the current workspace.",
+    repository_member_stale: "This repository is no longer in the current workspace.",
+    repository_busy: "This repository cannot be removed while related repository work is still in progress.",
+    repository_member_selector_invalid: "That repository selection is invalid.",
+  }[error] ?? errorMessage(error));
+}
+
+async function removeRepositoryMember(invoke, memberId) {
+  const error = document.querySelector("#repository-error");
+  const status = document.querySelector("#repository-membership-status");
+  const button = document.querySelector("#remove-repository-member");
+  error.hidden = true;
+  status.textContent = "";
+  try {
+    const result = await invoke("remove_repository_member", { memberId });
+    if (result?.membership) {
+      renderRepositoryMembership(result.membership);
+    } else {
+      await refreshRepositoryMembership(invoke);
+    }
+    status.textContent = "Repository removed from current workspace.";
+  } catch (repositoryError) {
+    error.textContent = repositoryMemberRemovalErrorMessage(repositoryError);
+    error.hidden = false;
+    await refreshRepositoryMembership(invoke).catch(() => {});
+  } finally {
+    button.disabled = false;
+    updateRepositoryMembershipControls();
+  }
+}
+
+function installRepositoryMemberRemovalHandler(invoke) {
+  const button = document.querySelector("#remove-repository-member");
+  const confirmation = document.querySelector("#repository-member-removal-confirmation");
+  button.addEventListener("click", () => {
+    const selected = document.querySelector("#repository-member-selector").value;
+    const member = renderedRepositoryMembership?.members?.find((candidate) => String(candidate.memberId ?? "") === selected);
+    if (!member || member.active === true || selected === renderedRepositoryMembership?.activeMemberId) {
+      updateRepositoryMembershipControls();
+      return;
+    }
+    pendingRepositoryMemberRemoval = selected;
+    confirmation.showModal();
+  });
+  confirmation.addEventListener("close", () => {
+    const memberId = pendingRepositoryMemberRemoval;
+    pendingRepositoryMemberRemoval = null;
+    if (confirmation.returnValue !== "confirm" || !memberId) return;
+    button.disabled = true;
+    void removeRepositoryMember(invoke, memberId);
+  });
 }
 
 function rememberedCandidateById(candidateId) {
@@ -1992,6 +2060,7 @@ async function initializeDesktop() {
   });
   installHostFormHandlers(invoke);
   installRememberedWorkspaceHandlers(invoke, dialog);
+  installRepositoryMemberRemovalHandler(invoke);
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });

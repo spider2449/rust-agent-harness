@@ -94,8 +94,21 @@
             <h3 id="repository-membership-title">Admitted repositories</h3>
             <label for="repository-member-selector">Current repository</label>
             <select id="repository-member-selector" aria-describedby="repository-membership-hint"></select>
-            <button id="activate-repository-member" type="button" disabled>Switch Repository</button>
+            <div class="repository-membership-actions">
+              <button id="activate-repository-member" type="button" disabled>Switch Repository</button>
+              <button id="remove-repository-member" type="button" disabled>Remove</button>
+            </div>
             <p id="repository-membership-hint" class="model-hint">Only the selected repository supplies executable repository authority. Admission is process-local and ends when Desktop exits.</p>
+            <p id="repository-member-removal-hint" class="model-hint" aria-live="polite"></p>
+            <p id="repository-membership-status" class="authority-status" aria-live="polite"></p>
+            <dialog id="repository-member-removal-confirmation" aria-labelledby="repository-member-removal-title">
+              <h3 id="repository-member-removal-title">Remove admitted repository?</h3>
+              <p id="repository-member-removal-copy">Remove this repository from the current workspace? This removes only the current process-local workspace membership. Repository files will not be deleted, and any remembered workspace entry will remain.</p>
+              <form method="dialog">
+                <button value="cancel">Cancel</button>
+                <button id="repository-member-removal-confirm" value="confirm">Remove from Current Workspace</button>
+              </form>
+            </dialog>
           </section>
           <div class="repository-actions">
             <button id="choose-repository" type="button">Choose Repository</button>

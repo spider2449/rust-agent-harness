@@ -32,7 +32,18 @@ assert.match(membershipPermission, /commands\.allow = \["repository_membership"\
 assert.match(removeMemberPermission, /identifier = "allow-remove-repository-member"/);
 assert.match(removeMemberPermission, /commands\.allow = \["remove_repository_member"\]/);
 assert.match(removeMemberPermission, /identifier = "deny-remove-repository-member"/);
-assert.equal(permissions.includes("allow-remove-repository-member"), false);
+assert.deepEqual(permissions.filter((permission) => permission === "allow-remove-repository-member"), [
+  "allow-remove-repository-member",
+]);
+assert.equal(permissions.some((permission) => permission.includes("*")), false);
+assert.deepEqual(
+  permissions.filter((permission) => permission === "allow-repository-membership" || permission.includes("repository-member")),
+  [
+    "allow-repository-membership",
+    "allow-remove-repository-member",
+    "allow-activate-repository-member",
+  ],
+);
 assert.match(activateMemberPermission, /identifier = "allow-activate-repository-member"/);
 assert.match(activateMemberPermission, /commands\.allow = \["activate_repository_member"\]/);
 assert.deepEqual(permissions.filter((permission) => permission === "allow-repository-membership"), [
@@ -48,4 +59,4 @@ assert.deepEqual(permissions.filter((permission) => permission.startsWith("allow
   "allow-host-cancel-tool-invocation",
 ]);
 
-console.log("Tauri rename permission tests passed");
+console.log("Tauri permission tests passed");
