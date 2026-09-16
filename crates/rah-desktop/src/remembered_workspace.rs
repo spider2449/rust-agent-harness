@@ -45,7 +45,9 @@ enum TestFault {
     Write,
     Sync,
     StagedReparse,
+    StagedDifferent,
     Replacement,
+    ReparseAncestor,
 }
 
 #[cfg(test)]
@@ -404,6 +406,7 @@ impl RememberedWorkspaceStore {
             .coordination
             .try_lock()
             .map_err(|_| LoadError::StorageFailure)?;
+        validate_storage_directory(&self.directory).map_err(|_| LoadError::StorageFailure)?;
         let Some(bytes) = read_catalog_bytes(&self.directory)? else {
             return Ok(RememberedWorkspaceCatalog::empty());
         };
@@ -421,10 +424,11 @@ impl RememberedWorkspaceStore {
             .coordination
             .try_lock()
             .map_err(|_| StoreError::StorageFailure)?;
+        validate_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
         ensure_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
         let coordination =
             CoordinationFile::acquire(&self.directory).map_err(|_| StoreError::StorageFailure)?;
-        let result = atomic_replace(&self.directory, &bytes);
+        let result = atomic_replace(&self.directory, catalog, &bytes);
         drop(coordination);
         result.map_err(|_| StoreError::StorageFailure)
     }
@@ -434,6 +438,7 @@ impl RememberedWorkspaceStore {
             .coordination
             .try_lock()
             .map_err(|_| StoreError::StorageFailure)?;
+        validate_storage_directory(&self.directory).map_err(|_| StoreError::StorageFailure)?;
         if !storage_directory_exists(&self.directory).map_err(|_| StoreError::StorageFailure)? {
             return Ok(());
         }
@@ -825,48 +830,52 @@ fn validate_storage_directory(directory: &Path) -> io::Result<()> {
         }
     }
     let mut current = directory.to_owned();
+    let mut found_existing = false;
     loop {
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
+                found_existing = true;
+                #[cfg(test)]
+                if test_fault(directory, TestFault::ReparseAncestor)
+                    && current == directory.parent().unwrap_or(directory)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "unsafe storage root",
+                    ));
+                }
                 if !is_regular_non_reparse_directory(&metadata) {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "unsafe storage root",
                     ));
                 }
-                return Ok(());
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let Some(parent) = current.parent() else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "storage root unavailable",
-                    ));
-                };
-                if parent == current {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "storage root unavailable",
-                    ));
-                }
-                current = parent.to_owned();
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_owned();
+    }
+    if found_existing {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "storage root unavailable",
+        ))
     }
 }
 
 fn ensure_storage_directory(directory: &Path) -> io::Result<()> {
+    validate_storage_directory(directory)?;
     fs::create_dir_all(directory)?;
-    let metadata = fs::symlink_metadata(directory)?;
-    if is_regular_non_reparse_directory(&metadata) {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "unsafe storage root",
-        ))
-    }
+    validate_storage_directory(directory)
 }
 
 fn storage_directory_exists(directory: &Path) -> io::Result<bool> {
@@ -898,6 +907,33 @@ fn is_regular_non_reparse_file(metadata: &fs::Metadata) -> bool {
 fn is_reparse(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn read_staged_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !is_regular_non_reparse_file(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe staged catalog",
+        ));
+    }
+    if metadata.len() > MAX_FILE_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged catalog is oversized",
+        ));
+    }
+    let mut bytes = Vec::with_capacity((metadata.len() as usize).min(MAX_FILE_BYTES));
+    File::open(path)?
+        .take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > MAX_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged catalog is empty or oversized",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn checked_file_state(path: &Path) -> io::Result<bool> {
@@ -952,7 +988,11 @@ impl Drop for CoordinationFile {
     }
 }
 
-fn atomic_replace(directory: &Path, bytes: &[u8]) -> io::Result<()> {
+fn atomic_replace(
+    directory: &Path,
+    catalog: &RememberedWorkspaceCatalog,
+    bytes: &[u8],
+) -> io::Result<()> {
     let target = directory.join(FILE_NAME);
     let temporary = directory.join(temp_name(TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
     let result = (|| {
@@ -983,17 +1023,20 @@ fn atomic_replace(directory: &Path, bytes: &[u8]) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
         #[cfg(test)]
-        if test_fault(&target, TestFault::StagedReparse) {
-            return Err(io::Error::other("test staged reparse failure"));
-        }
+        tamper_staged_file(&target, &temporary)?;
         #[cfg(test)]
         record_operation(&target, TestOperation::StagedReparse);
-        if parse_catalog(bytes).is_err() {
+        let staged_bytes = read_staged_bytes(&temporary)?;
+        let staged_catalog = parse_catalog(&staged_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "staged catalog invalid"))?;
+        if staged_bytes != bytes || &staged_catalog != catalog {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "staged catalog invalid",
+                "staged catalog differs from requested catalog",
             ));
         }
+        validate_storage_directory(directory)?;
+        checked_file_state(&temporary)?;
         let exists = checked_file_state(&target)?;
         if exists {
             replace_existing(&target, &temporary)
@@ -1007,6 +1050,20 @@ fn atomic_replace(directory: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+fn tamper_staged_file(target: &Path, temporary: &Path) -> io::Result<()> {
+    if test_fault(target, TestFault::StagedReparse) {
+        fs::write(temporary, b"{")?;
+    } else if test_fault(target, TestFault::StagedDifferent) {
+        fs::write(
+            temporary,
+            br#"{"version":1,"workspace":{"id":"tampered","label":"Tampered","members":[]}}
+"#,
+        )?;
+    }
+    Ok(())
 }
 
 fn temp_name(sequence: u64) -> String {
@@ -1315,6 +1372,7 @@ mod tests {
             TestFault::Write,
             TestFault::Sync,
             TestFault::StagedReparse,
+            TestFault::StagedDifferent,
             TestFault::Replacement,
         ] {
             set_test_fault(directory.file(), fault);
@@ -1336,6 +1394,49 @@ mod tests {
         store.save(&next).unwrap();
         assert_eq!(store.load().unwrap(), next);
         assert!(test_operations(&directory.file()).contains(&TestOperation::StagedReparse));
+    }
+
+    #[test]
+    fn storage_root_accepts_local_ancestors_and_rejects_unsupported_prefixes() {
+        let directory = TestDirectory::new();
+        let nested = directory.0.join("ordinary-parent").join("storage");
+        assert!(validate_storage_directory(&nested).is_ok());
+        assert!(RememberedWorkspaceStore::open(nested).is_ok());
+
+        for path in [
+            PathBuf::from(r"\\?\C:\rah-remembered-workspace"),
+            PathBuf::from(r"\\.\C:\rah-remembered-workspace"),
+            PathBuf::from(r"\\server\share\rah-remembered-workspace"),
+        ] {
+            assert!(matches!(
+                RememberedWorkspaceStore::open(path),
+                Err(StoreError::StorageFailure)
+            ));
+        }
+    }
+
+    #[test]
+    fn reparse_ancestor_rejection_has_no_catalog_or_coordination_mutation() {
+        let directory = TestDirectory::new();
+        let storage = directory.0.join("ordinary-ancestor").join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        assert!(fs::symlink_metadata(&storage).unwrap().is_dir());
+        let store = RememberedWorkspaceStore::open(storage.clone()).unwrap();
+        set_test_fault(storage.clone(), TestFault::ReparseAncestor);
+        let expected = catalog(vec![member("next", "Next")]);
+
+        assert_eq!(store.load(), Err(LoadError::StorageFailure));
+        assert_eq!(store.save(&expected), Err(StoreError::StorageFailure));
+        assert_eq!(store.delete(), Err(StoreError::StorageFailure));
+        assert_eq!(fs::read_dir(&storage).unwrap().count(), 0);
+        assert!(!storage.join(COORDINATION_NAME).exists());
+        assert!(
+            !fs::read_dir(&storage)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX))
+        );
+        clear_test_state();
     }
 
     #[test]
