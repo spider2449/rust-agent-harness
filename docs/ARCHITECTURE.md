@@ -1,9 +1,9 @@
-# RAH v0.27.0 Architecture — prepared, not yet published
+# RAH v0.28.0 Architecture - prepared, not yet published
 
-This section records the release-preparation architecture for durable,
-descriptive remembered workspaces. It adds a persistence layer below the
-process-local repository authority defined by ADR 0027 and the descriptive
-persistence contract defined by ADR 0028.
+This section records the release-preparation architecture for **Explicit
+Inactive Repository Member Removal**. It completes the process-local curation
+loop defined by ADR 0027 while retaining the descriptive remembered-candidate
+boundary defined by ADR 0028.
 
 ```text
 RememberedWorkspaceStore
@@ -29,6 +29,37 @@ An explicit human fresh-admission action reruns the current ADR 0027
 repository identity and currentness checks. Admission creates an inert
 process-local member; separate explicit activation creates fresh active-only
 composition. Automatic re-admission and automatic activation remain forbidden.
+
+The inactive-member removal lifecycle is:
+
+```text
+WorkspaceMembershipState
+        |
+        | inactive RepositoryMemberId
+        v
+explicit host Remove
+        |
+        v
+membership_coordination
+        -> lifecycle_coordination
+        -> current inactive/nonbusy proof
+        |
+        v
+process-local member removed
+```
+
+Removal accepts only the current opaque `RepositoryMemberId` for an inactive
+member. It is serialized through membership coordination and lifecycle
+coordination, proves current inactive/nonbusy state, and removes only that
+member. Active composition remains singular and is not rebuilt: removing B from
+`members = [A, B]`, `active = A` leaves `members = [A]` and active A unchanged.
+Removing active A is rejected. A later explicit admission of the same
+repository receives a fresh member ID and remains inert until activation.
+
+Removal is process-local lifecycle management, not a filesystem or Git
+operation. It does not write `remembered-workspace.json`, delete repository
+files, mutate `.git`, the index, HEAD, refs, or history, or perform automatic
+commit, activation, rollback, replay, cancellation, or compensation.
 
 ADR 0027 remains authoritative for process-local membership, fresh repository
 identity, one-active composition, switching, and repository-bound authority.
@@ -57,7 +88,7 @@ Stage/Unstage remain separate host index authorities and Commit remains a
 separate reviewed repository authority. There is no union ToolRegistry or
 parallel active repository authority.
 
-The v0.27 Windows evidence is host-driven production-backend certification,
+The v0.28 Windows evidence is host-driven production-backend certification,
 not GUI certification. Model-selected dynamic Tool dispatch remains
 unestablished under the approved GPT-5.6-terra live gate.
 

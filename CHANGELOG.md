@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.28.0 - prepared / not yet published
+
+RAH v0.28.0 is a release-preparation candidate. It has no tag, GitHub Release,
+publication date, or immutable publication metadata yet. The release theme is
+**Explicit Inactive Repository Member Removal**.
+
+### Added
+
+- Explicit host/Desktop removal of one admitted inactive repository member.
+- Active-member removal rejection with no lifecycle or membership effect.
+- Membership-generation advancement only after successful membership mutation.
+- Target-bound busy fail-closed handling, while unrelated active-repository
+  lifecycle state does not globally block removal of an inactive target.
+- Preservation of the active repository's lifecycle, authority, provider,
+  conversation, Commit, and Stage/Unstage state during inactive removal.
+- Process-local stale-selector invalidation and fresh member identity on later
+  re-admission.
+- Desktop confirmation that states repository files and remembered workspace
+  entries remain, plus the exact command-specific Tauri permission.
+- Windows host-driven certification of the production backend path.
+
+### Authority and limitations
+
+Authority delta: **NONE**. HostExplicit remains exactly 11; inactive member
+removal is host/Desktop lifecycle management, not a Tool, filesystem authority,
+Git authority, model route, MCP Tool, Process Plugin Tool, or new capability.
+Removal does not delete repository files, mutate `.git`, the index, HEAD,
+refs/history, or the remembered workspace catalog. Started or uncertain effects
+are not rolled back, replayed, cancelled, or compensated.
+
+The certification is **PASS WITH EXPLICIT NONCLAIMS**. GUI automation was not
+executed. Model-selected dynamic Tool dispatch, OS sandboxing, network
+isolation, race-free TOCTOU, cross-platform live parity, cross-process
+membership, and linked-worktree removal semantics are not claimed.
+
 ## v0.27.0 — released (2026-09-16)
 
 RAH v0.27.0 was successfully published by Task 337. The immutable release

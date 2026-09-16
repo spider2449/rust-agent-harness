@@ -1,6 +1,6 @@
-# RAH v0.27.0 Security Model — prepared, not yet published
+# RAH v0.28.0 Security Model - prepared, not yet published
 
-This section records the v0.27 remembered-workspace security boundary. The
+This section records the v0.28 inactive-member-removal security boundary. The
 dedicated `RememberedWorkspaceStore` owns the private
 `remembered-workspace.json` catalog in the normal per-user application data
 directory. It stores only the closed JSON schema v1 descriptive catalog:
@@ -32,18 +32,55 @@ not process-local member removal and does not delete filesystem content or
 mutate Git. One active repository remains the maximum, with no union
 ToolRegistry or parallel active repository authority.
 
+## Inactive member removal
+
+The closed removal selector is the opaque process-local
+`RepositoryMemberId`. The host rejects malformed, unknown, stale, repeated,
+and active selectors before mutation. It accepts only an existing inactive
+member after currentness and target-bound nonbusy checks. Backend state remains
+authoritative after confirmation, so a stale UI cannot remove a member that has
+become active or disappeared.
+
+Removal is coordinated as:
+
+```text
+opaque member ID -> membership coordination -> lifecycle coordination
+-> current inactive/nonbusy proof -> process-local membership mutation
+```
+
+Membership generation advances only on successful removal. Target-bound
+started or uncertain effects fail closed and retain their owner; unrelated
+active-A lifecycle state does not globally block removal of inactive B. An
+uncertain effect is never inferred to be removed: started or uncertain effect
+is not removed effect, and removal does not cancel, retry, replay, roll back,
+or compensate it.
+
+Removing inactive B while A is active preserves A's active repository,
+repository generation, active composition/registry, provider/connection,
+conversation, Commit, Stage/Unstage, and HostExplicit prepared state as
+certified. Active removal remains out of scope and is rejected with zero
+effect. HostExplicit remains exactly 11, and removal creates no Tool, model,
+MCP, or Process Plugin route.
+
+The removal operation has no filesystem or Git effect: it does not delete
+repository files or write `.git`, the index, HEAD, refs, or history. It does
+not write or delete `remembered-workspace.json`, remove a remembered candidate,
+change catalog order, or clear a remembered location. It is process-local
+membership management only.
+
 ADR 0027 remains authoritative for process-local membership and active-only
 authority composition. ADR 0028 is additive and descriptive only. The exact
 HostExplicit set remains 11; Stage/Unstage and Commit remain separate host
 authorities, and no Tool eligibility changed.
 
-The v0.27 Windows evidence is host-driven production-backend certification,
+The v0.28 Windows evidence is host-driven production-backend certification,
 not GUI certification. Required nonclaims remain: no encryption, no race-free
 TOCTOU protection, no network isolation, and no automatic recovery/replay after
 uncertain native effects. GUI automation, a real junction/reparse live
 fixture, and true simultaneous two-process live mutation were not executed.
-Model-selected dynamic Tool dispatch is not established under the approved
-GPT-5.6-terra live gate.
+Model-selected dynamic Tool dispatch, OS sandboxing, cross-platform live parity,
+cross-process membership, and linked-worktree removal semantics are not
+established.
 
 # RAH v0.26.0 Security Model — released
 

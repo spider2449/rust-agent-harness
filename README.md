@@ -5,31 +5,37 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.27.0 prepared — not yet published
+## RAH v0.28.0 prepared — not yet published
 
-RAH v0.27.0 is the release-preparation candidate and has not been published.
-The release theme is **Durable Remembered Workspaces with Explicit Fresh
-Re-Admission**.
+RAH v0.28.0 is prepared for publication but has not been released. The release
+theme is **Explicit Inactive Repository Member Removal**.
+
+RAH Desktop can explicitly remove an admitted repository member when it is
+inactive. The active repository must first be explicitly switched away from;
+the active member cannot be removed directly. Removal changes only the current
+process-local membership set: it does not delete repository files, mutate Git,
+or forget a remembered workspace candidate.
 
 RAH Desktop may durably remember descriptive repository candidates across
 restart. Restart restores zero executable repository authority: no repository
 membership, active repository, ToolRegistry, provider/runtime state, Commit,
 Stage/Unstage, or HostExplicit state is restored.
 
-A remembered candidate becomes executable only through explicit human fresh
-admission, current repository validation, a fresh process-local
-`RepositoryMemberId`, and a separate explicit activation. Remembered catalog
-add/update/delete/reorder and explicit location reveal are descriptive
-management actions; they do not probe or authorize a repository.
+A remembered candidate remains descriptive and independent of process-local
+membership. It becomes executable only through explicit human fresh admission,
+current repository validation, a fresh process-local `RepositoryMemberId`, and
+a separate explicit activation. Membership is process-local and is not
+restored across restart.
 
-The v0.27 Windows evidence is host-driven production-backend certification,
+The v0.28 Windows evidence is host-driven production-backend certification,
 not GUI certification. It retains the required nonclaim:
 
 `MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
 
-GUI automation, a real junction/reparse live fixture, true simultaneous
-two-process live mutation, network isolation, race-free TOCTOU protection, and
-automatic recovery/replay after uncertain native effects are not claimed.
+GUI automation, model-selected dynamic Tool dispatch, cross-platform live
+parity, network isolation, race-free TOCTOU protection, rollback/replay or
+compensation after uncertain native effects, and cross-process or
+linked-worktree membership semantics are not claimed.
 
 ## RAH v0.26.0 released
 
