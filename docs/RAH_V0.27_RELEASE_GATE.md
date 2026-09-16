@@ -2,11 +2,25 @@
 
 ## Status
 
-**READY FOR PUBLICATION — NOT YET RELEASED**
+**RELEASED — HISTORICAL RECORD**
 
-This gate is the Task 336 release-preparation record. It does not create or
-authorize a tag or GitHub Release. The current published release remains the
-immutable RAH v0.26.0 release.
+This gate is the historical Task 336 release-preparation record and Task 337
+publication record. RAH v0.27.0 is released; RAH v0.26.0 is the prior immutable
+published release. Task 338 is a later documentation-only descendant and is not
+the immutable v0.27.0 release source.
+
+## Immutable publication record
+
+- Release source: `1297787df07c725e41deb758cc7ecab5593b28d8`.
+- Annotated tag: `v0.27.0`.
+- Tag object: `587bb55747ac1c9cdf1c02bc56e7dff244ede93b`.
+- Peeled target: `1297787df07c725e41deb758cc7ecab5593b28d8`.
+- Release-preparation CI: `35061634078` — PASS.
+- Tag CI: `35063921592` — PASS.
+- GitHub Release ID: `389683736`.
+- Release name: `RAH v0.27.0`.
+- Published: `2026-09-16T06:31:29Z` (`draft=false`, `prerelease=false`).
+- Assets: 0.
 
 ## Release theme
 
@@ -135,11 +149,9 @@ Rust edition 2024. Cargo.lock may change only the 13 internal RAH package
 version records; dependency versions, checksums, sources, features, and the
 dependency graph must remain unchanged.
 
-The certification source above is not the release source. The final Task 336
-release-preparation commit will become the immutable candidate source after
-exact-head validation. Its SHA is intentionally not fabricated inside its own
-commit; Task 336 closure reports it, and Task 337 may record it for
-publication.
+The Task 335 certification source above is not the release source. Task 337
+subsequently published the immutable release source recorded above. Task 338
+is a later documentation-only descendant and is not the release source.
 
 ## Validation record
 
@@ -148,7 +160,8 @@ The final local deterministic and release validation is recorded in the Task
 
 ## Publication stop boundary
 
-Task 336 stops after the release-preparation commit is pushed with
-`HEAD == origin/master`, a clean worktree, and passing exact-head CI. It does
-not create or push `v0.27.0`, create a GitHub Release, publish release notes,
-mark the changelog released, or change the immutable v0.26.0 release identity.
+Task 336 stopped after the release-preparation commit was pushed with
+`HEAD == origin/master`, a clean worktree, and passing exact-head CI, as
+required. Task 337 subsequently created and pushed `v0.27.0`, waited for
+passing tag CI, and created the GitHub Release recorded above. Neither Task 337
+nor Task 338 changes the immutable v0.26.0 release identity.

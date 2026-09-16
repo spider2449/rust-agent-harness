@@ -1,10 +1,24 @@
 # Changelog
 
-## v0.27.0 — prepared / not yet published (2026-09-16)
+## v0.27.0 — released (2026-09-16)
 
-RAH v0.27.0 is prepared for later publication. It is not released, has no
-v0.27.0 tag, and has no GitHub Release. The prior immutable published release
-remains RAH v0.26.0.
+RAH v0.27.0 was successfully published by Task 337. The immutable release
+source is `1297787df07c725e41deb758cc7ecab5593b28d8`. Task 338 is a later
+documentation-only descendant and is not the immutable v0.27.0 release source.
+RAH v0.26.0 is the prior immutable published release.
+
+### Immutable release record
+
+- Release source: `1297787df07c725e41deb758cc7ecab5593b28d8`.
+- Annotated tag: `v0.27.0`.
+- Tag object: `587bb55747ac1c9cdf1c02bc56e7dff244ede93b`.
+- Peeled target: `1297787df07c725e41deb758cc7ecab5593b28d8`.
+- Release-preparation CI: `35061634078` — PASS.
+- Tag CI: `35063921592` — PASS.
+- GitHub Release ID: `389683736`.
+- Release name: `RAH v0.27.0`.
+- Published: `2026-09-16T06:31:29Z` (`draft=false`, `prerelease=false`).
+- Assets: 0.
 
 The release theme is **Durable Remembered Workspaces with Explicit Fresh
 Re-Admission**. RAH Desktop may remember bounded descriptive repository
@@ -46,9 +60,11 @@ composed.
   reparse checks, persist-before-publish ordering, and bounded coordination.
 - No encryption, race-free TOCTOU protection, network isolation, or automatic
   recovery/replay guarantee after uncertain native effects is claimed.
-- Model-selected dynamic Tool dispatch is not established under the approved
-  GPT-5.6-terra live gate. GUI automation, real junction/reparse live fixture,
-  and true simultaneous two-process live mutation were not executed.
+- `MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+- GUI automation was not certified; a real junction/reparse live fixture and
+  true simultaneous two-process live mutation were not executed. No network
+  isolation, race-free TOCTOU guarantee, or automatic recovery/replay guarantee
+  after uncertain native effects is claimed.
 
 ## v0.26.0 — released (2026-09-15)
 
