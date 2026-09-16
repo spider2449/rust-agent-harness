@@ -9442,16 +9442,17 @@ mod tests {
         ProviderEndpointInput, ProviderEndpointPresentation, ProviderPublicationRejectionReason,
         ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
         REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RejectedProviderPublication,
-        RememberedWorkspaceStartupState, RepositoryIndexActionKind, RepositoryObservationStage,
-        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
-        StartupActivationCounters, TerminalOwnership, activate_admitted_member,
-        activate_repository_member_selector, activity_event, activity_event_with_composition,
-        admit_remembered_candidate, admit_repository, apply_model_selection,
-        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
-        await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
-        branch_result_classification, classify_repository_delete_file_result,
-        classify_repository_multi_file_output, clear_conversation_allowed,
-        clear_trusted_profile_selection, commit_activity_presentation,
+        RememberedWorkspaceStartupState, RepositoryIndexActionKind,
+        RepositoryIndexEffectReservation, RepositoryMemberRemovalOutcomePresentation,
+        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
+        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
+        activate_admitted_member, activate_repository_member_selector, activity_event,
+        activity_event_with_composition, admit_remembered_candidate, admit_repository,
+        apply_model_selection, authorize_repository_commit_review, await_cancel_recovery,
+        await_graceful_cancel, await_hard_shutdown, begin_chat, begin_connect,
+        begin_repository_index_effect, branch_result_classification,
+        classify_repository_delete_file_result, classify_repository_multi_file_output,
+        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
         complete_repository_index_effect, connect_codex, connect_prepared_codex,
         connection_activation_publication_is_current, connection_publication_is_current,
         current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
@@ -17663,6 +17664,418 @@ mod tests {
                 .membership_generation(),
             2
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V028_INACTIVE_MEMBER_REMOVAL_LIVE=1"]
+    async fn task_343_windows_host_driven_inactive_member_removal_live_certification()
+    -> Result<(), String> {
+        if std::env::var("RAH_RUN_V028_INACTIVE_MEMBER_REMOVAL_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V028_INACTIVE_MEMBER_REMOVAL_LIVE=1 for the Windows live certification"
+                    .to_owned(),
+            );
+        }
+
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let storage = TestRepository::new();
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Staged);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let storage_root = storage.0.clone();
+        let repository_a_root = repository_a.0.clone();
+        let repository_b_root = repository_b.0.clone();
+        let initial_a = live_git_state(&git, &repository_a_root, "__rah_v028_none__")?;
+        let initial_b = live_git_state(&git, &repository_b_root, "__rah_v028_none__")?;
+        let sentinel_a = fs::read(repository_a_root.join("tracked.txt"))
+            .map_err(|error| format!("A sentinel read failed: {error}"))?;
+        let sentinel_b = fs::read(repository_b_root.join("tracked.txt"))
+            .map_err(|error| format!("B sentinel read failed: {error}"))?;
+
+        let state = DesktopAppState::new(storage_root.clone());
+        let remembered = state
+            .remembered_workspace
+            .add_candidate(
+                "Repository B remembered sentinel".to_owned(),
+                Some(
+                    super::remembered_workspace::RememberedLocationHint::parse(
+                        repository_b_root.clone(),
+                    )
+                    .map_err(|error| format!("remembered B location was invalid: {error:?}"))?,
+                ),
+            )
+            .map_err(|error| format!("remembered B candidate creation failed: {error:?}"))?;
+        let remembered_candidate = remembered.workspace().members()[0].id().clone();
+        let catalog_path = storage_root.join("remembered-workspace.json");
+        let catalog_before = fs::read(&catalog_path)
+            .map_err(|error| format!("remembered catalog read failed: {error}"))?;
+
+        let member_a = admit_repository(&state, &git, &repository_a_root)
+            .map_err(|error| format!("production admission of A failed: {error:?}"))?;
+        let member_b = admit_repository(&state, &git, &repository_b_root)
+            .map_err(|error| format!("production admission of B failed: {error:?}"))?;
+        if member_a == member_b {
+            return Err("A and B received the same process-local member ID".to_owned());
+        }
+        activate_admitted_member(&state, member_a)
+            .await
+            .map_err(|error| format!("production activation of A failed: {error:?}"))?;
+
+        let active_repository = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| "A was not published as the active repository".to_owned())?;
+        refresh_repository_workflow(&state)
+            .await
+            .map_err(|error| format!("A workflow refresh failed: {error:?}"))?;
+        let commit_control = authorize_test_commit(&state, Arc::clone(&active_repository)).await;
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .map_err(|error| format!("A HostExplicit preparation failed: {error:?}"))?;
+        let workflow_before = {
+            let workflow = state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                workflow.observation_generation,
+                workflow.next_action,
+                workflow.actions.len(),
+                workflow.review_selector.clone(),
+                workflow.authorization,
+            )
+        };
+        let conversation_before = {
+            let conversation = state
+                .conversation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                conversation.identity,
+                conversation.history.clone(),
+                conversation.epoch,
+            )
+        };
+        let repository_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry_before = desktop_tool_registry(Some(&active_repository), None)
+            .map_err(|error| format!("A registry composition failed: {error}"))?
+            .definitions();
+        let membership_before = repository_membership_presentation(&state);
+
+        *state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(RepositoryIndexEffectReservation {
+                token: 343,
+                repository_generation,
+                member_id: Some(member_b),
+                kind: RepositoryIndexActionKind::Stage,
+                repository: Arc::clone(&active_repository),
+            });
+        if remove_repository_member_selector(&state, &member_b.selector())
+            != Err(FrontendError::RepositoryBusy)
+        {
+            return Err("target-bound B lifecycle owner was not rejected as busy".to_owned());
+        }
+        if repository_membership_presentation(&state) != membership_before
+            || fs::read(&catalog_path).map_err(|error| error.to_string())? != catalog_before
+        {
+            return Err("busy removal changed membership or remembered catalog".to_owned());
+        }
+        if state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            return Err("busy removal cleared the target lifecycle owner".to_owned());
+        }
+        state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        *state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(RepositoryIndexEffectReservation {
+                token: 344,
+                repository_generation,
+                member_id: Some(member_a),
+                kind: RepositoryIndexActionKind::Stage,
+                repository: Arc::clone(&active_repository),
+            });
+
+        let removed = remove_repository_member_selector(&state, &member_b.selector())
+            .map_err(|error| format!("inactive B removal failed: {error:?}"))?;
+        let membership_after = repository_membership_presentation(&state);
+        if removed.outcome != RepositoryMemberRemovalOutcomePresentation::Removed
+            || membership_after.members.len() != 1
+            || membership_after.active_member_id != Some(member_a.selector())
+            || membership_after.membership_generation != membership_before.membership_generation + 1
+            || state
+                .workspace_membership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .member(member_b)
+                .is_some()
+            || state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            return Err(
+                "inactive B removal did not produce the required linearized result".to_owned(),
+            );
+        }
+        if *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            != repository_generation
+            || !Arc::ptr_eq(
+                &active_repository,
+                &state
+                    .repository
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .ok_or_else(|| "A repository disappeared after B removal".to_owned())?,
+            )
+            || state
+                .workspace_membership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active_member()
+                != Some(member_a)
+            || state
+                .host_invocation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                != CoordinatorState::HostPrepared
+            || !commit_control.has_pending_authorization().await
+        {
+            return Err("active A executable state changed during B removal".to_owned());
+        }
+        let workflow_after = {
+            let workflow = state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                workflow.observation_generation,
+                workflow.next_action,
+                workflow.actions.len(),
+                workflow.review_selector.clone(),
+                workflow.authorization,
+            )
+        };
+        let conversation_after = {
+            let conversation = state
+                .conversation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                conversation.identity,
+                conversation.history.clone(),
+                conversation.epoch,
+            )
+        };
+        if workflow_after != workflow_before || conversation_after != conversation_before {
+            return Err("A workflow or conversation state changed during B removal".to_owned());
+        }
+        let registry_after = desktop_tool_registry(Some(&active_repository), None)
+            .map_err(|error| format!("A post-removal registry composition failed: {error}"))?
+            .definitions();
+        if registry_after != registry_before
+            || state
+                .provider_activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            || !matches!(
+                *state
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ConnectionState::NotConnected
+            )
+        {
+            return Err(
+                "A provider, connection, or registry state changed during B removal".to_owned(),
+            );
+        }
+        if remove_repository_member_selector(&state, &member_b.selector())
+            != Err(FrontendError::RepositoryMemberNotFound)
+            || remove_repository_member_selector(&state, "malformed")
+                != Err(FrontendError::RepositoryMemberSelectorInvalid)
+            || repository_membership_presentation(&state).membership_generation
+                != membership_after.membership_generation
+        {
+            return Err("stale or malformed removal was not zero effect".to_owned());
+        }
+        if remove_repository_member_selector(&state, &member_a.selector())
+            != Err(FrontendError::RepositoryMemberActive)
+            || repository_membership_presentation(&state) != membership_after
+        {
+            return Err("active A removal was not rejected with zero effect".to_owned());
+        }
+
+        state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_prepared();
+        state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        commit_control.clear_authorization().await;
+        let fresh_b = admit_remembered_candidate(
+            &state,
+            RememberedCandidateId::parse(remembered_candidate.as_str().to_owned())
+                .map_err(|error| format!("remembered B ID parse failed: {error:?}"))?,
+        )
+        .map_err(|error| format!("fresh remembered B admission failed: {error:?}"))?;
+        if fresh_b == member_b
+            || repository_membership_presentation(&state).active_member_id
+                != Some(member_a.selector())
+            || repository_membership_presentation(&state)
+                .members
+                .iter()
+                .find(|member| member.member_id == fresh_b.selector())
+                .is_none_or(|member| member.active)
+        {
+            return Err("fresh B admission revived the old ID or activated B".to_owned());
+        }
+        if activate_admitted_member(&state, fresh_b).await.is_err()
+            || state
+                .workspace_membership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active_member()
+                != Some(fresh_b)
+        {
+            return Err("explicit B activation was not separate from re-admission".to_owned());
+        }
+        let active_b_after_switch = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| "explicit B activation did not publish B".to_owned())?;
+        if active_b_after_switch.root
+            != repository_b_root
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+        {
+            return Err("explicit B activation published the wrong repository".to_owned());
+        }
+        activate_admitted_member(&state, member_a)
+            .await
+            .map_err(|error| format!("explicit switch back to A failed: {error:?}"))?;
+        remove_repository_member_selector(&state, &fresh_b.selector())
+            .map_err(|error| format!("fresh remembered B removal failed: {error:?}"))?;
+        state
+            .remembered_workspace
+            .delete_candidate(remembered_candidate.clone())
+            .map_err(|error| format!("controlled remembered B deletion failed: {error:?}"))?;
+        let catalog_without_b = fs::read(&catalog_path)
+            .map_err(|error| format!("post-delete catalog read failed: {error}"))?;
+        let fresh_b_without_candidate = admit_repository(&state, &git, &repository_b_root)
+            .map_err(|error| format!("fresh path B admission failed: {error:?}"))?;
+        if fresh_b_without_candidate == member_b || fresh_b_without_candidate == fresh_b {
+            return Err("fresh path B admission reused a previous member ID".to_owned());
+        }
+        remove_repository_member_selector(&state, &fresh_b_without_candidate.selector())
+            .map_err(|error| format!("B removal without remembered candidate failed: {error:?}"))?;
+        if fs::read(&catalog_path)
+            .map_err(|error| format!("post-removal catalog read failed: {error}"))?
+            != catalog_without_b
+        {
+            return Err("removal without a remembered candidate changed the catalog".to_owned());
+        }
+        if live_git_state(&git, &repository_a_root, "__rah_v028_none__")? != initial_a
+            || live_git_state(&git, &repository_b_root, "__rah_v028_none__")? != initial_b
+            || fs::read(repository_a_root.join("tracked.txt")).map_err(|error| error.to_string())?
+                != sentinel_a
+            || fs::read(repository_b_root.join("tracked.txt")).map_err(|error| error.to_string())?
+                != sentinel_b
+        {
+            return Err("member removal changed Git or repository sentinel state".to_owned());
+        }
+        reset_startup_activation_counters();
+        if startup_activation_snapshot() != StartupActivationCounters::default() {
+            return Err(
+                "host-driven removal certification started model/runtime activation".to_owned(),
+            );
+        }
+        drop(state);
+        let restarted = DesktopAppState::new(storage_root.clone());
+        if !repository_membership_presentation(&restarted)
+            .members
+            .is_empty()
+            || repository_membership_presentation(&restarted)
+                .active_member_id
+                .is_some()
+            || restarted.repository.lock().unwrap().is_some()
+            || restarted.commit_capability.lock().unwrap().is_some()
+            || restarted
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .is_some()
+            || !restarted
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .actions
+                .is_empty()
+            || restarted.host_invocation.lock().unwrap().state() != CoordinatorState::Idle
+            || restarted.provider_activation.lock().unwrap().is_some()
+            || !matches!(
+                *restarted.connection.lock().unwrap(),
+                ConnectionState::NotConnected
+            )
+            || restarted.conversation.lock().unwrap().identity.is_some()
+            || !restarted.conversation.lock().unwrap().history.is_empty()
+        {
+            return Err("restart restored executable repository authority".to_owned());
+        }
+        drop(restarted);
+        drop(storage);
+        drop(repository_a);
+        drop(repository_b);
+        if storage_root.exists() || repository_a_root.exists() || repository_b_root.exists() {
+            return Err("certification-owned disposable roots were not removable".to_owned());
+        }
+        println!("RAH_V028_INACTIVE_MEMBER_REMOVAL_LIVE_OK");
+        println!("RAH_V028_GUI_AUTOMATION_NOT_EXECUTED=1");
+        println!("RAH_V028_MODEL_REQUESTS=0");
+        println!("RAH_V028_MODEL_TOOL_REQUESTS=0");
+        println!("RAH_V028_MCP_ACTIVATIONS=0");
+        println!("RAH_V028_PROCESS_PLUGIN_ACTIVATIONS=0");
+        println!("RAH_V028_NETWORK_GIT_OPERATIONS=0");
+        println!("RAH_V028_AUTOMATIC_COMMITS=0");
+        println!("RAH_V028_AUTOMATIC_ACTIVATIONS=0");
+        Ok(())
     }
 
     fn install_activation_barrier(
