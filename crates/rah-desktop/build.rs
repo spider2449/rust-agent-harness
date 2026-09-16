@@ -25,6 +25,7 @@ fn main() {
             "reorder_remembered_workspace_candidates",
             "admit_remembered_workspace_candidate",
             "repository_membership",
+            "remove_repository_member",
             "activate_repository_member",
             "connect_codex",
             "disconnect_codex",

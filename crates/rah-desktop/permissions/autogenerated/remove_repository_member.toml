@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-repository-member"
+description = "Enables the remove_repository_member command without any pre-configured scope."
+commands.allow = ["remove_repository_member"]
+
+[[permission]]
+identifier = "deny-remove-repository-member"
+description = "Denies the remove_repository_member command without any pre-configured scope."
+commands.deny = ["remove_repository_member"]

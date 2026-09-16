@@ -97,7 +97,9 @@ use remembered_workspace::{
     RememberedWorkspaceMutationError, RememberedWorkspaceStartupState, RememberedWorkspaceState,
 };
 #[cfg(target_os = "windows")]
-use repository_membership::{InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipState};
+use repository_membership::{
+    InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipRemoval, WorkspaceMembershipState,
+};
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -1405,6 +1407,7 @@ pub(crate) enum FrontendError {
     RepositoryMemberStale,
     RepositoryMemberNotFound,
     RepositoryMemberSelectorInvalid,
+    RepositoryMemberActive,
     RepositoryObservationFailed,
     RepositoryDialogFailed,
     RepositoryBusy,
@@ -6889,6 +6892,21 @@ struct WorkspaceRepositoryMembershipPresentation {
 #[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+enum RepositoryMemberRemovalOutcomePresentation {
+    Removed,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryMemberRemovalResult {
+    outcome: RepositoryMemberRemovalOutcomePresentation,
+    membership: WorkspaceRepositoryMembershipPresentation,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 enum RepositoryActivationOutcomePresentation {
     Activated,
     AlreadyActive,
@@ -6948,6 +6966,159 @@ fn repository_membership(
     state: State<'_, DesktopAppState>,
 ) -> WorkspaceRepositoryMembershipPresentation {
     repository_membership_presentation(state.inner())
+}
+
+#[cfg(target_os = "windows")]
+fn repository_workflow_has_state(workflow: &RepositoryWorkflowState) -> bool {
+    workflow.observation_generation != 0
+        || workflow.next_action != 0
+        || !workflow.actions.is_empty()
+        || workflow.review.is_some()
+        || workflow.commit_review.is_some()
+        || workflow.review_selector.is_some()
+        || workflow.authorization != CommitAuthorizationPresentation::ReviewRequired
+}
+
+#[cfg(target_os = "windows")]
+fn inactive_repository_member_removal_is_busy(
+    state: &DesktopAppState,
+    target_member_id: RepositoryMemberId,
+    active_member_id: Option<RepositoryMemberId>,
+) -> bool {
+    if let Some(reservation) = state
+        .repository_index_effect_reservation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        // A current reservation is attributable to its active member. Any
+        // target-bound reservation, or an owner that is no longer current,
+        // fails closed without clearing the external-effect owner.
+        if reservation.member_id == Some(target_member_id)
+            || !repository_index_effect_binding_is_current(state, reservation)
+        {
+            return true;
+        }
+    }
+
+    if active_member_id.is_some() {
+        return false;
+    }
+
+    // Executable lifecycle state without an active member cannot be safely
+    // attributed to an unrelated inactive target.
+    if state
+        .repository
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+        || state
+            .commit_capability
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        || repository_workflow_has_state(
+            &state
+                .repository_workflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        || state
+            .host_invocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            != CoordinatorState::Idle
+        || state
+            .provider_activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        || !matches!(
+            *state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ConnectionState::NotConnected
+        )
+        || !matches!(
+            *state
+                .chat
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ChatState::Idle
+        )
+        || state
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn remove_repository_member_selector(
+    state: &DesktopAppState,
+    selector: &str,
+) -> Result<RepositoryMemberRemovalResult, FrontendError> {
+    let member_id = RepositoryMemberId::parse_selector(selector)
+        .ok_or(FrontendError::RepositoryMemberSelectorInvalid)?;
+
+    // Removal and activation/admission share the same ordering. The final
+    // membership checks and the sole membership mutation occur under both
+    // coordination locks, so activation cannot publish an absent member.
+    let _membership_coordination = state
+        .membership_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lifecycle_coordination = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let active_member_id = {
+        let membership = state
+            .workspace_membership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if membership.member(member_id).is_none() {
+            return Err(FrontendError::RepositoryMemberNotFound);
+        }
+        membership.active_member()
+    };
+    if active_member_id == Some(member_id) {
+        return Err(FrontendError::RepositoryMemberActive);
+    }
+    if inactive_repository_member_removal_is_busy(state, member_id, active_member_id) {
+        return Err(FrontendError::RepositoryBusy);
+    }
+
+    let removal = state
+        .workspace_membership
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(member_id);
+    match removal {
+        WorkspaceMembershipRemoval::Removed => Ok(RepositoryMemberRemovalResult {
+            outcome: RepositoryMemberRemovalOutcomePresentation::Removed,
+            membership: repository_membership_presentation(state),
+        }),
+        WorkspaceMembershipRemoval::Active => Err(FrontendError::RepositoryMemberActive),
+        WorkspaceMembershipRemoval::NotFound => Err(FrontendError::RepositoryMemberNotFound),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn remove_repository_member(
+    state: State<'_, DesktopAppState>,
+    member_id: String,
+) -> Result<RepositoryMemberRemovalResult, FrontendError> {
+    remove_repository_member_selector(state.inner(), &member_id)
 }
 
 #[cfg(target_os = "windows")]
@@ -9179,6 +9350,7 @@ fn main() -> ExitCode {
             reorder_remembered_workspace_candidates,
             admit_remembered_workspace_candidate,
             repository_membership,
+            remove_repository_member,
             activate_repository_member,
             connect_codex,
             disconnect_codex,
@@ -9249,7 +9421,7 @@ mod tests {
     };
     use super::remembered_workspace::RememberedCandidateId;
     use super::remembered_workspace::RememberedWorkspaceStore;
-    use super::repository_membership::RepositoryMemberId;
+    use super::repository_membership::{RepositoryMemberId, WorkspaceMembershipRemoval};
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
         ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
@@ -9295,9 +9467,9 @@ mod tests {
         prepare_repo_rename_file_with_current, prepared_host_activity,
         publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
-        remembered_catalog_presentation, replace_selected_repository,
-        repository_authorize_commit_review, repository_context_fingerprint,
-        repository_index_action, repository_index_effect_is_active,
+        remembered_catalog_presentation, remove_repository_member_selector,
+        replace_selected_repository, repository_authorize_commit_review,
+        repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
         repository_membership_presentation, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot, repository_stage_action,
         repository_tool_authority, repository_unstage_action, request_connect,
@@ -17036,6 +17208,463 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_341_membership_remove_changes_generation_only_after_success() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        {
+            let mut membership = state.workspace_membership.lock().unwrap();
+            assert!(membership.publish_active(member_a));
+            assert_eq!(membership.membership_generation(), 2);
+            let unknown = RepositoryMemberId::parse_selector(&format!(
+                "m{}-999999",
+                member_a.as_debug_tuple().0
+            ))
+            .expect("unknown selector is syntactically valid");
+            assert!(matches!(
+                membership.remove(unknown),
+                WorkspaceMembershipRemoval::NotFound
+            ));
+            assert_eq!(membership.membership_generation(), 2);
+            assert!(matches!(
+                membership.remove(member_a),
+                WorkspaceMembershipRemoval::Active
+            ));
+            assert_eq!(membership.membership_generation(), 2);
+            assert_eq!(membership.member_count(), 2);
+            assert!(matches!(
+                membership.remove(member_b),
+                WorkspaceMembershipRemoval::Removed
+            ));
+            assert_eq!(membership.membership_generation(), 3);
+            assert!(membership.member(member_b).is_none());
+            assert!(membership.member(member_a).is_some());
+            assert!(matches!(
+                membership.remove(member_b),
+                WorkspaceMembershipRemoval::NotFound
+            ));
+            assert_eq!(membership.membership_generation(), 3);
+        }
+
+        let fresh_member_b = admit_repository(&state, &git, &repository_b.0).expect("re-admit B");
+        assert_ne!(fresh_member_b, member_b);
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 2);
+        assert_eq!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .membership_generation(),
+            4
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_341_remove_inactive_member_preserves_active_repository_lifecycle_state() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let active_repository = state.repository.lock().unwrap().clone().expect("active A");
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        let conversation_epoch = state.conversation.lock().unwrap().epoch;
+        state
+            .conversation
+            .lock()
+            .unwrap()
+            .history
+            .push(message(MessageRole::User, "A-only conversation"));
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .expect("A HostExplicit preparation");
+        {
+            let mut workflow = state.repository_workflow.lock().unwrap();
+            workflow.observation_generation = 9;
+            workflow.next_action = 4;
+            workflow.review_selector = Some("A-only-review".to_owned());
+            workflow.authorization = CommitAuthorizationPresentation::AuthorizedPending;
+        }
+        let (commit_tool, commit_control) = RepositoryCommitTool::compose(
+            &active_repository.git_executable,
+            &active_repository.root,
+            "RAH Task 341".to_owned(),
+            "rah-task-341@example.invalid".to_owned(),
+        )
+        .expect("A Commit capability should compose");
+        state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .replace(DesktopCommitCapability {
+                repository_generation,
+                model_generation: state.model.lock().unwrap().generation,
+                identity_generation: *state.commit_identity_generation.lock().unwrap(),
+                _tool: Arc::new(commit_tool),
+                control: Arc::new(commit_control),
+            });
+        let commit_control = state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("A Commit capability")
+            .control
+            .clone();
+        state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .replace(super::RepositoryIndexEffectReservation {
+                token: 341,
+                repository_generation,
+                member_id: Some(member_a),
+                kind: RepositoryIndexActionKind::Stage,
+                repository: active_repository.clone(),
+            });
+
+        let result = remove_repository_member_selector(&state, &member_b.selector())
+            .expect("inactive B removal succeeds");
+        assert_eq!(
+            result.outcome,
+            super::RepositoryMemberRemovalOutcomePresentation::Removed
+        );
+        assert_eq!(result.membership.members.len(), 1);
+        assert_eq!(result.membership.members[0].member_id, member_a.selector());
+        assert_eq!(
+            result.membership.active_member_id,
+            Some(member_a.selector())
+        );
+        assert_eq!(result.membership.membership_generation, 3);
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b)
+                .is_none()
+        );
+        assert_eq!(
+            *state.repository_generation.lock().unwrap(),
+            repository_generation
+        );
+        assert!(Arc::ptr_eq(
+            &active_repository,
+            &state
+                .repository
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("A remains active")
+        ));
+        assert_eq!(state.conversation.lock().unwrap().epoch, conversation_epoch);
+        assert_eq!(state.conversation.lock().unwrap().history.len(), 1);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostPrepared
+        );
+        assert_eq!(
+            state
+                .repository_workflow
+                .lock()
+                .unwrap()
+                .review_selector
+                .as_deref(),
+            Some("A-only-review")
+        );
+        assert_eq!(
+            state.repository_workflow.lock().unwrap().authorization,
+            CommitAuthorizationPresentation::AuthorizedPending
+        );
+        assert!(Arc::ptr_eq(
+            &commit_control,
+            &state
+                .commit_capability
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("A Commit capability remains")
+                .control
+        ));
+        assert_eq!(
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("A index effect remains")
+                .token,
+            341
+        );
+        assert!(state.provider_activation.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_341_remove_command_surface_is_closed_and_zero_effect_on_rejection() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let before = repository_membership_presentation(&state);
+        let repository_generation = *state.repository_generation.lock().unwrap();
+        assert_eq!(
+            remove_repository_member_selector(&state, "malformed"),
+            Err(FrontendError::RepositoryMemberSelectorInvalid)
+        );
+        assert_eq!(repository_membership_presentation(&state), before);
+        assert_eq!(
+            remove_repository_member_selector(
+                &state,
+                &format!("m{}-999999", member_a.as_debug_tuple().0)
+            ),
+            Err(FrontendError::RepositoryMemberNotFound)
+        );
+        assert_eq!(repository_membership_presentation(&state), before);
+        assert_eq!(
+            remove_repository_member_selector(&state, &member_a.selector()),
+            Err(FrontendError::RepositoryMemberActive)
+        );
+        assert_eq!(repository_membership_presentation(&state), before);
+        assert_eq!(
+            *state.repository_generation.lock().unwrap(),
+            repository_generation
+        );
+        assert_eq!(
+            remove_repository_member_selector(&state, &member_b.selector())
+                .expect("B removal succeeds")
+                .outcome,
+            super::RepositoryMemberRemovalOutcomePresentation::Removed
+        );
+        let serialized = serde_json::to_string(&repository_membership_presentation(&state))
+            .expect("sanitized membership serializes");
+        assert!(!serialized.contains(repository_a.0.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(repository_b.0.to_string_lossy().as_ref()));
+        assert!(!serialized.contains("RepositoryAdmissionIdentity"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_341_target_bound_index_effect_is_busy_but_active_a_effect_is_unrelated() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let generation = state
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .membership_generation();
+        let active_repository = state.repository.lock().unwrap().clone().expect("active A");
+        state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .replace(super::RepositoryIndexEffectReservation {
+                token: 1,
+                repository_generation: *state.repository_generation.lock().unwrap(),
+                member_id: Some(member_b),
+                kind: RepositoryIndexActionKind::Unstage,
+                repository: active_repository.clone(),
+            });
+        assert_eq!(
+            remove_repository_member_selector(&state, &member_b.selector()),
+            Err(FrontendError::RepositoryBusy)
+        );
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b)
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .membership_generation(),
+            generation
+        );
+        assert_eq!(
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("busy owner remains")
+                .member_id,
+            Some(member_b)
+        );
+        state
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("reservation remains")
+            .member_id = Some(member_a);
+        assert!(matches!(
+            remove_repository_member_selector(&state, &member_b.selector()),
+            Ok(result) if result.membership.active_member_id == Some(member_a.selector())
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_341_removal_preserves_remembered_candidate_bytes() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_a = TestRepository::git_repository(GitRepositoryState::Clean);
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_a = admit_repository(&state, &git, &repository_a.0).expect("admit A");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("activate A");
+        let catalog = state
+            .remembered_workspace
+            .add_candidate(
+                "B remembered sentinel".to_owned(),
+                Some(
+                    super::remembered_workspace::RememberedLocationHint::parse(
+                        repository_b.0.clone(),
+                    )
+                    .expect("B location hint is valid"),
+                ),
+            )
+            .expect("remember B");
+        let candidate_id = catalog.workspace().members()[0].id().clone();
+        let remembered_path = storage.0.join("remembered-workspace.json");
+        let before_bytes = fs::read(&remembered_path).expect("remembered catalog exists");
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        remove_repository_member_selector(&state, &member_b.selector()).expect("remove B");
+        assert_eq!(
+            fs::read(&remembered_path).expect("catalog remains"),
+            before_bytes
+        );
+        let snapshot = state.remembered_workspace.snapshot();
+        assert!(matches!(
+            snapshot,
+            RememberedWorkspaceStartupState::Available(catalog)
+                if catalog.workspace().members()[0].id() == &candidate_id
+                    && catalog.workspace().members()[0].location_hint().is_some()
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_341_remove_wins_activation_publication_race_without_absent_active_member() {
+        let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+        let mut reached = install_activation_member_barrier(&state, member_b);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("activation reached final currentness barrier");
+        remove_repository_member_selector(&state, &member_b.selector())
+            .expect("removal wins while activation is paused");
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn task_341_double_remove_concurrency_has_one_linearized_success() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let repository_b = TestRepository::git_repository(GitRepositoryState::Clean);
+        let git = TestRepository::native_git();
+        let member_b = admit_repository(&state, &git, &repository_b.0).expect("admit B");
+        let selector = member_b.selector();
+        let gate = Arc::new(std::sync::Barrier::new(3));
+        let outcomes = std::thread::scope(|scope| {
+            let first_gate = Arc::clone(&gate);
+            let first_selector = selector.clone();
+            let first_state = &state;
+            let first = scope.spawn(move || {
+                first_gate.wait();
+                remove_repository_member_selector(first_state, &first_selector)
+            });
+            let second_gate = Arc::clone(&gate);
+            let second_selector = selector.clone();
+            let second_state = &state;
+            let second = scope.spawn(move || {
+                second_gate.wait();
+                remove_repository_member_selector(second_state, &second_selector)
+            });
+            gate.wait();
+            [
+                first.join().expect("first removal thread").is_ok(),
+                second.join().expect("second removal thread").is_ok(),
+            ]
+        });
+        assert_eq!(outcomes.iter().filter(|success| **success).count(), 1);
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(member_b)
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .membership_generation(),
+            2
+        );
+    }
+
     fn install_activation_barrier(
         state: &DesktopAppState,
         parties: usize,
@@ -17878,14 +18507,10 @@ fn main() {
             .expect("activation reached final barrier");
         {
             let _coordination = state.membership_coordination.lock().unwrap();
-            assert!(
-                state
-                    .workspace_membership
-                    .lock()
-                    .unwrap()
-                    .remove(member_b)
-                    .is_some()
-            );
+            assert!(matches!(
+                state.workspace_membership.lock().unwrap().remove(member_b),
+                WorkspaceMembershipRemoval::Removed
+            ));
         }
         release_activation_barrier(&state);
         assert_eq!(

@@ -80,6 +80,12 @@ pub(crate) struct WorkspaceMembershipState {
     active_member: Option<RepositoryMemberId>,
 }
 
+pub(crate) enum WorkspaceMembershipRemoval {
+    Removed,
+    Active,
+    NotFound,
+}
+
 impl WorkspaceMembershipState {
     pub(crate) fn new() -> Self {
         Self {
@@ -136,12 +142,15 @@ impl WorkspaceMembershipState {
         member
     }
 
-    pub(crate) fn remove(&mut self, id: RepositoryMemberId) -> Option<InertRepositoryMember> {
+    pub(crate) fn remove(&mut self, id: RepositoryMemberId) -> WorkspaceMembershipRemoval {
         if self.active_member == Some(id) {
-            return None;
+            return WorkspaceMembershipRemoval::Active;
+        }
+        if self.members.remove(&id).is_none() {
+            return WorkspaceMembershipRemoval::NotFound;
         }
         self.membership_generation = self.membership_generation.wrapping_add(1);
-        self.members.remove(&id)
+        WorkspaceMembershipRemoval::Removed
     }
 
     pub(crate) fn publish_active(&mut self, id: RepositoryMemberId) -> bool {
