@@ -1,10 +1,26 @@
 # Changelog
 
-## v0.28.0 - prepared / not yet published
+## v0.28.0 — released (2026-09-16)
 
-RAH v0.28.0 is a release-preparation candidate. It has no tag, GitHub Release,
-publication date, or immutable publication metadata yet. The release theme is
-**Explicit Inactive Repository Member Removal**.
+RAH v0.28.0 was published by Task 345. The release theme is **Explicit
+Inactive Repository Member Removal**.
+
+### Immutable release record
+
+- Release source: `616af196b03c6473b93984d429e7dd0825edc0b7`.
+- Annotated tag: `v0.28.0`.
+- Tag annotation: `RAH v0.28.0`.
+- Tag object: `2927c297e47cb04ea629c761b74afd43d2f685f1`.
+- Peeled target: `616af196b03c6473b93984d429e7dd0825edc0b7`.
+- Release-preparation CI: `35095044576` — PASS.
+- Tag CI: `35095965370` — PASS.
+- GitHub Release ID: `389903124`.
+- Release name: `RAH v0.28.0`.
+- Published: `2026-09-16T12:30:07Z` (`draft=false`, `prerelease=false`).
+- Assets: 0.
+
+Task 346 is a later documentation-only descendant and is not the immutable
+v0.28.0 release source. The v0.27.0 immutable release identity is unchanged.
 
 ### Added
 
