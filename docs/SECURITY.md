@@ -1,3 +1,50 @@
+# RAH v0.27.0 Security Model — prepared, not yet published
+
+This section records the v0.27 remembered-workspace security boundary. The
+dedicated `RememberedWorkspaceStore` owns the private
+`remembered-workspace.json` catalog in the normal per-user application data
+directory. It stores only the closed JSON schema v1 descriptive catalog:
+opaque `RememberedCandidateId` values, bounded labels/order, and an optional
+explicitly opted-in location hint.
+
+The catalog is bounded to 64 candidates, 256 UTF-8 bytes per label, 64 ASCII
+bytes per opaque ID, 4096 UTF-8 bytes per location hint, and a 256 KiB final
+serialized file. Same-directory atomic replacement uses persist-before-publish
+ordering, staged-file reread and exact validation, bounded synchronization,
+and Windows checks for every supported storage ancestor and the final file's
+reparse state. Corrupt, future-version, invalid, or over-bound catalogs fail
+closed with bounded outcomes.
+
+Location hints are private host data, absent by default, and never generic
+model/provider/activity/Effective Authority data. Generic catalog presentation
+is path-free; a full location is returned only by an explicit human-controlled
+reveal action. Startup performs passive catalog loading only: it does not
+stat, open, canonicalize, or otherwise probe any candidate location, and it
+does not create repository membership, identity proof, active composition,
+ToolRegistry, provider/runtime state, Commit, Stage/Unstage, or HostExplicit
+state.
+
+Explicit fresh re-admission uses the existing ADR 0027 pipeline and current
+facts, creates a fresh process-local `RepositoryMemberId`, and remains inert
+until separate explicit activation. Automatic re-admission and activation are
+forbidden. Persisted paths are not repository identity; catalog deletion is
+not process-local member removal and does not delete filesystem content or
+mutate Git. One active repository remains the maximum, with no union
+ToolRegistry or parallel active repository authority.
+
+ADR 0027 remains authoritative for process-local membership and active-only
+authority composition. ADR 0028 is additive and descriptive only. The exact
+HostExplicit set remains 11; Stage/Unstage and Commit remain separate host
+authorities, and no Tool eligibility changed.
+
+The v0.27 Windows evidence is host-driven production-backend certification,
+not GUI certification. Required nonclaims remain: no encryption, no race-free
+TOCTOU protection, no network isolation, and no automatic recovery/replay after
+uncertain native effects. GUI automation, a real junction/reparse live
+fixture, and true simultaneous two-process live mutation were not executed.
+Model-selected dynamic Tool dispatch is not established under the approved
+GPT-5.6-terra live gate.
+
 # RAH v0.26.0 Security Model — released
 
 This section records the released v0.26 security boundary. RAH v0.26.0 is the

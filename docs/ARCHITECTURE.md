@@ -1,3 +1,66 @@
+# RAH v0.27.0 Architecture — prepared, not yet published
+
+This section records the release-preparation architecture for durable,
+descriptive remembered workspaces. It adds a persistence layer below the
+process-local repository authority defined by ADR 0027 and the descriptive
+persistence contract defined by ADR 0028.
+
+```text
+RememberedWorkspaceStore
+        ↓
+durable inert candidate catalog
+        ↓ restart
+Desktop remembered presentation state
+        ↓ explicit human fresh admission
+WorkspaceMembershipState
+        ↓ explicit activation
+DesktopRepository
+        ↓
+fresh active-only ToolRegistry / repository authority
+```
+
+The durable `RememberedCandidateId` is distinct from the fresh process-local
+`RepositoryMemberId`. A persisted location hint is not repository identity and
+is never executable proof. Remembered persistence is outside the executable
+authority graph: startup loads only bounded descriptive presentation state,
+does not probe candidate paths, and restores zero repository authority.
+
+An explicit human fresh-admission action reruns the current ADR 0027
+repository identity and currentness checks. Admission creates an inert
+process-local member; separate explicit activation creates fresh active-only
+composition. Automatic re-admission and automatic activation remain forbidden.
+
+ADR 0027 remains authoritative for process-local membership, fresh repository
+identity, one-active composition, switching, and repository-bound authority.
+ADR 0028 is additive and owns only remembered candidates, storage/privacy,
+restart inertness, fresh re-admission, and descriptive catalog mutation.
+
+The exact production HostExplicit set remains 11 names:
+
+```text
+fs.read
+repo.file-info
+repo.status
+repo.diff
+repo.diff-staged
+repo.create-branch
+repo.patch
+repo.edit-files
+repo.create-file
+repo.delete-file
+repo.rename-file
+```
+
+`repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
+fixtures/diagnostics, and unknown/provider-defined Tools remain ineligible.
+Stage/Unstage remain separate host index authorities and Commit remains a
+separate reviewed repository authority. There is no union ToolRegistry or
+parallel active repository authority.
+
+The v0.27 Windows evidence is host-driven production-backend certification,
+not GUI certification. Model-selected dynamic Tool dispatch remains
+unestablished under the approved GPT-5.6-terra live gate.
+
 # RAH v0.26.0 Architecture — released
 
 This document records the released v0.26 architecture. The current immutable

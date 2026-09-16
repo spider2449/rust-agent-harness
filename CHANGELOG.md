@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.27.0 — prepared / not yet published (2026-09-16)
+
+RAH v0.27.0 is prepared for later publication. It is not released, has no
+v0.27.0 tag, and has no GitHub Release. The prior immutable published release
+remains RAH v0.26.0.
+
+The release theme is **Durable Remembered Workspaces with Explicit Fresh
+Re-Admission**. RAH Desktop may remember bounded descriptive repository
+candidates across restart, while restart restores zero executable repository
+authority. A remembered candidate requires explicit human fresh admission,
+current repository validation, a fresh process-local `RepositoryMemberId`, and
+separate explicit activation before active-only repository authority is
+composed.
+
+### Added
+
+- A dedicated `RememberedWorkspaceStore` and closed JSON schema v1 in
+  `remembered-workspace.json` for a bounded descriptive candidate catalog.
+- Explicit catalog add, update, delete, and reorder actions, with explicit
+  privacy-controlled location reveal and no generic path exposure.
+- Inert startup catalog loading and explicit fresh re-admission integrated with
+  the existing ADR 0027 membership and active-only authority pipeline.
+
+### Verified
+
+- Windows host-driven live certification covering restart isolation, fresh
+  member identity, admission/activation separation, deletion isolation,
+  current-facts rejection, corrupt/future catalog behavior, privacy, zero
+  startup candidate-path access, A/B Git integrity, zero model requests and
+  Tool requests, zero MCP/Process Plugin activations, zero automatic commits,
+  zero network Git, and bounded cleanup.
+- The certified production source was
+  `b90e63dd138732d616582d935b1fa45b842fcfe8`, with Task 335 verdict
+  `PASS WITH EXPLICIT NONCLAIMS` and marker
+  `RAH_V027_REMEMBERED_WORKSPACE_LIVE_OK`.
+
+### Security and limitations
+
+- Remembered data is descriptive only. Persisted paths are location hints, not
+  repository identity or authority; automatic re-admission and activation are
+  forbidden; there is one active repository maximum and no union ToolRegistry.
+- The store uses a closed schema, bounded catalog, same-directory atomic
+  replacement, staged reread and exact validation, Windows ancestor/final-file
+  reparse checks, persist-before-publish ordering, and bounded coordination.
+- No encryption, race-free TOCTOU protection, network isolation, or automatic
+  recovery/replay guarantee after uncertain native effects is claimed.
+- Model-selected dynamic Tool dispatch is not established under the approved
+  GPT-5.6-terra live gate. GUI automation, real junction/reparse live fixture,
+  and true simultaneous two-process live mutation were not executed.
+
 ## v0.26.0 — released (2026-09-15)
 
 RAH v0.26.0 is the current immutable published release. RAH v0.25.0 is the

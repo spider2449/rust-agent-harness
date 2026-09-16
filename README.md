@@ -5,10 +5,36 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.27.0 prepared — not yet published
+
+RAH v0.27.0 is the release-preparation candidate and has not been published.
+The release theme is **Durable Remembered Workspaces with Explicit Fresh
+Re-Admission**.
+
+RAH Desktop may durably remember descriptive repository candidates across
+restart. Restart restores zero executable repository authority: no repository
+membership, active repository, ToolRegistry, provider/runtime state, Commit,
+Stage/Unstage, or HostExplicit state is restored.
+
+A remembered candidate becomes executable only through explicit human fresh
+admission, current repository validation, a fresh process-local
+`RepositoryMemberId`, and a separate explicit activation. Remembered catalog
+add/update/delete/reorder and explicit location reveal are descriptive
+management actions; they do not probe or authorize a repository.
+
+The v0.27 Windows evidence is host-driven production-backend certification,
+not GUI certification. It retains the required nonclaim:
+
+`MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
+
+GUI automation, a real junction/reparse live fixture, true simultaneous
+two-process live mutation, network isolation, race-free TOCTOU protection, and
+automatic recovery/replay after uncertain native effects are not claimed.
+
 ## RAH v0.26.0 released
 
-RAH v0.26.0 is now the current immutable release. v0.25.0 is the prior
-immutable release. The v0.26 release source is
+RAH v0.26.0 is the prior immutable published release. v0.25.0 is the release
+before it. The v0.26 release source is
 `8b22b18739a54b752ce11e791fe380e522c10049`.
 
 The release theme is **Explicit Multi-Repository Membership and Active-Only
