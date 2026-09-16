@@ -9248,6 +9248,7 @@ mod tests {
         HostReadRequest, host_descriptor, host_descriptor_with_rename,
     };
     use super::remembered_workspace::RememberedCandidateId;
+    use super::remembered_workspace::RememberedWorkspaceStore;
     use super::repository_membership::RepositoryMemberId;
     use super::trusted_profile_selection::load_provider_only_profile;
     use super::{
@@ -9273,11 +9274,12 @@ mod tests {
         RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
         StartupActivationCounters, TerminalOwnership, activate_admitted_member,
         activate_repository_member_selector, activity_event, activity_event_with_composition,
-        admit_repository, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        begin_connect, begin_repository_index_effect, branch_result_classification,
-        classify_repository_delete_file_result, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
+        admit_remembered_candidate, admit_repository, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
+        branch_result_classification, classify_repository_delete_file_result,
+        classify_repository_multi_file_output, clear_conversation_allowed,
+        clear_trusted_profile_selection, commit_activity_presentation,
         complete_repository_index_effect, connect_codex, connect_prepared_codex,
         connection_activation_publication_is_current, connection_publication_is_current,
         current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
@@ -9293,18 +9295,19 @@ mod tests {
         prepare_repo_rename_file_with_current, prepared_host_activity,
         publish_connected_provider_state, publish_readiness_result,
         publish_trusted_profile_selection, refresh_repository_workflow,
-        replace_selected_repository, repository_authorize_commit_review,
-        repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
+        remembered_catalog_presentation, replace_selected_repository,
+        repository_authorize_commit_review, repository_context_fingerprint,
+        repository_index_action, repository_index_effect_is_active,
         repository_membership_presentation, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot, repository_stage_action,
         repository_tool_authority, repository_unstage_action, request_connect,
         reset_startup_activation_counters, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
-        revoke_repository_commit_context, run_host_tool, safe_delete_file_activity_result,
-        same_arc, save_trusted_profile_preference, selected_git_executable, set_commit_identity,
-        startup_activation_snapshot, uncertain_repository_effect_pending,
-        uncertain_repository_effect_requires_refresh, validate_host_confirmation_ticket,
-        validate_prompt,
+        reveal_remembered_location, revoke_repository_commit_context, run_host_tool,
+        safe_delete_file_activity_result, same_arc, save_trusted_profile_preference,
+        selected_git_executable, set_commit_identity, startup_activation_snapshot,
+        uncertain_repository_effect_pending, uncertain_repository_effect_requires_refresh,
+        validate_host_confirmation_ticket, validate_prompt,
     };
     use super::{SUPPORTED_CODEX_VERSION, current_host_composition};
     use async_trait::async_trait;
@@ -26826,6 +26829,436 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V026_TEMP_REPOSITORY_CLEANUP=1");
         println!("RAH_V026_HEAD_INDEX_REF_INTEGRITY=1");
         println!("RAH_V026_HOST_DRIVEN_MULTI_REPOSITORY_LIVE_OK");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V027_REMEMBERED_WORKSPACE_LIVE=1"]
+    async fn task_335_windows_host_driven_remembered_workspace_live_certification()
+    -> Result<(), String> {
+        if std::env::var("RAH_RUN_V027_REMEMBERED_WORKSPACE_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V027_REMEMBERED_WORKSPACE_LIVE=1 for the Windows live certification"
+                    .to_owned(),
+            );
+        }
+
+        let git = selected_git_executable()
+            .map_err(|error| format!("native Git discovery failed: {error:?}"))?;
+        let fixture = Task324LiveFixture::new(&git)?;
+        let storage = fixture.root.join("remembered-host-storage");
+        let initial_a = live_git_state(&git, &fixture.repository_a, "__rah_v027_none__")?;
+        let initial_b = live_git_state(&git, &fixture.repository_b, "__rah_v027_none__")?;
+        let private_path = fixture.root.join("RAH_V027_PRIVATE_PATH_SENTINEL");
+        let private_path_string = private_path.to_string_lossy().into_owned();
+        let html_label = "<img src=x onerror=alert(1)>";
+        let release_managed_persistence = |app: &tauri::App| {
+            let inert_replacement =
+                Persistence::start(fixture.repository_a.join("repo-marker.txt"));
+            let old_persistence = {
+                let state = app.state::<DesktopAppState>();
+                let mut persistence = state
+                    .inner()
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                std::mem::replace(&mut *persistence, inert_replacement)
+            };
+            drop(old_persistence);
+        };
+
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("P1 Desktop app construction failed: {error}"))?;
+        let p1_member = {
+            let state = app.state::<DesktopAppState>();
+            let initial_catalog =
+                remembered_catalog_presentation(state.remembered_workspace.snapshot());
+            if !initial_catalog.candidates.is_empty()
+                || !repository_membership_presentation(state.inner())
+                    .members
+                    .is_empty()
+                || repository_membership_presentation(state.inner())
+                    .active_member_id
+                    .is_some()
+                || state.repository.lock().unwrap().is_some()
+                || state.provider_activation.lock().unwrap().is_some()
+                || !matches!(
+                    *state.connection.lock().unwrap(),
+                    ConnectionState::NotConnected
+                )
+            {
+                return Err("P1 did not start with empty inert authority state".to_owned());
+            }
+            let candidate_a = add_remembered_candidate(
+                state.inner(),
+                "Repository A",
+                Some(fixture.repository_a.clone()),
+            );
+            let candidate_b = add_remembered_candidate(
+                state.inner(),
+                "Repository B",
+                Some(fixture.repository_b.clone()),
+            );
+            let private_candidate =
+                add_remembered_candidate(state.inner(), html_label, Some(private_path.clone()));
+            let generic = serde_json::to_string(&remembered_catalog_presentation(
+                state.remembered_workspace.snapshot(),
+            ))
+            .map_err(|error| format!("generic catalog serialization failed: {error}"))?;
+            let status = serde_json::to_string(&state.status())
+                .map_err(|error| format!("application status serialization failed: {error}"))?;
+            let authority = serde_json::to_string(&get_effective_authority_snapshot(app.state()))
+                .map_err(|error| format!("authority serialization failed: {error}"))?;
+            let transcript =
+                serde_json::to_string(&state.persistence.lock().unwrap().presentation())
+                    .map_err(|error| format!("transcript serialization failed: {error}"))?;
+            if !generic.contains(html_label)
+                || generic.contains(&private_path_string)
+                || status.contains(&private_path_string)
+                || authority.contains(&private_path_string)
+                || transcript.contains(&private_path_string)
+            {
+                return Err("P1 generic privacy sentinel scan failed".to_owned());
+            }
+            let revealed = reveal_remembered_location(state.inner(), private_candidate.clone())
+                .map_err(|error| format!("P1 explicit reveal failed: {error:?}"))?;
+            let revealed_json = serde_json::to_string(&revealed)
+                .map_err(|error| format!("reveal serialization failed: {error}"))?;
+            if revealed.location != private_path_string
+                || !revealed_json.contains("RAH_V027_PRIVATE_PATH_SENTINEL")
+            {
+                return Err("P1 explicit reveal did not return the exact path".to_owned());
+            }
+            state
+                .remembered_workspace
+                .delete_candidate(private_candidate)
+                .map_err(|error| format!("P1 privacy candidate deletion failed: {error:?}"))?;
+            state
+                .remembered_workspace
+                .reorder_candidates(vec![candidate_b, candidate_a.clone()])
+                .map_err(|error| format!("P1 reorder failed: {error:?}"))?;
+            let admitted = admit_remembered_candidate(state.inner(), candidate_a.clone())
+                .map_err(|error| format!("P1 remembered admission failed: {error:?}"))?;
+            let membership = repository_membership_presentation(state.inner());
+            if membership.members.len() != 1
+                || membership.active_member_id.is_some()
+                || state.repository.lock().unwrap().is_some()
+            {
+                return Err("P1 admission activated or selected a repository".to_owned());
+            }
+            activate_admitted_member(state.inner(), admitted)
+                .await
+                .map_err(|error| format!("P1 explicit activation failed: {error:?}"))?;
+            Ok::<_, String>(admitted)
+        }?;
+        release_managed_persistence(&app);
+        drop(app);
+
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("P2 Desktop app construction failed: {error}"))?;
+        let p2_member_b = {
+            let state = app.state::<DesktopAppState>();
+            let catalog = remembered_catalog_presentation(state.remembered_workspace.snapshot());
+            let p1_snapshot = repository_membership_presentation(state.inner());
+            let p1_candidates = catalog
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect::<Vec<_>>();
+            if p1_candidates.len() != 2
+                || !p1_snapshot.members.is_empty()
+                || p1_snapshot.active_member_id.is_some()
+                || state.repository.lock().unwrap().is_some()
+                || state.commit_capability.lock().unwrap().is_some()
+                || state
+                    .repository_index_effect_reservation
+                    .lock()
+                    .unwrap()
+                    .is_some()
+                || !state.repository_workflow.lock().unwrap().actions.is_empty()
+                || state.host_invocation.lock().unwrap().state() != CoordinatorState::Idle
+                || state.provider_activation.lock().unwrap().is_some()
+                || !matches!(
+                    *state.connection.lock().unwrap(),
+                    ConnectionState::NotConnected
+                )
+                || !state.conversation.lock().unwrap().history.is_empty()
+            {
+                return Err("P2 restored executable or runtime state".to_owned());
+            }
+            let p2_catalog_json = serde_json::to_string(&catalog)
+                .map_err(|error| format!("P2 catalog serialization failed: {error}"))?;
+            if p2_catalog_json.contains(&private_path.to_string_lossy().to_string()) {
+                return Err("P2 exposed a remembered path in generic catalog output".to_owned());
+            }
+            let candidate_a = catalog
+                .candidates
+                .iter()
+                .find(|candidate| candidate.label == "Repository A")
+                .ok_or_else(|| "P2 did not retain candidate A".to_owned())?
+                .candidate_id
+                .clone();
+            let candidate_b = catalog
+                .candidates
+                .iter()
+                .find(|candidate| candidate.label == "Repository B")
+                .ok_or_else(|| "P2 did not retain candidate B".to_owned())?
+                .candidate_id
+                .clone();
+            let member_a = admit_remembered_candidate(
+                state.inner(),
+                RememberedCandidateId::parse(candidate_a.clone()).unwrap(),
+            )
+            .map_err(|error| format!("P2 admission of A failed: {error:?}"))?;
+            if member_a == p1_member
+                || repository_membership_presentation(state.inner())
+                    .active_member_id
+                    .is_some()
+            {
+                return Err("P2 did not create fresh inert A identity".to_owned());
+            }
+            activate_admitted_member(state.inner(), member_a)
+                .await
+                .map_err(|error| format!("P2 activation of A failed: {error:?}"))?;
+            let active_a = state
+                .repository
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "P2 A was not active".to_owned())?;
+            let b_member = admit_remembered_candidate(
+                state.inner(),
+                RememberedCandidateId::parse(candidate_b.clone()).unwrap(),
+            )
+            .map_err(|error| format!("P2 admission of B failed: {error:?}"))?;
+            if repository_membership_presentation(state.inner()).active_member_id
+                != Some(member_a.selector())
+                || state
+                    .repository
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|repository| repository.root.clone())
+                    != Some(active_a.root.clone())
+            {
+                return Err("P2 B admission switched active A".to_owned());
+            }
+            activate_admitted_member(state.inner(), b_member)
+                .await
+                .map_err(|error| format!("P2 activation of B failed: {error:?}"))?;
+            let active_b = state
+                .repository
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "P2 B was not active".to_owned())?;
+            if repository_membership_presentation(state.inner()).active_member_id
+                != Some(b_member.selector())
+            {
+                return Err("P2 B activation did not become current".to_owned());
+            }
+            let registry_before_delete = desktop_tool_registry(Some(&active_b), None)
+                .map_err(|error| format!("P2 active B registry failed: {error}"))?;
+            state
+                .remembered_workspace
+                .delete_candidate(RememberedCandidateId::parse(candidate_b).unwrap())
+                .map_err(|error| format!("P2 B catalog deletion failed: {error:?}"))?;
+            let retained_b = state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member(b_member)
+                .is_some();
+            let active_after_delete = state.repository.lock().unwrap().clone();
+            let registry_after_delete = desktop_tool_registry(active_after_delete.as_deref(), None)
+                .map_err(|error| format!("P2 registry after deletion failed: {error}"))?;
+            let durable = RememberedWorkspaceStore::open(storage.clone())
+                .map_err(|error| format!("P2 remembered store open failed: {error:?}"))?
+                .load()
+                .map_err(|error| format!("P2 durable catalog load failed: {error:?}"))?;
+            if durable.workspace().members().len() != 1
+                || !retained_b
+                || repository_membership_presentation(state.inner()).active_member_id
+                    != Some(b_member.selector())
+                || active_after_delete
+                    .as_ref()
+                    .map(|repository| repository.root.clone())
+                    != Some(active_b.root.clone())
+                || registry_before_delete.definitions().len()
+                    != registry_after_delete.definitions().len()
+                || state.provider_activation.lock().unwrap().is_some()
+                || !matches!(
+                    *state.connection.lock().unwrap(),
+                    ConnectionState::NotConnected
+                )
+            {
+                return Err("P2 catalog deletion was not isolated from active B".to_owned());
+            }
+            Ok::<_, String>(b_member)
+        }?;
+        release_managed_persistence(&app);
+        drop(app);
+
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.clone()))
+            .build(tauri::generate_context!())
+            .map_err(|error| format!("P3 Desktop app construction failed: {error}"))?;
+        {
+            let state = app.state::<DesktopAppState>();
+            let catalog = remembered_catalog_presentation(state.remembered_workspace.snapshot());
+            if catalog.candidates.len() != 1
+                || catalog.candidates[0].label != "Repository A"
+                || !repository_membership_presentation(state.inner())
+                    .members
+                    .is_empty()
+                || repository_membership_presentation(state.inner())
+                    .active_member_id
+                    .is_some()
+                || state.repository.lock().unwrap().is_some()
+            {
+                return Err(
+                    "P3 did not preserve A-only descriptive state and empty authority".to_owned(),
+                );
+            }
+        }
+        release_managed_persistence(&app);
+        drop(app);
+
+        let invalid_root = fixture.root.join("current-facts-rejection");
+        fs::create_dir_all(&invalid_root)
+            .map_err(|error| format!("current-facts storage creation failed: {error}"))?;
+        let invalid_repository = fixture.root.join("repo-c");
+        fs::create_dir(&invalid_repository)
+            .map_err(|error| format!("repository C creation failed: {error}"))?;
+        Task324LiveFixture::initialize_repository(&git, &invalid_repository, "C")?;
+        let candidate_c = {
+            let state = DesktopAppState::new(invalid_root.clone());
+            let candidate =
+                add_remembered_candidate(&state, "Repository C", Some(invalid_repository.clone()));
+            drop(state);
+            fs::remove_dir_all(invalid_repository.join(".git"))
+                .map_err(|error| format!("repository C invalidation failed: {error}"))?;
+            candidate
+        };
+        let invalid_state = DesktopAppState::new(invalid_root);
+        if !remembered_candidate_ids(&invalid_state).contains(&candidate_c)
+            || admit_remembered_candidate(&invalid_state, candidate_c).is_ok()
+            || invalid_state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count()
+                != 0
+            || invalid_state.repository.lock().unwrap().is_some()
+        {
+            return Err("current-facts rejection did not remain inert".to_owned());
+        }
+        drop(invalid_state);
+
+        let path_access_root = fixture.root.join("startup-path-access");
+        let path_candidate = {
+            let state = DesktopAppState::new(path_access_root.clone());
+            add_remembered_candidate(
+                &state,
+                "Missing path",
+                Some(fixture.root.join("missing-path")),
+            )
+        };
+        let _ = path_candidate;
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+        let path_state = DesktopAppState::new(path_access_root);
+        if super::remembered_workspace::test_location_hint_path_accesses() != 0
+            || path_state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count()
+                != 0
+        {
+            return Err("startup probed a remembered candidate path".to_owned());
+        }
+        drop(path_state);
+
+        for (name, bytes, expected_status) in [
+            ("corrupt", br#"{"#.to_vec(), "unavailable"),
+            (
+                "future",
+                br#"{"version":2,"workspace":{"future":true}}"#.to_vec(),
+                "unavailable",
+            ),
+        ] {
+            let root = fixture.root.join(format!("startup-{name}"));
+            fs::create_dir_all(&root)
+                .map_err(|error| format!("{name} root creation failed: {error}"))?;
+            let catalog_path = root.join("remembered-workspace.json");
+            fs::write(&catalog_path, &bytes)
+                .map_err(|error| format!("{name} catalog write failed: {error}"))?;
+            let state = DesktopAppState::new(root);
+            let presentation =
+                remembered_catalog_presentation(state.remembered_workspace.snapshot());
+            if presentation.status != expected_status
+                || !presentation.candidates.is_empty()
+                || fs::read(&catalog_path)
+                    .map_err(|error| format!("{name} catalog reread failed: {error}"))?
+                    != bytes
+                || state.workspace_membership.lock().unwrap().member_count() != 0
+                || state.repository.lock().unwrap().is_some()
+            {
+                return Err(format!("{name} catalog startup handling failed"));
+            }
+            drop(state);
+        }
+
+        if live_git_state(&git, &fixture.repository_a, "__rah_v027_none__")? != initial_a
+            || live_git_state(&git, &fixture.repository_b, "__rah_v027_none__")? != initial_b
+        {
+            return Err("A/B Git state changed during descriptive certification".to_owned());
+        }
+        if p2_member_b == p1_member {
+            return Err("P2 B identity unexpectedly matched P1 A identity".to_owned());
+        }
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        if cleanup_root.exists() {
+            return Err("v0.27 certification root remained after cleanup".to_owned());
+        }
+        println!("RAH_V027_WINDOWS_EDITION=Windows 10 Professional");
+        println!("RAH_V027_WINDOWS_BUILD=19045");
+        println!("RAH_V027_WINDOWS_ARCH=x64");
+        println!("RAH_V027_RUSTC={}", rustc_version());
+        println!("RAH_V027_CARGO={}", cargo_version());
+        println!(
+            "RAH_V027_GIT_VERSION={}",
+            task_324_git(&git, Path::new("."), &["--version"])?.trim()
+        );
+        println!("RAH_V027_MODEL_REQUESTS=0");
+        println!("RAH_V027_MODEL_TOOL_REQUESTS=0");
+        println!("RAH_V027_MCP_PROVIDER_ACTIVATIONS=0");
+        println!("RAH_V027_PROCESS_PLUGIN_ACTIVATIONS=0");
+        println!("RAH_V027_AUTOMATIC_COMMITS=0");
+        println!("RAH_V027_NETWORK_GIT=0");
+        println!("RAH_V027_JUNCTION_LIVE=not-executed-deterministic-covered");
+        println!("RAH_V027_MULTI_PROCESS_LIVE=not-executed-deterministic-covered");
+        println!("RAH_V027_P1_P2_FRESH_MEMBER=1");
+        println!("RAH_V027_ADMISSION_ACTIVATION_SEPARATE=1");
+        println!("RAH_V027_DELETE_ISOLATED=1");
+        println!("RAH_V027_CURRENT_FACTS_REJECTION=1");
+        println!("RAH_V027_PRIVACY_SENTINEL_SCAN=1");
+        println!("RAH_V027_STARTUP_PATH_ACCESS=0");
+        println!("RAH_V027_CORRUPT_FUTURE_PRESERVED=1");
+        println!("RAH_V027_GIT_INTEGRITY=1");
+        println!("RAH_V027_REMEMBERED_WORKSPACE_LIVE_OK");
         Ok(())
     }
 
