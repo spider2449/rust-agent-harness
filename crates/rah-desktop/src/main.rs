@@ -6573,6 +6573,14 @@ struct RememberedWorkspaceCatalogPresentation {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RememberedLocationPresentation {
+    candidate_id: String,
+    location: String,
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RememberedCandidateAddRequest {
@@ -6713,6 +6721,41 @@ fn remembered_workspace_catalog(
     state: State<'_, DesktopAppState>,
 ) -> RememberedWorkspaceCatalogPresentation {
     remembered_catalog_presentation(state.remembered_workspace.snapshot())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_remembered_location(
+    state: &DesktopAppState,
+    candidate_id: RememberedCandidateId,
+) -> Result<RememberedLocationPresentation, FrontendError> {
+    let location = match state.remembered_workspace.location_hint(&candidate_id) {
+        Ok(Some(location)) => location,
+        Ok(None) => return Err(FrontendError::RememberedLocationRequired),
+        Err(RememberedWorkspaceLookupError::Unavailable) => {
+            return Err(FrontendError::RememberedCatalogUnavailable);
+        }
+        Err(RememberedWorkspaceLookupError::NotFound) => {
+            return Err(FrontendError::RememberedCandidateNotFound);
+        }
+    };
+    let location = location
+        .to_str()
+        .ok_or(FrontendError::RememberedCatalogRequestInvalid)?
+        .to_owned();
+    Ok(RememberedLocationPresentation {
+        candidate_id: candidate_id.as_str().to_owned(),
+        location,
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn reveal_remembered_workspace_location(
+    state: State<'_, DesktopAppState>,
+    candidate_id: String,
+) -> Result<RememberedLocationPresentation, FrontendError> {
+    let candidate_id = parse_remembered_candidate_id(candidate_id)?;
+    reveal_remembered_location(state.inner(), candidate_id)
 }
 
 #[cfg(target_os = "windows")]
@@ -9129,6 +9172,7 @@ fn main() -> ExitCode {
             test_llama_cpp_endpoint,
             choose_repository,
             remembered_workspace_catalog,
+            reveal_remembered_workspace_location,
             remember_workspace_candidate,
             update_remembered_workspace_candidate,
             delete_remembered_workspace_candidate,
@@ -24161,6 +24205,82 @@ fn main() {
             Err(FrontendError::RememberedLocationRequired)
         );
         assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+    }
+
+    #[test]
+    fn task_334_reveal_is_explicit_exact_and_authority_free() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let sentinel = PathBuf::from(r"C:\task-334-private\remembered-repository");
+        let candidate =
+            add_remembered_candidate(&state, "Private repository", Some(sentinel.clone()));
+
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+        let revealed = super::reveal_remembered_location(&state, candidate.clone())
+            .expect("stored location reveals explicitly");
+        assert_eq!(revealed.candidate_id, candidate.as_str());
+        assert_eq!(revealed.location, sentinel.to_str().unwrap());
+        let serialized = serde_json::to_value(&revealed).unwrap();
+        assert_eq!(serialized["candidateId"], candidate.as_str());
+        assert_eq!(serialized["location"], sentinel.to_str().unwrap());
+        assert_eq!(serialized.as_object().unwrap().len(), 2);
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            1
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+        assert!(state.repository.lock().unwrap().is_none());
+        assert!(state.provider_activation.lock().unwrap().is_none());
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+
+        let missing = add_remembered_candidate(&state, "No location", None);
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+        assert_eq!(
+            super::reveal_remembered_location(&state, missing),
+            Err(FrontendError::RememberedLocationRequired)
+        );
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            0
+        );
+        assert_eq!(
+            super::reveal_remembered_location(
+                &state,
+                super::remembered_workspace::RememberedCandidateId::generate(),
+            ),
+            Err(FrontendError::RememberedCandidateNotFound)
+        );
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            0
+        );
+    }
+
+    #[test]
+    fn task_334_reveal_rejects_unavailable_catalog_without_path_access() {
+        let storage = TestRepository::new();
+        let storage_file = storage.0.join("remembered-storage-file");
+        std::fs::write(&storage_file, b"not a directory").expect("storage failure fixture writes");
+        let state = DesktopAppState::new(storage_file);
+        super::remembered_workspace::reset_test_location_hint_path_accesses();
+
+        assert_eq!(
+            super::reveal_remembered_location(
+                &state,
+                super::remembered_workspace::RememberedCandidateId::generate(),
+            ),
+            Err(FrontendError::RememberedCatalogUnavailable)
+        );
+        assert_eq!(
+            super::remembered_workspace::test_location_hint_path_accesses(),
+            0
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
+        assert!(state.repository.lock().unwrap().is_none());
+        assert!(state.provider_activation.lock().unwrap().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

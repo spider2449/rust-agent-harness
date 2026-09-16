@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reveal-remembered-workspace-location"
+description = "Enables the reveal_remembered_workspace_location command without any pre-configured scope."
+commands.allow = ["reveal_remembered_workspace_location"]
+
+[[permission]]
+identifier = "deny-reveal-remembered-workspace-location"
+description = "Denies the reveal_remembered_workspace_location command without any pre-configured scope."
+commands.deny = ["reveal_remembered_workspace_location"]

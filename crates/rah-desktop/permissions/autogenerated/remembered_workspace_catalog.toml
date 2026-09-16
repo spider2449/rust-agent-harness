@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remembered-workspace-catalog"
+description = "Enables the remembered_workspace_catalog command without any pre-configured scope."
+commands.allow = ["remembered_workspace_catalog"]
+
+[[permission]]
+identifier = "deny-remembered-workspace-catalog"
+description = "Denies the remembered_workspace_catalog command without any pre-configured scope."
+commands.deny = ["remembered_workspace_catalog"]

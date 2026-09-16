@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-remembered-workspace-candidate"
+description = "Enables the delete_remembered_workspace_candidate command without any pre-configured scope."
+commands.allow = ["delete_remembered_workspace_candidate"]
+
+[[permission]]
+identifier = "deny-delete-remembered-workspace-candidate"
+description = "Denies the delete_remembered_workspace_candidate command without any pre-configured scope."
+commands.deny = ["delete_remembered_workspace_candidate"]

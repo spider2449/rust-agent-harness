@@ -112,6 +112,34 @@
           <p id="staged-review-state">No staged changes</p>
           <button id="authorize-commit" type="button" hidden>Authorize Commit</button>
         </section>
+        <section class="remembered-workspaces" aria-labelledby="remembered-workspaces-title">
+          <h2 id="remembered-workspaces-title">Remembered Workspaces</h2>
+          <p class="model-hint">Remembered entries are local descriptive shortcuts. They do not admit or activate a repository automatically.</p>
+          <p id="remembered-catalog-status" class="authority-status" aria-live="polite">Remembered workspaces loading…</p>
+          <p id="remembered-catalog-error" class="connection-error" aria-live="polite" hidden></p>
+          <p id="remembered-action-status" class="model-hint" aria-live="polite"></p>
+          <form id="remembered-add-form" class="remembered-form">
+            <h3>Remember a workspace</h3>
+            <label for="remembered-add-label">Label</label>
+            <input id="remembered-add-label" name="label" type="text" maxlength="1024" required />
+            <label>
+              <input id="remembered-add-location-enabled" type="checkbox" />
+              Remember a location
+            </label>
+            <button id="remembered-add-location" type="button" disabled>Choose Location</button>
+            <span id="remembered-add-location-state" class="model-hint">No location will be saved</span>
+            <button id="remembered-add-submit" type="submit">Add</button>
+          </form>
+          <div id="remembered-catalog" class="remembered-entries" aria-live="polite"></div>
+          <dialog id="remembered-delete-confirmation" aria-labelledby="remembered-delete-title">
+            <h3 id="remembered-delete-title">Forget remembered entry?</h3>
+            <p id="remembered-delete-copy">Forget this remembered entry? This does not delete repository files or remove an already admitted repository.</p>
+            <form method="dialog">
+              <button value="cancel">Cancel</button>
+              <button id="remembered-delete-confirm" class="destructive-action" value="confirm">Forget Entry</button>
+            </form>
+          </dialog>
+        </section>
         <section class="authority-review" aria-labelledby="effective-authority-title">
           <div class="authority-heading">
             <h2 id="effective-authority-title">Effective Authority</h2>

@@ -25,6 +25,11 @@ let renderedTrustedProfileSelection = null;
 let renderedRepositoryMembership = null;
 let repositorySwitchBlocked = false;
 let activePreparedHostReview = null;
+let rememberedCatalog = null;
+let rememberedCatalogMutationBusy = false;
+const revealedRememberedLocations = new Map();
+const admittedRememberedCandidates = new Set();
+let pendingRememberedDelete = null;
 const maxActivityEntries = 100;
 const multiFileMaxTargets = 4;
 const multiFileMaxReplacements = 16;
@@ -158,6 +163,12 @@ function errorMessage(error) {
     repository_member_stale: "The selected repository is stale and was not activated",
     repository_action_invalid: "That repository action is no longer available. Refresh and choose it again.",
     repository_action_stale: "Repository changed after it was displayed. Refresh and choose a new action.",
+    remembered_catalog_unavailable: "Remembered workspaces are unavailable.",
+    remembered_catalog_save_failed: "Remembered workspace changes could not be saved.",
+    remembered_candidate_id_invalid: "That remembered entry is invalid.",
+    remembered_candidate_not_found: "That remembered entry is no longer available.",
+    remembered_catalog_request_invalid: "That remembered workspace request is invalid.",
+    remembered_location_required: "Choose a location before continuing.",
     model_configuration_invalid: "Invalid model configuration",
     model_configuration_busy: "Model configuration is unavailable while chat is running",
     commit_identity_invalid: "Commit identity is invalid",
@@ -1385,6 +1396,323 @@ async function refreshRepositoryMembership(invoke) {
   renderRepositoryMembership(await invoke("repository_membership"));
 }
 
+function rememberedCandidateById(candidateId) {
+  return rememberedCatalog?.candidates?.find((candidate) => candidate.candidateId === candidateId) ?? null;
+}
+
+function setRememberedControlsDisabled(disabled) {
+  const section = document.querySelector(".remembered-workspaces");
+  for (const control of section.querySelectorAll("button, input")) {
+    if (control.closest("dialog")) continue;
+    control.disabled = disabled;
+  }
+  if (!disabled) {
+    document.querySelector("#remembered-add-location").disabled = !document.querySelector("#remembered-add-location-enabled").checked;
+  }
+}
+
+function renderRememberedCatalog(catalog, { clearReveals = true } = {}) {
+  rememberedCatalog = catalog;
+  if (clearReveals) revealedRememberedLocations.clear();
+  const status = document.querySelector("#remembered-catalog-status");
+  const error = document.querySelector("#remembered-catalog-error");
+  const entries = document.querySelector("#remembered-catalog");
+  const available = catalog?.status === "available";
+  status.textContent = available ? (catalog.candidates.length ? "Remembered workspaces" : "No remembered workspaces") : "Remembered workspaces unavailable";
+  status.dataset.state = available ? "current" : "unavailable";
+  entries.replaceChildren();
+  if (!available) {
+    setRememberedControlsDisabled(true);
+    return;
+  }
+  if (!catalog.candidates.length) entries.append(emptyEntry("No remembered entries"));
+  for (const candidate of catalog.candidates) {
+    const article = document.createElement("article");
+    article.className = "remembered-entry";
+    article.dataset.candidateId = candidate.candidateId;
+    const title = document.createElement("h3");
+    title.textContent = candidate.label;
+    const order = document.createElement("p");
+    order.textContent = `Order ${Number(candidate.order) + 1}`;
+    const location = document.createElement("p");
+    location.className = "remembered-location";
+    const revealed = revealedRememberedLocations.get(candidate.candidateId);
+    location.textContent = revealed ?? (candidate.hasLocationHint ? "Location saved — hidden" : "No location saved");
+    const admission = document.createElement("p");
+    admission.className = "model-hint";
+    admission.textContent = admittedRememberedCandidates.has(candidate.candidateId)
+      ? "Admitted — activate separately"
+      : "Inert — admission is explicit";
+    const actions = document.createElement("div");
+    actions.className = "remembered-entry-actions";
+    const addAction = (action, text) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.rememberedAction = action;
+      button.dataset.candidateId = candidate.candidateId;
+      button.textContent = text;
+      actions.append(button);
+    };
+    if (revealed) addAction("hide-location", "Hide Location");
+    else if (candidate.hasLocationHint) addAction("reveal-location", "Show Location");
+    else addAction("edit-location", "Add Location");
+    addAction("edit", "Edit");
+    if (!admittedRememberedCandidates.has(candidate.candidateId) && candidate.hasLocationHint) {
+      addAction("admit", "Admit Repository");
+    }
+    if (candidate.order > 0) addAction("move-up", "Move Up");
+    if (candidate.order + 1 < catalog.candidates.length) addAction("move-down", "Move Down");
+    addAction("delete", "Forget Entry");
+    article.append(title, order, location, admission, actions);
+    entries.append(article);
+  }
+  setRememberedControlsDisabled(rememberedCatalogMutationBusy);
+}
+
+function showRememberedError(error) {
+  const element = document.querySelector("#remembered-catalog-error");
+  element.textContent = errorMessage(error);
+  element.hidden = false;
+}
+
+async function refreshRememberedCatalog(invoke) {
+  const error = document.querySelector("#remembered-catalog-error");
+  try {
+    renderRememberedCatalog(await invoke("remembered_workspace_catalog"));
+    error.hidden = true;
+  } catch (catalogError) {
+    renderRememberedCatalog({ status: "unavailable", candidates: [], lastActiveCandidateId: null });
+    showRememberedError("remembered_catalog_unavailable");
+  }
+}
+
+async function pickRememberedLocation(dialog) {
+  if (typeof dialog?.open !== "function") throw "remembered_catalog_request_invalid";
+  const selected = await dialog.open({ directory: true, multiple: false, title: "Choose remembered workspace location" });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return typeof selected === "string" ? selected : null;
+}
+
+async function runRememberedMutation(invoke, mutation) {
+  rememberedCatalogMutationBusy = true;
+  setRememberedControlsDisabled(true);
+  try {
+    await mutation();
+    await refreshRememberedCatalog(invoke);
+  } catch (error) {
+    showRememberedError(error);
+  } finally {
+    rememberedCatalogMutationBusy = false;
+    setRememberedControlsDisabled(rememberedCatalog?.status !== "available");
+  }
+}
+
+function openRememberedEditor(invoke, dialog, candidate) {
+  const editor = document.createElement("dialog");
+  const title = document.createElement("h3");
+  const form = document.createElement("form");
+  const label = document.createElement("label");
+  const labelInput = document.createElement("input");
+  const locationLabel = document.createElement("label");
+  const locationEnabled = document.createElement("input");
+  const locationState = document.createElement("p");
+  const choose = document.createElement("button");
+  const clear = document.createElement("button");
+  const cancel = document.createElement("button");
+  const save = document.createElement("button");
+  let selectedLocation = null;
+  let locationChanged = false;
+  let settled = false;
+  editor.setAttribute("aria-labelledby", "remembered-editor-title");
+  title.id = "remembered-editor-title";
+  title.textContent = candidate ? "Edit remembered workspace" : "Remember a workspace";
+  label.htmlFor = "remembered-editor-label";
+  label.textContent = "Label";
+  labelInput.id = "remembered-editor-label";
+  labelInput.type = "text";
+  labelInput.maxLength = 1024;
+  labelInput.required = true;
+  labelInput.value = candidate?.label ?? "";
+  locationLabel.append(locationEnabled);
+  locationLabel.append(" Save a location hint");
+  locationEnabled.type = "checkbox";
+  locationEnabled.checked = candidate?.hasLocationHint === true;
+  locationState.className = "model-hint";
+  locationState.textContent = candidate?.hasLocationHint ? "Saved location — hidden" : "No location will be saved";
+  choose.type = "button";
+  choose.textContent = candidate?.hasLocationHint ? "Replace Location" : "Choose Location";
+  clear.type = "button";
+  clear.textContent = "Clear Location";
+  clear.disabled = !candidate?.hasLocationHint;
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  save.type = "submit";
+  save.textContent = "Save Changes";
+  form.append(title, label, labelInput, locationLabel, choose, clear, locationState, save, cancel);
+  editor.append(form);
+  const close = () => {
+    if (editor.open) editor.close();
+    editor.remove();
+  };
+  choose.addEventListener("click", async () => {
+    try {
+      const path = await pickRememberedLocation(dialog);
+      if (path) {
+        selectedLocation = path;
+        locationChanged = true;
+        locationEnabled.checked = true;
+        locationState.textContent = "New location selected — save to remember it";
+        clear.disabled = false;
+      }
+    } catch (error) {
+      showRememberedError(error);
+    }
+  });
+  clear.addEventListener("click", () => {
+    selectedLocation = null;
+    locationChanged = true;
+    locationEnabled.checked = false;
+    locationState.textContent = "Location will be cleared";
+    clear.disabled = true;
+  });
+  cancel.addEventListener("click", close);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!locationEnabled.checked && !candidate) {
+      close();
+      return;
+    }
+    if (locationEnabled.checked && !selectedLocation && !candidate?.hasLocationHint) {
+      showRememberedError("remembered_location_required");
+      return;
+    }
+    if (settled) return;
+    settled = true;
+    const request = { label: labelInput.value };
+    if (candidate) request.candidateId = candidate.candidateId;
+    if (!locationEnabled.checked || locationChanged) request.locationHint = locationEnabled.checked ? selectedLocation : null;
+    close();
+    void runRememberedMutation(invoke, () => invoke(
+      candidate ? "update_remembered_workspace_candidate" : "remember_workspace_candidate",
+      { request },
+    ));
+  });
+  document.body.append(editor);
+  editor.showModal();
+}
+
+function installRememberedWorkspaceHandlers(invoke, dialog) {
+  let addLocation = null;
+  const addEnabled = document.querySelector("#remembered-add-location-enabled");
+  const addLocationButton = document.querySelector("#remembered-add-location");
+  const addLocationState = document.querySelector("#remembered-add-location-state");
+  addEnabled.addEventListener("change", () => {
+    addLocationButton.disabled = !addEnabled.checked;
+    if (!addEnabled.checked) {
+      addLocation = null;
+      addLocationState.textContent = "No location will be saved";
+    }
+  });
+  addLocationButton.addEventListener("click", async () => {
+    try {
+      const path = await pickRememberedLocation(dialog);
+      if (path) {
+        addLocation = path;
+        addLocationState.textContent = "Location selected — save with Add";
+      }
+    } catch (error) {
+      showRememberedError(error);
+    }
+  });
+  document.querySelector("#remembered-add-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (addEnabled.checked && !addLocation) {
+      showRememberedError("remembered_location_required");
+      return;
+    }
+    const request = {
+      label: document.querySelector("#remembered-add-label").value,
+      locationHint: addEnabled.checked ? addLocation : null,
+    };
+    void runRememberedMutation(invoke, async () => {
+      await invoke("remember_workspace_candidate", { request });
+      event.target.reset();
+      addLocation = null;
+      addLocationState.textContent = "No location will be saved";
+      addLocationButton.disabled = true;
+    });
+  });
+  document.querySelector("#remembered-catalog").addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-remembered-action]");
+    if (!button || rememberedCatalogMutationBusy) return;
+    const candidateId = button.dataset.candidateId;
+    const candidate = rememberedCandidateById(candidateId);
+    if (!candidate) {
+      showRememberedError("remembered_candidate_not_found");
+      return;
+    }
+    const action = button.dataset.rememberedAction;
+    if (action === "hide-location") {
+      revealedRememberedLocations.delete(candidateId);
+      renderRememberedCatalog(rememberedCatalog);
+      return;
+    }
+    if (action === "reveal-location") {
+      button.disabled = true;
+      try {
+        const result = await invoke("reveal_remembered_workspace_location", { candidateId });
+        revealedRememberedLocations.set(result.candidateId, result.location);
+        renderRememberedCatalog(rememberedCatalog, { clearReveals: false });
+      } catch (error) {
+        showRememberedError(error);
+        setRememberedControlsDisabled(rememberedCatalog?.status !== "available");
+      }
+      return;
+    }
+    if (action === "edit" || action === "edit-location") {
+      openRememberedEditor(invoke, dialog, candidate);
+      return;
+    }
+    if (action === "admit") {
+      button.disabled = true;
+      try {
+        const result = await invoke("admit_remembered_workspace_candidate", { candidateId });
+        admittedRememberedCandidates.add(candidateId);
+        renderRepositoryMembership(result.membership);
+        await refreshRepositoryMembership(invoke);
+        document.querySelector("#remembered-action-status").textContent = "Repository admitted. Activate it separately to use repository authority.";
+        await refreshRememberedCatalog(invoke);
+      } catch (error) {
+        showRememberedError(error);
+        setRememberedControlsDisabled(rememberedCatalog?.status !== "available");
+      }
+      return;
+    }
+    if (action === "delete") {
+      pendingRememberedDelete = candidateId;
+      document.querySelector("#remembered-delete-copy").textContent = "Forget this remembered entry? This does not delete repository files or remove an already admitted repository.";
+      document.querySelector("#remembered-delete-confirmation").showModal();
+      return;
+    }
+    if (action === "move-up" || action === "move-down") {
+      const ids = rememberedCatalog.candidates.map((entry) => entry.candidateId);
+      const index = ids.indexOf(candidateId);
+      const nextIndex = action === "move-up" ? index - 1 : index + 1;
+      [ids[index], ids[nextIndex]] = [ids[nextIndex], ids[index]];
+      await runRememberedMutation(invoke, () => invoke("reorder_remembered_workspace_candidates", { request: { candidateIds: ids } }));
+    }
+  });
+  document.querySelector("#remembered-delete-confirmation").addEventListener("close", (event) => {
+    if (event.target.returnValue !== "confirm" || !pendingRememberedDelete) {
+      pendingRememberedDelete = null;
+      return;
+    }
+    const candidateId = pendingRememberedDelete;
+    pendingRememberedDelete = null;
+    void runRememberedMutation(invoke, () => invoke("delete_remembered_workspace_candidate", { candidateId }));
+  });
+}
+
 async function refreshRepository(invoke) {
   const error = document.querySelector("#repository-error");
   error.hidden = true;
@@ -1639,6 +1967,7 @@ async function initializeDesktop() {
     throw new Error("supported Tauri global API is unavailable");
   }
   const { invoke } = tauri.core;
+  const { dialog } = tauri;
   const { listen } = tauri.event;
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
@@ -1662,6 +1991,7 @@ async function initializeDesktop() {
     void refreshEffectiveAuthority(invoke);
   });
   installHostFormHandlers(invoke);
+  installRememberedWorkspaceHandlers(invoke, dialog);
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });
@@ -1951,6 +2281,7 @@ async function initializeDesktop() {
   });
   await refreshTrustedProfileSelection(invoke);
   await refreshRepositoryMembership(invoke);
+  await refreshRememberedCatalog(invoke);
   await loadStatus(invoke);
   await replaceTranscript(invoke);
   await refreshModelConfiguration(invoke);

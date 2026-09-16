@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-admit-remembered-workspace-candidate"
+description = "Enables the admit_remembered_workspace_candidate command without any pre-configured scope."
+commands.allow = ["admit_remembered_workspace_candidate"]
+
+[[permission]]
+identifier = "deny-admit-remembered-workspace-candidate"
+description = "Denies the admit_remembered_workspace_candidate command without any pre-configured scope."
+commands.deny = ["admit_remembered_workspace_candidate"]

@@ -44,6 +44,36 @@ main {
   margin-top: 0.5rem;
 }
 
+.remembered-form,
+.remembered-entry {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, CanvasText 7%, transparent);
+}
+
+.remembered-form h3,
+.remembered-entry h3 {
+  margin-top: 0;
+}
+
+.remembered-form button,
+.remembered-entry button {
+  justify-self: start;
+}
+
+.remembered-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.remembered-location {
+  overflow-wrap: anywhere;
+}
+
 .authority-heading {
   display: flex;
   align-items: baseline;

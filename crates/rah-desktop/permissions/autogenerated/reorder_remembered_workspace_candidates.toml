@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reorder-remembered-workspace-candidates"
+description = "Enables the reorder_remembered_workspace_candidates command without any pre-configured scope."
+commands.allow = ["reorder_remembered_workspace_candidates"]
+
+[[permission]]
+identifier = "deny-reorder-remembered-workspace-candidates"
+description = "Denies the reorder_remembered_workspace_candidates command without any pre-configured scope."
+commands.deny = ["reorder_remembered_workspace_candidates"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-remembered-workspace-candidate"
+description = "Enables the update_remembered_workspace_candidate command without any pre-configured scope."
+commands.allow = ["update_remembered_workspace_candidate"]
+
+[[permission]]
+identifier = "deny-update-remembered-workspace-candidate"
+description = "Denies the update_remembered_workspace_candidate command without any pre-configured scope."
+commands.deny = ["update_remembered_workspace_candidate"]
