@@ -304,6 +304,13 @@ assert.equal(cancelCalls.length, 0, "cancel must not invoke Close");
 assert.equal(cancelFrontend.run("pendingRepositoryClose"), null);
 
 async function testCloseSuccessAndErrors() {
+const failedAuthorityFrontend = createFrontend();
+configureFrontend(failedAuthorityFrontend);
+failedAuthorityFrontend.context.failedAuthorityInvoke = async () => { throw new Error("refresh failed"); };
+await failedAuthorityFrontend.run("refreshEffectiveAuthority(failedAuthorityInvoke)");
+assert.equal(failedAuthorityFrontend.run("renderedEffectiveAuthority"), null, "failed refresh clears the old Close generation");
+assert.equal(failedAuthorityFrontend.elements.get("#close-repository").disabled, true, "failed Effective Authority refresh keeps Close disabled");
+
 const successFrontend = createFrontend();
 configureFrontend(successFrontend);
 let authorityRefreshes = 0;

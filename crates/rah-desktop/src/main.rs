@@ -115,7 +115,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime},
@@ -930,7 +930,25 @@ impl DesktopAppState {
         {
             return false;
         }
-        let claimed = chat.terminal.claim(generation);
+        chat.terminal.claim(generation)
+    }
+
+    fn finish_claimed_chat(&self, generation: u64) -> bool {
+        let _lifecycle_coordination = self
+            .lifecycle_coordination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let claimed = active.as_ref().is_some_and(|chat| {
+            chat.generation == generation && !chat.terminal.is_unclaimed(generation)
+        });
+        if !claimed {
+            return false;
+        }
+        *active = None;
         drop(active);
         *self
             .chat
@@ -940,7 +958,7 @@ impl DesktopAppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release_model();
-        claimed
+        true
     }
 
     fn is_current_chat(
@@ -996,18 +1014,18 @@ impl DesktopAppState {
             .lifecycle_coordination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !active
+            .as_mut()
+            .is_some_and(|chat| chat.terminal.claim(generation))
         {
-            let mut active = self
-                .active_chat
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !active
-                .as_mut()
-                .is_some_and(|chat| chat.terminal.claim(generation))
-            {
-                return;
-            }
+            return;
         }
+        *active = None;
+        drop(active);
         *self
             .chat
             .lock()
@@ -2195,6 +2213,11 @@ fn safe_repository_display_name(root: &Path) -> Option<String> {
 fn get_effective_authority_snapshot(
     state: State<'_, DesktopAppState>,
 ) -> EffectiveAuthoritySnapshot {
+    effective_authority_snapshot_for_state(state.inner())
+}
+
+#[cfg(target_os = "windows")]
+fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveAuthoritySnapshot {
     let repository = state
         .repository
         .lock()
@@ -5672,7 +5695,40 @@ fn publish_repository_workflow(
         .repository_workflow
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    workflow.observation_generation += 1;
+    let action_count = u64::try_from(prepared.actions.len())
+        .ok()
+        .and_then(|count| {
+            count.checked_add(if prepared.commit_review.is_some() {
+                1
+            } else {
+                0
+            })
+        });
+    let next_observation_generation = workflow.observation_generation.checked_add(1);
+    let action_sequence_fits = action_count
+        .and_then(|count| workflow.next_action.checked_add(count))
+        .is_some();
+    let Some(next_observation_generation) =
+        next_observation_generation.filter(|_| action_sequence_fits)
+    else {
+        workflow.actions.clear();
+        workflow.review = None;
+        workflow.commit_review = None;
+        workflow.review_selector = None;
+        workflow.authorization = CommitAuthorizationPresentation::AuthorizationRevoked;
+        for entry in &mut prepared.snapshot.status_entries {
+            entry.stage_action_id = None;
+        }
+        for file in &mut prepared.snapshot.staged_diff {
+            file.unstage_action_id = None;
+        }
+        prepared.snapshot.review = StagedReviewPresentation::ReviewUnavailable {
+            reason: "repository workflow generation exhausted",
+        };
+        return prepared.snapshot;
+    };
+
+    workflow.observation_generation = next_observation_generation;
     workflow.actions.clear();
     workflow.review = None;
     workflow.commit_review = None;
@@ -7141,6 +7197,13 @@ fn repository_membership_presentation(
         .workspace_membership
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    repository_membership_presentation_from(&membership)
+}
+
+#[cfg(target_os = "windows")]
+fn repository_membership_presentation_from(
+    membership: &WorkspaceMembershipState,
+) -> WorkspaceRepositoryMembershipPresentation {
     let active_member = membership.active_member();
     let members = membership
         .members()
@@ -7163,6 +7226,11 @@ fn repository_membership_presentation(
 }
 
 #[cfg(target_os = "windows")]
+fn close_state_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, CloseRepositoryError> {
+    mutex.lock().map_err(|_| CloseRepositoryError::Unavailable)
+}
+
+#[cfg(target_os = "windows")]
 fn close_repository_transition(
     state: &DesktopAppState,
     request: CloseRepositoryRequest,
@@ -7174,56 +7242,45 @@ fn close_repository_transition(
     // Match activation and member removal: membership coordination is always
     // acquired before lifecycle coordination. Both are held through the final
     // active-member publication below.
-    let _membership_coordination = state
-        .membership_coordination
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _lifecycle_coordination = state
-        .lifecycle_coordination
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _membership_coordination = close_state_lock(&state.membership_coordination)?;
+    let _lifecycle_coordination = close_state_lock(&state.lifecycle_coordination)?;
 
-    let mut membership = state
-        .workspace_membership
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut membership = close_state_lock(&state.workspace_membership)?;
     if membership.member(expected_member_id).is_none() {
         return Err(CloseRepositoryError::InvalidGuard);
     }
     let Some(active_member_id) = membership.active_member() else {
-        drop(membership);
-        let repository_present = state
-            .repository
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some();
-        let commit_present = state
-            .commit_capability
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some();
-        let workflow_present = repository_workflow_has_state(
-            &state
-                .repository_workflow
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        let repository_present = close_state_lock(&state.repository)?.is_some();
+        let commit_present = close_state_lock(&state.commit_capability)?.is_some();
+        let workflow = close_state_lock(&state.repository_workflow)?;
+        let workflow_present = repository_workflow_has_state(&workflow);
+        let index_effect_present =
+            close_state_lock(&state.repository_index_effect_reservation)?.is_some();
+        let host_owner_present =
+            close_state_lock(&state.host_invocation)?.state() != CoordinatorState::Idle;
+        let chat_active = close_model_turn_is_active(
+            close_state_lock(&state.host_invocation)?.state(),
+            *close_state_lock(&state.chat)?,
+            close_state_lock(&state.active_chat)?.is_some(),
         );
-        let index_effect_present = state
-            .repository_index_effect_reservation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some();
-        let host_owner_present = state
-            .host_invocation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state()
-            != CoordinatorState::Idle;
+        let connection = close_state_lock(&state.connection)?;
+        let provider_activation_present = close_state_lock(&state.provider_activation)?.is_some();
+        let runtime_state_present = matches!(
+            &*connection,
+            ConnectionState::Connecting
+                | ConnectionState::Connected { .. }
+                | ConnectionState::Disconnecting
+        );
+        let provider_activation_incoherent = provider_activation_present
+            && !matches!(&*connection, ConnectionState::Connected { .. });
         if repository_present
             || commit_present
             || workflow_present
             || index_effect_present
             || host_owner_present
+            || chat_active
+            || runtime_state_present
+            || provider_activation_incoherent
         {
             return Err(CloseRepositoryError::Unavailable);
         }
@@ -7234,21 +7291,15 @@ fn close_repository_transition(
     }
     let active_member = membership
         .member(active_member_id)
-        .expect("active repository member must remain admitted");
-    let repository = state
-        .repository
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ok_or(CloseRepositoryError::Unavailable)?;
+    let repository = close_state_lock(&state.repository)?
         .clone()
         .ok_or(CloseRepositoryError::Unavailable)?;
     if repository.root != active_member.root {
         return Err(CloseRepositoryError::Unavailable);
     }
     drop(repository);
-    let current_repository_generation = *state
-        .repository_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_repository_generation = *close_state_lock(&state.repository_generation)?;
     if current_repository_generation == 0 {
         return Err(CloseRepositoryError::Unavailable);
     }
@@ -7256,44 +7307,26 @@ fn close_repository_transition(
         return Err(CloseRepositoryError::ActiveChanged);
     }
 
-    let coordinator_state = state
-        .host_invocation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .state();
-    let chat_state = *state
-        .chat
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let active_chat_present = state
-        .active_chat
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some();
+    let coordinator_state = close_state_lock(&state.host_invocation)?.state();
+    let chat_state = *close_state_lock(&state.chat)?;
+    let active_chat_present = close_state_lock(&state.active_chat)?.is_some();
     let model_turn_active =
         close_model_turn_is_active(coordinator_state, chat_state, active_chat_present);
     if model_turn_active {
         return Err(CloseRepositoryError::ModelTurnBusy);
     }
 
-    let index_effect_active = state
-        .repository_index_effect_reservation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some();
+    let index_effect_active =
+        close_state_lock(&state.repository_index_effect_reservation)?.is_some();
     if index_effect_active || coordinator_state == CoordinatorState::HostRunning {
         return Err(CloseRepositoryError::RepositoryEffectBusy);
     }
 
-    let connection = state
-        .connection
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let provider_activation_present = state
-        .provider_activation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some();
+    let connection = close_state_lock(&state.connection)?;
+    let provider_activation_present = close_state_lock(&state.provider_activation)?.is_some();
+    if matches!(&*connection, ConnectionState::NotConnected) && provider_activation_present {
+        return Err(CloseRepositoryError::Unavailable);
+    }
     if !close_runtime_is_disconnected(
         close_connection_state(&connection),
         provider_activation_present,
@@ -7304,12 +7337,19 @@ fn close_repository_transition(
 
     let next_generation = next_repository_generation(current_repository_generation)
         .ok_or(CloseRepositoryError::Unavailable)?;
-    let commit_control = state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let commit_control = close_state_lock(&state.commit_capability)?
         .as_ref()
         .map(|capability| Arc::clone(&capability.control));
+
+    // Acquire every mutex needed by the mutation before the last fallible
+    // operation. Poisoning or contention therefore cannot leave a partial
+    // withdrawal after authority revocation begins.
+    let mut repository = close_state_lock(&state.repository)?;
+    let mut repository_generation = close_state_lock(&state.repository_generation)?;
+    let mut repository_workflow = close_state_lock(&state.repository_workflow)?;
+    let mut host_invocation = close_state_lock(&state.host_invocation)?;
+    let mut commit_capability = close_state_lock(&state.commit_capability)?;
+    let mut conversation = close_state_lock(&state.conversation)?;
 
     // This nonblocking clear is the final fallible operation. Everything
     // below is an in-memory, synchronous publication under both gates.
@@ -7317,45 +7357,21 @@ fn close_repository_transition(
         return Err(CloseRepositoryError::RepositoryEffectBusy);
     }
 
-    state
-        .host_invocation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear_prepared();
-    state
-        .commit_capability
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    *state
-        .repository_workflow
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryWorkflowState::default();
-    state
-        .repository
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    *state
-        .repository_generation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = next_generation;
-    state
-        .conversation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .start_new();
+    host_invocation.clear_prepared();
+    commit_capability.take();
+    *repository_workflow = RepositoryWorkflowState::default();
+    repository.take();
+    *repository_generation = next_generation;
+    conversation.start_new();
     let deactivation = membership.deactivate_expected(expected_member_id);
     debug_assert!(matches!(
         deactivation,
         WorkspaceMembershipDeactivation::Deactivated
     ));
-    drop(membership);
-
     Ok(CloseRepositoryResult {
         outcome: CloseRepositoryOutcomePresentation::Closed,
         status: "Repository closed. No repository is active.",
-        membership: repository_membership_presentation(state),
+        membership: repository_membership_presentation_from(&membership),
     })
 }
 
@@ -8921,7 +8937,7 @@ async fn handle_uncertain_repository_effects(
     app: &AppHandle,
     tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
     repository_selected: bool,
-) {
+) -> bool {
     let refresh = uncertain_repository_effect_requires_refresh(repository_selected, tool_calls);
     tool_calls.clear();
     if refresh {
@@ -8932,6 +8948,7 @@ async fn handle_uncertain_repository_effects(
         }));
         emit_repository_refresh(app);
     }
+    refresh
 }
 
 #[cfg(target_os = "windows")]
@@ -9195,6 +9212,7 @@ async fn run_chat(
     let session_id = handle.session_id().clone();
     emit_chat_event(&app, ChatEvent::Started);
     let mut terminal = false;
+    let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
     let mut events = handle.into_events();
     while let Some(event) = events.next().await {
@@ -9245,13 +9263,18 @@ async fn run_chat(
                 }
             }
             AgentEvent::Completed { output, .. } => {
-                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
-                    .await;
+                retain_model_owner |=
+                    handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                        .await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
                     &session_id,
                 ) {
+                    if !retain_model_owner {
+                        app.state::<DesktopAppState>()
+                            .finish_claimed_chat(chat_generation);
+                    }
                     return;
                 }
                 let assistant_text = output.message.content.clone();
@@ -9292,8 +9315,9 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Failed { code, message, .. } => {
-                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
-                    .await;
+                retain_model_owner |=
+                    handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                        .await;
                 // The frontend receives only a closed error code. Retain the
                 // adapter-provided stage privately for live diagnosis.
                 tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
@@ -9312,6 +9336,10 @@ async fn run_chat(
                     &runtime,
                     &session_id,
                 ) {
+                    if !retain_model_owner {
+                        app.state::<DesktopAppState>()
+                            .finish_claimed_chat(chat_generation);
+                    }
                     return;
                 }
                 emit_chat_event(
@@ -9324,13 +9352,18 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Cancelled { .. } => {
-                handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
-                    .await;
+                retain_model_owner |=
+                    handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
+                        .await;
                 if !app.state::<DesktopAppState>().claim_terminal(
                     chat_generation,
                     &runtime,
                     &session_id,
                 ) {
+                    if !retain_model_owner {
+                        app.state::<DesktopAppState>()
+                            .finish_claimed_chat(chat_generation);
+                    }
                     return;
                 }
                 emit_chat_event(
@@ -9350,7 +9383,8 @@ async fn run_chat(
             | AgentEvent::ApprovalRequired { .. } => {}
         }
     }
-    handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected).await;
+    retain_model_owner |=
+        handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected).await;
     if !terminal
         && app
             .state::<DesktopAppState>()
@@ -9372,6 +9406,10 @@ async fn run_chat(
                 code: FrontendError::ChatRuntimeFailed,
             },
         );
+    }
+    if !retain_model_owner {
+        app.state::<DesktopAppState>()
+            .finish_claimed_chat(chat_generation);
     }
 }
 
@@ -19400,6 +19438,27 @@ fn main() {
             assert!(conversation.history.is_empty());
         }
         assert_eq!(storage_file_snapshot(&storage.0), persistent_before);
+        let authority_after_close = super::effective_authority_snapshot_for_state(&state);
+        assert_eq!(
+            authority_after_close.status,
+            super::SnapshotStatus::NoRepository
+        );
+        assert!(!authority_after_close.repository.selected);
+        assert_eq!(
+            authority_after_close.repository.kind,
+            super::RepositoryKind::None
+        );
+        assert!(
+            authority_after_close
+                .repository
+                .current_generation
+                .is_none()
+        );
+        assert_eq!(
+            authority_after_close.connection.state,
+            super::ConnectionBindingState::NotConnected
+        );
+        assert!(authority_after_close.effective_tools.is_empty());
         assert!(matches!(
             state.remembered_workspace.snapshot(),
             RememberedWorkspaceStartupState::Available(catalog)
@@ -19413,6 +19472,11 @@ fn main() {
         assert_eq!(
             *state.repository_generation.lock().unwrap(),
             generation_before + 1
+        );
+        assert_eq!(storage_file_snapshot(&storage.0), persistent_before);
+        assert_eq!(
+            repository_membership_presentation(&state).membership_generation,
+            membership_generation_before
         );
         assert_eq!(
             activate_admitted_member(&state, member_a).await,
@@ -19438,6 +19502,17 @@ fn main() {
             *state.connection.lock().unwrap(),
             ConnectionState::NotConnected
         ));
+        let authority_after_reactivation = super::effective_authority_snapshot_for_state(&state);
+        assert_eq!(
+            authority_after_reactivation.status,
+            super::SnapshotStatus::Disconnected
+        );
+        assert!(authority_after_reactivation.repository.selected);
+        assert_eq!(
+            authority_after_reactivation.repository.current_generation,
+            Some(generation_before + 2)
+        );
+        assert!(authority_after_reactivation.effective_tools.is_empty());
         assert!(state.conversation.lock().unwrap().identity.is_none());
         assert!(state.conversation.lock().unwrap().history.is_empty());
         assert!(
@@ -19586,6 +19661,230 @@ fn main() {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn task351_close_fails_closed_on_poisoned_final_mutation_lock() {
+        let (state, _repository_a, _repository_b, member_a, _) = activation_fixture().await;
+        let generation = *state.repository_generation.lock().unwrap();
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .expect("seed a safe no-effect HostPrepared state");
+
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _conversation = state.conversation.lock().unwrap();
+            panic!("poison Close final mutation lock");
+        }));
+        assert!(poison.is_err());
+
+        assert_eq!(
+            super::close_repository_transition(&state, close_request(member_a, generation)),
+            Err(super::CloseRepositoryError::Unavailable)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert!(state.repository.lock().unwrap().is_some());
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::HostPrepared,
+            "failed precommit locking must not withdraw the prepared owner"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task351_close_waits_for_chat_terminal_publication_to_finish() {
+        let (state, storage, repository_a, _repository_b, member_a, _) =
+            close_activation_fixture(GitRepositoryState::Clean).await;
+        let index_before = fs::read(repository_a.0.join(".git").join("index"))
+            .expect("the active repository index exists");
+        state
+            .persist_completed_pair("older prompt".to_owned(), "older answer".to_owned())
+            .expect("seed a completed transcript pair");
+        let repository = state.repository.lock().unwrap().clone().unwrap();
+        let runtime = test_codex_runtime(&repository.root, Arc::new(ToolRegistry::new())).await;
+        let chat_generation = state.start_chat().expect("start the host-owned model turn");
+        let session_id = SessionId::new();
+        assert!(state.register_chat_session(
+            chat_generation,
+            Arc::clone(&runtime),
+            session_id.clone()
+        ));
+        let repository_generation = *state.repository_generation.lock().unwrap();
+
+        assert!(state.claim_terminal(chat_generation, &runtime, &session_id));
+        assert_eq!(
+            super::close_repository_transition(
+                &state,
+                close_request(member_a, repository_generation)
+            ),
+            Err(super::CloseRepositoryError::ModelTurnBusy),
+            "terminal claim must retain the model owner until conversation publication finishes"
+        );
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::ModelTurn
+        );
+        assert_eq!(*state.chat.lock().unwrap(), ChatState::Running);
+        assert!(state.active_chat.lock().unwrap().is_some());
+
+        let conversation_epoch = state.conversation.lock().unwrap().epoch;
+        state
+            .conversation
+            .lock()
+            .unwrap()
+            .commit(
+                conversation_epoch,
+                "current prompt".to_owned(),
+                Message {
+                    role: MessageRole::Assistant,
+                    content: "current answer".to_owned(),
+                },
+            )
+            .expect("completed answer belongs to the current conversation");
+        state
+            .persist_completed_pair("current prompt".to_owned(), "current answer".to_owned())
+            .expect("publish the completed transcript before releasing the model owner");
+        let persistent_after_completion = storage_file_snapshot(&storage.0);
+        assert!(state.finish_claimed_chat(chat_generation));
+        runtime
+            .shutdown()
+            .await
+            .expect("the deterministic test runtime shuts down");
+
+        super::close_repository_transition(&state, close_request(member_a, repository_generation))
+            .expect("Close may proceed after terminal publication and runtime ownership finish");
+        assert_eq!(
+            storage_file_snapshot(&storage.0),
+            persistent_after_completion
+        );
+        assert!(state.active_chat.lock().unwrap().is_none());
+        assert_eq!(*state.chat.lock().unwrap(), ChatState::Idle);
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+        assert!(state.repository.lock().unwrap().is_none());
+        assert_eq!(
+            fs::read(repository_a.0.join(".git").join("index"))
+                .expect("Close must preserve the repository index"),
+            index_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task351_workflow_selector_generations_fail_closed_on_exhaustion() {
+        let (state, _repository_a, _repository_b, _member_a, _) = activation_fixture().await;
+
+        let make_prepared = |actions| super::PreparedRepositoryWorkflow {
+            repository_generation: 1,
+            identity_generation: 1,
+            snapshot: super::RepositorySnapshot {
+                path: "repo".to_owned(),
+                status_entries: vec![super::RepositoryStatusEntry {
+                    path: "tracked.txt".to_owned(),
+                    previous_path: None,
+                    tracked: true,
+                    index_state: "modified".to_owned(),
+                    worktree_state: "modified".to_owned(),
+                    conflict_state: "none".to_owned(),
+                    stage_action_id: Some("stale-stage".to_owned()),
+                    staging_note: None,
+                }],
+                worktree_diff: Vec::new(),
+                staged_diff: vec![super::RepositoryDiffFile {
+                    old_path: Some("tracked.txt".to_owned()),
+                    new_path: Some("tracked.txt".to_owned()),
+                    change_kind: "modified".to_owned(),
+                    binary: false,
+                    added_lines: Some(1),
+                    deleted_lines: Some(1),
+                    patch: None,
+                    unstage_action_id: Some("stale-unstage".to_owned()),
+                }],
+                review: super::StagedReviewPresentation::NoStagedChanges,
+            },
+            actions,
+            review_digest: None,
+            commit_review: None,
+        };
+        let action = || super::PreparedRepositoryWorkflowAction {
+            status_entry_index: 0,
+            kind: super::RepositoryIndexActionKind::Stage,
+            target: PathBuf::from("tracked.txt"),
+            target_observation: super::TargetObservation {
+                canonical_path: PathBuf::from("tracked.txt"),
+                length: 1,
+                modified: None,
+                content_digest: [0; 32],
+            },
+        };
+
+        {
+            let mut workflow = state.repository_workflow.lock().unwrap();
+            workflow.observation_generation = 3;
+            workflow.next_action = u64::MAX;
+            workflow.review_selector = Some("stale-review".to_owned());
+            workflow.authorization = super::CommitAuthorizationPresentation::AuthorizedPending;
+            workflow.actions.insert(
+                "stale-stage".to_owned(),
+                super::RepositoryIndexAction {
+                    kind: super::RepositoryIndexActionKind::Stage,
+                    repository_generation: 1,
+                    observation_generation: 3,
+                    target: PathBuf::from("tracked.txt"),
+                    target_observation: super::TargetObservation {
+                        canonical_path: PathBuf::from("tracked.txt"),
+                        length: 1,
+                        modified: None,
+                        content_digest: [0; 32],
+                    },
+                },
+            );
+        }
+        let action_overflow =
+            super::publish_repository_workflow(&state, make_prepared(vec![action()]));
+        {
+            let workflow = state.repository_workflow.lock().unwrap();
+            assert_eq!(workflow.observation_generation, 3);
+            assert_eq!(workflow.next_action, u64::MAX);
+            assert!(workflow.actions.is_empty());
+            assert!(workflow.review_selector.is_none());
+            assert_eq!(
+                workflow.authorization,
+                super::CommitAuthorizationPresentation::AuthorizationRevoked
+            );
+        }
+        assert_eq!(action_overflow.status_entries[0].stage_action_id, None);
+        assert_eq!(action_overflow.staged_diff[0].unstage_action_id, None);
+        assert!(matches!(
+            action_overflow.review,
+            super::StagedReviewPresentation::ReviewUnavailable { .. }
+        ));
+
+        {
+            let mut workflow = state.repository_workflow.lock().unwrap();
+            *workflow = super::RepositoryWorkflowState::default();
+            workflow.observation_generation = u64::MAX;
+            workflow.next_action = 4;
+        }
+        let observation_overflow =
+            super::publish_repository_workflow(&state, make_prepared(Vec::new()));
+        let workflow = state.repository_workflow.lock().unwrap();
+        assert_eq!(workflow.observation_generation, u64::MAX);
+        assert_eq!(workflow.next_action, 4);
+        assert!(workflow.actions.is_empty());
+        assert_eq!(observation_overflow.status_entries[0].stage_action_id, None);
+        assert_eq!(observation_overflow.staged_diff[0].unstage_action_id, None);
+        assert!(matches!(
+            observation_overflow.review,
+            super::StagedReviewPresentation::ReviewUnavailable { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn task349_close_for_a_never_closes_a_newly_active_b() {
         let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
         let captured_generation = *state.repository_generation.lock().unwrap();
@@ -19618,6 +19917,23 @@ fn main() {
         let (connect_first, _repository_a, _repository_b, member_a, _) = activation_fixture().await;
         let generation = *connect_first.repository_generation.lock().unwrap();
         assert_eq!(begin_connect(&connect_first), Ok(ConnectRequest::Start));
+        assert_eq!(
+            super::close_repository_transition(&connect_first, close_request(member_a, generation)),
+            Err(super::CloseRepositoryError::ConnectedOrRuntimeBusy),
+            "the Connecting reservation must make Close lose before runtime publication"
+        );
+        assert_eq!(
+            connect_first
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member(),
+            Some(member_a)
+        );
+        assert_eq!(
+            *connect_first.repository_generation.lock().unwrap(),
+            generation
+        );
         let selected = connect_first.repository.lock().unwrap().clone().unwrap();
         let registry = desktop_tool_registry(Some(&selected), None)
             .expect("active repository registry should compose");
@@ -19721,6 +20037,18 @@ fn main() {
                 .active_member(),
             None
         );
+        assert_eq!(begin_connect(&close_first), Ok(ConnectRequest::Start));
+        assert!(close_first.repository.lock().unwrap().is_none());
+        assert_eq!(
+            *close_first.repository_generation.lock().unwrap(),
+            captured.repository_generation + 1,
+            "a later Connect captures the zero-repository generation"
+        );
+        assert!(matches!(
+            *close_first.connection.lock().unwrap(),
+            ConnectionState::Connecting
+        ));
+        *close_first.connection.lock().unwrap() = ConnectionState::NotConnected;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -19943,6 +20271,69 @@ fn main() {
             fs::read(repository_a.0.join("nested").join("ordinary.txt"))
                 .expect("worktree file remains readable"),
             modified_file_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task351_close_preserves_unstage_reservation_without_index_effect() {
+        let (state, _storage, repository_a, _repository_b, member_a, _) =
+            close_activation_fixture(GitRepositoryState::Staged).await;
+        let generation = *state.repository_generation.lock().unwrap();
+        let repository = state.repository.lock().unwrap().clone().unwrap();
+        let index_before = fs::read(repository_a.0.join(".git").join("index"))
+            .expect("staged fixture index should exist");
+        let snapshot = desktop_repository_snapshot(&repository)
+            .await
+            .expect("staged repository snapshot should complete");
+        let identity_generation = *state.commit_identity_generation.lock().unwrap();
+        let snapshot = install_repository_workflow(
+            &state,
+            &repository,
+            generation,
+            snapshot,
+            None,
+            identity_generation,
+        );
+        let unstage_action_id = snapshot
+            .staged_diff
+            .iter()
+            .find_map(|file| file.unstage_action_id.clone())
+            .expect("staged repository should have an Unstage selector");
+        let (reservation, _) = begin_repository_index_effect(
+            &state,
+            &unstage_action_id,
+            RepositoryIndexActionKind::Unstage,
+        )
+        .expect("Unstage selector should acquire its reservation");
+
+        assert_eq!(
+            super::close_repository_transition(&state, close_request(member_a, generation)),
+            Err(super::CloseRepositoryError::RepositoryEffectBusy)
+        );
+        assert_eq!(
+            state
+                .repository_index_effect_reservation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .token,
+            reservation.token,
+            "Close must preserve the Unstage effect owner"
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert!(Arc::ptr_eq(
+            &repository,
+            state.repository.lock().unwrap().as_ref().unwrap()
+        ));
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+        assert_eq!(
+            fs::read(repository_a.0.join(".git").join("index"))
+                .expect("Close must preserve the staged index"),
+            index_before
         );
     }
 
