@@ -9873,38 +9873,40 @@ mod tests {
     use super::{
         ActivationOutcome, ActivationTestHook, ActivityEvent, ActivityResult,
         AuthorizationTestHook, BranchActivityClassification, CancelRecoveryOutcome, ChatEvent,
-        ChatState, CodexExecutableSourcePresentation, CommitAuthorizationPresentation,
-        ConnectPublicationTestHook, ConnectRequest, ConnectionPublicationCurrentness,
-        ConnectionState, ConversationContextChange, ConversationContextIdentity,
-        CreateFileResultClassification, DESKTOP_TOOL_NAME, DeleteFileResultClassification,
-        DesktopAppState, DesktopCommitCapability, DesktopCommitIdentity, DesktopConversationState,
-        DesktopModelProvider, DesktopModelSelection, DesktopModelState, DesktopRepository,
-        DesktopToolComposition, FrontendError, GracefulCancelOutcome, HardShutdownOutcome,
-        HostActivityEvent, HostActivityState, HostInvocationCoordinator,
-        HostInvocationUnavailableReason, IndexEffectTestHook, LlamaCppReadinessProbe,
-        MAX_CONVERSATION_REPLAY_BYTES, MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES,
-        ModelConfigurationPresentation, MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY,
-        PendingConnectedPublication, Persistence, Preferences, PreferencesWarning,
-        PreparedDeleteFileResponse, PreparedHostInvocation, PreparedHostPayload, ProviderEndpoint,
-        ProviderEndpointInput, ProviderEndpointPresentation, ProviderPublicationRejectionReason,
-        ProviderScheme, READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT,
-        REPOSITORY_CREATE_BRANCH_TOOL_NAME, ReadinessState, RejectedProviderPublication,
-        RememberedWorkspaceStartupState, RepositoryIndexActionKind,
-        RepositoryIndexEffectReservation, RepositoryMemberRemovalOutcomePresentation,
-        RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult,
-        SourceKind, StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
-        WorkflowRefreshTestHook, activate_admitted_member, activate_repository_member_selector,
-        activity_event, activity_event_with_composition, admit_remembered_candidate,
-        admit_repository, apply_model_selection, authorize_repository_commit_review,
-        await_cancel_recovery, await_graceful_cancel, await_hard_shutdown, begin_chat,
-        begin_connect, begin_repository_index_effect, branch_result_classification,
+        ChatState, CloseRepositoryError, CloseRepositoryRequest, CodexExecutableSourcePresentation,
+        CommitAuthorizationPresentation, ConnectPublicationTestHook, ConnectRequest,
+        ConnectionPublicationCurrentness, ConnectionState, ConversationContextChange,
+        ConversationContextIdentity, CreateFileResultClassification, DESKTOP_TOOL_NAME,
+        DeleteFileResultClassification, DesktopAppState, DesktopCommitCapability,
+        DesktopCommitIdentity, DesktopConversationState, DesktopModelProvider,
+        DesktopModelSelection, DesktopModelState, DesktopRepository, DesktopToolComposition,
+        FrontendError, GracefulCancelOutcome, HardShutdownOutcome, HostActivityEvent,
+        HostActivityState, HostInvocationCoordinator, HostInvocationUnavailableReason,
+        IndexEffectTestHook, LlamaCppReadinessProbe, MAX_CONVERSATION_REPLAY_BYTES,
+        MAX_CONVERSATION_REPLAY_MESSAGES, MAX_PROMPT_BYTES, ModelConfigurationPresentation,
+        MultiFileResultClassification, NEUTRAL_WORKSPACE_DIRECTORY, PendingConnectedPublication,
+        Persistence, Preferences, PreferencesWarning, PreparedDeleteFileResponse,
+        PreparedHostInvocation, PreparedHostPayload, ProviderEndpoint, ProviderEndpointInput,
+        ProviderEndpointPresentation, ProviderPublicationRejectionReason, ProviderScheme,
+        READINESS_BODY_LIMIT, READINESS_TOTAL_TIMEOUT, REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+        ReadinessState, RejectedProviderPublication, RememberedWorkspaceStartupState,
+        RepositoryIndexActionKind, RepositoryIndexEffectReservation,
+        RepositoryMemberRemovalOutcomePresentation, RepositoryObservationStage,
+        RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind, StagedReviewPresentation,
+        StartupActivationCounters, TerminalOwnership, WorkflowRefreshTestHook,
+        activate_admitted_member, activate_repository_member_selector, activity_event,
+        activity_event_with_composition, admit_remembered_candidate, admit_repository,
+        apply_model_selection, authorize_repository_commit_review, await_cancel_recovery,
+        await_graceful_cancel, await_hard_shutdown, begin_chat, begin_connect,
+        begin_repository_index_effect, branch_result_classification,
         classify_repository_delete_file_result, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, commit_activity_presentation,
-        complete_repository_index_effect, connect_codex, connect_prepared_codex,
-        connection_activation_publication_is_current, connection_publication_is_current,
-        current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
-        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
-        desktop_tool_composition_from_registry, desktop_tool_registry, disconnect_codex,
+        clear_conversation_allowed, clear_trusted_profile_selection, close_repository_transition,
+        commit_activity_presentation, complete_repository_index_effect, connect_codex,
+        connect_prepared_codex, connection_activation_publication_is_current,
+        connection_publication_is_current, current_app_status, current_host_generation_tuple,
+        delete_file_host_terminal_state, desktop_repository_snapshot,
+        desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
+        desktop_tool_registry, disconnect_codex, effective_authority_snapshot_for_state,
         emit_host_activity, empty_composition_metadata, forget_trusted_profile_preference,
         frontend_error, get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
         host_confirm_tool_invocation, host_invoke_read, host_kind, host_prepare_repo_create_branch,
@@ -9920,8 +9922,8 @@ mod tests {
         repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
         repository_membership_presentation, repository_selection_allowed,
         repository_selection_allowed_for_connection, repository_snapshot, repository_stage_action,
-        repository_tool_authority, repository_unstage_action, request_connect,
-        reset_startup_activation_counters, resolve_codex_executable,
+        repository_tool_authority, repository_unstage_action, repository_workflow_has_state,
+        request_connect, reset_startup_activation_counters, resolve_codex_executable,
         resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
         reveal_remembered_location, revoke_repository_commit_context, run_host_tool,
         safe_delete_file_activity_result, same_arc, save_trusted_profile_preference,
@@ -30197,5 +30199,1619 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .map(|value| value.trim().to_owned())
             .unwrap_or_else(|| "unavailable".to_owned())
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Task352RepositoryCapture {
+        head: String,
+        status: String,
+        refs: String,
+        index_sha256: String,
+        sentinel_sha256: String,
+        staged_file_sha256: String,
+        worktree_file_sha256: String,
+        repository_exists: bool,
+        git_directory_form: String,
+    }
+
+    fn task352_repository_capture(
+        git: &Path,
+        root: &Path,
+    ) -> Result<Task352RepositoryCapture, String> {
+        let git_directory = root.join(".git");
+        if !root.is_dir() || !git_directory.is_dir() {
+            return Err("fixture repository or .git directory is missing".to_owned());
+        }
+        let index_path = git_directory.join("index");
+        let index_before = fs::read(&index_path)
+            .map(|bytes| live_sha256(&bytes))
+            .map_err(|_| "fixture Git index could not be read".to_owned())?;
+        let head = task_324_git(git, root, &["--no-optional-locks", "rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        let status = task_324_git(
+            git,
+            root,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+        )?;
+        let refs = task_324_git(
+            git,
+            root,
+            &[
+                "--no-optional-locks",
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs",
+            ],
+        )?;
+        let index_after = fs::read(&index_path)
+            .map(|bytes| live_sha256(&bytes))
+            .map_err(|_| "fixture Git index could not be reread".to_owned())?;
+        if index_before != index_after {
+            return Err("read-only Git observation changed the fixture index".to_owned());
+        }
+        let file_hash = |name: &str| -> Result<String, String> {
+            fs::read(root.join(name))
+                .map(|bytes| live_sha256(&bytes))
+                .map_err(|_| "fixture tracked file could not be read".to_owned())
+        };
+        Ok(Task352RepositoryCapture {
+            head,
+            status,
+            refs,
+            index_sha256: index_after,
+            sentinel_sha256: file_hash("sentinel.txt")?,
+            staged_file_sha256: file_hash("staged.txt")?,
+            worktree_file_sha256: file_hash("worktree.txt")?,
+            repository_exists: root.is_dir(),
+            git_directory_form: "directory".to_owned(),
+        })
+    }
+
+    fn task352_require(condition: bool, message: &str) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    struct Task352LiveFixture {
+        root: PathBuf,
+        repository_a: PathBuf,
+        repository_b: PathBuf,
+        cleaned: bool,
+    }
+
+    impl Task352LiveFixture {
+        fn new(git: &Path) -> Result<Self, String> {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "certification clock was unavailable".to_owned())?
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "rah-v029-close-live-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir(&root)
+                .map_err(|_| "certification temp root could not be created".to_owned())?;
+            let private_parent = root.join("RAH_V029_PRIVATE_PATH_SENTINEL");
+            let repository_a = private_parent.join("repo-a");
+            let repository_b = private_parent.join("repo-b");
+            let fixture = Self {
+                root,
+                repository_a,
+                repository_b,
+                cleaned: false,
+            };
+            fs::create_dir_all(&fixture.repository_a)
+                .map_err(|_| "repository A fixture could not be created".to_owned())?;
+            fs::create_dir_all(&fixture.repository_b)
+                .map_err(|_| "repository B fixture could not be created".to_owned())?;
+            fixture.initialize_repository(git, &fixture.repository_a, "A")?;
+            fixture.initialize_repository(git, &fixture.repository_b, "B")?;
+            Ok(fixture)
+        }
+
+        fn initialize_repository(
+            &self,
+            git: &Path,
+            root: &Path,
+            label: &str,
+        ) -> Result<(), String> {
+            task_324_git(git, root, &["init", "--quiet"])?;
+            task_324_git(
+                git,
+                root,
+                &[
+                    "config",
+                    "--local",
+                    "user.name",
+                    "RAH v0.29 Close Certification",
+                ],
+            )?;
+            task_324_git(
+                git,
+                root,
+                &[
+                    "config",
+                    "--local",
+                    "user.email",
+                    "rah-v029-close@example.invalid",
+                ],
+            )?;
+            fs::write(
+                root.join("sentinel.txt"),
+                format!("repository {label} sentinel\n"),
+            )
+            .map_err(|_| "repository sentinel setup failed".to_owned())?;
+            fs::write(root.join("staged.txt"), "committed staged baseline\n")
+                .map_err(|_| "staged file baseline setup failed".to_owned())?;
+            fs::write(root.join("worktree.txt"), "committed worktree baseline\n")
+                .map_err(|_| "worktree file baseline setup failed".to_owned())?;
+            task_324_git(
+                git,
+                root,
+                &["add", "sentinel.txt", "staged.txt", "worktree.txt"],
+            )?;
+            task_324_git(
+                git,
+                root,
+                &["commit", "--quiet", "-m", "RAH v0.29 Close baseline"],
+            )?;
+            fs::write(root.join("staged.txt"), "staged review scenario\n")
+                .map_err(|_| "staged review setup failed".to_owned())?;
+            task_324_git(git, root, &["add", "staged.txt"])?;
+            fs::write(root.join("worktree.txt"), "unstaged selector scenario\n")
+                .map_err(|_| "worktree selector setup failed".to_owned())?;
+            Ok(())
+        }
+
+        fn cleanup(mut self) -> Result<(), String> {
+            let temp = fs::canonicalize(std::env::temp_dir())
+                .map_err(|_| "certification temp directory could not be resolved".to_owned())?;
+            let root = fs::canonicalize(&self.root)
+                .map_err(|_| "certification temp root could not be resolved".to_owned())?;
+            if root.parent() != Some(temp.as_path())
+                || !root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rah-v029-close-live-"))
+            {
+                return Err("certification cleanup target failed its ownership check".to_owned());
+            }
+            remove_task_324_fixture_root(&root)?;
+            self.cleaned = true;
+            if self.root.exists() {
+                return Err("certification temp root remained after cleanup".to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Task352LiveFixture {
+        fn drop(&mut self) {
+            if !self.cleaned {
+                let temp = fs::canonicalize(std::env::temp_dir()).ok();
+                let root = fs::canonicalize(&self.root).ok();
+                if let (Some(temp), Some(root)) = (temp, root)
+                    && root.parent() == Some(temp.as_path())
+                    && root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("rah-v029-close-live-"))
+                {
+                    let _ = remove_task_324_fixture_root(&root);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V029_ACTIVE_REPOSITORY_CLOSE_LIVE=1"]
+    async fn task_352_windows_active_repository_close_live_certification() -> Result<(), String> {
+        if std::env::var("RAH_RUN_V029_ACTIVE_REPOSITORY_CLOSE_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V029_ACTIVE_REPOSITORY_CLOSE_LIVE=1 for the Windows live certification"
+                    .to_owned(),
+            );
+        }
+        reset_startup_activation_counters();
+
+        let git =
+            selected_git_executable().map_err(|_| "native Git discovery failed".to_owned())?;
+        let fixture = Task352LiveFixture::new(&git)?;
+        let checkout = std::env::current_dir()
+            .and_then(fs::canonicalize)
+            .map_err(|_| "development checkout could not be resolved".to_owned())?;
+        let fixture_root = fs::canonicalize(&fixture.root)
+            .map_err(|_| "certification temp root could not be resolved".to_owned())?;
+        task352_require(
+            !fixture_root.starts_with(&checkout),
+            "disposable repositories are inside the development checkout",
+        )?;
+        let initial_a = task352_repository_capture(&git, &fixture.repository_a)?;
+        let initial_b = task352_repository_capture(&git, &fixture.repository_b)?;
+        task352_require(
+            initial_a.status.contains("staged.txt")
+                && initial_a.status.contains("worktree.txt")
+                && initial_b.status.contains("staged.txt")
+                && initial_b.status.contains("worktree.txt"),
+            "fixtures lack the controlled staged and worktree scenarios",
+        )?;
+
+        let storage_root = fixture.root.join("host-storage");
+        let (
+            repository_generation_before,
+            generation_after_reactivation,
+            generation_b,
+            connected_runtime_claim,
+            codex_sha256,
+            catalog_presentation_before,
+        ) = {
+            let app = tauri::Builder::default()
+                .any_thread()
+                .manage(DesktopAppState::new(storage_root.clone()))
+                .build(tauri::generate_context!())
+                .map_err(|_| "Task 352 Desktop app construction failed".to_owned())?;
+            let state = app.state::<DesktopAppState>();
+            let remembered_id = add_remembered_candidate(
+                &state,
+                "Task 352 Repository A",
+                Some(fixture.repository_a.clone()),
+            );
+            let catalog_path = storage_root.join("remembered-workspace.json");
+            let catalog_before = fs::read(&catalog_path)
+                .map_err(|_| "remembered catalog could not be captured".to_owned())?;
+            let catalog_presentation_before = serde_json::to_value(
+                remembered_catalog_presentation(state.remembered_workspace.snapshot()),
+            )
+            .map_err(|_| "remembered catalog presentation could not be serialized".to_owned())?;
+            task352_require(
+                catalog_presentation_before
+                    .to_string()
+                    .contains(remembered_id.as_str()),
+                "real remembered catalog API did not retain A's candidate ID",
+            )?;
+
+            let member_a = admit_repository(&state, &git, &fixture.repository_a)
+                .map_err(|_| "production admission of A failed".to_owned())?;
+            let member_b = admit_repository(&state, &git, &fixture.repository_b)
+                .map_err(|_| "production admission of B failed".to_owned())?;
+            let membership_before = repository_membership_presentation(&state);
+            let member_ids_before = membership_before
+                .members
+                .iter()
+                .map(|member| member.member_id.clone())
+                .collect::<Vec<_>>();
+            let membership_generation_before = membership_before.membership_generation;
+            task352_require(
+                membership_before.members.len() == 2
+                    && membership_before.active_member_id.is_none()
+                    && member_ids_before == vec![member_a.selector(), member_b.selector()],
+                "A/B admission did not preserve the expected order before activation",
+            )?;
+
+            activate_admitted_member(&state, member_a)
+                .await
+                .map_err(|_| "production activation of A failed".to_owned())?;
+            let repository_generation_before = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "repository generation lock was poisoned".to_owned())?;
+            let repository_before = state
+                .repository
+                .lock()
+                .map_err(|_| "repository state lock was poisoned".to_owned())?
+                .clone()
+                .ok_or_else(|| "A repository was not active".to_owned())?;
+            let authority_before = effective_authority_snapshot_for_state(&state);
+            task352_require(
+                state
+                    .workspace_membership
+                    .lock()
+                    .map_err(|_| "membership lock was poisoned".to_owned())?
+                    .active_member()
+                    == Some(member_a)
+                    && matches!(
+                        *state
+                            .connection
+                            .lock()
+                            .map_err(|_| "connection lock was poisoned".to_owned())?,
+                        ConnectionState::NotConnected
+                    )
+                    && state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "provider activation lock was poisoned".to_owned())?
+                        .is_none()
+                    && authority_before.repository.selected
+                    && authority_before.repository.current_generation
+                        == Some(repository_generation_before)
+                    && authority_before.effective_tools.is_empty(),
+                "A activation changed runtime state or advertised executable repository Tools",
+            )?;
+
+            let snapshot_a = refresh_repository_workflow(&state)
+                .await
+                .map_err(|_| "production workflow refresh for A failed".to_owned())?;
+            let stage_selector_a = snapshot_a
+                .status_entries
+                .iter()
+                .find_map(|entry| entry.stage_action_id.clone())
+                .ok_or_else(|| "A workflow had no Stage selector".to_owned())?;
+            let index_before_reservations =
+                task352_repository_capture(&git, &fixture.repository_a)?.index_sha256;
+            let (stage_reservation, _) = begin_repository_index_effect(
+                &state,
+                &stage_selector_a,
+                RepositoryIndexActionKind::Stage,
+            )
+            .map_err(|_| "production Stage reservation failed".to_owned())?;
+            let generation_at_stage_reservation = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "repository generation lock was poisoned".to_owned())?;
+            let stage_busy = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_a.selector(),
+                    expected_repository_generation: generation_at_stage_reservation,
+                },
+            );
+            task352_require(
+                matches!(stage_busy, Err(CloseRepositoryError::RepositoryEffectBusy))
+                    && state
+                        .repository_index_effect_reservation
+                        .lock()
+                        .map_err(|_| "Stage reservation lock was poisoned".to_owned())?
+                        .as_ref()
+                        .is_some_and(|owner| owner.token == stage_reservation.token)
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_a)
+                    && state
+                        .repository
+                        .lock()
+                        .map_err(|_| "repository state lock was poisoned".to_owned())?
+                        .as_ref()
+                        .is_some_and(|repository| Arc::ptr_eq(repository, &repository_before))
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == generation_at_stage_reservation
+                    && task352_repository_capture(&git, &fixture.repository_a)?.index_sha256
+                        == index_before_reservations,
+                "Stage-busy Close changed A, the reservation owner, or the index",
+            )?;
+            complete_repository_index_effect(&state, &stage_reservation)
+                .await
+                .map_err(|_| "existing Stage reservation owner could not complete".to_owned())?;
+            task352_require(
+                task352_repository_capture(&git, &fixture.repository_a)?.index_sha256
+                    == index_before_reservations,
+                "Stage reservation completion unexpectedly changed the index",
+            )?;
+
+            let snapshot_a = refresh_repository_workflow(&state)
+                .await
+                .map_err(|_| "fresh A workflow refresh failed".to_owned())?;
+            let unstage_selector_a = snapshot_a
+                .staged_diff
+                .iter()
+                .find_map(|file| file.unstage_action_id.clone())
+                .ok_or_else(|| "A workflow had no Unstage selector".to_owned())?;
+            let (unstage_reservation, _) = begin_repository_index_effect(
+                &state,
+                &unstage_selector_a,
+                RepositoryIndexActionKind::Unstage,
+            )
+            .map_err(|_| "production Unstage reservation failed".to_owned())?;
+            let generation_at_unstage_reservation = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "repository generation lock was poisoned".to_owned())?;
+            let unstage_busy = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_a.selector(),
+                    expected_repository_generation: generation_at_unstage_reservation,
+                },
+            );
+            task352_require(
+                matches!(
+                    unstage_busy,
+                    Err(CloseRepositoryError::RepositoryEffectBusy)
+                ) && state
+                    .repository_index_effect_reservation
+                    .lock()
+                    .map_err(|_| "Unstage reservation lock was poisoned".to_owned())?
+                    .as_ref()
+                    .is_some_and(|owner| owner.token == unstage_reservation.token)
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_a)
+                    && state
+                        .repository
+                        .lock()
+                        .map_err(|_| "repository state lock was poisoned".to_owned())?
+                        .as_ref()
+                        .is_some_and(|repository| Arc::ptr_eq(repository, &repository_before))
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == generation_at_unstage_reservation
+                    && task352_repository_capture(&git, &fixture.repository_a)?.index_sha256
+                        == index_before_reservations,
+                "Unstage-busy Close changed A, the reservation owner, or the index",
+            )?;
+            complete_repository_index_effect(&state, &unstage_reservation)
+                .await
+                .map_err(|_| "existing Unstage reservation owner could not complete".to_owned())?;
+            task352_require(
+                task352_repository_capture(&git, &fixture.repository_a)?.index_sha256
+                    == index_before_reservations,
+                "Unstage reservation completion unexpectedly changed the index",
+            )?;
+
+            let _fresh_a_workflow = refresh_repository_workflow(&state)
+                .await
+                .map_err(|_| "A workflow refresh before Commit review failed".to_owned())?;
+            let commit_control =
+                authorize_test_commit(&state, Arc::clone(&repository_before)).await;
+            task352_require(
+                state
+                    .repository_workflow
+                    .lock()
+                    .map_err(|_| "workflow lock was poisoned".to_owned())?
+                    .commit_review
+                    .is_some()
+                    && state
+                        .repository_workflow
+                        .lock()
+                        .map_err(|_| "workflow lock was poisoned".to_owned())?
+                        .authorization
+                        == CommitAuthorizationPresentation::AuthorizedPending
+                    && commit_control.has_pending_authorization().await,
+                "A did not reach a safe no-effect reviewed Commit authorization state",
+            )?;
+            let (old_stage_selector, old_unstage_selector, old_review_selector) = {
+                let workflow = state
+                    .repository_workflow
+                    .lock()
+                    .map_err(|_| "workflow lock was poisoned".to_owned())?;
+                let stage = workflow
+                    .actions
+                    .iter()
+                    .find(|(_, action)| action.kind == RepositoryIndexActionKind::Stage)
+                    .map(|(selector, _)| selector.clone())
+                    .ok_or_else(|| "refreshed A workflow had no Stage action".to_owned())?;
+                let unstage = workflow
+                    .actions
+                    .iter()
+                    .find(|(_, action)| action.kind == RepositoryIndexActionKind::Unstage)
+                    .map(|(selector, _)| selector.clone())
+                    .ok_or_else(|| "refreshed A workflow had no Unstage action".to_owned())?;
+                let review = workflow
+                    .review_selector
+                    .clone()
+                    .ok_or_else(|| "A reviewed Commit selector was unavailable".to_owned())?;
+                (stage, unstage, review)
+            };
+
+            state
+                .persist_completed_pair(
+                    "Task 352 completed transcript sentinel".to_owned(),
+                    "Persisted assistant sentinel".to_owned(),
+                )
+                .map_err(|_| "completed transcript fixture could not be persisted".to_owned())?;
+            let conversation_epoch_before = {
+                let mut conversation = state
+                    .conversation
+                    .lock()
+                    .map_err(|_| "conversation lock was poisoned".to_owned())?;
+                conversation.reconcile(ConversationContextIdentity {
+                    repository_generation: repository_generation_before,
+                    model_generation: 0,
+                });
+                conversation.history.push(Message {
+                    role: MessageRole::User,
+                    content: "in-memory executable context sentinel".to_owned(),
+                });
+                conversation.epoch
+            };
+            state
+                .host_invocation
+                .lock()
+                .map_err(|_| "HostExplicit coordinator lock was poisoned".to_owned())?
+                .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+                .map_err(|_| "safe HostPrepared lifecycle setup failed".to_owned())?;
+            let host_prepared_ticket = "test-ticket";
+            let storage_before_close = storage_file_snapshot(&storage_root);
+            let catalog_before_close = fs::read(&catalog_path)
+                .map_err(|_| "remembered catalog could not be recaptured".to_owned())?;
+            let transcript_before_close = serde_json::to_value(
+                state
+                    .persistence
+                    .lock()
+                    .map_err(|_| "transcript persistence lock was poisoned".to_owned())?
+                    .presentation(),
+            )
+            .map_err(|_| "transcript presentation could not be serialized".to_owned())?;
+            let git_before_close_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_before_close_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            task352_require(
+                git_before_close_a == initial_a
+                    && git_before_close_b == initial_b
+                    && git_before_close_a.index_sha256 == index_before_reservations
+                    && catalog_before_close == catalog_before,
+                "fixture setup or reservation lifecycle changed measured Git state",
+            )?;
+            let authority_before_close = effective_authority_snapshot_for_state(&state);
+            task352_require(
+                state
+                    .host_invocation
+                    .lock()
+                    .map_err(|_| "HostExplicit coordinator lock was poisoned".to_owned())?
+                    .state()
+                    == CoordinatorState::HostPrepared
+                    && authority_before_close.repository.current_generation
+                        == Some(repository_generation_before)
+                    && authority_before_close.reviewed_commit
+                        == super::effective_authority::ReviewedCommitState::AuthorizedPending,
+                "P1 pre-Close state did not contain the expected A authority snapshot",
+            )?;
+
+            let close_result = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_a.selector(),
+                    expected_repository_generation: repository_generation_before,
+                },
+            )
+            .map_err(|_| "production P1 Close failed".to_owned())?;
+            let close_json = serde_json::to_string(&close_result)
+                .map_err(|_| "P1 Close result could not be serialized".to_owned())?;
+            let private_sentinel = "RAH_V029_PRIVATE_PATH_SENTINEL";
+            task352_require(
+                !close_json.contains(private_sentinel)
+                    && !close_json.contains(".git")
+                    && !close_json.contains("git.exe")
+                    && !close_json.contains("test-ticket")
+                    && !close_json.contains("filesystem")
+                    && close_result.membership.membership_generation
+                        == membership_generation_before
+                    && close_result.membership.active_member_id.is_none()
+                    && close_result.status == "Repository closed. No repository is active.",
+                "P1 Close result leaked private data or changed membership generation",
+            )?;
+            let membership_after_p1 = repository_membership_presentation(&state);
+            let git_after_p1_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_after_p1_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            let ids_after_p1 = membership_after_p1
+                .members
+                .iter()
+                .map(|member| member.member_id.clone())
+                .collect::<Vec<_>>();
+            let authority_after_p1 = effective_authority_snapshot_for_state(&state);
+            let membership_after_p1_json = serde_json::to_string(&membership_after_p1)
+                .map_err(|_| "P1 membership result could not be serialized".to_owned())?;
+            let authority_after_p1_json = serde_json::to_string(&authority_after_p1)
+                .map_err(|_| "P1 authority snapshot could not be serialized".to_owned())?;
+            let bounded_close_errors = [
+                serde_json::to_string(&CloseRepositoryError::NoActive),
+                serde_json::to_string(&CloseRepositoryError::ActiveChanged),
+                serde_json::to_string(&CloseRepositoryError::ConnectedOrRuntimeBusy),
+                serde_json::to_string(&CloseRepositoryError::ModelTurnBusy),
+                serde_json::to_string(&CloseRepositoryError::RepositoryEffectBusy),
+                serde_json::to_string(&CloseRepositoryError::InvalidGuard),
+                serde_json::to_string(&CloseRepositoryError::Unavailable),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "bounded Close errors could not be serialized".to_owned())?;
+            let mut sanitized_close_surfaces = [
+                close_json.as_str(),
+                membership_after_p1_json.as_str(),
+                authority_after_p1_json.as_str(),
+            ]
+            .join(" ");
+            sanitized_close_surfaces.push(' ');
+            sanitized_close_surfaces.push_str(&bounded_close_errors.join(" "));
+            let git_executable_text = git.to_string_lossy();
+            for private_value in [
+                fixture.root.to_string_lossy(),
+                fixture.repository_a.to_string_lossy(),
+                fixture.repository_b.to_string_lossy(),
+                git_executable_text,
+            ] {
+                task352_require(
+                    !sanitized_close_surfaces.contains(private_value.as_ref()),
+                    "serialized Close surface exposed a private path",
+                )?;
+            }
+            task352_require(
+                !sanitized_close_surfaces.contains("RAH_V029_PRIVATE_PATH_SENTINEL")
+                    && !sanitized_close_surfaces.contains(".git")
+                    && !sanitized_close_surfaces.contains("filesystem")
+                    && !sanitized_close_surfaces.contains("test-ticket")
+                    && !sanitized_close_surfaces.contains("provider_handle"),
+                "serialized Close surface exposed private identity or lifecycle data",
+            )?;
+            task352_require(
+                membership_after_p1.members.len() == 2
+                    && git_after_p1_a == git_before_close_a
+                    && git_after_p1_b == git_before_close_b
+                    && ids_after_p1 == member_ids_before
+                    && membership_after_p1.membership_generation == membership_generation_before
+                    && membership_after_p1
+                        .members
+                        .iter()
+                        .all(|member| !member.active)
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .member(member_a)
+                        .is_some()
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .member(member_b)
+                        .is_some()
+                    && state
+                        .repository
+                        .lock()
+                        .map_err(|_| "repository lock was poisoned".to_owned())?
+                        .is_none()
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == repository_generation_before + 1
+                    && !repository_workflow_has_state(
+                        &*state
+                            .repository_workflow
+                            .lock()
+                            .map_err(|_| "workflow lock was poisoned".to_owned())?,
+                    )
+                    && state
+                        .commit_capability
+                        .lock()
+                        .map_err(|_| "Commit capability lock was poisoned".to_owned())?
+                        .is_none()
+                    && state
+                        .host_invocation
+                        .lock()
+                        .map_err(|_| "HostExplicit coordinator lock was poisoned".to_owned())?
+                        .state()
+                        == CoordinatorState::Idle
+                    && matches!(
+                        *state
+                            .connection
+                            .lock()
+                            .map_err(|_| "connection lock was poisoned".to_owned())?,
+                        ConnectionState::NotConnected
+                    )
+                    && state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "provider activation lock was poisoned".to_owned())?
+                        .is_none()
+                    && authority_after_p1.status == SnapshotStatus::NoRepository
+                    && !authority_after_p1.repository.selected
+                    && authority_after_p1.repository.kind
+                        == super::effective_authority::RepositoryKind::None
+                    && authority_after_p1.repository.current_generation.is_none()
+                    && authority_after_p1.connection.state
+                        == super::effective_authority::ConnectionBindingState::NotConnected
+                    && !authority_after_p1.connection.advertised
+                    && authority_after_p1.effective_tools.is_empty()
+                    && authority_after_p1.reviewed_commit
+                        == super::effective_authority::ReviewedCommitState::NotApplicable
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .epoch
+                        == conversation_epoch_before + 1
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .identity
+                        .is_none()
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .history
+                        .is_empty()
+                    && matches!(
+                        *state
+                            .chat
+                            .lock()
+                            .map_err(|_| "chat lock was poisoned".to_owned())?,
+                        ChatState::Idle
+                    )
+                    && state
+                        .active_chat
+                        .lock()
+                        .map_err(|_| "active chat lock was poisoned".to_owned())?
+                        .is_none()
+                    && !commit_control.has_pending_authorization().await,
+                "P1 did not withdraw A authority while retaining inert membership",
+            )?;
+            task352_require(
+                state
+                    .host_invocation
+                    .lock()
+                    .map_err(|_| "HostExplicit coordinator lock was poisoned".to_owned())?
+                    .take_prepared(host_prepared_ticket, std::time::Instant::now())
+                    .is_err(),
+                "HostPrepared test ticket remained usable after P1 Close",
+            )?;
+            let repeated_epoch = state
+                .conversation
+                .lock()
+                .map_err(|_| "conversation lock was poisoned".to_owned())?
+                .epoch;
+            let repeated_close = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_a.selector(),
+                    expected_repository_generation: repository_generation_before,
+                },
+            );
+            task352_require(
+                matches!(repeated_close, Err(CloseRepositoryError::NoActive))
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == repository_generation_before + 1
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .membership_generation()
+                        == membership_generation_before
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .epoch
+                        == repeated_epoch
+                    && storage_file_snapshot(&storage_root) == storage_before_close
+                    && fs::read(&catalog_path)
+                        .map_err(|_| "remembered catalog reread failed".to_owned())?
+                        == catalog_before_close,
+                "repeated Close was not bounded and effect-free",
+            )?;
+
+            activate_admitted_member(&state, member_a)
+                .await
+                .map_err(|_| "explicit reactivation of retained A failed".to_owned())?;
+            let generation_after_reactivation = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "repository generation lock was poisoned".to_owned())?;
+            let repository_after_reactivation = state
+                .repository
+                .lock()
+                .map_err(|_| "repository state lock was poisoned".to_owned())?
+                .clone()
+                .ok_or_else(|| "A repository was not recreated".to_owned())?;
+            let authority_after_reactivation = effective_authority_snapshot_for_state(&state);
+            task352_require(
+                generation_after_reactivation == repository_generation_before + 2
+                    && !Arc::ptr_eq(&repository_before, &repository_after_reactivation)
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_a)
+                    && repository_membership_presentation(&state)
+                        .members
+                        .iter()
+                        .map(|member| member.member_id.clone())
+                        .collect::<Vec<_>>()
+                        == member_ids_before
+                    && repository_membership_presentation(&state).membership_generation
+                        == membership_generation_before
+                    && matches!(
+                        *state
+                            .connection
+                            .lock()
+                            .map_err(|_| "connection lock was poisoned".to_owned())?,
+                        ConnectionState::NotConnected
+                    )
+                    && state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "provider activation lock was poisoned".to_owned())?
+                        .is_none()
+                    && authority_after_reactivation.status == SnapshotStatus::Disconnected
+                    && authority_after_reactivation.repository.selected
+                    && authority_after_reactivation.repository.current_generation
+                        == Some(generation_after_reactivation)
+                    && authority_before_close.repository.current_generation
+                        != authority_after_reactivation.repository.current_generation
+                    && authority_after_reactivation.effective_tools.is_empty()
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .identity
+                        .is_none()
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .history
+                        .is_empty()
+                    && state
+                        .repository_workflow
+                        .lock()
+                        .map_err(|_| "workflow lock was poisoned".to_owned())?
+                        .observation_generation
+                        == 0,
+                "A reactivation did not create fresh disconnected authority and context",
+            )?;
+            task352_require(
+                repository_index_action(
+                    &state,
+                    old_stage_selector,
+                    RepositoryIndexActionKind::Stage,
+                )
+                .await
+                .is_err()
+                    && repository_index_action(
+                        &state,
+                        old_unstage_selector,
+                        RepositoryIndexActionKind::Unstage,
+                    )
+                    .await
+                    .is_err()
+                    && authorize_repository_commit_review(&state, &old_review_selector)
+                        .await
+                        .is_err()
+                    && state
+                        .host_invocation
+                        .lock()
+                        .map_err(|_| "HostExplicit coordinator lock was poisoned".to_owned())?
+                        .take_prepared(host_prepared_ticket, std::time::Instant::now())
+                        .is_err(),
+                "a pre-Close A selector, Commit review, or prepared ticket became usable",
+            )?;
+            let fresh_a_workflow = refresh_repository_workflow(&state)
+                .await
+                .map_err(|_| "A workflow was not freshly observed after reactivation".to_owned())?;
+            task352_require(
+                fresh_a_workflow
+                    .status_entries
+                    .iter()
+                    .any(|entry| entry.stage_action_id.is_some())
+                    && fresh_a_workflow
+                        .staged_diff
+                        .iter()
+                        .any(|file| file.unstage_action_id.is_some()),
+                "A reactivation did not require and publish a fresh repository observation",
+            )?;
+
+            let stale_a_generation = generation_after_reactivation;
+            activate_admitted_member(&state, member_b)
+                .await
+                .map_err(|_| "explicit activation of B failed".to_owned())?;
+            let generation_b = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "repository generation lock was poisoned".to_owned())?;
+            let repository_b_active = state
+                .repository
+                .lock()
+                .map_err(|_| "repository state lock was poisoned".to_owned())?
+                .clone()
+                .ok_or_else(|| "B repository was not published".to_owned())?;
+            let fresh_b_workflow = refresh_repository_workflow(&state)
+                .await
+                .map_err(|_| "production workflow refresh for B failed".to_owned())?;
+            let authority_b_before_stale_close = effective_authority_snapshot_for_state(&state);
+            let b_workflow_before_stale_close = {
+                let workflow = state
+                    .repository_workflow
+                    .lock()
+                    .map_err(|_| "workflow lock was poisoned".to_owned())?;
+                let mut selectors = workflow.actions.keys().cloned().collect::<Vec<_>>();
+                selectors.sort();
+                (
+                    workflow.observation_generation,
+                    workflow.next_action,
+                    selectors,
+                    workflow.review_selector.clone(),
+                    workflow.authorization,
+                )
+            };
+            let git_before_stale_close_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_before_stale_close_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            let stale_a_close = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_a.selector(),
+                    expected_repository_generation: stale_a_generation,
+                },
+            );
+            let b_workflow_after_stale_close = {
+                let workflow = state
+                    .repository_workflow
+                    .lock()
+                    .map_err(|_| "workflow lock was poisoned".to_owned())?;
+                let mut selectors = workflow.actions.keys().cloned().collect::<Vec<_>>();
+                selectors.sort();
+                (
+                    workflow.observation_generation,
+                    workflow.next_action,
+                    selectors,
+                    workflow.review_selector.clone(),
+                    workflow.authorization,
+                )
+            };
+            let authority_b_after_stale_close = effective_authority_snapshot_for_state(&state);
+            let git_after_stale_close_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_after_stale_close_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            task352_require(
+                matches!(stale_a_close, Err(CloseRepositoryError::ActiveChanged))
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_b)
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == generation_b
+                    && state
+                        .repository
+                        .lock()
+                        .map_err(|_| "repository state lock was poisoned".to_owned())?
+                        .as_ref()
+                        .is_some_and(|repository| Arc::ptr_eq(repository, &repository_b_active))
+                    && b_workflow_before_stale_close == b_workflow_after_stale_close
+                    && authority_b_before_stale_close == authority_b_after_stale_close
+                    && authority_b_after_stale_close.repository.current_generation
+                        == Some(generation_b)
+                    && git_before_stale_close_a == git_after_stale_close_a
+                    && git_before_stale_close_b == git_after_stale_close_b
+                    && matches!(
+                        *state
+                            .connection
+                            .lock()
+                            .map_err(|_| "connection lock was poisoned".to_owned())?,
+                        ConnectionState::NotConnected
+                    )
+                    && state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "provider activation lock was poisoned".to_owned())?
+                        .is_none()
+                    && fresh_b_workflow
+                        .status_entries
+                        .iter()
+                        .any(|entry| entry.stage_action_id.is_some()),
+                "stale A guard did not preserve current B and its repository state",
+            )?;
+
+            let membership_before_p3 = repository_membership_presentation(&state);
+            let p3_epoch_before = state
+                .conversation
+                .lock()
+                .map_err(|_| "conversation lock was poisoned".to_owned())?
+                .epoch;
+            let git_before_p3_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_before_p3_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            let p3_result = close_repository_transition(
+                &state,
+                CloseRepositoryRequest {
+                    expected_active_member_id: member_b.selector(),
+                    expected_repository_generation: generation_b,
+                },
+            )
+            .map_err(|_| "production P3 Close of B failed".to_owned())?;
+            let git_after_p3_a = task352_repository_capture(&git, &fixture.repository_a)?;
+            let git_after_p3_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            let authority_after_p3 = effective_authority_snapshot_for_state(&state);
+            task352_require(
+                git_before_p3_a == git_after_p3_a
+                    && git_before_p3_b == git_after_p3_b
+                    && p3_result.membership.membership_generation == membership_generation_before
+                    && p3_result.membership.active_member_id.is_none()
+                    && p3_result.membership.members.len() == 2
+                    && repository_membership_presentation(&state)
+                        .members
+                        .iter()
+                        .all(|member| !member.active)
+                    && repository_membership_presentation(&state).membership_generation
+                        == membership_generation_before
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .member(member_a)
+                        .is_some()
+                    && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "membership lock was poisoned".to_owned())?
+                        .member(member_b)
+                        .is_some()
+                    && state
+                        .repository
+                        .lock()
+                        .map_err(|_| "repository lock was poisoned".to_owned())?
+                        .is_none()
+                    && *state
+                        .repository_generation
+                        .lock()
+                        .map_err(|_| "repository generation lock was poisoned".to_owned())?
+                        == generation_b + 1
+                    && !repository_workflow_has_state(
+                        &*state
+                            .repository_workflow
+                            .lock()
+                            .map_err(|_| "workflow lock was poisoned".to_owned())?,
+                    )
+                    && state
+                        .commit_capability
+                        .lock()
+                        .map_err(|_| "Commit capability lock was poisoned".to_owned())?
+                        .is_none()
+                    && authority_after_p3.status == SnapshotStatus::NoRepository
+                    && authority_after_p3.effective_tools.is_empty()
+                    && state
+                        .conversation
+                        .lock()
+                        .map_err(|_| "conversation lock was poisoned".to_owned())?
+                        .epoch
+                        == p3_epoch_before + 1
+                    && membership_before_p3.membership_generation == membership_generation_before,
+                "P3 Close did not leave both members admitted and zero active authority",
+            )?;
+
+            let connected_runtime_claim;
+            let selection = resolve_codex_executable()
+                .map_err(|_| "certified Codex baseline resolution failed".to_owned())?;
+            task352_require(
+                selection.source == CodexExecutableSource::CertifiedBaseline,
+                "Codex selection was not the certified baseline",
+            )?;
+            let codex_executable = PathBuf::from(&selection.executable);
+            let codex_sha256 = GetFileHash::sha256(&codex_executable)?;
+            task352_require(
+                codex_sha256 == "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00",
+                "certified Codex baseline hash did not match 0.149.0",
+            )?;
+            let codex_version = Command::new(&codex_executable)
+                .arg("--version")
+                .output()
+                .map_err(|_| "certified Codex version probe failed".to_owned())?;
+            task352_require(
+                codex_version.status.success()
+                    && String::from_utf8_lossy(&codex_version.stdout).trim() == "codex-cli 0.149.0",
+                "certified Codex baseline did not report version 0.149.0",
+            )?;
+            task352_require(
+                startup_activation_snapshot() == StartupActivationCounters::default(),
+                "startup unexpectedly activated a model or provider before explicit Codex Connect",
+            )?;
+
+            activate_admitted_member(&state, member_a)
+                .await
+                .map_err(|_| {
+                    "production reactivation of A for connected Close failed".to_owned()
+                })?;
+            let generation_connected_a = *state
+                .repository_generation
+                .lock()
+                .map_err(|_| "connected-case generation lock was poisoned".to_owned())?;
+            let connected_repository_a = state
+                .repository
+                .lock()
+                .map_err(|_| "connected-case repository lock was poisoned".to_owned())?
+                .clone()
+                .ok_or_else(|| "A was not active before explicit Codex Connect".to_owned())?;
+            let connected_git_before = task352_repository_capture(&git, &fixture.repository_a)?;
+            let connected_catalog_before = fs::read(&catalog_path)
+                .map_err(|_| "connected-case catalog capture failed".to_owned())?;
+            let connected_transcript_before = storage_file_snapshot(&storage_root);
+            let codex_processes_before = task_324_d_process_census(&codex_executable)?;
+            let connect_result = connect_codex(app.state()).await;
+            match connect_result {
+                Ok(result) => {
+                    let connected_state = {
+                        let connection = state
+                            .connection
+                            .lock()
+                            .map_err(|_| "connected-case lifecycle lock was poisoned".to_owned())?;
+                        match &*connection {
+                            ConnectionState::Connected {
+                                runtime, source, ..
+                            } => Some((Arc::clone(runtime), *source)),
+                            _ => None,
+                        }
+                    };
+                    let Some((connected_runtime, connected_source)) = connected_state else {
+                        let _ = disconnect_codex(app.state()).await;
+                        return Err(
+                            "explicit Codex Connect returned without a connected runtime"
+                                .to_owned(),
+                        );
+                    };
+                    let processes_after_connect = task_324_d_process_census(&codex_executable);
+                    let connected_process_ids = processes_after_connect.as_ref().map(|processes| {
+                        task_324_d_new_app_server_process_ids(&codex_processes_before, processes)
+                    });
+                    let connected_authority = effective_authority_snapshot_for_state(&state);
+                    let eligible = connected_authority
+                        .effective_tools
+                        .iter()
+                        .filter(|tool| tool.host_invocation.eligible)
+                        .map(|tool| tool.public_tool_name.as_str())
+                        .collect::<BTreeSet<_>>();
+                    let expected_eligible = [
+                        "fs.read",
+                        "repo.file-info",
+                        "repo.status",
+                        "repo.diff",
+                        "repo.diff-staged",
+                        "repo.create-branch",
+                        "repo.patch",
+                        "repo.edit-files",
+                        "repo.create-file",
+                        "repo.delete-file",
+                        "repo.rename-file",
+                    ]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                    let connected_close = close_repository_transition(
+                        &state,
+                        CloseRepositoryRequest {
+                            expected_active_member_id: member_a.selector(),
+                            expected_repository_generation: generation_connected_a,
+                        },
+                    );
+                    let rejected_close_preserved_runtime = matches!(
+                        connected_close,
+                        Err(CloseRepositoryError::ConnectedOrRuntimeBusy)
+                    ) && state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "connected-case membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_a)
+                        && state
+                            .repository
+                            .lock()
+                            .map_err(|_| "connected-case repository lock was poisoned".to_owned())?
+                            .as_ref()
+                            .is_some_and(|repository| {
+                                Arc::ptr_eq(repository, &connected_repository_a)
+                            })
+                        && *state.repository_generation.lock().map_err(|_| {
+                            "connected-case generation lock was poisoned".to_owned()
+                        })? == generation_connected_a
+                        && matches!(
+                            &*state
+                                .connection
+                                .lock()
+                                .map_err(|_| "connected-case lifecycle lock was poisoned".to_owned())?,
+                            ConnectionState::Connected { runtime, source: CodexExecutableSource::CertifiedBaseline, .. }
+                                if same_arc(runtime, &connected_runtime)
+                        )
+                        && connected_source == CodexExecutableSource::CertifiedBaseline
+                        && result.status == "connected"
+                        && state
+                            .provider_activation
+                            .lock()
+                            .map_err(|_| "connected-case provider lock was poisoned".to_owned())?
+                            .is_none()
+                        && connected_authority.status == SnapshotStatus::ConnectedCurrent
+                        && connected_authority.repository.captured_generation
+                            == Some(generation_connected_a)
+                        && connected_authority.effective_tools.len() == 11
+                        && eligible == expected_eligible;
+
+                    let disconnect_result = disconnect_codex(app.state()).await;
+                    let mut reaped_processes = true;
+                    match &connected_process_ids {
+                        Ok(process_ids) => {
+                            for process_id in process_ids {
+                                if task_324_wait_for_codex_process_exit(
+                                    &codex_executable,
+                                    *process_id,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    reaped_processes = false;
+                                }
+                            }
+                        }
+                        Err(_) => reaped_processes = false,
+                    }
+                    let census_after_disconnect = task_324_d_process_census(&codex_executable);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let census_after_settle = task_324_d_process_census(&codex_executable);
+                    let no_reconnect = match (&census_after_disconnect, &census_after_settle) {
+                        (Ok(before), Ok(after)) => {
+                            task_324_d_new_app_server_process_ids(before, after).is_empty()
+                        }
+                        _ => false,
+                    };
+                    task352_require(
+                        rejected_close_preserved_runtime
+                            && connected_process_ids
+                                .as_ref()
+                                .is_ok_and(|process_ids| process_ids.len() == 1)
+                            && connected_process_ids.as_ref().is_ok_and(|process_ids| {
+                                processes_after_connect.as_ref().is_ok_and(|processes| {
+                                    process_ids.iter().all(|process_id| {
+                                        processes
+                                            .iter()
+                                            .find(|process| process.pid == *process_id)
+                                            .is_some_and(|process| {
+                                                process.parent_pid == 0
+                                                    || process.parent_pid == std::process::id()
+                                            })
+                                    })
+                                })
+                            })
+                            && disconnect_result.is_ok()
+                            && reaped_processes
+                            && no_reconnect
+                            && matches!(
+                                *state
+                                    .connection
+                                    .lock()
+                                    .map_err(|_| "post-disconnect lock was poisoned".to_owned())?,
+                                ConnectionState::NotConnected
+                            )
+                            && state
+                                .provider_activation
+                                .lock()
+                                .map_err(|_| {
+                                    "post-disconnect provider lock was poisoned".to_owned()
+                                })?
+                                .is_none()
+                            && state
+                                .workspace_membership
+                                .lock()
+                                .map_err(|_| {
+                                    "post-disconnect membership lock was poisoned".to_owned()
+                                })?
+                                .active_member()
+                                == Some(member_a)
+                            && *state.repository_generation.lock().map_err(|_| {
+                                "post-disconnect generation lock was poisoned".to_owned()
+                            })? == generation_connected_a,
+                        "connected Close did not reject without shutdown and allow explicit Disconnect",
+                    )?;
+                    let git_before_final_connected_close =
+                        task352_repository_capture(&git, &fixture.repository_a)?;
+                    let close_after_disconnect = close_repository_transition(
+                        &state,
+                        CloseRepositoryRequest {
+                            expected_active_member_id: member_a.selector(),
+                            expected_repository_generation: generation_connected_a,
+                        },
+                    )
+                    .map_err(|_| "Close after explicit Codex Disconnect failed".to_owned())?;
+                    task352_require(
+                        close_after_disconnect.membership.active_member_id.is_none()
+                            && close_after_disconnect.membership.members.len() == 2
+                            && close_after_disconnect.membership.membership_generation
+                                == membership_generation_before
+                            && *state.repository_generation.lock().map_err(|_| {
+                                "post-disconnect Close generation lock was poisoned".to_owned()
+                            })? == generation_connected_a + 1
+                            && task352_repository_capture(&git, &fixture.repository_a)?
+                                == git_before_final_connected_close
+                            && task352_repository_capture(&git, &fixture.repository_a)?
+                                == connected_git_before
+                            && fs::read(&catalog_path)
+                                .map_err(|_| "connected-case catalog reread failed".to_owned())?
+                                == connected_catalog_before
+                            && storage_file_snapshot(&storage_root) == connected_transcript_before,
+                        "Close after explicit Disconnect changed membership, Git, or persistence",
+                    )?;
+                    connected_runtime_claim = "executed_pass";
+                }
+                Err(FrontendError::CodexConnectionFailed) => {
+                    let processes_after_failure = task_324_d_process_census(&codex_executable)?;
+                    let no_started_runtime = task_324_d_new_app_server_process_ids(
+                        &codex_processes_before,
+                        &processes_after_failure,
+                    )
+                    .is_empty();
+                    task352_require(
+                        no_started_runtime
+                            && state
+                                .provider_activation
+                                .lock()
+                                .map_err(|_| {
+                                    "failed-connect provider lock was poisoned".to_owned()
+                                })?
+                                .is_none()
+                            && state
+                                .workspace_membership
+                                .lock()
+                                .map_err(|_| {
+                                    "failed-connect membership lock was poisoned".to_owned()
+                                })?
+                                .active_member()
+                                == Some(member_a)
+                            && *state.repository_generation.lock().map_err(|_| {
+                                "failed-connect generation lock was poisoned".to_owned()
+                            })? == generation_connected_a,
+                        "failed certified Codex connection left an attributable app-server or changed A",
+                    )?;
+                    disconnect_codex(app.state()).await.map_err(|_| {
+                        "post-failure explicit disconnect lifecycle failed".to_owned()
+                    })?;
+                    close_repository_transition(
+                        &state,
+                        CloseRepositoryRequest {
+                            expected_active_member_id: member_a.selector(),
+                            expected_repository_generation: generation_connected_a,
+                        },
+                    )
+                    .map_err(|_| {
+                        "Close after failed Codex connection did not succeed".to_owned()
+                    })?;
+                    connected_runtime_claim = "not_executed_connection_failed";
+                }
+                Err(_) => {
+                    let _ = disconnect_codex(app.state()).await;
+                    return Err(
+                        "certified Codex connection failed outside the bounded runtime case"
+                            .to_owned(),
+                    );
+                }
+            }
+
+            task352_require(
+                task352_repository_capture(&git, &fixture.repository_a)? == initial_a
+                    && task352_repository_capture(&git, &fixture.repository_b)? == initial_b
+                    && fixture.repository_a.is_dir()
+                    && fixture.repository_b.is_dir()
+                    && fixture.repository_a.join(".git").is_dir()
+                    && fixture.repository_b.join(".git").is_dir()
+                    && storage_file_snapshot(&storage_root) == storage_before_close
+                    && fs::read(&catalog_path)
+                        .map_err(|_| "remembered catalog reread failed".to_owned())?
+                        == catalog_before_close
+                    && serde_json::to_value(remembered_catalog_presentation(
+                        state.remembered_workspace.snapshot(),
+                    ))
+                    .map_err(|_| {
+                        "remembered catalog presentation could not be serialized".to_owned()
+                    })? == catalog_presentation_before
+                    && serde_json::to_value(
+                        state
+                            .persistence
+                            .lock()
+                            .map_err(|_| "transcript persistence lock was poisoned".to_owned())?
+                            .presentation(),
+                    )
+                    .map_err(|_| "transcript presentation could not be serialized".to_owned())?
+                        == transcript_before_close,
+                "Close changed Git, filesystem, transcript, or remembered-catalog state",
+            )?;
+
+            let inert_persistence = Persistence::start(fixture.repository_a.join("sentinel.txt"));
+            let old_persistence = {
+                let mut persistence = state
+                    .persistence
+                    .lock()
+                    .map_err(|_| "final persistence lock was poisoned".to_owned())?;
+                std::mem::replace(&mut *persistence, inert_persistence)
+            };
+            drop(old_persistence);
+            (
+                repository_generation_before,
+                generation_after_reactivation,
+                generation_b,
+                connected_runtime_claim,
+                codex_sha256,
+                catalog_presentation_before,
+            )
+        };
+        let restarted = DesktopAppState::new(storage_root.clone());
+        let restart_membership = repository_membership_presentation(&restarted);
+        let restart_authority = effective_authority_snapshot_for_state(&restarted);
+        let restart_transcript = serde_json::to_value(
+            restarted
+                .persistence
+                .lock()
+                .map_err(|_| "restart transcript persistence lock was poisoned".to_owned())?
+                .presentation(),
+        )
+        .map_err(|_| "restart transcript presentation could not be serialized".to_owned())?;
+        let restart_catalog = serde_json::to_value(remembered_catalog_presentation(
+            restarted.remembered_workspace.snapshot(),
+        ))
+        .map_err(|_| "restart remembered catalog could not be serialized".to_owned())?;
+        task352_require(
+            restart_membership.members.is_empty()
+                && restart_membership.active_member_id.is_none()
+                && restarted
+                    .workspace_membership
+                    .lock()
+                    .map_err(|_| "restart membership lock was poisoned".to_owned())?
+                    .member_count()
+                    == 0
+                && restarted
+                    .repository
+                    .lock()
+                    .map_err(|_| "restart repository lock was poisoned".to_owned())?
+                    .is_none()
+                && restarted
+                    .repository_workflow
+                    .lock()
+                    .map_err(|_| "restart workflow lock was poisoned".to_owned())?
+                    .actions
+                    .is_empty()
+                && !repository_workflow_has_state(
+                    &*restarted
+                        .repository_workflow
+                        .lock()
+                        .map_err(|_| "restart workflow lock was poisoned".to_owned())?,
+                )
+                && restarted
+                    .commit_capability
+                    .lock()
+                    .map_err(|_| "restart Commit capability lock was poisoned".to_owned())?
+                    .is_none()
+                && restarted
+                    .repository_index_effect_reservation
+                    .lock()
+                    .map_err(|_| "restart index reservation lock was poisoned".to_owned())?
+                    .is_none()
+                && restarted
+                    .host_invocation
+                    .lock()
+                    .map_err(|_| "restart HostExplicit coordinator lock was poisoned".to_owned())?
+                    .state()
+                    == CoordinatorState::Idle
+                && restarted
+                    .provider_activation
+                    .lock()
+                    .map_err(|_| "restart provider activation lock was poisoned".to_owned())?
+                    .is_none()
+                && matches!(
+                    *restarted
+                        .connection
+                        .lock()
+                        .map_err(|_| "restart connection lock was poisoned".to_owned())?,
+                    ConnectionState::NotConnected
+                )
+                && restart_authority.status == SnapshotStatus::NoRepository
+                && restart_authority.repository.current_generation.is_none()
+                && restart_authority.effective_tools.is_empty()
+                && restart_authority.reviewed_commit
+                    == super::effective_authority::ReviewedCommitState::NotApplicable
+                && restarted
+                    .conversation
+                    .lock()
+                    .map_err(|_| "restart conversation lock was poisoned".to_owned())?
+                    .identity
+                    .is_none()
+                && restarted
+                    .conversation
+                    .lock()
+                    .map_err(|_| "restart conversation lock was poisoned".to_owned())?
+                    .history
+                    .is_empty()
+                && matches!(
+                    restarted.remembered_workspace.snapshot(),
+                    RememberedWorkspaceStartupState::Available(_)
+                )
+                && restart_catalog == catalog_presentation_before
+                && !restart_transcript["resumeAvailable"]
+                    .as_bool()
+                    .unwrap_or(true)
+                && restart_transcript
+                    .to_string()
+                    .contains("Task 352 completed transcript sentinel")
+                && restart_transcript
+                    .to_string()
+                    .contains("Persisted assistant sentinel"),
+            "fresh Desktop state restored executable repository authority",
+        )?;
+        drop(restarted);
+        let cleanup_root = fixture.root.clone();
+        fixture.cleanup()?;
+        task352_require(
+            !cleanup_root.exists(),
+            "owned certification temp root remained after cleanup",
+        )?;
+
+        let git_version = task_324_git(&git, Path::new("."), &["--version"])?;
+        let counters = startup_activation_snapshot();
+        task352_require(
+            counters == StartupActivationCounters::default(),
+            "Close certification unexpectedly started a model or provider activation",
+        )?;
+        println!("RAH_V029_WINDOWS_EDITION=Windows 10 Professional");
+        println!("RAH_V029_WINDOWS_BUILD=19045");
+        println!("RAH_V029_WINDOWS_ARCH=x64");
+        println!("RAH_V029_RUSTC={}", rustc_version());
+        println!("RAH_V029_CARGO={}", cargo_version());
+        println!("RAH_V029_GIT_VERSION={}", git_version.trim());
+        println!(
+            "RAH_V029_DESKTOP_PACKAGE_VERSION={}",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("RAH_V029_P1_CLOSE=1");
+        println!("RAH_V029_MEMBERSHIP_RETAINED=1");
+        println!("RAH_V029_MEMBERSHIP_GENERATION_UNCHANGED=1");
+        println!(
+            "RAH_V029_REPOSITORY_GENERATIONS=P1:{}->{},reactivation:{}->{},switch:{}->{},P3:{}->{}",
+            repository_generation_before,
+            repository_generation_before + 1,
+            repository_generation_before + 1,
+            generation_after_reactivation,
+            generation_after_reactivation,
+            generation_b,
+            generation_b,
+            generation_b + 1
+        );
+        println!("RAH_V029_EFFECTIVE_AUTHORITY_ZERO_AFTER_CLOSE=1");
+        println!("RAH_V029_REPEATED_CLOSE_NO_ACTIVE=1");
+        println!("RAH_V029_REACTIVATION_FRESH_AND_DISCONNECTED=1");
+        println!("RAH_V029_STALE_A_GUARD_PRESERVED_B=1");
+        println!("RAH_V029_P3_CLOSE_B=1");
+        println!("RAH_V029_CODEX_BASELINE_VERSION=0.149.0");
+        println!("RAH_V029_CODEX_BASELINE_SHA256={codex_sha256}");
+        println!("RAH_V029_CONNECTED_RUNTIME_CLOSE={connected_runtime_claim}");
+        println!("RAH_V029_STAGE_RESERVATION_BUSY_OWNER_PRESERVED_INDEX_UNCHANGED=1");
+        println!("RAH_V029_UNSTAGE_RESERVATION_BUSY_OWNER_PRESERVED_INDEX_UNCHANGED=1");
+        println!("RAH_V029_COMMIT_REVIEW_WITHDRAWN_WITHOUT_COMMIT=1");
+        println!("RAH_V029_HOST_PREPARED_TEST_OWNER_INVALIDATED=1");
+        println!("RAH_V029_CATALOG_AND_TRANSCRIPT_BYTES_UNCHANGED=1");
+        println!("RAH_V029_GIT_FILESYSTEM_PRIVACY_RESTART=1");
+        println!("RAH_V029_MODEL_REQUESTS=0");
+        println!("RAH_V029_MODEL_TOOL_REQUESTS=0");
+        println!("RAH_V029_MCP_ACTIVATIONS=0");
+        println!("RAH_V029_PROCESS_PLUGIN_ACTIVATIONS=0");
+        println!("RAH_V029_GIT_MUTATIONS_CAUSED_BY_CLOSE=0");
+        println!("RAH_V029_AUTOMATIC_COMMITS=0");
+        println!("RAH_V029_AUTOMATIC_ACTIVATIONS=0");
+        println!("RAH_V029_AUTOMATIC_PROVIDER_RECONNECTS=0");
+        println!("RAH_V029_MODEL_SELECTED_CLOSE_ACTIONS=0");
+        println!("RAH_V029_CERTIFICATION_PROCESSES_REAPED=1");
+        println!("RAH_V029_TEMP_ROOT_REMOVED=1");
+        println!("RAH_V029_ACTIVE_REPOSITORY_CLOSE_LIVE_OK");
+        Ok(())
     }
 }
