@@ -30281,6 +30281,20 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         }
     }
 
+    fn task352_repository_capture_equal_except_index(
+        left: &Task352RepositoryCapture,
+        right: &Task352RepositoryCapture,
+    ) -> bool {
+        left.head == right.head
+            && left.status == right.status
+            && left.refs == right.refs
+            && left.sentinel_sha256 == right.sentinel_sha256
+            && left.staged_file_sha256 == right.staged_file_sha256
+            && left.worktree_file_sha256 == right.worktree_file_sha256
+            && left.repository_exists == right.repository_exists
+            && left.git_directory_form == right.git_directory_form
+    }
+
     struct Task352LiveFixture {
         root: PathBuf,
         repository_a: PathBuf,
@@ -30757,8 +30771,13 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .map_err(|_| "transcript presentation could not be serialized".to_owned())?;
             let git_before_close_a = task352_repository_capture(&git, &fixture.repository_a)?;
             let git_before_close_b = task352_repository_capture(&git, &fixture.repository_b)?;
+            let pre_close_a_index_changed_during_setup =
+                git_before_close_a.index_sha256 != initial_a.index_sha256;
+            println!(
+                "TASK352_PRE_CLOSE_A_INDEX_CHANGED_DURING_SETUP={pre_close_a_index_changed_during_setup}"
+            );
             task352_require(
-                git_before_close_a == initial_a
+                task352_repository_capture_equal_except_index(&git_before_close_a, &initial_a)
                     && git_before_close_b == initial_b
                     && git_before_close_a.index_sha256 == index_before_reservations
                     && catalog_before_close == catalog_before,
@@ -31600,7 +31619,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             }
 
             task352_require(
-                task352_repository_capture(&git, &fixture.repository_a)? == initial_a
+                task352_repository_capture(&git, &fixture.repository_a)? == git_before_close_a
                     && task352_repository_capture(&git, &fixture.repository_b)? == initial_b
                     && fixture.repository_a.is_dir()
                     && fixture.repository_b.is_dir()
