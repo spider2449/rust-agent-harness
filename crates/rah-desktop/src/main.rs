@@ -31715,15 +31715,12 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             restarted.remembered_workspace.snapshot(),
         ))
         .map_err(|_| "restart remembered catalog could not be serialized".to_owned())?;
-        let restart_transcript_available = !restart_transcript["resumeAvailable"]
+        let restart_transcript_inert = !restart_transcript["resumeAvailable"]
             .as_bool()
             .unwrap_or(true)
-            && restart_transcript
-                .to_string()
-                .contains("Task 352 completed transcript sentinel")
-            && restart_transcript
-                .to_string()
-                .contains("Persisted assistant sentinel");
+            && restart_transcript["records"]
+                .as_array()
+                .is_some_and(Vec::is_empty);
         let restart_member_count_zero = restarted
             .workspace_membership
             .lock()
@@ -31760,7 +31757,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             RememberedWorkspaceStartupState::Available(_)
         );
         println!(
-            "TASK352_RESTART=members_empty:{},active_none:{},member_count_zero:{},repository_none:{},workflow_empty:{},commit_none:{},index_reservation_none:{},host_idle:{},provider_none:{},not_connected:{},authority_no_repository:{},authority_generation_none:{},authority_tools_empty:{},commit_not_applicable:{},conversation_identity_none:{},conversation_history_empty:{},catalog_available:{},catalog_unchanged:{},transcript_inert_and_preserved:{}",
+            "TASK352_RESTART=members_empty:{},active_none:{},member_count_zero:{},repository_none:{},workflow_empty:{},commit_none:{},index_reservation_none:{},host_idle:{},provider_none:{},not_connected:{},authority_no_repository:{},authority_generation_none:{},authority_tools_empty:{},commit_not_applicable:{},conversation_identity_none:{},conversation_history_empty:{},catalog_available:{},catalog_unchanged:{},transcript_not_resumed:{}",
             restart_membership.members.is_empty(),
             restart_membership.active_member_id.is_none(),
             restart_member_count_zero,
@@ -31780,7 +31777,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             restart_conversation_inert.1,
             restart_catalog_available,
             restart_catalog == catalog_presentation_before,
-            restart_transcript_available,
+            restart_transcript_inert,
         );
         task352_require(
             restart_membership.members.is_empty()
@@ -31858,7 +31855,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     RememberedWorkspaceStartupState::Available(_)
                 )
                 && restart_catalog == catalog_presentation_before
-                && restart_transcript_available,
+                && restart_transcript_inert,
             "fresh Desktop state restored executable repository authority",
         )?;
         drop(restarted);
