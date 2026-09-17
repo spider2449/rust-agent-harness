@@ -31715,6 +31715,73 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             restarted.remembered_workspace.snapshot(),
         ))
         .map_err(|_| "restart remembered catalog could not be serialized".to_owned())?;
+        let restart_transcript_available = !restart_transcript["resumeAvailable"]
+            .as_bool()
+            .unwrap_or(true)
+            && restart_transcript
+                .to_string()
+                .contains("Task 352 completed transcript sentinel")
+            && restart_transcript
+                .to_string()
+                .contains("Persisted assistant sentinel");
+        let restart_member_count_zero = restarted
+            .workspace_membership
+            .lock()
+            .unwrap()
+            .member_count()
+            == 0;
+        let restart_repository_none = restarted.repository.lock().unwrap().is_none();
+        let restart_workflow_empty = {
+            let workflow = restarted.repository_workflow.lock().unwrap();
+            workflow.actions.is_empty() && !repository_workflow_has_state(&workflow)
+        };
+        let restart_commit_none = restarted.commit_capability.lock().unwrap().is_none();
+        let restart_index_reservation_none = restarted
+            .repository_index_effect_reservation
+            .lock()
+            .unwrap()
+            .is_none();
+        let restart_host_idle =
+            restarted.host_invocation.lock().unwrap().state() == CoordinatorState::Idle;
+        let restart_provider_none = restarted.provider_activation.lock().unwrap().is_none();
+        let restart_not_connected = matches!(
+            *restarted.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        );
+        let restart_conversation_inert = {
+            let conversation = restarted.conversation.lock().unwrap();
+            (
+                conversation.identity.is_none(),
+                conversation.history.is_empty(),
+            )
+        };
+        let restart_catalog_available = matches!(
+            restarted.remembered_workspace.snapshot(),
+            RememberedWorkspaceStartupState::Available(_)
+        );
+        println!(
+            "TASK352_RESTART=members_empty:{},active_none:{},member_count_zero:{},repository_none:{},workflow_empty:{},commit_none:{},index_reservation_none:{},host_idle:{},provider_none:{},not_connected:{},authority_no_repository:{},authority_generation_none:{},authority_tools_empty:{},commit_not_applicable:{},conversation_identity_none:{},conversation_history_empty:{},catalog_available:{},catalog_unchanged:{},transcript_inert_and_preserved:{}",
+            restart_membership.members.is_empty(),
+            restart_membership.active_member_id.is_none(),
+            restart_member_count_zero,
+            restart_repository_none,
+            restart_workflow_empty,
+            restart_commit_none,
+            restart_index_reservation_none,
+            restart_host_idle,
+            restart_provider_none,
+            restart_not_connected,
+            restart_authority.status == SnapshotStatus::NoRepository,
+            restart_authority.repository.current_generation.is_none(),
+            restart_authority.effective_tools.is_empty(),
+            restart_authority.reviewed_commit
+                == super::effective_authority::ReviewedCommitState::NotApplicable,
+            restart_conversation_inert.0,
+            restart_conversation_inert.1,
+            restart_catalog_available,
+            restart_catalog == catalog_presentation_before,
+            restart_transcript_available,
+        );
         task352_require(
             restart_membership.members.is_empty()
                 && restart_membership.active_member_id.is_none()
@@ -31791,15 +31858,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     RememberedWorkspaceStartupState::Available(_)
                 )
                 && restart_catalog == catalog_presentation_before
-                && !restart_transcript["resumeAvailable"]
-                    .as_bool()
-                    .unwrap_or(true)
-                && restart_transcript
-                    .to_string()
-                    .contains("Task 352 completed transcript sentinel")
-                && restart_transcript
-                    .to_string()
-                    .contains("Persisted assistant sentinel"),
+                && restart_transcript_available,
             "fresh Desktop state restored executable repository authority",
         )?;
         drop(restarted);
