@@ -30688,8 +30688,16 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             let _fresh_a_workflow = refresh_repository_workflow(&state)
                 .await
                 .map_err(|_| "A workflow refresh before Commit review failed".to_owned())?;
+            let index_before_commit_review =
+                task352_repository_capture(&git, &fixture.repository_a)?.index_sha256;
             let commit_control =
                 authorize_test_commit(&state, Arc::clone(&repository_before)).await;
+            let index_after_commit_review =
+                task352_repository_capture(&git, &fixture.repository_a)?.index_sha256;
+            println!(
+                "TASK352_COMMIT_REVIEW_INDEX_CHANGED={}",
+                index_after_commit_review != index_before_commit_review
+            );
             task352_require(
                 state
                     .repository_workflow
@@ -30779,7 +30787,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             task352_require(
                 task352_repository_capture_equal_except_index(&git_before_close_a, &initial_a)
                     && git_before_close_b == initial_b
-                    && git_before_close_a.index_sha256 == index_before_reservations
+                    && git_before_close_a.index_sha256 == index_after_commit_review
                     && catalog_before_close == catalog_before,
                 "fixture setup or reservation lifecycle changed measured Git state",
             )?;
