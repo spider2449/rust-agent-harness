@@ -1,6 +1,6 @@
 # Task 349 — Zero-Active Repository Withdrawal Foundation
 
-Status: implementation complete; local gates pass; exact-head CI pending after push.
+Status: implementation complete; local gates and exact-head CI pass.
 
 Parent checkpoint: `a5b896e6a6184c0aff66acb6f1e9a3d9b22aefbf`.
 Authoritative contract: [Task 348 active repository close contract](2026-09-16-task-348-active-repository-close-contract.md).
@@ -93,7 +93,13 @@ Results:
   PASS after scoping two test mutex guards lexically.
 - `node crates/rah-desktop/tauri_permission_test.js` — PASS.
 - `git diff --check` — PASS.
+- Exact-head full-workspace CI for the implementation commit on `master`, SHA
+  `4a29ef58533a2e9fcc9e16cb28f47b8e74cdafb7`, run `35177852723` attempt 2 —
+  PASS (formatting, workspace check, workspace tests, and workspace lint).
+  Attempt 1 hit a parallel temporary-root collision in the existing
+  `rah-tools` rename test fixture during `git init`; all 42 focused rename
+  module tests passed locally, and the same-SHA CI retry passed.
 
 No Cargo manifest, lockfile, ADR, frontend asset, default capability, or
-persistence schema changes are included. Exact-head full-workspace CI is the
-final gate after commit and push.
+persistence schema changes are included. Task 350 owns frontend enablement and
+the user-facing Close workflow.
