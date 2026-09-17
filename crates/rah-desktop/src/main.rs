@@ -31466,9 +31466,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                         == SnapshotStatus::ConnectedCurrent
                         && connected_authority.repository.captured_generation
                             == Some(generation_connected_a);
-                    let connected_tool_inventory_valid = connected_authority.effective_tools.len()
-                        == 11
-                        && eligible == expected_eligible;
+                    let connected_tool_inventory_valid =
+                        eligible.len() == 11 && eligible == expected_eligible;
                     let rejected_close_preserved_runtime = connected_close_returned_busy
                         && connected_close_kept_member_active
                         && connected_close_kept_repository
@@ -31547,6 +31546,12 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                         })? == generation_connected_a;
                     println!(
                         "TASK352_CONNECTED_CLOSE_GUARDS=busy:{connected_close_returned_busy},active:{connected_close_kept_member_active},repository:{connected_close_kept_repository},generation:{connected_close_kept_generation},runtime:{connected_close_kept_runtime},certified_identity:{connected_close_had_certified_identity},provider_absent:{connected_close_provider_absent},authority_current:{connected_authority_current},tool_inventory:{connected_tool_inventory_valid}"
+                    );
+                    println!(
+                        "TASK352_CONNECTED_TOOLS=effective_count:{},eligible_count:{},eligible_exact:{}",
+                        connected_authority.effective_tools.len(),
+                        eligible.len(),
+                        eligible == expected_eligible
                     );
                     println!(
                         "TASK352_CONNECTED_DISCONNECT=process_count:{connected_process_count_valid},process_parent:{connected_process_parent_valid},succeeded:{},reaped:{reaped_processes},no_reconnect:{no_reconnect},not_connected:{post_disconnect_inactive},provider_absent:{post_disconnect_provider_absent},member_retained:{post_disconnect_kept_member},generation_unchanged:{post_disconnect_kept_generation}",
