@@ -30439,8 +30439,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     .to_owned(),
             );
         }
-        reset_startup_activation_counters();
-
         let git =
             selected_git_executable().map_err(|_| "native Git discovery failed".to_owned())?;
         let fixture = Task352LiveFixture::new(&git)?;
@@ -30472,6 +30470,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             codex_sha256,
             catalog_presentation_before,
         ) = {
+            reset_startup_activation_counters();
             let app = tauri::Builder::default()
                 .any_thread()
                 .manage(DesktopAppState::new(storage_root.clone()))
