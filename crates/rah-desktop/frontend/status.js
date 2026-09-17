@@ -23,6 +23,8 @@ let renderedModelConfiguration = null;
 let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
 let renderedRepositoryMembership = null;
+let renderedEffectiveAuthority = null;
+let renderedCodexStatus = null;
 let repositorySwitchBlocked = false;
 let activePreparedHostReview = null;
 let rememberedCatalog = null;
@@ -31,6 +33,7 @@ const revealedRememberedLocations = new Map();
 const admittedRememberedCandidates = new Set();
 let pendingRememberedDelete = null;
 let pendingRepositoryMemberRemoval = null;
+let pendingRepositoryClose = null;
 const maxActivityEntries = 100;
 const multiFileMaxTargets = 4;
 const multiFileMaxReplacements = 16;
@@ -223,6 +226,7 @@ function renderEffectiveAuthority(snapshot) {
   const unsupportedSchema = !snapshot || snapshot.schemaVersion !== 1;
   const unsupportedStatus = !unsupportedSchema && !Object.hasOwn(authorityStatusLabels, snapshot.status);
   if (unsupportedSchema || unsupportedStatus) {
+    renderedEffectiveAuthority = null;
     statusElement.textContent = unsupportedSchema
       ? "Authority snapshot version unavailable"
       : "Authority snapshot unavailable";
@@ -233,8 +237,10 @@ function renderEffectiveAuthority(snapshot) {
     document.querySelector("#unavailable-capabilities").replaceChildren();
     document.querySelector("#effective-authority-advanced").replaceChildren();
     document.querySelector("#effective-authority-currentness-note").hidden = true;
+    updateRepositoryMembershipControls();
     return;
   }
+  renderedEffectiveAuthority = snapshot.status === "unavailable" ? null : snapshot;
   const statusText = authorityStatusLabels[snapshot.status] ?? "Unknown / unavailable";
   statusElement.textContent = statusText;
   statusElement.dataset.state = snapshot.status === "connected_current" ? "current" : "unavailable";
@@ -266,6 +272,7 @@ function renderEffectiveAuthority(snapshot) {
   const currentnessNote = document.querySelector("#effective-authority-currentness-note");
   currentnessNote.textContent = "This runtime inventory is not current for the selected context.";
   currentnessNote.hidden = !["reconnect_required", "stale"].includes(snapshot.status);
+  updateRepositoryMembershipControls();
 }
 
 function authorityListMessage(text) {
@@ -1402,6 +1409,192 @@ function updateRepositoryMembershipControls() {
     : selectedMember
       ? "Remove only removes this admitted repository from the current workspace."
       : "";
+  updateRepositoryCloseControls();
+}
+
+function repositoryCloseGuard() {
+  const activeMemberId = renderedRepositoryMembership?.activeMemberId;
+  const activeMember = renderedRepositoryMembership?.members?.find((member) =>
+    member.memberId === activeMemberId && member.active === true,
+  );
+  const generation = renderedEffectiveAuthority?.repository?.currentGeneration;
+  if (typeof activeMemberId !== "string" || activeMemberId.length === 0
+    || !activeMember || renderedEffectiveAuthority?.repository?.selected !== true
+    || !Number.isSafeInteger(generation) || generation <= 0) {
+    return null;
+  }
+  return {
+    expectedActiveMemberId: activeMemberId,
+    expectedRepositoryGeneration: generation,
+  };
+}
+
+function updateRepositoryCloseControls() {
+  const button = document.querySelector("#close-repository");
+  const hint = document.querySelector("#repository-close-hint");
+  const activeMemberId = renderedRepositoryMembership?.activeMemberId;
+  const activeMember = renderedRepositoryMembership?.members?.find((member) =>
+    member.memberId === activeMemberId && member.active === true,
+  );
+  button.disabled = true;
+  if (typeof activeMemberId !== "string" || activeMemberId.length === 0 || !activeMember) {
+    hint.textContent = "No repository is active.";
+    return;
+  }
+  if (chatRunning || activeAssistant) {
+    hint.textContent = "Wait for the current chat turn to finish before closing the repository.";
+    return;
+  }
+  if (renderedCodexStatus === "connected") {
+    hint.textContent = "Disconnect the runtime before closing the active repository.";
+    return;
+  }
+  if (renderedCodexStatus === "connecting" || renderedCodexStatus === "disconnecting") {
+    hint.textContent = "The runtime is busy. Wait for it to finish before closing the active repository.";
+    return;
+  }
+  if (renderedCodexStatus === "error") {
+    hint.textContent = "Runtime status is unavailable. Resolve the connection state before closing the active repository.";
+    return;
+  }
+  if (renderedCodexStatus !== "not connected") {
+    hint.textContent = "Repository close is currently unavailable.";
+    return;
+  }
+  if (!repositoryCloseGuard()) {
+    hint.textContent = "Repository close state is stale. Refresh and try again.";
+    return;
+  }
+  button.disabled = false;
+  hint.textContent = "Close the active repository. It will remain admitted but inactive.";
+}
+
+function repositoryCloseErrorMessage(error) {
+  return ({
+    no_active: "No repository is active.",
+    active_changed: "The active repository changed. Review the current repository before closing it.",
+    connected_or_runtime_busy: "Disconnect the runtime before closing the active repository.",
+    model_turn_busy: "Wait for the current chat turn to finish before closing the repository.",
+    repository_effect_busy: "Repository work is still in progress. Finish or resolve it before closing the repository.",
+    invalid_guard: "Repository close state is stale. Refresh and try again.",
+    unavailable: "Repository close is currently unavailable.",
+  }[error] ?? "Repository close is currently unavailable.");
+}
+
+function clearRepositorySnapshotPresentation() {
+  document.querySelector("#repository-path").textContent = "No repository is active.";
+  document.querySelector("#repository-status-entries").replaceChildren(emptyEntry("No active repository"));
+  document.querySelector("#worktree-diff-entries").replaceChildren(emptyEntry("No active repository"));
+  document.querySelector("#staged-diff-entries").replaceChildren(emptyEntry("No active repository"));
+  document.querySelector("#staged-review-state").textContent = "No repository is active.";
+  document.querySelector("#repository-error").hidden = true;
+  renderedCommitReview = null;
+  const authorize = document.querySelector("#authorize-commit");
+  authorize.hidden = true;
+  authorize.disabled = true;
+}
+
+async function refreshRepositoryCloseSuccessPresentation(invoke) {
+  await Promise.allSettled([
+    refreshEffectiveAuthority(invoke),
+    loadStatus(invoke),
+    replaceTranscript(invoke),
+  ]);
+}
+
+async function refreshRepositoryCloseNoActivePresentation(invoke) {
+  let membershipRefreshed = false;
+  await Promise.allSettled([
+    (async () => {
+      await refreshRepositoryMembership(invoke);
+      membershipRefreshed = true;
+    })(),
+    refreshEffectiveAuthority(invoke),
+    loadStatus(invoke),
+    replaceTranscript(invoke),
+  ]);
+  if (membershipRefreshed && renderedRepositoryMembership?.activeMemberId != null) {
+    await refreshRepository(invoke).catch(() => {});
+  } else {
+    clearRepositorySnapshotPresentation();
+  }
+}
+
+async function refreshRepositoryCloseChangedPresentation(invoke, message) {
+  await Promise.allSettled([
+    refreshRepositoryMembership(invoke),
+    refreshEffectiveAuthority(invoke),
+    loadStatus(invoke),
+    replaceTranscript(invoke),
+    refreshRepository(invoke),
+  ]);
+  const error = document.querySelector("#repository-error");
+  error.textContent = message;
+  error.hidden = false;
+}
+
+async function closeActiveRepository(invoke, capturedGuard) {
+  const error = document.querySelector("#repository-error");
+  const status = document.querySelector("#repository-membership-status");
+  const button = document.querySelector("#close-repository");
+  error.hidden = true;
+  status.textContent = "";
+  button.disabled = true;
+  try {
+    const result = await invoke("close_repository", {
+      request: {
+        expectedActiveMemberId: capturedGuard.expectedActiveMemberId,
+        expectedRepositoryGeneration: capturedGuard.expectedRepositoryGeneration,
+      },
+    });
+    if (result?.outcome !== "closed" || !result.membership) throw "unavailable";
+    renderRepositoryMembership(result.membership);
+    clearRepositorySnapshotPresentation();
+    status.textContent = "Repository closed. No repository is active.";
+    await refreshRepositoryCloseSuccessPresentation(invoke);
+  } catch (closeError) {
+    const message = repositoryCloseErrorMessage(closeError);
+    error.textContent = message;
+    error.hidden = false;
+    if (closeError === "no_active") {
+      status.textContent = message;
+      await refreshRepositoryCloseNoActivePresentation(invoke);
+    } else if (closeError === "active_changed" || closeError === "invalid_guard") {
+      await refreshRepositoryCloseChangedPresentation(invoke, message);
+    }
+  } finally {
+    pendingRepositoryClose = null;
+    updateRepositoryMembershipControls();
+  }
+}
+
+function installRepositoryCloseHandler(invoke) {
+  const button = document.querySelector("#close-repository");
+  const confirmation = document.querySelector("#repository-close-confirmation");
+  button.addEventListener("click", () => {
+    const capturedGuard = repositoryCloseGuard();
+    if (!capturedGuard || button.disabled) {
+      updateRepositoryCloseControls();
+      if (!capturedGuard) {
+        document.querySelector("#repository-close-hint").textContent = "Repository close state is stale. Refresh and try again.";
+        void refreshRepositoryMembership(invoke).catch(() => {});
+        void refreshEffectiveAuthority(invoke);
+      }
+      return;
+    }
+    pendingRepositoryClose = {
+      expectedActiveMemberId: capturedGuard.expectedActiveMemberId,
+      expectedRepositoryGeneration: capturedGuard.expectedRepositoryGeneration,
+    };
+    confirmation.showModal();
+  });
+  confirmation.addEventListener("close", (event) => {
+    const capturedGuard = pendingRepositoryClose;
+    pendingRepositoryClose = null;
+    if (event.target.returnValue !== "confirm" || !capturedGuard) return;
+    button.disabled = true;
+    void closeActiveRepository(invoke, capturedGuard);
+  });
 }
 
 async function refreshRepositoryMembership(invoke) {
@@ -1833,6 +2026,8 @@ function appendActivity(payload) {
 }
 
 function showBackendError() {
+  renderedCodexStatus = null;
+  updateRepositoryMembershipControls();
   const error = document.querySelector("#backend-error");
   error.textContent = "Desktop backend unavailable";
   error.hidden = false;
@@ -1861,6 +2056,7 @@ function waitForTauriApi() {
 
 async function loadStatus(invoke) {
   const status = await invoke("app_status");
+  renderedCodexStatus = status.codexStatus;
   renderRows(document.querySelector("#application-status"), applicationRows, status);
   renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
   const button = document.querySelector("#codex-connection");
@@ -1913,6 +2109,7 @@ async function loadStatus(invoke) {
   } else {
     connectionError.hidden = true;
   }
+  updateRepositoryCloseControls();
 }
 
 function appendMessage(role, text) {
@@ -1992,6 +2189,7 @@ function handleChatEvent(invoke, event) {
   const payload = event.payload;
   if (payload.kind === "started") {
     activeAssistant = appendMessage("RAH", "");
+    updateRepositoryMembershipControls();
   } else if (payload.kind === "delta" && activeAssistant) {
     activeAssistant.textContent += payload.text;
   } else if (payload.kind === "failed" || payload.kind === "cancelled") {
@@ -2000,6 +2198,7 @@ function handleChatEvent(invoke, event) {
   if (["completed", "failed", "cancelled"].includes(payload.kind)) {
     chatRunning = false;
     activeAssistant = null;
+    updateRepositoryMembershipControls();
     void loadStatus(invoke).catch(() => showBackendError());
   }
 }
@@ -2061,6 +2260,7 @@ async function initializeDesktop() {
   installHostFormHandlers(invoke);
   installRememberedWorkspaceHandlers(invoke, dialog);
   installRepositoryMemberRemovalHandler(invoke);
+  installRepositoryCloseHandler(invoke);
   document.querySelector("#codex-connection").addEventListener("click", () => {
     void toggleCodexConnection(invoke);
   });
@@ -2343,6 +2543,7 @@ async function initializeDesktop() {
       appendMessage("You", prompt.value);
       prompt.value = "";
       chatRunning = true;
+      updateRepositoryMembershipControls();
       await loadStatus(invoke);
     } catch (error) {
       showChatError(error);

@@ -22,6 +22,13 @@ assert.match(source, /Object\.hasOwn\(authorityStatusLabels, snapshot\.status\)/
 assert.match(source, /snapshot\.status === "connected_current"/);
 assert.match(source, /renderEffectiveAuthority\(\{ schemaVersion: 0 \}\)/);
 assert.match(source, /invoke\("get_effective_authority_snapshot"\)/);
+assert.match(source, /renderedEffectiveAuthority = snapshot\.status === "unavailable" \? null : snapshot/);
+assert.match(source, /renderedEffectiveAuthority = null/);
+assert.match(source, /repository\.currentGeneration == null \? "Not available" : String\(repository\.currentGeneration\)/);
+const closeGuard = source.slice(source.indexOf("function repositoryCloseGuard"), source.indexOf("function updateRepositoryCloseControls"));
+assert.match(closeGuard, /renderedEffectiveAuthority\?\.repository\?\.currentGeneration/);
+assert.match(closeGuard, /renderedEffectiveAuthority\?\.repository\?\.selected !== true/);
+assert.match(closeGuard, /Number\.isSafeInteger\(generation\)/);
 assert.match(source, /function renderSourceLabel\(value\)/);
 assert.match(source, /renderSourceLabel\(tool\.sourceLabel\)/);
 assert.match(source, /repository_local_branch_creation: "Local branch creation"/);

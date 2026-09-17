@@ -96,11 +96,21 @@
             <select id="repository-member-selector" aria-describedby="repository-membership-hint"></select>
             <div class="repository-membership-actions">
               <button id="activate-repository-member" type="button" disabled>Switch Repository</button>
+              <button id="close-repository" type="button" aria-describedby="repository-close-hint" disabled>Close Repository</button>
               <button id="remove-repository-member" type="button" disabled>Remove</button>
             </div>
             <p id="repository-membership-hint" class="model-hint">Only the selected repository supplies executable repository authority. Admission is process-local and ends when Desktop exits.</p>
+            <p id="repository-close-hint" class="model-hint" aria-live="polite">No repository is active.</p>
             <p id="repository-member-removal-hint" class="model-hint" aria-live="polite"></p>
             <p id="repository-membership-status" class="authority-status" aria-live="polite"></p>
+            <dialog id="repository-close-confirmation" aria-labelledby="repository-close-title">
+              <h3 id="repository-close-title">Close active repository?</h3>
+              <p id="repository-close-copy">Close the active repository? It will remain admitted but inactive. Repository files and remembered workspaces will not be deleted. Disconnect first if a runtime is connected.</p>
+              <form method="dialog">
+                <button value="cancel">Cancel</button>
+                <button id="repository-close-confirm" value="confirm">Close Repository</button>
+              </form>
+            </dialog>
             <dialog id="repository-member-removal-confirmation" aria-labelledby="repository-member-removal-title">
               <h3 id="repository-member-removal-title">Remove admitted repository?</h3>
               <p id="repository-member-removal-copy">Remove this repository from the current workspace? This removes only the current process-local workspace membership. Repository files will not be deleted, and any remembered workspace entry will remain.</p>

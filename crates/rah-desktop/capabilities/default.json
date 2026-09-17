@@ -30,6 +30,7 @@
     "allow-repository-membership",
     "allow-remove-repository-member",
     "allow-activate-repository-member",
+    "allow-close-repository",
     "allow-connect-codex",
     "allow-disconnect-codex",
     "allow-repository-snapshot",

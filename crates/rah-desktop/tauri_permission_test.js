@@ -14,6 +14,55 @@ const closeRepositoryPermission = fs.readFileSync(`${root}/permissions/autogener
 const capability = JSON.parse(fs.readFileSync(`${root}/capabilities/default.json`, "utf8"));
 const permissions = capability.permissions;
 
+assert.deepEqual(permissions, [
+  "core:event:allow-listen",
+  "core:event:allow-unlisten",
+  "allow-app-status",
+  "allow-trusted-profile-selection",
+  "allow-choose-trusted-profile",
+  "allow-restore-trusted-profile",
+  "allow-forget-trusted-profile",
+  "allow-clear-trusted-profile",
+  "allow-model-configuration",
+  "allow-set-model-configuration",
+  "allow-reset-model-preferences",
+  "allow-commit-identity",
+  "allow-set-commit-identity",
+  "allow-desktop-preferences-warning",
+  "allow-test-llama-cpp-endpoint",
+  "allow-choose-repository",
+  "allow-remembered-workspace-catalog",
+  "allow-reveal-remembered-workspace-location",
+  "allow-remember-workspace-candidate",
+  "allow-update-remembered-workspace-candidate",
+  "allow-delete-remembered-workspace-candidate",
+  "allow-reorder-remembered-workspace-candidates",
+  "allow-admit-remembered-workspace-candidate",
+  "allow-repository-membership",
+  "allow-remove-repository-member",
+  "allow-activate-repository-member",
+  "allow-close-repository",
+  "allow-connect-codex",
+  "allow-disconnect-codex",
+  "allow-repository-snapshot",
+  "allow-repository-authorize-commit-review",
+  "allow-repository-stage-action",
+  "allow-repository-unstage-action",
+  "allow-send-chat",
+  "allow-cancel-chat",
+  "allow-new-conversation",
+  "allow-clear-conversation-history",
+  "allow-resume-previous-conversation",
+  "allow-conversation-transcript",
+  "allow-get-effective-authority-snapshot",
+  "allow-host-invoke-read",
+  "allow-host-prepare-repo-create-branch",
+  "allow-host-prepare-repo-patch",
+  "allow-host-prepare-repo-rename-file",
+  "allow-host-confirm-tool-invocation",
+  "allow-host-cancel-tool-invocation",
+]);
+
 assert.equal((buildManifest.match(/"host_prepare_repo_rename_file"/g) ?? []).length, 1);
 assert.match(buildManifest, /AppManifest::new\(\)\.commands\(&\[/);
 assert.match(generatedPermission, /identifier = "allow-host-prepare-repo-rename-file"/);
@@ -55,7 +104,9 @@ assert.match(activateMemberPermission, /commands\.allow = \["activate_repository
 assert.match(closeRepositoryPermission, /identifier = "allow-close-repository"/);
 assert.match(closeRepositoryPermission, /commands\.allow = \["close_repository"\]/);
 assert.match(closeRepositoryPermission, /identifier = "deny-close-repository"/);
-assert.equal(permissions.includes("allow-close-repository"), false);
+assert.deepEqual(permissions.filter((permission) => permission === "allow-close-repository"), [
+  "allow-close-repository",
+]);
 assert.deepEqual(permissions.filter((permission) => permission === "allow-repository-membership"), [
   "allow-repository-membership",
 ]);
@@ -68,5 +119,6 @@ assert.deepEqual(permissions.filter((permission) => permission.startsWith("allow
 assert.deepEqual(permissions.filter((permission) => permission.startsWith("allow-host-cancel-tool-invocation")), [
   "allow-host-cancel-tool-invocation",
 ]);
+assert.equal(permissions.some((permission) => permission.includes("*")), false);
 
 console.log("Tauri permission tests passed");
