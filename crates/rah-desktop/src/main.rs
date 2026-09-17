@@ -30681,7 +30681,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     .repository_workflow
                     .lock()
                     .map_err(|_| "workflow lock was poisoned".to_owned())?
-                    .commit_review
+                    .review
                     .is_some()
                     && state
                         .repository_workflow
