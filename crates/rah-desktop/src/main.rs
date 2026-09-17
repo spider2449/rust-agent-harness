@@ -30478,6 +30478,10 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 .build(tauri::generate_context!())
                 .map_err(|_| "Task 352 Desktop app construction failed".to_owned())?;
             let state = app.state::<DesktopAppState>();
+            task352_require(
+                startup_activation_snapshot() == StartupActivationCounters::default(),
+                "startup activated a model or provider before explicit repository actions",
+            )?;
             let remembered_id = add_remembered_candidate(
                 &state,
                 "Task 352 Repository A",
@@ -31346,10 +31350,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 codex_version.status.success()
                     && String::from_utf8_lossy(&codex_version.stdout).trim() == "codex-cli 0.149.0",
                 "certified Codex baseline did not report version 0.149.0",
-            )?;
-            task352_require(
-                startup_activation_snapshot() == StartupActivationCounters::default(),
-                "startup unexpectedly activated a model or provider before explicit Codex Connect",
             )?;
 
             activate_admitted_member(&state, member_a)
