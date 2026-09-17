@@ -27,6 +27,7 @@ fn main() {
             "repository_membership",
             "remove_repository_member",
             "activate_repository_member",
+            "close_repository",
             "connect_codex",
             "disconnect_codex",
             "repository_snapshot",

@@ -86,6 +86,13 @@ pub(crate) enum WorkspaceMembershipRemoval {
     NotFound,
 }
 
+pub(crate) enum WorkspaceMembershipDeactivation {
+    Deactivated,
+    NoActive,
+    ActiveChanged,
+    NotFound,
+}
+
 impl WorkspaceMembershipState {
     pub(crate) fn new() -> Self {
         Self {
@@ -162,6 +169,25 @@ impl WorkspaceMembershipState {
         }
     }
 
+    pub(crate) fn deactivate_expected(
+        &mut self,
+        expected_member: RepositoryMemberId,
+    ) -> WorkspaceMembershipDeactivation {
+        if !self.members.contains_key(&expected_member) {
+            return WorkspaceMembershipDeactivation::NotFound;
+        }
+        match self.active_member {
+            None => WorkspaceMembershipDeactivation::NoActive,
+            Some(active_member) if active_member != expected_member => {
+                WorkspaceMembershipDeactivation::ActiveChanged
+            }
+            Some(_) => {
+                self.active_member = None;
+                WorkspaceMembershipDeactivation::Deactivated
+            }
+        }
+    }
+
     pub(crate) fn relation_to_existing(
         &self,
         identity: &RepositoryAdmissionIdentity,
@@ -175,7 +201,33 @@ impl WorkspaceMembershipState {
 
 #[cfg(test)]
 mod tests {
-    use super::{MEMBER_SELECTOR_MAX_BYTES, RepositoryMemberId};
+    use super::{
+        MEMBER_SELECTOR_MAX_BYTES, NEXT_WORKSPACE_EPOCH, RepositoryMemberId,
+        WorkspaceMembershipDeactivation, WorkspaceMembershipState,
+    };
+    use rah_tools::RepositoryAdmissionIdentity;
+    use std::sync::atomic::Ordering;
+
+    fn admitted_membership() -> (
+        WorkspaceMembershipState,
+        RepositoryMemberId,
+        RepositoryMemberId,
+    ) {
+        let sequence = NEXT_WORKSPACE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "rah-membership-primitive-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join(".git")).expect("test repository should be created");
+        let executable = std::env::current_exe().expect("test executable should exist");
+        let identity = RepositoryAdmissionIdentity::capture(executable, &root)
+            .expect("test repository identity should capture");
+        let mut membership = WorkspaceMembershipState::new();
+        let a = membership.admit("A".to_owned(), root.clone(), identity.clone());
+        let b = membership.admit("B".to_owned(), root.clone(), identity);
+        std::fs::remove_dir_all(&root).expect("test repository should be removable");
+        (membership, a.id, b.id)
+    }
 
     #[test]
     fn selectors_are_bounded_opaque_and_strictly_parseable() {
@@ -211,5 +263,98 @@ mod tests {
             RepositoryMemberId::parse_selector(&"m1-1".repeat(MEMBER_SELECTOR_MAX_BYTES)),
             None
         );
+    }
+
+    #[test]
+    fn deactivate_retains_member_identity_and_membership_generation() {
+        let (mut membership, member_a, _) = admitted_membership();
+        let before_generation = membership.membership_generation();
+        assert!(membership.publish_active(member_a));
+
+        assert!(matches!(
+            membership.deactivate_expected(member_a),
+            WorkspaceMembershipDeactivation::Deactivated
+        ));
+        assert_eq!(membership.active_member(), None);
+        assert_eq!(membership.member_count(), 2);
+        assert_eq!(
+            membership.member(member_a).map(|member| member.id),
+            Some(member_a)
+        );
+        assert_eq!(membership.membership_generation(), before_generation);
+    }
+
+    #[test]
+    fn deactivate_retains_all_members_and_order() {
+        let (mut membership, member_a, member_b) = admitted_membership();
+        let before: Vec<_> = membership.members().map(|member| member.id).collect();
+        let before_generation = membership.membership_generation();
+        assert!(membership.publish_active(member_a));
+
+        assert!(matches!(
+            membership.deactivate_expected(member_a),
+            WorkspaceMembershipDeactivation::Deactivated
+        ));
+        assert_eq!(
+            membership
+                .members()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(membership.member_count(), 2);
+        assert!(membership.member(member_a).is_some());
+        assert!(membership.member(member_b).is_some());
+        assert_eq!(membership.active_member(), None);
+        assert_eq!(membership.membership_generation(), before_generation);
+    }
+
+    #[test]
+    fn deactivate_rejects_no_active_changed_and_unknown_without_mutation() {
+        let (mut membership, member_a, member_b) = admitted_membership();
+        let before_generation = membership.membership_generation();
+        let before_members: Vec<_> = membership.members().map(|member| member.id).collect();
+        let unknown = RepositoryMemberId {
+            workspace_epoch: u64::MAX,
+            ordinal: u64::MAX,
+        };
+
+        assert!(matches!(
+            membership.deactivate_expected(member_a),
+            WorkspaceMembershipDeactivation::NoActive
+        ));
+        assert!(membership.publish_active(member_b));
+        assert!(matches!(
+            membership.deactivate_expected(member_a),
+            WorkspaceMembershipDeactivation::ActiveChanged
+        ));
+        assert!(matches!(
+            membership.deactivate_expected(unknown),
+            WorkspaceMembershipDeactivation::NotFound
+        ));
+        assert_eq!(membership.active_member(), Some(member_b));
+        assert_eq!(membership.membership_generation(), before_generation);
+        assert_eq!(
+            membership
+                .members()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            before_members
+        );
+    }
+
+    #[test]
+    fn retained_member_can_be_explicitly_reactivated() {
+        let (mut membership, member_a, _) = admitted_membership();
+        let before_generation = membership.membership_generation();
+        assert!(membership.publish_active(member_a));
+        assert!(matches!(
+            membership.deactivate_expected(member_a),
+            WorkspaceMembershipDeactivation::Deactivated
+        ));
+
+        assert!(membership.publish_active(member_a));
+        assert_eq!(membership.active_member(), Some(member_a));
+        assert_eq!(membership.membership_generation(), before_generation);
     }
 }
