@@ -31426,46 +31426,58 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                             expected_repository_generation: generation_connected_a,
                         },
                     );
-                    let rejected_close_preserved_runtime = matches!(
+                    let connected_close_returned_busy = matches!(
                         connected_close,
                         Err(CloseRepositoryError::ConnectedOrRuntimeBusy)
-                    ) && state
+                    );
+                    let connected_close_kept_member_active = state
                         .workspace_membership
                         .lock()
                         .map_err(|_| "connected-case membership lock was poisoned".to_owned())?
                         .active_member()
-                        == Some(member_a)
-                        && state
-                            .repository
-                            .lock()
-                            .map_err(|_| "connected-case repository lock was poisoned".to_owned())?
-                            .as_ref()
-                            .is_some_and(|repository| {
-                                Arc::ptr_eq(repository, &connected_repository_a)
-                            })
-                        && *state.repository_generation.lock().map_err(|_| {
+                        == Some(member_a);
+                    let connected_close_kept_repository = state
+                        .repository
+                        .lock()
+                        .map_err(|_| "connected-case repository lock was poisoned".to_owned())?
+                        .as_ref()
+                        .is_some_and(|repository| Arc::ptr_eq(repository, &connected_repository_a));
+                    let connected_close_kept_generation =
+                        *state.repository_generation.lock().map_err(|_| {
                             "connected-case generation lock was poisoned".to_owned()
-                        })? == generation_connected_a
-                        && matches!(
-                            &*state
-                                .connection
-                                .lock()
-                                .map_err(|_| "connected-case lifecycle lock was poisoned".to_owned())?,
-                            ConnectionState::Connected { runtime, source: CodexExecutableSource::CertifiedBaseline, .. }
-                                if same_arc(runtime, &connected_runtime)
-                        )
-                        && connected_source == CodexExecutableSource::CertifiedBaseline
-                        && result.status == "connected"
-                        && state
-                            .provider_activation
+                        })? == generation_connected_a;
+                    let connected_close_kept_runtime = matches!(
+                        &*state
+                            .connection
                             .lock()
-                            .map_err(|_| "connected-case provider lock was poisoned".to_owned())?
-                            .is_none()
-                        && connected_authority.status == SnapshotStatus::ConnectedCurrent
+                            .map_err(|_| "connected-case lifecycle lock was poisoned".to_owned())?,
+                        ConnectionState::Connected { runtime, source: CodexExecutableSource::CertifiedBaseline, .. }
+                            if same_arc(runtime, &connected_runtime)
+                    );
+                    let connected_close_had_certified_identity = connected_source
+                        == CodexExecutableSource::CertifiedBaseline
+                        && result.status == "connected";
+                    let connected_close_provider_absent = state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "connected-case provider lock was poisoned".to_owned())?
+                        .is_none();
+                    let connected_authority_current = connected_authority.status
+                        == SnapshotStatus::ConnectedCurrent
                         && connected_authority.repository.captured_generation
-                            == Some(generation_connected_a)
-                        && connected_authority.effective_tools.len() == 11
+                            == Some(generation_connected_a);
+                    let connected_tool_inventory_valid = connected_authority.effective_tools.len()
+                        == 11
                         && eligible == expected_eligible;
+                    let rejected_close_preserved_runtime = connected_close_returned_busy
+                        && connected_close_kept_member_active
+                        && connected_close_kept_repository
+                        && connected_close_kept_generation
+                        && connected_close_kept_runtime
+                        && connected_close_had_certified_identity
+                        && connected_close_provider_absent
+                        && connected_authority_current
+                        && connected_tool_inventory_valid;
 
                     let disconnect_result = disconnect_codex(app.state()).await;
                     let mut reaped_processes = true;
@@ -31494,52 +31506,63 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                         }
                         _ => false,
                     };
-                    task352_require(
-                        rejected_close_preserved_runtime
-                            && connected_process_ids
-                                .as_ref()
-                                .is_ok_and(|process_ids| process_ids.len() == 1)
-                            && connected_process_ids.as_ref().is_ok_and(|process_ids| {
-                                processes_after_connect.as_ref().is_ok_and(|processes| {
-                                    process_ids.iter().all(|process_id| {
-                                        processes
-                                            .iter()
-                                            .find(|process| process.pid == *process_id)
-                                            .is_some_and(|process| {
-                                                process.parent_pid == 0
-                                                    || process.parent_pid == std::process::id()
-                                            })
-                                    })
+                    let connected_process_count_valid = connected_process_ids
+                        .as_ref()
+                        .is_ok_and(|process_ids| process_ids.len() == 1);
+                    let connected_process_parent_valid =
+                        connected_process_ids.as_ref().is_ok_and(|process_ids| {
+                            processes_after_connect.as_ref().is_ok_and(|processes| {
+                                process_ids.iter().all(|process_id| {
+                                    processes
+                                        .iter()
+                                        .find(|process| process.pid == *process_id)
+                                        .is_some_and(|process| {
+                                            process.parent_pid == 0
+                                                || process.parent_pid == std::process::id()
+                                        })
                                 })
                             })
+                        });
+                    let post_disconnect_inactive = matches!(
+                        *state
+                            .connection
+                            .lock()
+                            .map_err(|_| "post-disconnect lock was poisoned".to_owned())?,
+                        ConnectionState::NotConnected
+                    );
+                    let post_disconnect_provider_absent = state
+                        .provider_activation
+                        .lock()
+                        .map_err(|_| "post-disconnect provider lock was poisoned".to_owned())?
+                        .is_none();
+                    let post_disconnect_kept_member = state
+                        .workspace_membership
+                        .lock()
+                        .map_err(|_| "post-disconnect membership lock was poisoned".to_owned())?
+                        .active_member()
+                        == Some(member_a);
+                    let post_disconnect_kept_generation =
+                        *state.repository_generation.lock().map_err(|_| {
+                            "post-disconnect generation lock was poisoned".to_owned()
+                        })? == generation_connected_a;
+                    println!(
+                        "TASK352_CONNECTED_CLOSE_GUARDS=busy:{connected_close_returned_busy},active:{connected_close_kept_member_active},repository:{connected_close_kept_repository},generation:{connected_close_kept_generation},runtime:{connected_close_kept_runtime},certified_identity:{connected_close_had_certified_identity},provider_absent:{connected_close_provider_absent},authority_current:{connected_authority_current},tool_inventory:{connected_tool_inventory_valid}"
+                    );
+                    println!(
+                        "TASK352_CONNECTED_DISCONNECT=process_count:{connected_process_count_valid},process_parent:{connected_process_parent_valid},succeeded:{},reaped:{reaped_processes},no_reconnect:{no_reconnect},not_connected:{post_disconnect_inactive},provider_absent:{post_disconnect_provider_absent},member_retained:{post_disconnect_kept_member},generation_unchanged:{post_disconnect_kept_generation}",
+                        disconnect_result.is_ok()
+                    );
+                    task352_require(
+                        rejected_close_preserved_runtime
+                            && connected_process_count_valid
+                            && connected_process_parent_valid
                             && disconnect_result.is_ok()
                             && reaped_processes
                             && no_reconnect
-                            && matches!(
-                                *state
-                                    .connection
-                                    .lock()
-                                    .map_err(|_| "post-disconnect lock was poisoned".to_owned())?,
-                                ConnectionState::NotConnected
-                            )
-                            && state
-                                .provider_activation
-                                .lock()
-                                .map_err(|_| {
-                                    "post-disconnect provider lock was poisoned".to_owned()
-                                })?
-                                .is_none()
-                            && state
-                                .workspace_membership
-                                .lock()
-                                .map_err(|_| {
-                                    "post-disconnect membership lock was poisoned".to_owned()
-                                })?
-                                .active_member()
-                                == Some(member_a)
-                            && *state.repository_generation.lock().map_err(|_| {
-                                "post-disconnect generation lock was poisoned".to_owned()
-                            })? == generation_connected_a,
+                            && post_disconnect_inactive
+                            && post_disconnect_provider_absent
+                            && post_disconnect_kept_member
+                            && post_disconnect_kept_generation,
                         "connected Close did not reject without shutdown and allow explicit Disconnect",
                     )?;
                     let git_before_final_connected_close =
