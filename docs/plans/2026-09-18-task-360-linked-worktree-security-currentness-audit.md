@@ -171,10 +171,10 @@ Captured root, `.git`, private/common directory, registration, backlink,
 commondir, and Git executable replacement/currentness tests fail stale. Real
 external `git worktree move` and remove fixtures do not migrate the retained
 identity. Locked and present is accepted; missing or prunable is rejected.
-Windows junction coverage rejects root, root `.git`, private, common, and
-registration ancestry cases. Root aliases are reduced by canonical path and
-filesystem identity. This is deterministic reparse coverage on Windows, not a
-race-free TOCTOU claim.
+Windows junction coverage rejects root, root `.git`, private, common, the
+`worktrees` parent, and registration directory ancestry. Root aliases are
+reduced by canonical path and filesystem identity. This is deterministic
+reparse coverage on Windows, not a race-free TOCTOU claim.
 
 The active root's own `.git` file is skipped as root metadata by nested-boundary
 checks. Nested `.git` directories, nested gitfiles, submodules, and linked-root

@@ -1292,6 +1292,16 @@ mod tests {
         std::fs::remove_dir(&common).unwrap();
         std::fs::rename(&common_backup, &common).unwrap();
         assert!(common_rejected);
+
+        let worktrees = original_layout.common_git_dir().join("worktrees");
+        let worktrees_backup = worktrees.with_file_name("worktrees-backup");
+        std::fs::rename(&worktrees, &worktrees_backup).unwrap();
+        junction(&worktrees, &worktrees_backup);
+        let worktrees_rejected =
+            RepositoryGitLayout::capture(&fixture.git, &fixture.linked_a).is_err();
+        std::fs::remove_dir(&worktrees).unwrap();
+        std::fs::rename(&worktrees_backup, &worktrees).unwrap();
+        assert!(worktrees_rejected);
     }
 
     #[tokio::test]
