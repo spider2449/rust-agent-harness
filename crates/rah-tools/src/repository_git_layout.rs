@@ -209,10 +209,10 @@ impl RepositoryGitLayout {
     fn capture_linked(git_file_path: &Path) -> Result<LayoutEvidence, ToolError> {
         let git_file = capture_file(git_file_path, GITFILE_LIMIT)?;
         let git_dir_spelling = parse_single_record(&git_file.bytes, b"gitdir: ")?;
-        let git_dir_spelling = PathBuf::from(git_dir_spelling);
-        if !git_dir_spelling.is_absolute() {
-            return Err(layout_error());
-        }
+        let git_dir_spelling = resolve_recorded_path(
+            git_file_path.parent().ok_or_else(layout_error)?,
+            Path::new(git_dir_spelling),
+        )?;
         reject_ancestry(&git_dir_spelling)?;
         let private_git_dir = fs::canonicalize(&git_dir_spelling).map_err(|_| layout_error())?;
         require_directory(&private_git_dir)?;
@@ -223,9 +223,12 @@ impl RepositoryGitLayout {
         let commondir = capture_file(&commondir_path, RELATION_FILE_LIMIT)?;
         let backlink_target = parse_path_record(&backlink.bytes)?;
         let canonical_git_file = fs::canonicalize(git_file_path).map_err(|_| layout_error())?;
-        if !backlink_target.is_absolute()
-            || fs::canonicalize(&backlink_target).map_err(|_| layout_error())? != canonical_git_file
-        {
+        let backlink_target = resolve_recorded_path(
+            backlink_path.parent().ok_or_else(layout_error)?,
+            &backlink_target,
+        )?;
+        reject_ancestry(&backlink_target)?;
+        if fs::canonicalize(&backlink_target).map_err(|_| layout_error())? != canonical_git_file {
             return Err(layout_error());
         }
         let common_spelling = parse_single_record(&commondir.bytes, b"")?;
@@ -507,6 +510,24 @@ fn parse_single_record<'a>(bytes: &'a [u8], prefix: &[u8]) -> Result<&'a str, To
 fn parse_path_record(bytes: &[u8]) -> Result<PathBuf, ToolError> {
     let record = parse_single_record(bytes, b"")?;
     Ok(PathBuf::from(record))
+}
+
+fn resolve_recorded_path(base: &Path, spelling: &Path) -> Result<PathBuf, ToolError> {
+    if spelling.is_absolute() {
+        return Ok(spelling.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    if spelling.has_root()
+        || matches!(
+            spelling.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+    {
+        return Err(layout_error());
+    }
+
+    Ok(base.join(spelling))
 }
 
 fn require_directory(path: &Path) -> Result<(), ToolError> {
@@ -792,8 +813,147 @@ pub(crate) mod test_fixture {
 mod tests {
     use std::process::Command;
 
-    use super::{RepositoryGitLayout, test_fixture::WorktreeFixture};
+    use super::{RepositoryGitLayout, selected_worktree_registered, test_fixture::WorktreeFixture};
     use crate::{RepositoryAdmissionIdentity, RepositoryAdmissionRelation};
+
+    struct ParserRoot(std::path::PathBuf);
+
+    impl ParserRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("rah-worktree-list-parser-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+    }
+
+    impl Drop for ParserRoot {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn porcelain_record(root: &std::path::Path, tail: &str) -> String {
+        format!(
+            "worktree {}\0HEAD {}\0{}\0\0",
+            root.display(),
+            "0123456789abcdef0123456789abcdef01234567",
+            tail
+        )
+    }
+
+    #[test]
+    fn worktree_list_parser_rejects_malformed_and_ambiguous_records() {
+        let root = ParserRoot::new();
+        let valid = porcelain_record(&root.0, "branch refs/heads/topic");
+        assert!(selected_worktree_registered(valid.as_bytes(), &root.0).unwrap());
+        assert!(
+            selected_worktree_registered(
+                porcelain_record(&root.0, "branch refs/heads/topic\0locked portable media")
+                    .as_bytes(),
+                &root.0
+            )
+            .unwrap()
+        );
+
+        let missing_worktree = format!(
+            "HEAD {}\0branch refs/heads/topic\0\0",
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let missing_head = format!("worktree {}\0branch refs/heads/topic\0\0", root.0.display());
+        let duplicate_head = format!(
+            "worktree {}\0HEAD {}\0HEAD {}\0branch refs/heads/topic\0\0",
+            root.0.display(),
+            "0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let malformed_oid = format!(
+            "worktree {}\0HEAD not-an-object-id\0branch refs/heads/topic\0\0",
+            root.0.display()
+        );
+        let both_attached_and_detached = format!(
+            "worktree {}\0HEAD {}\0branch refs/heads/topic\0detached\0\0",
+            root.0.display(),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let neither_attached_nor_detached = format!(
+            "worktree {}\0HEAD {}\0\0",
+            root.0.display(),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let unknown_field = format!(
+            "worktree {}\0HEAD {}\0branch refs/heads/topic\0unknown-field\0\0",
+            root.0.display(),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let prunable = porcelain_record(&root.0, "branch refs/heads/topic\0prunable missing");
+        let truncated = valid.trim_end_matches('\0').to_owned();
+        for malformed in [
+            missing_worktree,
+            missing_head,
+            duplicate_head,
+            malformed_oid,
+            both_attached_and_detached,
+            neither_attached_nor_detached,
+            unknown_field,
+            prunable,
+            truncated,
+        ] {
+            assert!(
+                selected_worktree_registered(malformed.as_bytes(), &root.0).is_err(),
+                "malformed worktree list record unexpectedly passed: {malformed:?}"
+            );
+        }
+
+        assert!(
+            !selected_worktree_registered(format!("{valid}{valid}").as_bytes(), &root.0).unwrap()
+        );
+        assert!(selected_worktree_registered(b"", &root.0).is_ok_and(|matched| !matched));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_list_parser_fails_closed_for_non_utf8_path_fields() {
+        let root = ParserRoot::new();
+        let mut record = b"worktree ".to_vec();
+        record.extend_from_slice(&[0xff]);
+        record.extend_from_slice(
+            b"\0HEAD 0123456789abcdef0123456789abcdef01234567\0branch refs/heads/topic\0\0",
+        );
+        assert!(selected_worktree_registered(&record, &root.0).is_err());
+    }
+
+    #[tokio::test]
+    async fn relative_linked_gitfile_and_backlink_are_validated_by_git_semantics() {
+        let fixture = WorktreeFixture::new();
+        let layout = RepositoryGitLayout::capture(&fixture.git, &fixture.linked_a).unwrap();
+        let private = layout.git_dir().to_path_buf();
+        let root_gitfile = fixture.linked_a.join(".git");
+        let backlink = private.join("gitdir");
+        let original_gitfile = std::fs::read(&root_gitfile).unwrap();
+        let original_backlink = std::fs::read(&backlink).unwrap();
+
+        let registration = private.file_name().unwrap().to_string_lossy();
+        std::fs::write(
+            &root_gitfile,
+            format!("gitdir: ../main/.git/worktrees/{registration}\n"),
+        )
+        .unwrap();
+        std::fs::write(&backlink, b"../../../../linked-a/.git\n").unwrap();
+
+        let identity = RepositoryAdmissionIdentity::capture(&fixture.git, &fixture.linked_a)
+            .expect("relative Git linking records resolve to the retained standard layout");
+        identity
+            .validate_git()
+            .await
+            .expect("native Git semantic probes should confirm relative linking records");
+        identity
+            .revalidate(&fixture.git, &fixture.linked_a)
+            .expect("relative linking record bytes should remain current");
+
+        std::fs::write(&root_gitfile, original_gitfile).unwrap();
+        std::fs::write(&backlink, original_backlink).unwrap();
+    }
 
     #[tokio::test]
     async fn real_main_and_linked_worktrees_validate_and_share_only_common_identity() {

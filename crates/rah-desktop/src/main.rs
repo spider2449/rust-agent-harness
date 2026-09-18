@@ -6097,6 +6097,15 @@ async fn admit_repository(
     git: &Path,
     selected_path: &Path,
 ) -> Result<RepositoryMemberId, FrontendError> {
+    admit_repository_with_semantic_validation(state, git, selected_path).await
+}
+
+#[cfg(target_os = "windows")]
+async fn admit_repository_with_semantic_validation(
+    state: &DesktopAppState,
+    git: &Path,
+    selected_path: &Path,
+) -> Result<RepositoryMemberId, FrontendError> {
     let identity = RepositoryAdmissionIdentity::capture(git, selected_path).map_err(|error| {
         let _ = error;
         tracing::warn!("repository admission identity capture failed");
@@ -6122,6 +6131,11 @@ fn admit_repository(
     git: &Path,
     selected_path: &Path,
 ) -> Result<RepositoryMemberId, FrontendError> {
+    if std::fs::symlink_metadata(selected_path.join(".git"))
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(FrontendError::RepositoryInvalid);
+    }
     let identity = RepositoryAdmissionIdentity::capture(git, selected_path).map_err(|error| {
         let _ = error;
         FrontendError::RepositoryInvalid
@@ -9952,22 +9966,23 @@ mod tests {
         StartupActivationCounters, TerminalOwnership, WorkflowRefreshTestHook,
         activate_admitted_member, activate_repository_member_selector, activity_event,
         activity_event_with_composition, admit_remembered_candidate, admit_repository,
-        apply_model_selection, authorize_repository_commit_review, await_cancel_recovery,
-        await_graceful_cancel, await_hard_shutdown, begin_chat, begin_connect,
-        begin_repository_index_effect, branch_result_classification,
-        classify_repository_delete_file_result, classify_repository_multi_file_output,
-        clear_conversation_allowed, clear_trusted_profile_selection, close_repository_transition,
-        commit_activity_presentation, complete_repository_index_effect, connect_codex,
-        connect_prepared_codex, connection_activation_publication_is_current,
-        connection_publication_is_current, current_app_status, current_host_generation_tuple,
-        delete_file_host_terminal_state, desktop_repository_snapshot,
-        desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
-        desktop_tool_registry, disconnect_codex, effective_authority_snapshot_for_state,
-        emit_host_activity, empty_composition_metadata, forget_trusted_profile_preference,
-        frontend_error, get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
-        host_confirm_tool_invocation, host_invoke_read, host_kind, host_prepare_repo_create_branch,
-        host_prepare_repo_create_file, host_prepare_repo_delete_file, host_prepare_repo_edit_files,
-        host_prepare_repo_patch, host_prepare_repo_rename_file, install_repository_workflow,
+        admit_repository_with_semantic_validation, apply_model_selection,
+        authorize_repository_commit_review, await_cancel_recovery, await_graceful_cancel,
+        await_hard_shutdown, begin_chat, begin_connect, begin_repository_index_effect,
+        branch_result_classification, classify_repository_delete_file_result,
+        classify_repository_multi_file_output, clear_conversation_allowed,
+        clear_trusted_profile_selection, close_repository_transition, commit_activity_presentation,
+        complete_repository_index_effect, connect_codex, connect_prepared_codex,
+        connection_activation_publication_is_current, connection_publication_is_current,
+        current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
+        desktop_repository_snapshot, desktop_repository_snapshot_with_review,
+        desktop_tool_composition_from_registry, desktop_tool_registry, disconnect_codex,
+        effective_authority_snapshot_for_state, emit_host_activity, empty_composition_metadata,
+        forget_trusted_profile_preference, frontend_error, get_effective_authority_snapshot,
+        host_call, host_cancel_tool_invocation, host_confirm_tool_invocation, host_invoke_read,
+        host_kind, host_prepare_repo_create_branch, host_prepare_repo_create_file,
+        host_prepare_repo_delete_file, host_prepare_repo_edit_files, host_prepare_repo_patch,
+        host_prepare_repo_rename_file, install_repository_workflow,
         invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
         prepare_codex_connection, prepare_repo_delete_file_with_current,
         prepare_repo_rename_file_with_current, prepared_host_activity,
@@ -17621,12 +17636,20 @@ mod tests {
                 .expect("linked fixture identity should validate");
         }
 
+        assert!(admit_repository(&state, &fixture.git, &fixture.linked_a).is_err());
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 0);
         let member_main =
-            admit_repository(&state, &fixture.git, &fixture.main).expect("main should be admitted");
-        let member_a = admit_repository(&state, &fixture.git, &fixture.linked_a)
-            .expect("linked A should be admitted");
-        let member_b = admit_repository(&state, &fixture.git, &fixture.linked_b)
-            .expect("linked B should be admitted");
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.main)
+                .await
+                .expect("main should be admitted through the production validation route");
+        let member_a =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .expect("linked A should be admitted");
+        let member_b =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_b)
+                .await
+                .expect("linked B should be admitted");
         assert_ne!(member_main, member_a);
         assert_ne!(member_main, member_b);
         assert_ne!(member_a, member_b);
@@ -17785,8 +17808,10 @@ mod tests {
             .validate_git()
             .await
             .expect("fresh A identity should validate");
-        let fresh_member_a = admit_repository(&state, &fixture.git, &fixture.linked_a)
-            .expect("A should receive a fresh member");
+        let fresh_member_a =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .expect("A should receive a fresh member");
         assert_ne!(fresh_member_a, member_a);
         assert_eq!(
             state.workspace_membership.lock().unwrap().active_member(),
@@ -17823,6 +17848,61 @@ mod tests {
             state.repository.lock().unwrap().as_ref().unwrap().root,
             fs::canonicalize(&fixture.linked_a).unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task360_linked_activation_rejects_gitfile_change_at_publication_barrier() {
+        let storage = TestRepository::new();
+        let state = Arc::new(DesktopAppState::new(storage.0.clone()));
+        let fixture = LinkedWorktreeFixture::new();
+        let member_a =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .expect("linked A should be admitted through production validation");
+        let member_b =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_b)
+                .await
+                .expect("linked B should be admitted through production validation");
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("A should be active before the stale B activation attempt");
+        let active_a = state.repository.lock().unwrap().clone().unwrap();
+        let generation = *state.repository_generation.lock().unwrap();
+        let linked_b_gitfile = fixture.linked_b.join(".git");
+        let original_b_gitfile = fs::read(&linked_b_gitfile).unwrap();
+        let a_gitfile = fs::read(fixture.linked_a.join(".git")).unwrap();
+
+        let mut reached = install_activation_member_barrier(&state, member_b);
+        let activation_state = Arc::clone(&state);
+        let activation =
+            tokio::spawn(
+                async move { activate_admitted_member(&activation_state, member_b).await },
+            );
+        reached
+            .recv()
+            .await
+            .expect("B activation reached the final publication barrier");
+
+        fs::write(&linked_b_gitfile, a_gitfile)
+            .expect("replace B's gitfile with A's linked registration");
+        release_activation_barrier(&state);
+        assert_eq!(
+            activation.await.unwrap(),
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        fs::write(&linked_b_gitfile, original_b_gitfile)
+            .expect("restore B's fixture gitfile for teardown");
+
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert!(Arc::ptr_eq(
+            &active_a,
+            state.repository.lock().unwrap().as_ref().unwrap()
+        ));
+        assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -31697,7 +31777,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 "P3 Close did not leave both members admitted and zero active authority",
             )?;
 
-            let connected_runtime_claim;
             let selection = resolve_codex_executable()
                 .map_err(|_| "certified Codex baseline resolution failed".to_owned())?;
             task352_require(
@@ -31741,7 +31820,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             let connected_transcript_before = storage_file_snapshot(&storage_root);
             let codex_processes_before = task_324_d_process_census(&codex_executable)?;
             let connect_result = connect_codex(app.state()).await;
-            match connect_result {
+            let connected_runtime_claim = match connect_result {
                 Ok(result) => {
                     let connected_state = {
                         let connection = state
@@ -31967,7 +32046,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                             && storage_file_snapshot(&storage_root) == connected_transcript_before,
                         "Close after explicit Disconnect changed membership, Git, or persistence",
                     )?;
-                    connected_runtime_claim = "executed_pass";
+                    "executed_pass"
                 }
                 Err(FrontendError::CodexConnectionFailed) => {
                     let processes_after_failure = task_324_d_process_census(&codex_executable)?;
@@ -32011,7 +32090,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     .map_err(|_| {
                         "Close after failed Codex connection did not succeed".to_owned()
                     })?;
-                    connected_runtime_claim = "not_executed_connection_failed";
+                    "not_executed_connection_failed"
                 }
                 Err(_) => {
                     let _ = disconnect_codex(app.state()).await;
@@ -32020,7 +32099,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                             .to_owned(),
                     );
                 }
-            }
+            };
 
             task352_require(
                 task352_repository_capture(&git, &fixture.repository_a)? == git_before_close_a

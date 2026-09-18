@@ -653,13 +653,14 @@ fn repository_key(root: &Path) -> String {
 #[cfg(test)]
 mod test_after_stage {
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
         process::Command,
         sync::{Arc, Mutex, OnceLock},
     };
 
     use rah_sandbox::HostProcessOutput;
-    use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+    use tokio::sync::Notify;
 
     use crate::ToolError;
 
@@ -676,36 +677,19 @@ mod test_after_stage {
         },
     }
 
-    struct InstalledHook {
-        root: PathBuf,
-        hook: Hook,
-        _permit: OwnedSemaphorePermit,
-    }
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, Hook>>> = OnceLock::new();
 
-    static HOOK: OnceLock<Mutex<Option<InstalledHook>>> = OnceLock::new();
-    static SERIAL: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-    pub(super) async fn install(root: &Path, hook: Hook) {
+    pub(super) fn install(root: &Path, hook: Hook) {
         let root = std::fs::canonicalize(root).expect("test hook repository root should exist");
-        let permit = SERIAL
-            .get_or_init(|| Arc::new(Semaphore::new(1)))
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("Git stage test hook semaphore must stay open");
-        let mut slot = HOOK
-            .get_or_init(|| Mutex::new(None))
+        let mut hooks = HOOKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .expect("Git stage test hook mutex poisoned");
         assert!(
-            slot.replace(InstalledHook {
-                root,
-                hook,
-                _permit: permit,
-            })
-            .is_none(),
+            !hooks.contains_key(&root),
             "Git stage test hook already installed"
         );
+        hooks.insert(root, hook);
     }
 
     pub(super) async fn run(
@@ -713,26 +697,16 @@ mod test_after_stage {
         repository_root: &Path,
     ) -> Result<HostProcessOutput, ToolError> {
         let installed = {
-            let mut slot = HOOK
-                .get_or_init(|| Mutex::new(None))
+            let mut hooks = HOOKS
+                .get_or_init(|| Mutex::new(HashMap::new()))
                 .lock()
                 .expect("Git stage test hook mutex poisoned");
-            let expected_root = std::fs::canonicalize(repository_root).ok();
-            let root_matches = match (slot.as_ref(), expected_root.as_ref()) {
-                (Some(installed), Some(expected_root)) => installed.root == *expected_root,
-                _ => false,
-            };
-            if !root_matches {
-                return process;
-            }
-            slot.take()
+            std::fs::canonicalize(repository_root)
+                .ok()
+                .and_then(|root| hooks.remove(&root))
         };
         match installed {
-            Some(InstalledHook {
-                hook: Hook::MutateUnrelatedIndex { git, root },
-                _permit,
-                ..
-            }) => {
+            Some(Hook::MutateUnrelatedIndex { git, root }) => {
                 let status = Command::new(git)
                     .args(["add", "--", "other.txt"])
                     .current_dir(root)
@@ -743,20 +717,12 @@ mod test_after_stage {
                     "test hook should mutate unrelated index entry"
                 );
             }
-            Some(InstalledHook {
-                hook: Hook::LoseProcessResult,
-                _permit,
-                ..
-            }) => {
+            Some(Hook::LoseProcessResult) => {
                 process = Err(ToolError::Execution {
                     message: "deterministic lost process result after Git mutation".to_owned(),
                 });
             }
-            Some(InstalledHook {
-                hook: Hook::TimeoutAfterMutation,
-                _permit,
-                ..
-            }) => {
+            Some(Hook::TimeoutAfterMutation) => {
                 process = Ok(HostProcessOutput {
                     stdout: Vec::new(),
                     stderr: Vec::new(),
@@ -766,11 +732,7 @@ mod test_after_stage {
                     termination_attempted: true,
                 });
             }
-            Some(InstalledHook {
-                hook: Hook::BlockAfterMutation { entered, release },
-                _permit,
-                ..
-            }) => {
+            Some(Hook::BlockAfterMutation { entered, release }) => {
                 entered.notify_one();
                 release.notified().await;
             }
@@ -938,8 +900,7 @@ mod tests {
                 git: git.clone(),
                 root: root.clone(),
             },
-        )
-        .await;
+        );
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -952,7 +913,7 @@ mod tests {
         fs::write(root.join("target.txt"), "target changed\n").unwrap();
         let tool =
             GitStageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult).await;
+        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult);
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -967,7 +928,7 @@ mod tests {
         fs::write(root.join("target.txt"), "target changed\n").unwrap();
         let tool =
             GitStageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation).await;
+        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation);
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -994,8 +955,7 @@ mod tests {
                 entered: entered.clone(),
                 release,
             },
-        )
-        .await;
+        );
         let task = tokio::spawn({
             let tool = tool.clone();
             async move {
@@ -1034,8 +994,7 @@ mod tests {
                 git: git.clone(),
                 root: root.clone(),
             },
-        )
-        .await;
+        );
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -1048,7 +1007,7 @@ mod tests {
         run_git(&git, &root, &["add", "--", "target.txt"]);
         let tool =
             GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult).await;
+        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult);
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -1062,7 +1021,7 @@ mod tests {
         run_git(&git, &root, &["add", "--", "target.txt"]);
         let tool =
             GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation).await;
+        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation);
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -1085,8 +1044,7 @@ mod tests {
                 entered: entered.clone(),
                 release,
             },
-        )
-        .await;
+        );
         let task = tokio::spawn({
             let tool = tool.clone();
             async move {
@@ -1278,6 +1236,16 @@ mod tests {
             &fixture.linked_b,
             &["commit", "--quiet", "-m", "unrelated B commit"],
         );
+        fs::write(
+            fixture.linked_b.join("sibling-staged.txt"),
+            b"B remains staged while A is unstaged\n",
+        )
+        .unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["add", "--", "sibling-staged.txt"],
+        );
         let b_before = fs::read(&b_index).unwrap();
 
         fs::write(fixture.linked_a.join("tracked.txt"), b"staged only in A\n").unwrap();
@@ -1297,6 +1265,9 @@ mod tests {
         assert_ne!(a_staged, a_before);
         assert_eq!(fs::read(&main_index).unwrap(), main_before);
         assert_eq!(fs::read(&b_index).unwrap(), b_before);
+        for index in [&main_index, &a_index, &b_index] {
+            assert!(!index.with_file_name("index.lock").exists());
+        }
 
         let unstage = GitUnstageTool::new(
             &fixture.git,
@@ -1313,5 +1284,67 @@ mod tests {
         assert_ne!(fs::read(&a_index).unwrap(), a_staged);
         assert_eq!(fs::read(&main_index).unwrap(), main_before);
         assert_eq!(fs::read(&b_index).unwrap(), b_before);
+        assert!(fixture.linked_b.join("sibling-staged.txt").exists());
+        for index in [&main_index, &a_index, &b_index] {
+            assert!(!index.with_file_name("index.lock").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_test_hooks_are_owned_by_their_canonical_repository_root() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(
+            fixture.linked_a.join("tracked.txt"),
+            b"A stage hook target\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.linked_b.join("tracked.txt"),
+            b"B stage hook target\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.linked_b.join("other.txt"),
+            b"B unrelated hook target\n",
+        )
+        .unwrap();
+
+        let stage_a = GitStageTool::new(
+            &fixture.git,
+            &fixture.linked_a,
+            "tracked-file",
+            fixture.linked_a.join("tracked.txt"),
+        )
+        .unwrap();
+        let stage_b = GitStageTool::new(
+            &fixture.git,
+            &fixture.linked_b,
+            "tracked-file",
+            fixture.linked_b.join("tracked.txt"),
+        )
+        .unwrap();
+
+        test_after_stage::install(&fixture.linked_a, test_after_stage::Hook::LoseProcessResult);
+        test_after_stage::install(
+            &fixture.linked_b,
+            test_after_stage::Hook::MutateUnrelatedIndex {
+                git: fixture.git.clone(),
+                root: fixture.linked_b.clone(),
+            },
+        );
+
+        let output_b = stage_b
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(output_b.is_error);
+        assert_eq!(content(&output_b)["status"], "policy_violation");
+
+        let output_a = stage_a
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(output_a.is_error);
+        assert_eq!(content(&output_a)["status"], "uncertain");
     }
 }
