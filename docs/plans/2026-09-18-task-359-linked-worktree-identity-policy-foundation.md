@@ -184,6 +184,8 @@ local deterministic identity and line-ending configuration. Tests cover:
   fabricated, malformed, locked, detached, and bounded metadata cases;
 - observer isolation; Stage/Unstage index isolation; Commit A/B index, HEAD,
   branch, and shared-object behavior; local branch creation without checkout;
+- test-only Stage/Unstage fault hooks bind to their selected repository root,
+  keeping concurrent test executions isolated;
 - selected-root read, file-info, create, delete, rename, patch, multi-file
   preflight, and directory creation; active-root `.git` and nested-boundary
   rejection;

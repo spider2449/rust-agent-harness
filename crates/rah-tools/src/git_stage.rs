@@ -177,7 +177,7 @@ impl GitIndexMutationPolicy {
         self.mutation_attempts.fetch_add(1, Ordering::Relaxed);
         let process = self.mutation.execute_process(&ToolInput(json!({}))).await;
         #[cfg(test)]
-        let process = test_after_stage::run(process).await;
+        let process = test_after_stage::run(process, &self.root).await;
         let post = self.capture_state(mutation_kind).await;
         Ok(self.result(pre, process, post, mutation_kind))
     }
@@ -653,7 +653,7 @@ fn repository_key(root: &Path) -> String {
 #[cfg(test)]
 mod test_after_stage {
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::Command,
         sync::{Arc, Mutex, OnceLock},
     };
@@ -677,6 +677,7 @@ mod test_after_stage {
     }
 
     struct InstalledHook {
+        root: PathBuf,
         hook: Hook,
         _permit: OwnedSemaphorePermit,
     }
@@ -684,7 +685,8 @@ mod test_after_stage {
     static HOOK: OnceLock<Mutex<Option<InstalledHook>>> = OnceLock::new();
     static SERIAL: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
-    pub(super) async fn install(hook: Hook) {
+    pub(super) async fn install(root: &Path, hook: Hook) {
+        let root = std::fs::canonicalize(root).expect("test hook repository root should exist");
         let permit = SERIAL
             .get_or_init(|| Arc::new(Semaphore::new(1)))
             .clone()
@@ -697,6 +699,7 @@ mod test_after_stage {
             .expect("Git stage test hook mutex poisoned");
         assert!(
             slot.replace(InstalledHook {
+                root,
                 hook,
                 _permit: permit,
             })
@@ -707,16 +710,26 @@ mod test_after_stage {
 
     pub(super) async fn run(
         mut process: Result<HostProcessOutput, ToolError>,
+        repository_root: &Path,
     ) -> Result<HostProcessOutput, ToolError> {
-        let installed = HOOK
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .expect("Git stage test hook mutex poisoned")
-            .take();
+        let installed = {
+            let mut slot = HOOK
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("Git stage test hook mutex poisoned");
+            let expected_root = std::fs::canonicalize(repository_root).ok();
+            if slot.as_ref().is_none_or(|installed| {
+                Some(&installed.root) != expected_root.as_ref()
+            }) {
+                return process;
+            }
+            slot.take()
+        };
         match installed {
             Some(InstalledHook {
                 hook: Hook::MutateUnrelatedIndex { git, root },
                 _permit,
+                ..
             }) => {
                 let status = Command::new(git)
                     .args(["add", "--", "other.txt"])
@@ -731,6 +744,7 @@ mod test_after_stage {
             Some(InstalledHook {
                 hook: Hook::LoseProcessResult,
                 _permit,
+                ..
             }) => {
                 process = Err(ToolError::Execution {
                     message: "deterministic lost process result after Git mutation".to_owned(),
@@ -739,6 +753,7 @@ mod test_after_stage {
             Some(InstalledHook {
                 hook: Hook::TimeoutAfterMutation,
                 _permit,
+                ..
             }) => {
                 process = Ok(HostProcessOutput {
                     stdout: Vec::new(),
@@ -752,6 +767,7 @@ mod test_after_stage {
             Some(InstalledHook {
                 hook: Hook::BlockAfterMutation { entered, release },
                 _permit,
+                ..
             }) => {
                 entered.notify_one();
                 release.notified().await;
@@ -914,10 +930,13 @@ mod tests {
         fs::write(root.join("other.txt"), "other changed\n").unwrap();
         let tool =
             GitStageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::MutateUnrelatedIndex {
-            git: git.clone(),
-            root: root.clone(),
-        })
+        test_after_stage::install(
+            &root,
+            test_after_stage::Hook::MutateUnrelatedIndex {
+                git: git.clone(),
+                root: root.clone(),
+            },
+        )
         .await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
@@ -931,7 +950,7 @@ mod tests {
         fs::write(root.join("target.txt"), "target changed\n").unwrap();
         let tool =
             GitStageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::LoseProcessResult).await;
+        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult).await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -946,7 +965,7 @@ mod tests {
         fs::write(root.join("target.txt"), "target changed\n").unwrap();
         let tool =
             GitStageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::TimeoutAfterMutation).await;
+        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation).await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -967,10 +986,13 @@ mod tests {
         );
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        test_after_stage::install(test_after_stage::Hook::BlockAfterMutation {
-            entered: entered.clone(),
-            release,
-        })
+        test_after_stage::install(
+            &root,
+            test_after_stage::Hook::BlockAfterMutation {
+                entered: entered.clone(),
+                release,
+            },
+        )
         .await;
         let task = tokio::spawn({
             let tool = tool.clone();
@@ -1004,10 +1026,13 @@ mod tests {
         run_git(&git, &root, &["add", "--", "target.txt"]);
         let tool =
             GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::MutateUnrelatedIndex {
-            git: git.clone(),
-            root: root.clone(),
-        })
+        test_after_stage::install(
+            &root,
+            test_after_stage::Hook::MutateUnrelatedIndex {
+                git: git.clone(),
+                root: root.clone(),
+            },
+        )
         .await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
@@ -1021,7 +1046,7 @@ mod tests {
         run_git(&git, &root, &["add", "--", "target.txt"]);
         let tool =
             GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::LoseProcessResult).await;
+        test_after_stage::install(&root, test_after_stage::Hook::LoseProcessResult).await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -1035,7 +1060,7 @@ mod tests {
         run_git(&git, &root, &["add", "--", "target.txt"]);
         let tool =
             GitUnstageTool::new(&git, &root, "release-artifact", root.join("target.txt")).unwrap();
-        test_after_stage::install(test_after_stage::Hook::TimeoutAfterMutation).await;
+        test_after_stage::install(&root, test_after_stage::Hook::TimeoutAfterMutation).await;
         let output = tool
             .execute(ToolInput(json!({})), ToolContext::default())
             .await
@@ -1052,10 +1077,13 @@ mod tests {
         );
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        test_after_stage::install(test_after_stage::Hook::BlockAfterMutation {
-            entered: entered.clone(),
-            release,
-        })
+        test_after_stage::install(
+            &root,
+            test_after_stage::Hook::BlockAfterMutation {
+                entered: entered.clone(),
+                release,
+            },
+        )
         .await;
         let task = tokio::spawn({
             let tool = tool.clone();
