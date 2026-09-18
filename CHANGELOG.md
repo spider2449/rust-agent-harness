@@ -1,8 +1,23 @@
 # Changelog
 
-## v0.29.0 — prepared / not yet published
+## v0.29.0 — released (2026-09-18)
 
 The release theme is **Explicit Active Repository Close**.
+
+### Immutable publication record
+
+- Release source: `1568707e25705ca367a21fe096cfcbf16abfb79e`.
+- Annotated tag: `v0.29.0` (`RAH v0.29.0`).
+- Tag object: `12be50d8ba531e83f13a9aeb313afcd6032fa89e`.
+- Peeled target: `1568707e25705ca367a21fe096cfcbf16abfb79e`.
+- Release-preparation CI: `35294662087` — PASS.
+- Tag CI: `35296021014` — PASS.
+- GitHub Release ID: `391159613`; name: `RAH v0.29.0`.
+- Published: `2026-09-18T01:39:37Z`; `draft=false`, `prerelease=false`;
+  assets: 0.
+
+Task 355 is a later documentation-only descendant and is NOT the immutable
+v0.29.0 release source.
 
 ### Added
 

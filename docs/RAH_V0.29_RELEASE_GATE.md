@@ -1,10 +1,11 @@
 # RAH v0.29.0 Release Gate
 
-**Status: READY FOR PUBLICATION — NOT YET RELEASED**
+**Status: RELEASED — HISTORICAL RECORD**
 
-This gate records the accepted v0.29 milestone and release preparation for
-**Explicit Active Repository Close**. Task 354 is a separate publication gate.
-No v0.29.0 tag or GitHub Release exists as part of Task 353.
+This gate records the accepted v0.29 milestone, Task 353 release preparation,
+and the separate Task 354 publication for **Explicit Active Repository
+Close**. Task 353 itself stopped before publication; Task 354 subsequently
+published the prepared source recorded below.
 
 ## Candidate identity
 
@@ -13,11 +14,28 @@ No v0.29.0 tag or GitHub Release exists as part of Task 353.
 | Production behavior base after Task 351 | `99f44aebb89fb697573f16f40a849290d5a9cf09` |
 | Windows-certified source after Task 352 | `c9cff2afac40f9d518310da38ba4c9e158af1641` |
 | Task 352 certification documentation head | `b51d85fcfa7fcca4ee81b4bcd73af391ebc8ad2e` |
-| Task 353 release-preparation source | The full SHA of the commit containing this gate and the Task 353 plan; it is established by Git after that commit and is not self-embedded. Task 354 must recheck and use that exact commit. |
+| Immutable v0.29.0 release source (Task 353 preparation source) | `1568707e25705ca367a21fe096cfcbf16abfb79e` |
+| Task 355 cleanup | Later documentation-only descendant; its full SHA is established by Git after the Task 355 commit. It is NOT the release source. |
 
-Task 353 starts at `b51d85fcfa7fcca4ee81b4bcd73af391ebc8ad2e`, with
+Task 353 started at `b51d85fcfa7fcca4ee81b4bcd73af391ebc8ad2e`, with
 `HEAD == origin/master` and a clean worktree. The v0.28.0 immutable published
 release remains unchanged.
+
+## Immutable v0.29.0 publication record
+
+- Annotated tag: `v0.29.0`; annotation: `RAH v0.29.0`.
+- Tag object: `12be50d8ba531e83f13a9aeb313afcd6032fa89e`.
+- Peeled target and immutable release source:
+  `1568707e25705ca367a21fe096cfcbf16abfb79e`.
+- Release-preparation CI: `35294662087` — PASS.
+- Tag CI: `35296021014` — PASS.
+- GitHub Release ID: `391159613`; name: `RAH v0.29.0`.
+- Published: `2026-09-18T01:39:37Z`; `draft=false`; `prerelease=false`;
+  assets: 0.
+
+Task 355 is a later documentation-only descendant. Its cleanup commit is not
+the immutable v0.29.0 release source; the tag remains on
+`1568707e25705ca367a21fe096cfcbf16abfb79e`.
 
 ## Milestone audit: Tasks 347–352
 
@@ -176,10 +194,9 @@ running-process leak. Task 353 does not broaden into cleanup work.
 
 ## Version and release-preparation validation
 
-Task 353 changes all 13 workspace packages from `0.28.0` to `0.29.0`; edition
-remains `2024`. Cargo.lock is expected to change only the 13 internal RAH
-package version records. No external dependency, checksum, source, or graph
-change is allowed.
+Task 353 changed all 13 workspace packages from `0.28.0` to `0.29.0`; edition
+remained `2024`. Cargo.lock changed only the 13 internal RAH package version
+records. No external dependency, checksum, source, or graph change was made.
 
 Required Task 353 checks:
 
@@ -200,27 +217,31 @@ node crates/rah-desktop/tauri_permission_test.js
 
 The local validation results are recorded in
 [the Task 353 preparation plan](plans/2026-09-18-v0.29-release-preparation.md).
-The release build must identify `rah-desktop v0.29.0`. Carry-forward of Task
-352 certification is valid only because Task 353 changes version metadata and
-documentation, with no Rust behavior, frontend behavior, tests, or permissions
-change.
+The release build identified `rah-desktop v0.29.0`. Task 352 certification
+carried forward for Task 353 only because Task 353 changed version metadata
+and documentation, with no Rust behavior, frontend behavior, tests, or
+permissions change.
 
-## Exact-head and publication gates
+## Exact-head and publication record
 
-After committing Task 353, push `master`, then require all of the following
-before Task 354 begins:
+Task 353 completed the following preparation closure before Task 354 began:
 
-1. `HEAD` equals `origin/master` at the exact Task 353 source SHA.
-2. The worktree is clean and the exact changed-file scope is the eight
+1. `HEAD` equaled `origin/master` at the exact Task 353 source SHA.
+2. The worktree was clean and the exact changed-file scope was the eight
    preparation paths: `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`,
    `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, this gate, and the Task 353
    plan.
-3. Exact-head Task 353 CI completes successfully for that full SHA.
-4. No `v0.29.0` tag or GitHub Release has been created during preparation.
+3. Exact-head Task 353 CI completed successfully for that full SHA.
+4. No `v0.29.0` tag or GitHub Release was created during Task 353 preparation.
 
-Task 353 creates no `v0.29.0` tag, pushes no v0.29.0 tag, creates no GitHub
-Release, marks no changelog entry released, invents no publication timestamp
-or tag-object SHA, and does not mutate v0.28.0 artifacts. Task 354 will
-independently recheck the exact candidate, create the annotated tag at that
-exact SHA, require exact tag CI PASS, and then publish `RAH v0.29.0` without a
-repository commit.
+Task 353 itself stopped before publication. It neither created nor pushed the
+`v0.29.0` tag and created no GitHub Release; it marked no changelog entry
+released and did not alter v0.28.0 artifacts. Its exact source
+`1568707e25705ca367a21fe096cfcbf16abfb79e` passed release-preparation CI
+`35294662087` and became the sole approved candidate.
+
+Task 354 subsequently rechecked that candidate, created annotated tag
+`v0.29.0` at exactly that SHA, passed tag CI `35296021014`, and published
+GitHub Release `391159613` without a repository commit. The exact tag object,
+peeled target, and Release metadata are recorded in the immutable publication
+record above.
