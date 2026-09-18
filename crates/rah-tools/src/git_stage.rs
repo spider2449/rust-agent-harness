@@ -718,9 +718,11 @@ mod test_after_stage {
                 .lock()
                 .expect("Git stage test hook mutex poisoned");
             let expected_root = std::fs::canonicalize(repository_root).ok();
-            if slot.as_ref().is_none_or(|installed| {
-                Some(&installed.root) != expected_root.as_ref()
-            }) {
+            let root_matches = match (slot.as_ref(), expected_root.as_ref()) {
+                (Some(installed), Some(expected_root)) => installed.root == *expected_root,
+                _ => false,
+            };
+            if !root_matches {
                 return process;
             }
             slot.take()
