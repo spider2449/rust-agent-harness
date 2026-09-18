@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.29.0 prepared — not yet published
+## RAH v0.29.0 released
 
 The release theme is **Explicit Active Repository Close**. RAH Desktop can
 explicitly close the active repository and enter a valid zero-active state.
