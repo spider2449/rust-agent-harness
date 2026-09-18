@@ -32372,4 +32372,1892 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V029_ACTIVE_REPOSITORY_CLOSE_LIVE_OK");
         Ok(())
     }
+
+    struct Task361LiveFixture {
+        root: PathBuf,
+        git: PathBuf,
+        main: PathBuf,
+        linked_a: PathBuf,
+        linked_b: PathBuf,
+        worktrees: Mutex<Vec<PathBuf>>,
+        child_pids: Mutex<Vec<u32>>,
+        cleaned: bool,
+    }
+
+    impl Task361LiveFixture {
+        fn new(git: PathBuf) -> Result<Self, String> {
+            let root = std::env::temp_dir().join(format!(
+                "rah-v030-linked-live-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| "Task 361 certification clock unavailable")?
+                    .as_nanos()
+            ));
+            let main = root.join("main");
+            let linked_a = root.join("linked-a");
+            let linked_b = root.join("linked-b");
+            fs::create_dir_all(&main)
+                .map_err(|_| "Task 361 fixture root could not be created".to_owned())?;
+            let fixture = Self {
+                root,
+                git,
+                main,
+                linked_a,
+                linked_b,
+                worktrees: Mutex::new(Vec::new()),
+                child_pids: Mutex::new(Vec::new()),
+                cleaned: false,
+            };
+            fixture.git_run(&fixture.main, &["init", "--quiet", "--initial-branch=main"])?;
+            fixture.git_run(
+                &fixture.main,
+                &["config", "--local", "user.name", "RAH v0.30 Certification"],
+            )?;
+            fixture.git_run(
+                &fixture.main,
+                &[
+                    "config",
+                    "--local",
+                    "user.email",
+                    "rah-v030@example.invalid",
+                ],
+            )?;
+            fixture.git_run(
+                &fixture.main,
+                &["config", "--local", "core.autocrlf", "false"],
+            )?;
+            fixture.git_run(
+                &fixture.main,
+                &["config", "--local", "worktree.useRelativePaths", "false"],
+            )?;
+            for (name, contents) in [
+                ("sentinel.txt", b"main sentinel\n".as_slice()),
+                ("edit.txt", b"baseline edit text\n"),
+                ("stage-a.txt", b"stage A baseline\n"),
+                ("commit-a.txt", b"commit A baseline\n"),
+                ("a-initial-staged.txt", b"A initially staged\n"),
+                ("b-initial-staged.txt", b"B initially staged\n"),
+                ("main-initial-staged.txt", b"main initially staged\n"),
+                ("b-commit.txt", b"B commit baseline\n"),
+                ("rename-a.txt", b"rename A source\n"),
+                ("delete-a.txt", b"delete A source\n"),
+            ] {
+                fs::write(fixture.main.join(name), contents)
+                    .map_err(|_| "Task 361 fixture file setup failed".to_owned())?;
+            }
+            fixture.git_run(&fixture.main, &["add", "--", "."])?;
+            fixture.git_run(
+                &fixture.main,
+                &["commit", "--quiet", "-m", "Task 361 baseline"],
+            )?;
+            fixture.add_branch_worktree("worktree-a", &fixture.linked_a)?;
+            fixture.git_run(
+                &fixture.main,
+                &["config", "--local", "worktree.useRelativePaths", "true"],
+            )?;
+            fixture.add_branch_worktree("worktree-b", &fixture.linked_b)?;
+            for (root, name, contents, sentinel) in [
+                (
+                    &fixture.main,
+                    "main-branch-only.txt",
+                    b"main branch tip\n".as_slice(),
+                    b"main sentinel\n".as_slice(),
+                ),
+                (
+                    &fixture.linked_a,
+                    "a-branch-only.txt",
+                    b"A branch tip\n",
+                    b"A linked sentinel\n",
+                ),
+                (
+                    &fixture.linked_b,
+                    "b-branch-only.txt",
+                    b"B branch tip\n",
+                    b"B linked sentinel\n",
+                ),
+            ] {
+                fs::write(root.join(name), contents)
+                    .map_err(|_| "Task 361 branch fixture setup failed".to_owned())?;
+                fs::write(root.join("sentinel.txt"), sentinel)
+                    .map_err(|_| "Task 361 sentinel setup failed".to_owned())?;
+                fixture.git_run(root, &["add", "--", name, "sentinel.txt"])?;
+                fixture.git_run(root, &["commit", "--quiet", "-m", "distinct worktree tip"])?;
+            }
+            for (root, name, contents) in [
+                (
+                    &fixture.main,
+                    "main-initial-staged.txt",
+                    b"main staged content\n".as_slice(),
+                ),
+                (
+                    &fixture.linked_a,
+                    "a-initial-staged.txt",
+                    b"A staged content\n",
+                ),
+                (
+                    &fixture.linked_b,
+                    "b-initial-staged.txt",
+                    b"B staged content\n",
+                ),
+            ] {
+                fs::write(root.join(name), contents)
+                    .map_err(|_| "Task 361 staged fixture setup failed".to_owned())?;
+                fixture.git_run(root, &["add", "--", name])?;
+            }
+            Ok(fixture)
+        }
+
+        fn command_output(&self, command: &mut Command) -> Result<std::process::Output, String> {
+            let child = command
+                .spawn()
+                .map_err(|_| "Task 361 owned child process could not start".to_owned())?;
+            self.child_pids
+                .lock()
+                .map_err(|_| "Task 361 child ownership record was poisoned".to_owned())?
+                .push(child.id());
+            child
+                .wait_with_output()
+                .map_err(|_| "Task 361 owned child process could not be reaped".to_owned())
+        }
+
+        fn git_run(&self, cwd: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+            let output =
+                self.command_output(Command::new(&self.git).args(arguments).current_dir(cwd))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Task 361 fixture Git operation failed: {arguments:?}"
+                ));
+            }
+            Ok(output.stdout)
+        }
+
+        fn git_text(&self, cwd: &Path, arguments: &[&str]) -> Result<String, String> {
+            String::from_utf8(self.git_run(cwd, arguments)?)
+                .map(|value| value.trim().to_owned())
+                .map_err(|_| "Task 361 fixture Git returned non-UTF-8 text".to_owned())
+        }
+
+        fn add_branch_worktree(&self, branch: &str, root: &Path) -> Result<(), String> {
+            let root = root
+                .to_str()
+                .ok_or_else(|| "Task 361 fixture path is not UTF-8".to_owned())?;
+            self.git_run(
+                &self.main,
+                &["worktree", "add", "--quiet", "-b", branch, root],
+            )?;
+            self.worktrees
+                .lock()
+                .map_err(|_| "Task 361 worktree ownership record was poisoned".to_owned())?
+                .push(PathBuf::from(root));
+            Ok(())
+        }
+
+        fn add_detached_worktree(&self, root: &Path) -> Result<(), String> {
+            let root_text = root
+                .to_str()
+                .ok_or_else(|| "Task 361 fixture path is not UTF-8".to_owned())?;
+            self.git_run(
+                &self.main,
+                &["worktree", "add", "--quiet", "--detach", root_text],
+            )?;
+            self.worktrees
+                .lock()
+                .map_err(|_| "Task 361 worktree ownership record was poisoned".to_owned())?
+                .push(root.to_path_buf());
+            Ok(())
+        }
+
+        fn remove_worktree(&self, root: &Path) -> Result<(), String> {
+            let root_text = root
+                .to_str()
+                .ok_or_else(|| "Task 361 fixture path is not UTF-8".to_owned())?;
+            self.git_run(
+                if self.main.is_dir() {
+                    &self.main
+                } else {
+                    &self.root
+                },
+                &["worktree", "remove", "--force", root_text],
+            )?;
+            self.worktrees
+                .lock()
+                .map_err(|_| "Task 361 worktree ownership record was poisoned".to_owned())?
+                .retain(|candidate| candidate != root);
+            Ok(())
+        }
+
+        fn move_worktree(&self, old_root: &Path, new_root: &Path) -> Result<(), String> {
+            let old_text = old_root
+                .to_str()
+                .ok_or_else(|| "Task 361 fixture path is not UTF-8".to_owned())?;
+            let new_text = new_root
+                .to_str()
+                .ok_or_else(|| "Task 361 fixture path is not UTF-8".to_owned())?;
+            self.git_run(&self.main, &["worktree", "move", old_text, new_text])?;
+            let mut worktrees = self
+                .worktrees
+                .lock()
+                .map_err(|_| "Task 361 worktree ownership record was poisoned".to_owned())?;
+            if let Some(path) = worktrees.iter_mut().find(|path| path.as_path() == old_root) {
+                *path = new_root.to_path_buf();
+            } else {
+                worktrees.push(new_root.to_path_buf());
+            }
+            Ok(())
+        }
+
+        fn create_junction(&self, link: &Path, target: &Path) -> Result<(), String> {
+            let link = link
+                .to_str()
+                .ok_or_else(|| "Task 361 junction path is not UTF-8".to_owned())?;
+            let target = target
+                .to_str()
+                .ok_or_else(|| "Task 361 junction target is not UTF-8".to_owned())?;
+            let output = self.command_output(
+                Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J", link, target]),
+            )?;
+            if !output.status.success() {
+                return Err("Task 361 Windows junction could not be created".to_owned());
+            }
+            Ok(())
+        }
+
+        fn remove_junction(&self, link: &Path) -> Result<(), String> {
+            fs::remove_dir(link)
+                .map_err(|_| "Task 361 Windows junction could not be removed".to_owned())
+        }
+
+        fn cleanup(mut self) -> Result<Vec<u32>, String> {
+            let remaining = self
+                .worktrees
+                .lock()
+                .map_err(|_| "Task 361 worktree ownership record was poisoned".to_owned())?
+                .clone();
+            for worktree in remaining.into_iter().rev() {
+                if worktree.exists() {
+                    self.remove_worktree(&worktree)?;
+                }
+            }
+            let temp = fs::canonicalize(std::env::temp_dir())
+                .map_err(|_| "Task 361 temp directory could not be resolved".to_owned())?;
+            let root = fs::canonicalize(&self.root)
+                .map_err(|_| "Task 361 fixture root could not be resolved".to_owned())?;
+            if root.parent() != Some(temp.as_path())
+                || !root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rah-v030-linked-live-"))
+            {
+                return Err("Task 361 cleanup ownership check failed".to_owned());
+            }
+            let pids = self
+                .child_pids
+                .lock()
+                .map_err(|_| "Task 361 child ownership record was poisoned".to_owned())?
+                .clone();
+            fs::remove_dir_all(&root)
+                .map_err(|_| "Task 361 fixture root cleanup failed".to_owned())?;
+            self.cleaned = true;
+            if self.root.exists() {
+                return Err("Task 361 fixture root remained after cleanup".to_owned());
+            }
+            Ok(pids)
+        }
+    }
+
+    impl Drop for Task361LiveFixture {
+        fn drop(&mut self) {
+            if self.cleaned {
+                return;
+            }
+            let remaining = self
+                .worktrees
+                .get_mut()
+                .map(|items| items.clone())
+                .unwrap_or_default();
+            for worktree in remaining.into_iter().rev() {
+                if worktree.exists() && self.main.is_dir() {
+                    let _ = self.git_run(
+                        &self.main,
+                        &[
+                            "worktree",
+                            "remove",
+                            "--force",
+                            worktree.to_string_lossy().as_ref(),
+                        ],
+                    );
+                }
+            }
+            if let (Ok(temp), Ok(root)) = (
+                fs::canonicalize(std::env::temp_dir()),
+                fs::canonicalize(&self.root),
+            ) && root.parent() == Some(temp.as_path())
+                && root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rah-v030-linked-live-"))
+            {
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Task361RepositoryCapture {
+        root: PathBuf,
+        private_git_dir: PathBuf,
+        common_git_dir: PathBuf,
+        head_path: PathBuf,
+        index_path: PathBuf,
+        head: String,
+        branch: String,
+        index_sha256: String,
+        sentinel_sha256: String,
+        gitfile: Vec<u8>,
+        backlink: Vec<u8>,
+        registrations: Vec<u8>,
+        refs: Vec<u8>,
+    }
+
+    fn task361_capture(
+        fixture: &Task361LiveFixture,
+        root: &Path,
+    ) -> Result<Task361RepositoryCapture, String> {
+        let text = |args: &[&str]| fixture.git_text(root, args);
+        let root_from_git = PathBuf::from(text(&["rev-parse", "--show-toplevel"])?);
+        let private_git_dir = PathBuf::from(text(&["rev-parse", "--absolute-git-dir"])?);
+        let common_git_dir = PathBuf::from(text(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])?);
+        let head_path = PathBuf::from(text(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "HEAD",
+        ])?);
+        let index_path = PathBuf::from(text(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+        ])?);
+        let branch = text(&["symbolic-ref", "-q", "HEAD"])?;
+        let head = text(&["rev-parse", "HEAD"])?;
+        let index = fs::read(&index_path)
+            .map_err(|_| "Task 361 selected index could not be captured".to_owned())?;
+        let sentinel = fs::read(root.join("sentinel.txt"))
+            .map_err(|_| "Task 361 selected sentinel could not be captured".to_owned())?;
+        let gitfile_path = root.join(".git");
+        let gitfile = if gitfile_path.is_file() {
+            fs::read(&gitfile_path)
+                .map_err(|_| "Task 361 root gitfile could not be captured".to_owned())?
+        } else {
+            Vec::new()
+        };
+        let backlink = if private_git_dir == common_git_dir {
+            Vec::new()
+        } else {
+            fs::read(private_git_dir.join("gitdir"))
+                .map_err(|_| "Task 361 private backlink could not be captured".to_owned())?
+        };
+        let registrations = fixture.git_run(root, &["worktree", "list", "--porcelain", "-z"])?;
+        let refs = fixture.git_run(
+            root,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        Ok(Task361RepositoryCapture {
+            root: root_from_git,
+            private_git_dir,
+            common_git_dir,
+            head_path,
+            index_path,
+            head,
+            branch,
+            index_sha256: live_sha256(&index),
+            sentinel_sha256: live_sha256(&sentinel),
+            gitfile,
+            backlink,
+            registrations,
+            refs,
+        })
+    }
+
+    fn task361_require(condition: bool, message: &str) -> Result<(), String> {
+        condition
+            .then_some(())
+            .ok_or_else(|| format!("Task 361 live assertion failed: {message}"))
+    }
+
+    async fn task361_tool(
+        registry: &Arc<ToolRegistry>,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<rah_protocol::ToolOutput, String> {
+        let tool = registry
+            .get(&ToolName::new(name))
+            .ok_or_else(|| format!("Task 361 selected registry lacks {name}"))?;
+        tool.execute(ToolInput(input), ToolContext::default())
+            .await
+            .map_err(|_| format!("Task 361 production Tool {name} failed to execute"))
+    }
+
+    fn task361_output_value(output: &rah_protocol::ToolOutput) -> Option<serde_json::Value> {
+        let content = output.content.first()?;
+        match content {
+            ToolContent::Json(value) => Some(value.clone()),
+            ToolContent::Text(text) => serde_json::from_str(text).ok(),
+        }
+    }
+
+    fn task361_output_status(output: &rah_protocol::ToolOutput) -> Option<String> {
+        task361_output_value(output)?
+            .get("status")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    fn task361_index_lock_absent(captures: &[&Task361RepositoryCapture]) -> bool {
+        captures
+            .iter()
+            .all(|capture| !capture.index_path.with_file_name("index.lock").exists())
+    }
+
+    async fn task361_run_live_scenarios(fixture: &Task361LiveFixture) -> Result<(), String> {
+        let checkout =
+            fs::canonicalize(std::env::current_dir().map_err(|_| "checkout cwd unavailable")?)
+                .map_err(|_| "checkout root unavailable")?;
+        let fixture_root =
+            fs::canonicalize(&fixture.root).map_err(|_| "fixture root unavailable")?;
+        task361_require(
+            !fixture_root.starts_with(&checkout),
+            "fixture is outside the RAH checkout",
+        )?;
+
+        let capture_main = task361_capture(fixture, &fixture.main)?;
+        let capture_a = task361_capture(fixture, &fixture.linked_a)?;
+        let capture_b = task361_capture(fixture, &fixture.linked_b)?;
+        let worktrees_parent = capture_main.common_git_dir.join("worktrees");
+        let privacy_sentinels = [
+            "RAH_V030_PRIVATE_GITDIR_SENTINEL",
+            "RAH_V030_COMMON_GITDIR_SENTINEL",
+            "RAH_V030_WORKTREES_PARENT_SENTINEL",
+            "RAH_V030_REGISTRATION_SENTINEL",
+        ];
+        for (directory, sentinel) in [
+            (&capture_a.private_git_dir, privacy_sentinels[0]),
+            (&capture_main.common_git_dir, privacy_sentinels[1]),
+            (&worktrees_parent, privacy_sentinels[2]),
+            (&capture_a.private_git_dir, privacy_sentinels[3]),
+        ] {
+            fs::write(directory.join(sentinel), sentinel)
+                .map_err(|_| "Task 361 private-topology sentinel setup failed")?;
+        }
+        task361_require(
+            capture_main.common_git_dir == capture_a.common_git_dir
+                && capture_a.common_git_dir == capture_b.common_git_dir
+                && capture_main.private_git_dir != capture_a.private_git_dir
+                && capture_a.private_git_dir != capture_b.private_git_dir
+                && capture_main.private_git_dir != capture_b.private_git_dir,
+            "main/A/B share common Git storage but have distinct private Git directories",
+        )?;
+        task361_require(
+            capture_main.registrations == capture_a.registrations
+                && capture_a.registrations == capture_b.registrations
+                && capture_main.refs == capture_a.refs
+                && capture_a.refs == capture_b.refs,
+            "private observations agree on shared registrations and common refs",
+        )?;
+        task361_require(
+            capture_main.branch == "refs/heads/main"
+                && capture_a.branch == "refs/heads/worktree-a"
+                && capture_b.branch == "refs/heads/worktree-b"
+                && capture_main.root
+                    == fixture
+                        .main
+                        .canonicalize()
+                        .map_err(|_| "main root unavailable")?
+                && capture_a.root
+                    == fixture
+                        .linked_a
+                        .canonicalize()
+                        .map_err(|_| "A root unavailable")?
+                && capture_b.root
+                    == fixture
+                        .linked_b
+                        .canonicalize()
+                        .map_err(|_| "B root unavailable")?,
+            "main/A/B selected roots and branch identities are distinct",
+        )?;
+        task361_require(
+            capture_main.gitfile.is_empty()
+                && fixture.main.join(".git").is_dir()
+                && fixture.linked_a.join(".git").is_file()
+                && fixture.linked_b.join(".git").is_file()
+                && capture_a.gitfile.starts_with(b"gitdir: ")
+                && capture_b.gitfile.starts_with(b"gitdir: ")
+                && std::path::Path::new(
+                    std::str::from_utf8(
+                        &capture_b.gitfile[8..capture_b.gitfile.len().saturating_sub(1)],
+                    )
+                    .map_err(|_| "relative Gitfile is not UTF-8")?,
+                )
+                .is_relative(),
+            "Git produced a main directory, default A gitfile, and relative B gitfile",
+        )?;
+        task361_require(
+            std::path::Path::new(
+                std::str::from_utf8(
+                    &capture_a.gitfile[8..capture_a.gitfile.len().saturating_sub(1)],
+                )
+                .map_err(|_| "default A gitfile is not UTF-8")?,
+            )
+            .is_absolute()
+                && std::path::Path::new(
+                    std::str::from_utf8(
+                        &capture_b.backlink[..capture_b.backlink.len().saturating_sub(1)],
+                    )
+                    .map_err(|_| "relative B backlink is not UTF-8")?,
+                )
+                .is_relative(),
+            "Git produced absolute/default A links and valid relative B backlink records",
+        )?;
+        task361_require(
+            capture_main.sentinel_sha256 != capture_a.sentinel_sha256
+                && capture_a.sentinel_sha256 != capture_b.sentinel_sha256
+                && capture_main.sentinel_sha256 != capture_b.sentinel_sha256,
+            "main/A/B sentinel files have distinct captured hashes",
+        )?;
+        task361_require(
+            capture_main.head_path != capture_a.head_path
+                && capture_a.head_path != capture_b.head_path
+                && capture_main.index_path != capture_a.index_path
+                && capture_a.index_path != capture_b.index_path
+                && capture_main.head != capture_a.head
+                && capture_a.head != capture_b.head
+                && capture_main.head != capture_b.head,
+            "selected HEAD and index paths are private per worktree",
+        )?;
+        let initial_index_hashes = [
+            capture_main.index_sha256.as_str(),
+            capture_a.index_sha256.as_str(),
+            capture_b.index_sha256.as_str(),
+        ];
+        task361_require(
+            initial_index_hashes[0] != initial_index_hashes[1]
+                && initial_index_hashes[0] != initial_index_hashes[2]
+                && initial_index_hashes[1] != initial_index_hashes[2],
+            "main/A/B indexes begin with distinct controlled staged content",
+        )?;
+
+        let storage = fixture.root.join("host-storage");
+        fs::create_dir_all(&storage).map_err(|_| "Task 361 host storage unavailable")?;
+        let state = DesktopAppState::new(storage.clone());
+        reset_startup_activation_counters();
+        task361_require(
+            startup_activation_snapshot() == StartupActivationCounters::default(),
+            "startup did not activate a runtime/provider",
+        )?;
+        let member_main =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.main)
+                .await
+                .map_err(|_| "production semantic admission of main failed")?;
+        let member_a =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .map_err(|_| "production semantic admission of linked A failed")?;
+        let member_b =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_b)
+                .await
+                .map_err(|_| "production semantic admission of relative linked B failed")?;
+        task361_require(
+            member_main != member_a
+                && member_main != member_b
+                && member_a != member_b
+                && state.workspace_membership.lock().unwrap().member_count() == 3
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && state.repository.lock().unwrap().is_none(),
+            "production admission published three inert distinct members",
+        )?;
+        task361_require(
+            matches!(
+                *state.connection.lock().unwrap(),
+                ConnectionState::NotConnected
+            ) && state.provider_activation.lock().unwrap().is_none(),
+            "admission did not activate the runtime or provider",
+        )?;
+
+        let admission_error =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .expect_err("same A root must reject duplicate admission");
+        let member_count = state.workspace_membership.lock().unwrap().member_count();
+        let canonical_alias = fixture.linked_a.join("..").join("linked-a");
+        let canonical_alias_result =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &canonical_alias).await;
+        task361_require(
+            canonical_alias_result.is_err(),
+            "canonical-equivalent A spelling is rejected as a duplicate",
+        )?;
+        let alias = PathBuf::from(fixture.linked_a.to_string_lossy().to_uppercase());
+        if alias.is_dir() {
+            let alias_result =
+                admit_repository_with_semantic_validation(&state, &fixture.git, &alias).await;
+            task361_require(alias_result.is_err(), "case-equivalent A alias is rejected")?;
+        }
+        task361_require(
+            state.workspace_membership.lock().unwrap().member_count() == member_count
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none(),
+            "duplicate and canonical/case alias rejection published no member or changed active state",
+        )?;
+
+        let copied_root = fixture.root.join("copied-gitfile");
+        fs::create_dir(&copied_root).map_err(|_| "copied gitfile candidate setup failed")?;
+        fs::copy(fixture.linked_a.join(".git"), copied_root.join(".git"))
+            .map_err(|_| "copied gitfile candidate setup failed")?;
+        let fabricated_root = fixture.root.join("fabricated-gitfile");
+        fs::create_dir(&fabricated_root)
+            .map_err(|_| "fabricated gitfile candidate setup failed")?;
+        fs::write(
+            fabricated_root.join(".git"),
+            format!("gitdir: {}\n", capture_a.private_git_dir.display()),
+        )
+        .map_err(|_| "fabricated gitfile candidate setup failed")?;
+        let malformed_root = fixture.root.join("malformed-gitfile");
+        fs::create_dir(&malformed_root).map_err(|_| "malformed gitfile candidate setup failed")?;
+        fs::write(malformed_root.join(".git"), b"gitdir: one\ngitdir: two\n")
+            .map_err(|_| "malformed gitfile candidate setup failed")?;
+        for candidate in [&copied_root, &fabricated_root, &malformed_root] {
+            task361_require(
+                admit_repository_with_semantic_validation(&state, &fixture.git, candidate)
+                    .await
+                    .is_err(),
+                "copied, fabricated, and malformed gitfiles fail production admission",
+            )?;
+        }
+        task361_require(
+            state.workspace_membership.lock().unwrap().member_count() == 3,
+            "invalid gitfiles published no member",
+        )?;
+
+        activate_admitted_member(&state, member_main)
+            .await
+            .map_err(|_| "ordinary main activation failed")?;
+        let generation_main = *state.repository_generation.lock().unwrap();
+        let main_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "production main observation failed")?;
+        task361_require(
+            state.workspace_membership.lock().unwrap().active_member() == Some(member_main)
+                && state
+                    .repository
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|repository| repository.root == capture_main.root)
+                && main_snapshot.path == capture_main.root.display().to_string(),
+            "main activates and observes from its selected repository root",
+        )?;
+        task361_require(
+            main_snapshot
+                .staged_diff
+                .iter()
+                .any(|entry| entry.new_path.as_deref() == Some("main-initial-staged.txt")),
+            "main observation uses the main private index",
+        )?;
+        activate_admitted_member(&state, member_a)
+            .await
+            .map_err(|_| "main-to-A switch failed")?;
+        let generation_a = *state.repository_generation.lock().unwrap();
+        task361_require(
+            generation_a > generation_main
+                && state.workspace_membership.lock().unwrap().active_member() == Some(member_a)
+                && state
+                    .repository
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|repository| repository.root == capture_a.root),
+            "A switch publishes a fresh selected-root composition and advances generation",
+        )?;
+        let switch_a_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "selected A workflow observation failed")?;
+        task361_require(
+            switch_a_snapshot
+                .staged_diff
+                .iter()
+                .any(|entry| entry.new_path.as_deref() == Some("a-initial-staged.txt"))
+                && switch_a_snapshot
+                    .staged_diff
+                    .iter()
+                    .all(|entry| entry.new_path.as_deref() != Some("b-initial-staged.txt")),
+            "A observation uses A's private index and excludes B-only staged content",
+        )?;
+        activate_admitted_member(&state, member_b)
+            .await
+            .map_err(|_| "A-to-relative-B switch failed")?;
+        let generation_b = *state.repository_generation.lock().unwrap();
+        task361_require(
+            generation_b > generation_a
+                && state.workspace_membership.lock().unwrap().active_member() == Some(member_b)
+                && state
+                    .repository
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|repository| repository.root == capture_b.root),
+            "relative linked B remains valid through activation and gets a fresh composition",
+        )?;
+
+        let registrations_before_close =
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let refs_before_close = fixture.git_run(
+            &fixture.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        let b_index_before_close =
+            fs::read(&capture_b.index_path).map_err(|_| "B index capture failed")?;
+        let b_root_before_close = fixture.linked_b.is_dir();
+        let close = close_repository_transition(
+            &state,
+            CloseRepositoryRequest {
+                expected_active_member_id: member_b.selector(),
+                expected_repository_generation: generation_b,
+            },
+        );
+        task361_require(
+            close.is_ok()
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .member(member_b)
+                    .is_some()
+                && state.repository.lock().unwrap().is_none()
+                && !effective_authority_snapshot_for_state(&state)
+                    .repository
+                    .selected
+                && fixture.linked_b.is_dir() == b_root_before_close
+                && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                    == registrations_before_close
+                && fixture.git_run(
+                    &fixture.main,
+                    &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+                )? == refs_before_close
+                && fs::read(&capture_b.index_path).map_err(|_| "B index read failed")?
+                    == b_index_before_close,
+            "Close withdraws active B authority without changing Git or registration",
+        )?;
+        activate_admitted_member(&state, member_b)
+            .await
+            .map_err(|_| "retained relative B reactivation failed")?;
+        task361_require(
+            state.workspace_membership.lock().unwrap().active_member() == Some(member_b)
+                && *state.repository_generation.lock().unwrap() > generation_b
+                && matches!(
+                    *state.connection.lock().unwrap(),
+                    ConnectionState::NotConnected
+                )
+                && state.provider_activation.lock().unwrap().is_none(),
+            "explicit B reactivation retains member identity and does not Connect",
+        )?;
+        let b_reactivation_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "relative B observation after reactivation failed")?;
+        task361_require(
+            b_reactivation_snapshot
+                .staged_diff
+                .iter()
+                .any(|entry| entry.new_path.as_deref() == Some("b-initial-staged.txt")),
+            "B observation uses the relative linked worktree's private index",
+        )?;
+
+        activate_admitted_member(&state, member_b)
+            .await
+            .map_err(|_| "B activation before inactive A removal failed")?;
+        let registrations_before_remove =
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let refs_before_remove = fixture.git_run(
+            &fixture.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        remove_repository_member_selector(&state, &member_a.selector())
+            .map_err(|_| "inactive A membership removal failed")?;
+        task361_require(
+            fixture.linked_a.is_dir()
+                && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                    == registrations_before_remove
+                && fixture.git_run(
+                    &fixture.main,
+                    &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+                )? == refs_before_remove
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .member(member_a)
+                    .is_none()
+                && state.workspace_membership.lock().unwrap().active_member() == Some(member_b),
+            "inactive A removal changes membership only and preserves root/registration/refs",
+        )?;
+        let fresh_member_a =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .map_err(|_| "fresh explicit A re-admission failed")?;
+        task361_require(
+            fresh_member_a != member_a,
+            "A re-admission has a fresh process-local member ID",
+        )?;
+
+        activate_admitted_member(&state, fresh_member_a)
+            .await
+            .map_err(|_| "fresh A activation failed")?;
+        let a_observation = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "production A observation failed")?;
+        task361_require(
+            a_observation.path == capture_a.root.display().to_string()
+                && state.workspace_membership.lock().unwrap().active_member()
+                    == Some(fresh_member_a)
+                && a_observation
+                    .staged_diff
+                    .iter()
+                    .any(|entry| entry.new_path.as_deref() == Some("a-initial-staged.txt"))
+                && a_observation
+                    .staged_diff
+                    .iter()
+                    .all(|entry| entry.new_path.as_deref() != Some("b-initial-staged.txt")),
+            "A observer is selected-root-only",
+        )?;
+
+        fs::write(fixture.linked_a.join("stage-a.txt"), b"stage A changed\n")
+            .map_err(|_| "A Stage target setup failed")?;
+        let stage_baseline = [
+            fs::read(&capture_main.index_path).map_err(|_| "main index read failed")?,
+            fs::read(&capture_a.index_path).map_err(|_| "A index read failed")?,
+            fs::read(&capture_b.index_path).map_err(|_| "B index read failed")?,
+        ];
+        let stage_hashes = stage_baseline.each_ref().map(|index| live_sha256(index));
+        task361_require(
+            stage_hashes[0] != stage_hashes[1]
+                && stage_hashes[0] != stage_hashes[2]
+                && stage_hashes[1] != stage_hashes[2],
+            "Stage begins with three distinct current indexes",
+        )?;
+        let a_target_before_stage = fs::read(fixture.linked_a.join("stage-a.txt"))
+            .map_err(|_| "A Stage target could not be captured")?;
+        let stage_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "A Stage workflow refresh failed")?;
+        let stage_action = stage_snapshot
+            .status_entries
+            .iter()
+            .find(|entry| entry.path == "stage-a.txt")
+            .and_then(|entry| entry.stage_action_id.clone())
+            .ok_or_else(|| "production A observer did not issue a Stage selector".to_owned())?;
+        let stage_result =
+            repository_index_action(&state, stage_action, RepositoryIndexActionKind::Stage)
+                .await
+                .map_err(|_| "production A Stage action failed".to_owned())?;
+        let stage_indexes = [
+            fs::read(&capture_main.index_path).map_err(|_| "main index reread failed")?,
+            fs::read(&capture_a.index_path).map_err(|_| "A index reread failed")?,
+            fs::read(&capture_b.index_path).map_err(|_| "B index reread failed")?,
+        ];
+        task361_require(
+            stage_result.status == "ok"
+                && stage_result.changed
+                && stage_indexes[0] == stage_baseline[0]
+                && stage_indexes[1] != stage_baseline[1]
+                && stage_indexes[2] == stage_baseline[2]
+                && fs::read(fixture.linked_a.join("stage-a.txt"))
+                    .map_err(|_| "A Stage target reread failed")?
+                    == a_target_before_stage,
+            "Stage changes only selected A index and preserves worktree content",
+        )?;
+        let staged_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "A Unstage workflow refresh failed")?;
+        let unstage_action = staged_snapshot
+            .staged_diff
+            .iter()
+            .find(|entry| entry.new_path.as_deref() == Some("stage-a.txt"))
+            .and_then(|entry| entry.unstage_action_id.clone())
+            .ok_or_else(|| "production A observer did not issue an Unstage selector".to_owned())?;
+        let unstage_result =
+            repository_index_action(&state, unstage_action, RepositoryIndexActionKind::Unstage)
+                .await
+                .map_err(|_| "production A Unstage action failed".to_owned())?;
+        let unstage_indexes = [
+            fs::read(&capture_main.index_path).map_err(|_| "main index reread failed")?,
+            fs::read(&capture_a.index_path).map_err(|_| "A index reread failed")?,
+            fs::read(&capture_b.index_path).map_err(|_| "B index reread failed")?,
+        ];
+        let unstage_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "post-Unstage observer refresh failed")?;
+        task361_require(
+            unstage_result.status == "ok"
+                && unstage_result.changed
+                && unstage_indexes[0] == stage_baseline[0]
+                && unstage_indexes[1] != stage_indexes[1]
+                && unstage_indexes[2] == stage_baseline[2]
+                && unstage_snapshot
+                    .status_entries
+                    .iter()
+                    .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "none")
+                && fixture
+                    .git_text(&fixture.linked_b, &["diff", "--cached", "--name-only"])?
+                    .contains("b-initial-staged.txt"),
+            "Unstage affects only A and preserves independently staged B content",
+        )?;
+        task361_require(
+            task361_index_lock_absent(&[&capture_main, &capture_a, &capture_b]),
+            "Stage and Unstage leave no sibling index locks",
+        )?;
+
+        let active_a = state
+            .repository
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "A DesktopRepository disappeared before authoring".to_owned())?;
+        let a_registry = desktop_tool_registry(Some(&active_a), None)
+            .map_err(|_| "active A production ToolRegistry composition failed")?;
+        let tool_schemas = serde_json::to_string(&a_registry.definitions())
+            .map_err(|_| "active A Tool schemas could not be serialized")?;
+        task361_require(
+            !tool_schemas.contains("repository_member_id")
+                && !tool_schemas.contains("worktree_root")
+                && !tool_schemas.contains("worktree_id"),
+            "ordinary Tool schemas contain no member or worktree selector",
+        )?;
+
+        let before_content_main = fs::read(fixture.main.join("edit.txt"))
+            .map_err(|_| "main content baseline unavailable")?;
+        let before_content_b = fs::read(fixture.linked_b.join("edit.txt"))
+            .map_err(|_| "B content baseline unavailable")?;
+        let patch_preimage = fs::read(fixture.linked_a.join("edit.txt"))
+            .map_err(|_| "A patch preimage unavailable")?;
+        let patch_output = task361_tool(
+            &a_registry,
+            "repo.patch",
+            serde_json::json!({
+                "path":"edit.txt",
+                "expected_file_sha256":live_sha256(&patch_preimage),
+                "expected_file_byte_length":patch_preimage.len(),
+                "expected_old_text":"baseline edit text",
+                "replacement_text":"edited in A"
+            }),
+        )
+        .await?;
+        let create_output = task361_tool(
+            &a_registry,
+            "repo.create-file",
+            serde_json::json!({"path":"created-a.txt","content":"created only in A\n"}),
+        )
+        .await?;
+        let rename_preimage = b"rename A source\n";
+        let rename_output = task361_tool(
+            &a_registry,
+            "repo.rename-file",
+            serde_json::json!({
+                "source_path":"rename-a.txt",
+                "destination_path":"renamed-a.txt",
+                "expected_source_file_sha256":live_sha256(rename_preimage),
+                "expected_source_file_byte_length":rename_preimage.len()
+            }),
+        )
+        .await?;
+        let delete_preimage = b"delete A source\n";
+        let delete_output = task361_tool(
+            &a_registry,
+            "repo.delete-file",
+            serde_json::json!({
+                "path":"delete-a.txt",
+                "expected_file_sha256":live_sha256(delete_preimage),
+                "expected_file_byte_length":delete_preimage.len()
+            }),
+        )
+        .await?;
+        task361_require(
+            task361_output_status(&patch_output).as_deref() == Some("ok")
+                && task361_output_status(&create_output).as_deref() == Some("ok")
+                && task361_output_status(&rename_output).as_deref() == Some("renamed_verified")
+                && task361_output_status(&delete_output).as_deref() == Some("deleted_verified")
+                && fs::read(fixture.linked_a.join("edit.txt"))
+                    .map_err(|_| "A patched file read failed")?
+                    == b"edited in A\n"
+                && fixture.linked_a.join("created-a.txt").is_file()
+                && !fixture.linked_a.join("rename-a.txt").exists()
+                && fixture.linked_a.join("renamed-a.txt").is_file()
+                && !fixture.linked_a.join("delete-a.txt").exists()
+                && fs::read(fixture.main.join("edit.txt"))
+                    .map_err(|_| "main file reread failed")?
+                    == before_content_main
+                && fs::read(fixture.linked_b.join("edit.txt"))
+                    .map_err(|_| "B file reread failed")?
+                    == before_content_b
+                && !fixture.main.join("created-a.txt").exists()
+                && !fixture.linked_b.join("created-a.txt").exists()
+                && fixture.main.join("rename-a.txt").is_file()
+                && fixture.linked_b.join("rename-a.txt").is_file()
+                && fixture.main.join("delete-a.txt").is_file()
+                && fixture.linked_b.join("delete-a.txt").is_file(),
+            "create, patch, rename, and delete effects remain selected-root-only",
+        )?;
+        let metadata_write = task361_tool(
+            &a_registry,
+            "repo.create-file",
+            serde_json::json!({"path":".git/RAH_V030_METADATA_TARGET","content":"must not write"}),
+        )
+        .await?;
+        let nested = fixture.linked_a.join("nested-boundary");
+        fs::create_dir(&nested).map_err(|_| "nested-boundary fixture setup failed")?;
+        fixture.git_run(&nested, &["init", "--quiet"])?;
+        fs::write(nested.join("secret.txt"), b"nested private content\n")
+            .map_err(|_| "nested-boundary sentinel setup failed")?;
+        let read_tool = a_registry
+            .get(&ToolName::new("fs.read"))
+            .ok_or_else(|| "active A registry lacks fs.read".to_owned())?;
+        let nested_read = read_tool
+            .execute(
+                ToolInput(serde_json::json!({"path":"nested-boundary/secret.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .map_err(|_| "nested-boundary read dispatch failed")?;
+        task361_require(
+            task361_output_status(&metadata_write).as_deref() != Some("ok")
+                && !fixture
+                    .linked_a
+                    .join(".git/RAH_V030_METADATA_TARGET")
+                    .exists()
+                && nested_read.is_error,
+            "root .git metadata and nested repository content are protected boundaries",
+        )?;
+
+        let a_head_before_branch = fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?;
+        let b_head_before_branch = fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?;
+        let a_branch_before_branch =
+            fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?;
+        let registrations_before_branch =
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let refs_before_branch = fixture.git_run(
+            &fixture.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        let branch_name = "task361-branch-from-A";
+        let branch_output = task361_tool(
+            &a_registry,
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+            serde_json::json!({"name":branch_name}),
+        )
+        .await?;
+        let branch_value = task361_output_value(&branch_output)
+            .ok_or_else(|| "branch creation output was not structured".to_owned())?;
+        let branch_oid = branch_value
+            .get("oid")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "branch creation output lacked selected source OID".to_owned())?;
+        let refs_after_branch = fixture.git_run(
+            &fixture.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        let branch_conflict = task361_tool(
+            &a_registry,
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+            serde_json::json!({"name":"worktree-a"}),
+        )
+        .await?;
+        task361_require(
+            task361_output_status(&branch_output).as_deref() == Some("branch_created_verified")
+                && branch_oid == a_head_before_branch
+                && fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?
+                    == a_branch_before_branch
+                && fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?
+                    == a_head_before_branch
+                && fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?
+                    == b_head_before_branch
+                && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                    == registrations_before_branch
+                && refs_after_branch != refs_before_branch
+                && task361_output_status(&branch_conflict).as_deref()
+                    == Some("precondition_failed")
+                && fixture.git_run(
+                    &fixture.main,
+                    &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+                )? == refs_after_branch,
+            "branch creation uses A HEAD without switching and rejects an existing target ref",
+        )?;
+
+        fs::write(
+            fixture.linked_a.join("commit-a.txt"),
+            b"reviewed A commit\n",
+        )
+        .map_err(|_| "A Commit target setup failed")?;
+        let commit_stage_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "A Commit Stage workflow refresh failed")?;
+        let commit_stage_action = commit_stage_snapshot
+            .status_entries
+            .iter()
+            .find(|entry| entry.path == "commit-a.txt")
+            .and_then(|entry| entry.stage_action_id.clone())
+            .ok_or_else(|| "A Commit target had no production Stage selector".to_owned())?;
+        let commit_stage = repository_index_action(
+            &state,
+            commit_stage_action,
+            RepositoryIndexActionKind::Stage,
+        )
+        .await
+        .map_err(|_| "production Stage of A Commit target failed")?;
+        task361_require(
+            commit_stage.status == "ok" && commit_stage.changed,
+            "A Commit target entered the selected worktree index",
+        )?;
+        let review_control = authorize_test_commit(&state, Arc::clone(&active_a)).await;
+        let a_review_state = task361_capture(fixture, &fixture.linked_a)?;
+        let b_review_state = task361_capture(fixture, &fixture.linked_b)?;
+        let main_review_index = fs::read(&capture_main.index_path)
+            .map_err(|_| "main index before Commit review could not be captured")?;
+        task361_require(
+            review_control.has_pending_authorization().await
+                && fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?
+                    == "refs/heads/worktree-a"
+                && fixture.git_text(&fixture.linked_b, &["symbolic-ref", "-q", "HEAD"])?
+                    == "refs/heads/worktree-b",
+            "A reviewed Commit authorization binds the selected attached branch",
+        )?;
+
+        fs::write(
+            fixture.linked_b.join("b-commit.txt"),
+            b"unrelated B branch commit\n",
+        )
+        .map_err(|_| "B sibling Commit setup failed")?;
+        fixture.git_run(&fixture.linked_b, &["add", "--", "b-commit.txt"])?;
+        fixture.git_run(
+            &fixture.linked_b,
+            &["commit", "--quiet", "-m", "unrelated B commit"],
+        )?;
+        fs::write(
+            fixture.linked_b.join("b-remains-staged.txt"),
+            b"B staged sibling state\n",
+        )
+        .map_err(|_| "B retained staged-state setup failed")?;
+        fixture.git_run(&fixture.linked_b, &["add", "--", "b-remains-staged.txt"])?;
+        let b_head_after_external_commit =
+            fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?;
+        let b_index_before_a_commit = fs::read(&capture_b.index_path)
+            .map_err(|_| "B index before A Commit could not be captured")?;
+        let a_before_commit = task361_capture(fixture, &fixture.linked_a)?;
+        task361_require(
+            a_before_commit.head == a_review_state.head
+                && a_before_commit.index_sha256 == a_review_state.index_sha256
+                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
+                    == a_review_state.head
+                && b_head_after_external_commit != b_review_state.head
+                && review_control.has_pending_authorization().await,
+            "unrelated B Commit and index state do not stale the valid selected A review",
+        )?;
+
+        let commit_tool = state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|capability| Arc::clone(&capability._tool))
+            .ok_or_else(|| {
+                "A reviewed Commit Tool was not retained by the active capability".to_owned()
+            })?;
+        let commit_registry = desktop_tool_registry(Some(&active_a), Some(commit_tool))
+            .map_err(|_| "A reviewed Commit registry composition failed")?;
+        let commit_output = task361_tool(
+            &commit_registry,
+            "repo.commit",
+            serde_json::json!({"message":"Task 361 reviewed A commit"}),
+        )
+        .await?;
+        let a_after_commit = task361_capture(fixture, &fixture.linked_a)?;
+        task361_require(
+            task361_output_status(&commit_output).as_deref() == Some("committed_verified")
+                && a_after_commit.head != a_review_state.head
+                && a_after_commit.branch == "refs/heads/worktree-a"
+                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
+                    == a_after_commit.head
+                && fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?
+                    == b_head_after_external_commit
+                && fs::read(&capture_b.index_path)
+                    .map_err(|_| "B index after A Commit could not be read")?
+                    == b_index_before_a_commit
+                && fs::read(&capture_main.index_path)
+                    .map_err(|_| "main index after A Commit could not be read")?
+                    == main_review_index
+                && fixture
+                    .git_text(&fixture.linked_b, &["diff", "--cached", "--name-only"])?
+                    .contains("b-remains-staged.txt")
+                && fixture
+                    .git_run(&fixture.linked_b, &["cat-file", "-e", &a_after_commit.head])
+                    .is_ok(),
+            "reviewed A Commit advances only selected A HEAD/index and preserves B staged state",
+        )?;
+
+        fs::write(
+            fixture.linked_a.join("stale-review.txt"),
+            b"stale review target\n",
+        )
+        .map_err(|_| "stale A review fixture setup failed")?;
+        let stale_stage_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "stale A review Stage refresh failed")?;
+        let stale_stage_action = stale_stage_snapshot
+            .status_entries
+            .iter()
+            .find(|entry| entry.path == "stale-review.txt")
+            .and_then(|entry| entry.stage_action_id.clone())
+            .ok_or_else(|| "stale A review target had no Stage selector".to_owned())?;
+        let stale_stage =
+            repository_index_action(&state, stale_stage_action, RepositoryIndexActionKind::Stage)
+                .await
+                .map_err(|_| "stale A review target could not be staged")?;
+        task361_require(
+            stale_stage.status == "ok",
+            "stale A target staged before review",
+        )?;
+        let _stale_review_snapshot = refresh_repository_workflow(&state)
+            .await
+            .map_err(|_| "stale A Commit review capture failed")?;
+        let stale_review_selector = state
+            .repository_workflow
+            .lock()
+            .unwrap()
+            .review_selector
+            .clone()
+            .ok_or_else(|| "stale A Commit review selector was not issued".to_owned())?;
+        let stale_branch_target = fixture.git_text(&fixture.main, &["rev-parse", "HEAD"])?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["update-ref", "refs/heads/worktree-a", &stale_branch_target],
+        )?;
+        let stale_review_authorization =
+            authorize_repository_commit_review(&state, &stale_review_selector).await;
+        let a_head_after_stale_rejection =
+            fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?;
+        let current_commit_tool = state
+            .commit_capability
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|capability| Arc::clone(&capability._tool))
+            .ok_or_else(|| "A Commit Tool disappeared before stale rejection check".to_owned())?;
+        let stale_commit_registry =
+            desktop_tool_registry(Some(&active_a), Some(current_commit_tool))
+                .map_err(|_| "stale A Commit registry composition failed")?;
+        let stale_commit_output = task361_tool(
+            &stale_commit_registry,
+            "repo.commit",
+            serde_json::json!({"message":"must not commit stale review"}),
+        )
+        .await?;
+        task361_require(
+            stale_review_authorization.is_err()
+                && !review_control.has_pending_authorization().await
+                && task361_output_status(&stale_commit_output).as_deref()
+                    == Some("precondition_failed")
+                && fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?
+                    == a_head_after_stale_rejection
+                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
+                    == stale_branch_target,
+            "selected branch-ref movement rejects the old review before native Commit spawn",
+        )?;
+
+        task361_require(
+            host_kind("fs.read").is_some()
+                && host_kind("repo.file-info").is_some()
+                && host_kind("repo.status").is_some()
+                && host_kind("repo.diff").is_some()
+                && host_kind("repo.diff-staged").is_some()
+                && host_kind("repo.create-branch").is_some()
+                && host_kind("repo.patch").is_some()
+                && host_kind("repo.edit-files").is_some()
+                && host_kind("repo.create-file").is_some()
+                && host_kind("repo.delete-file").is_some()
+                && host_kind("repo.rename-file").is_some()
+                && host_kind("repo.create-directory").is_none()
+                && host_kind("repo.commit").is_none(),
+            "HostExplicit remains exactly the existing eleven Tools",
+        )?;
+
+        let remembered_id = add_remembered_candidate(
+            &state,
+            "Task 361 linked A candidate",
+            Some(fixture.linked_a.clone()),
+        );
+        let remembered_json = serde_json::to_string(&remembered_catalog_presentation(
+            state.remembered_workspace.snapshot(),
+        ))
+        .map_err(|_| "remembered candidate presentation could not be serialized")?;
+        let remembered_bytes = fs::read(storage.join("remembered-workspace.json"))
+            .map_err(|_| "remembered candidate persistence could not be read")?;
+        let membership_json = serde_json::to_string(&repository_membership_presentation(&state))
+            .map_err(|_| "membership presentation could not be serialized")?;
+        let authority_json = serde_json::to_string(&effective_authority_snapshot_for_state(&state))
+            .map_err(|_| "Effective Authority could not be serialized")?;
+        let workflow_json = serde_json::to_string(&a_observation)
+            .map_err(|_| "repository workflow snapshot could not be serialized")?;
+        let activity_json = serde_json::to_string(&prepared_host_activity(
+            "task361-activity".to_owned(),
+            "repo.create-file".to_owned(),
+            None,
+        ))
+        .map_err(|_| "generic Activity could not be serialized")?;
+        let safe_activity_json = serde_json::to_string(&serde_json::json!({
+            "create": task361_output_value(&super::safe_create_file_activity_result(CreateFileResultClassification::Ok).unwrap()),
+            "delete": task361_output_value(&safe_delete_file_activity_result(DeleteFileResultClassification::DeletedVerified)),
+            "rename": task361_output_value(&super::safe_rename_file_activity_result(rah_tools::RepositoryRenameFileProof::ReviewedSuccess)),
+        }))
+        .map_err(|_| "safe Activity result could not be serialized")?;
+        let serialized_tool_input =
+            serde_json::json!({"path":"created-a.txt","content":"created only in A"}).to_string();
+        let serialized_tool_schemas = serde_json::to_string(&a_registry.definitions())
+            .map_err(|_| "active Tool schemas could not be serialized")?;
+        let privacy_surfaces = [
+            format!("{admission_error:?}"),
+            membership_json,
+            authority_json,
+            workflow_json,
+            activity_json,
+            safe_activity_json,
+            remembered_json,
+            serialized_tool_input,
+            serialized_tool_schemas,
+            String::from_utf8_lossy(&remembered_bytes).into_owned(),
+            serde_json::to_string(&task361_output_value(&patch_output))
+                .map_err(|_| "patch Tool result could not be serialized")?,
+            serde_json::to_string(&task361_output_value(&create_output))
+                .map_err(|_| "create Tool result could not be serialized")?,
+        ];
+        let sensitive_topology = [
+            capture_a.private_git_dir.to_string_lossy().into_owned(),
+            capture_a.common_git_dir.to_string_lossy().into_owned(),
+            worktrees_parent.to_string_lossy().into_owned(),
+            capture_a
+                .private_git_dir
+                .join("gitdir")
+                .to_string_lossy()
+                .into_owned(),
+            String::from_utf8_lossy(&capture_a.gitfile).into_owned(),
+            privacy_sentinels[0].to_owned(),
+            privacy_sentinels[1].to_owned(),
+            privacy_sentinels[2].to_owned(),
+            privacy_sentinels[3].to_owned(),
+        ];
+        task361_require(
+            sensitive_topology.iter().all(|needle| {
+                needle.is_empty()
+                    || privacy_surfaces
+                        .iter()
+                        .all(|surface| !surface.contains(needle))
+            }) && !remembered_bytes
+                .windows(member_a.selector().len())
+                .any(|window| window == member_a.selector().as_bytes()),
+            "serialized product surfaces and remembered candidate exclude private/common topology and executable member identity",
+        )?;
+
+        let registrations_before_final_close =
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let refs_before_final_close = fixture.git_run(
+            &fixture.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+        )?;
+        let index_before_final_close = [
+            fs::read(&capture_main.index_path)
+                .map_err(|_| "main index before final Close unavailable")?,
+            fs::read(&capture_a.index_path)
+                .map_err(|_| "A index before final Close unavailable")?,
+            fs::read(&capture_b.index_path)
+                .map_err(|_| "B index before final Close unavailable")?,
+        ];
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .prepare(PreparedHostInvocation::for_test(std::time::Instant::now()))
+            .map_err(|_| "HostExplicit restart-boundary state setup failed")?;
+        let final_generation = *state.repository_generation.lock().unwrap();
+        close_repository_transition(
+            &state,
+            CloseRepositoryRequest {
+                expected_active_member_id: fresh_member_a.selector(),
+                expected_repository_generation: final_generation,
+            },
+        )
+        .map_err(|_| "final A Close before restart failed")?;
+        task361_require(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member()
+                .is_none()
+                && state.repository.lock().unwrap().is_none()
+                && state.host_invocation.lock().unwrap().state() == CoordinatorState::Idle
+                && !repository_workflow_has_state(&state.repository_workflow.lock().unwrap())
+                && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                    == registrations_before_final_close
+                && fixture.git_run(
+                    &fixture.main,
+                    &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+                )? == refs_before_final_close
+                && fs::read(&capture_main.index_path)
+                    .map_err(|_| "main index after final Close unavailable")?
+                    == index_before_final_close[0]
+                && fs::read(&capture_a.index_path)
+                    .map_err(|_| "A index after final Close unavailable")?
+                    == index_before_final_close[1]
+                && fs::read(&capture_b.index_path)
+                    .map_err(|_| "B index after final Close unavailable")?
+                    == index_before_final_close[2],
+            "Close leaves no active authority and changes no Git worktree state",
+        )?;
+        drop(a_registry);
+        drop(commit_registry);
+        drop(stale_commit_registry);
+        drop(review_control);
+        drop(active_a);
+        drop(state);
+
+        reset_startup_activation_counters();
+        let restarted = DesktopAppState::new(storage.clone());
+        task361_require(
+            restarted
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count()
+                == 0
+                && restarted
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && restarted.repository.lock().unwrap().is_none()
+                && restarted.commit_capability.lock().unwrap().is_none()
+                && restarted
+                    .repository_index_effect_reservation
+                    .lock()
+                    .unwrap()
+                    .is_none()
+                && !repository_workflow_has_state(&restarted.repository_workflow.lock().unwrap())
+                && restarted.host_invocation.lock().unwrap().state() == CoordinatorState::Idle
+                && matches!(
+                    *restarted.connection.lock().unwrap(),
+                    ConnectionState::NotConnected
+                )
+                && restarted.provider_activation.lock().unwrap().is_none()
+                && restarted.conversation.lock().unwrap().identity.is_none()
+                && restarted.conversation.lock().unwrap().history.is_empty()
+                && !effective_authority_snapshot_for_state(&restarted)
+                    .repository
+                    .selected
+                && fs::read(storage.join("remembered-workspace.json"))
+                    .map_err(|_| "remembered catalog disappeared on restart")?
+                    == remembered_bytes,
+            "restart restores zero repository authority while preserving descriptive candidate bytes",
+        )?;
+        let fresh_restart_member =
+            admit_repository_with_semantic_validation(&restarted, &fixture.git, &fixture.linked_a)
+                .await
+                .map_err(|_| "restart required fresh semantic A admission")?;
+        task361_require(
+            restarted
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .member_count()
+                == 1
+                && restarted
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .member(fresh_restart_member)
+                    .is_some()
+                && restarted
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && restarted.repository.lock().unwrap().is_none(),
+            "fresh linked admission after restart reruns semantic validation and remains inactive",
+        )?;
+        drop(restarted);
+
+        println!("RAH_V030_MAIN_AB_RELATIVE_ADMISSION=1");
+        println!("RAH_V030_DISTINCT_MEMBER_AND_PRIVATE_GIT_IDENTITY=1");
+        println!("RAH_V030_DUPLICATE_AND_INVALID_GITFILE_REJECTION=1");
+        println!("RAH_V030_ACTIVE_ONLY_SWITCH_CLOSE_REACTIVATION=1");
+        println!("RAH_V030_INACTIVE_REMOVAL_NO_GIT_EFFECT=1");
+        println!("RAH_V030_SELECTED_ROOT_OBSERVER=1");
+        println!("RAH_V030_SELECTED_INDEX_STAGE_UNSTAGE=1");
+        println!("RAH_V030_SELECTED_ROOT_AUTHORING_AND_NESTED_BOUNDARY=1");
+        println!("RAH_V030_SELECTED_BRANCH_CREATE=1");
+        println!("RAH_V030_REVIEWED_COMMIT_AND_SELECTED_REF_STALENESS=1");
+        println!("RAH_V030_EFFECTIVE_AUTHORITY_AND_HOSTEXPLICIT=1");
+        println!("RAH_V030_PRIVACY_REMEMBERED_CANDIDATE_AND_RESTART=1");
+        let _ = admission_error;
+        let _ = remembered_id;
+        Ok(())
+    }
+
+    async fn task361_require_rejected_admission(
+        fixture: &Task361LiveFixture,
+        label: &str,
+        root: &Path,
+    ) -> Result<(), String> {
+        let state = DesktopAppState::new(fixture.root.join(format!("storage-{label}")));
+        let admission = admit_repository_with_semantic_validation(&state, &fixture.git, root).await;
+        task361_require(
+            admission.is_err()
+                && state.workspace_membership.lock().unwrap().member_count() == 0
+                && state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && state.repository.lock().unwrap().is_none(),
+            &format!("{label} invalid form fails before membership/effect publication"),
+        )
+    }
+
+    async fn task361_run_layout_and_external_identity_cases(
+        fixture: &Task361LiveFixture,
+    ) -> Result<(), String> {
+        let submodule_source = fixture.root.join("local-submodule-source");
+        fs::create_dir_all(&submodule_source).map_err(|_| "local submodule source setup failed")?;
+        fixture.git_run(
+            &submodule_source,
+            &["init", "--quiet", "--initial-branch=submodule"],
+        )?;
+        fixture.git_run(
+            &submodule_source,
+            &["config", "--local", "user.name", "RAH v0.30 Certification"],
+        )?;
+        fixture.git_run(
+            &submodule_source,
+            &[
+                "config",
+                "--local",
+                "user.email",
+                "rah-v030@example.invalid",
+            ],
+        )?;
+        fs::write(submodule_source.join("submodule.txt"), b"local submodule\n")
+            .map_err(|_| "local submodule content setup failed")?;
+        fixture.git_run(&submodule_source, &["add", "--", "submodule.txt"])?;
+        fixture.git_run(
+            &submodule_source,
+            &["commit", "--quiet", "-m", "local submodule"],
+        )?;
+        let submodule_path = fixture.main.join("nested-module");
+        let source_text = submodule_source
+            .to_str()
+            .ok_or_else(|| "submodule source path is not UTF-8".to_owned())?;
+        let target_text = submodule_path
+            .to_str()
+            .ok_or_else(|| "submodule target path is not UTF-8".to_owned())?;
+        fixture.git_run(
+            &fixture.main,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                source_text,
+                target_text,
+            ],
+        )?;
+        task361_require(
+            submodule_path.join(".git").is_file(),
+            "installed Git produced modern submodule gitfile form",
+        )?;
+        task361_require_rejected_admission(fixture, "submodule", &submodule_path).await?;
+
+        let separate_root = fixture.root.join("separate-git-dir-root");
+        let separate_metadata = fixture.root.join("separate-git-dir-metadata");
+        fs::create_dir(&separate_root).map_err(|_| "separate-git-dir candidate setup failed")?;
+        let separate_root_text = separate_root
+            .to_str()
+            .ok_or_else(|| "separate-git-dir root path is not UTF-8".to_owned())?;
+        let separate_metadata_text = separate_metadata
+            .to_str()
+            .ok_or_else(|| "separate-git-dir metadata path is not UTF-8".to_owned())?;
+        fixture.git_run(
+            &fixture.root,
+            &[
+                "init",
+                "--quiet",
+                "--separate-git-dir",
+                separate_metadata_text,
+                separate_root_text,
+            ],
+        )?;
+        task361_require_rejected_admission(fixture, "separate-git-dir", &separate_root).await?;
+
+        let root_junction = fixture.root.join("root-reparse-alias");
+        fixture.create_junction(&root_junction, &fixture.linked_a)?;
+        task361_require_rejected_admission(fixture, "selected-root-reparse", &root_junction)
+            .await?;
+        fixture.remove_junction(&root_junction)?;
+
+        let capture_a = task361_capture(fixture, &fixture.linked_a)?;
+        let private_alias = fixture.root.join("private-gitdir-reparse-alias");
+        fixture.create_junction(&private_alias, &capture_a.private_git_dir)?;
+        let root_gitfile = fixture.linked_a.join(".git");
+        let original_gitfile = fs::read(&root_gitfile).map_err(|_| "A gitfile capture failed")?;
+        let alias_text = private_alias
+            .to_str()
+            .ok_or_else(|| "private alias path is not UTF-8".to_owned())?;
+        fs::write(&root_gitfile, format!("gitdir: {alias_text}\n"))
+            .map_err(|_| "private gitdir reparse candidate setup failed")?;
+        let private_reparse_result = task361_require_rejected_admission(
+            fixture,
+            "private-gitdir-reparse",
+            &fixture.linked_a,
+        )
+        .await;
+        fs::write(&root_gitfile, original_gitfile)
+            .map_err(|_| "A gitfile cleanup restore failed")?;
+        fixture.remove_junction(&private_alias)?;
+        private_reparse_result?;
+
+        let common_git_dir = capture_a.common_git_dir.clone();
+        let common_backup = fixture.root.join("common-gitdir-reparse-backup");
+        fs::rename(&common_git_dir, &common_backup)
+            .map_err(|_| "common Git directory reparse setup failed")?;
+        fixture.create_junction(&common_git_dir, &common_backup)?;
+        let common_reparse_result =
+            task361_require_rejected_admission(fixture, "common-gitdir-reparse", &fixture.main)
+                .await;
+        fixture.remove_junction(&common_git_dir)?;
+        fs::rename(&common_backup, &common_git_dir)
+            .map_err(|_| "common Git directory reparse restore failed")?;
+        common_reparse_result?;
+
+        let worktrees_parent = common_git_dir.join("worktrees");
+        let worktrees_backup = fixture.root.join("worktrees-parent-reparse-backup");
+        fs::rename(&worktrees_parent, &worktrees_backup)
+            .map_err(|_| "worktrees parent reparse setup failed")?;
+        fixture.create_junction(&worktrees_parent, &worktrees_backup)?;
+        let worktrees_reparse_result = task361_require_rejected_admission(
+            fixture,
+            "worktrees-parent-reparse",
+            &fixture.linked_a,
+        )
+        .await;
+        fixture.remove_junction(&worktrees_parent)?;
+        fs::rename(&worktrees_backup, &worktrees_parent)
+            .map_err(|_| "worktrees parent reparse restore failed")?;
+        worktrees_reparse_result?;
+
+        let registration = capture_a.private_git_dir.clone();
+        let registration_backup = fixture.root.join("registration-reparse-backup");
+        fs::rename(&registration, &registration_backup)
+            .map_err(|_| "registration-directory reparse setup failed")?;
+        fixture.create_junction(&registration, &registration_backup)?;
+        let registration_reparse_result =
+            task361_require_rejected_admission(fixture, "registration-reparse", &fixture.linked_a)
+                .await;
+        fixture.remove_junction(&registration)?;
+        fs::rename(&registration_backup, &registration)
+            .map_err(|_| "registration-directory reparse restore failed")?;
+        registration_reparse_result?;
+
+        let detached = fixture.root.join("detached-worktree");
+        fixture.add_detached_worktree(&detached)?;
+        let detached_state = DesktopAppState::new(fixture.root.join("storage-detached"));
+        let detached_member =
+            admit_repository_with_semantic_validation(&detached_state, &fixture.git, &detached)
+                .await
+                .map_err(|_| "valid detached linked worktree admission failed")?;
+        activate_admitted_member(&detached_state, detached_member)
+            .await
+            .map_err(|_| "detached linked worktree activation failed")?;
+        let detached_snapshot = refresh_repository_workflow(&detached_state)
+            .await
+            .map_err(|_| "detached linked worktree observation failed")?;
+        let (_, detached_control) = RepositoryCommitTool::compose(
+            &fixture.git,
+            &detached,
+            "RAH v0.30 Certification".to_owned(),
+            "rah-v030@example.invalid".to_owned(),
+        )
+        .map_err(|_| "detached Commit policy construction failed")?;
+        task361_require(
+            detached_snapshot.path
+                == detached
+                    .canonicalize()
+                    .map_err(|_| "detached root unavailable")?
+                    .display()
+                    .to_string()
+                && detached_control
+                    .review_current_staged_snapshot()
+                    .await
+                    .is_err(),
+            "detached linked worktree observation works while reviewed Commit remains unavailable",
+        )?;
+        drop(detached_control);
+        drop(detached_state);
+        fixture.remove_worktree(&detached)?;
+
+        let moved_old = fixture.root.join("external-move-old");
+        let moved_new = fixture.root.join("external-move-new");
+        fixture.add_branch_worktree("external-move", &moved_old)?;
+        let moved_state = DesktopAppState::new(fixture.root.join("storage-moved"));
+        let moved_member =
+            admit_repository_with_semantic_validation(&moved_state, &fixture.git, &moved_old)
+                .await
+                .map_err(|_| "external-move sacrificial worktree admission failed")?;
+        fixture.move_worktree(&moved_old, &moved_new)?;
+        task361_require(
+            activate_admitted_member(&moved_state, moved_member).await
+                == Err(FrontendError::RepositoryMemberStale)
+                && moved_state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && moved_state.repository.lock().unwrap().is_none()
+                && !moved_old.exists()
+                && moved_new.is_dir(),
+            "external Git move stales retained identity without migrating authority",
+        )?;
+        drop(moved_state);
+        fixture.remove_worktree(&moved_new)?;
+
+        let removed_root = fixture.root.join("external-remove-root");
+        fixture.add_branch_worktree("external-remove", &removed_root)?;
+        let removed_state = DesktopAppState::new(fixture.root.join("storage-removed"));
+        let removed_member =
+            admit_repository_with_semantic_validation(&removed_state, &fixture.git, &removed_root)
+                .await
+                .map_err(|_| "external-remove sacrificial worktree admission failed")?;
+        fixture.remove_worktree(&removed_root)?;
+        task361_require(
+            activate_admitted_member(&removed_state, removed_member).await
+                == Err(FrontendError::RepositoryMemberStale)
+                && removed_state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .member(removed_member)
+                    .is_some()
+                && removed_state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && removed_state.repository.lock().unwrap().is_none(),
+            "external Git removal stales retained identity without auto-prune or re-admission",
+        )?;
+        drop(removed_state);
+
+        let metadata_root = fixture.root.join("metadata-mutation-root");
+        fixture.add_branch_worktree("metadata-mutation", &metadata_root)?;
+        let metadata_state = DesktopAppState::new(fixture.root.join("storage-metadata"));
+        let metadata_member = admit_repository_with_semantic_validation(
+            &metadata_state,
+            &fixture.git,
+            &metadata_root,
+        )
+        .await
+        .map_err(|_| "metadata mutation sacrificial worktree admission failed")?;
+        let metadata_gitfile = metadata_root.join(".git");
+        let retained_gitfile =
+            fs::read(&metadata_gitfile).map_err(|_| "sacrificial gitfile could not be captured")?;
+        fs::write(&metadata_gitfile, &capture_a.gitfile)
+            .map_err(|_| "sacrificial gitfile mutation failed")?;
+        let metadata_activation = activate_admitted_member(&metadata_state, metadata_member).await;
+        fs::write(&metadata_gitfile, retained_gitfile)
+            .map_err(|_| "sacrificial gitfile cleanup restore failed")?;
+        task361_require(
+            metadata_activation == Err(FrontendError::RepositoryMemberStale)
+                && metadata_state
+                    .workspace_membership
+                    .lock()
+                    .unwrap()
+                    .active_member()
+                    .is_none()
+                && metadata_state.repository.lock().unwrap().is_none(),
+            "root gitfile content mutation stales retained authority before activation",
+        )?;
+        drop(metadata_state);
+        fixture.remove_worktree(&metadata_root)?;
+
+        println!("RAH_V030_SUBMODULE_AND_SEPARATE_DIR_REJECTED=1");
+        println!("RAH_V030_WINDOWS_REPARSE_RELATIONS_REJECTED=1");
+        println!("RAH_V030_DETACHED_OBSERVATION_COMMIT_UNAVAILABLE=1");
+        println!("RAH_V030_EXTERNAL_MOVE_REMOVE_AND_METADATA_STALE=1");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V030_LINKED_WORKTREE_LIVE=1"]
+    async fn task_361_windows_linked_worktree_live_certification() -> Result<(), String> {
+        if std::env::var("RAH_RUN_V030_LINKED_WORKTREE_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V030_LINKED_WORKTREE_LIVE=1 for Task 361 certification".to_owned(),
+            );
+        }
+        let git = selected_git_executable()
+            .map_err(|_| "Task 361 native Git discovery failed".to_owned())?;
+        let fixture = Task361LiveFixture::new(git)?;
+        task361_run_live_scenarios(&fixture).await?;
+        task361_run_layout_and_external_identity_cases(&fixture).await?;
+        let child_pids = fixture.cleanup()?;
+        task361_require(
+            !child_pids.is_empty(),
+            "fixture child processes were owned and reaped",
+        )?;
+        println!("RAH_V030_FIXTURE_CHILDREN_REAPED={}", child_pids.len());
+        println!(
+            "RAH_V030_FIXTURE_CHILD_PIDS={}",
+            child_pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        println!("RAH_V030_FIXTURE_ROOT_REMOVED=1");
+        println!("RAH_V030_LINKED_WORKTREE_LIVE_OK");
+        Ok(())
+    }
 }
