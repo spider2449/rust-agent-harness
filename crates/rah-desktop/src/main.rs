@@ -6062,8 +6062,8 @@ fn construct_repository_for_admission(
             None
         }
     };
-    let directory_creation_authority =
-        RepositoryDirectoryCreationAuthority::new(root).map_err(|error| {
+    let directory_creation_authority = RepositoryDirectoryCreationAuthority::new(git, root)
+        .map_err(|error| {
             let _ = error;
             tracing::warn!("admitted repository cannot receive directory authority");
             FrontendError::RepositoryInvalid
@@ -6091,8 +6091,8 @@ fn construct_repository_for_admission(
     })
 }
 
-#[cfg(target_os = "windows")]
-fn admit_repository(
+#[cfg(all(target_os = "windows", not(test)))]
+async fn admit_repository(
     state: &DesktopAppState,
     git: &Path,
     selected_path: &Path,
@@ -6102,16 +6102,44 @@ fn admit_repository(
         tracing::warn!("repository admission identity capture failed");
         FrontendError::RepositoryInvalid
     })?;
-    let root = identity.canonical_root().to_path_buf();
-    // Admission may use current validators as a proof, but the constructed
-    // repository and all temporary authorities are dropped before publication.
-    let _ = construct_repository_for_admission(git, &root)?;
-    identity.revalidate(git, &root).map_err(|error| {
+    identity.validate_git().await.map_err(|error| {
         let _ = error;
-        tracing::warn!("repository became stale before admission");
-        FrontendError::RepositoryMemberStale
+        tracing::warn!("repository Git layout validation failed");
+        FrontendError::RepositoryInvalid
     })?;
+    let root = identity.canonical_root().to_path_buf();
+    let _ = construct_repository_for_admission(git, &root)?;
+    identity
+        .revalidate_git(git, &root)
+        .await
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
+    admit_repository_identity(state, identity)
+}
 
+#[cfg(all(target_os = "windows", test))]
+fn admit_repository(
+    state: &DesktopAppState,
+    git: &Path,
+    selected_path: &Path,
+) -> Result<RepositoryMemberId, FrontendError> {
+    let identity = RepositoryAdmissionIdentity::capture(git, selected_path).map_err(|error| {
+        let _ = error;
+        FrontendError::RepositoryInvalid
+    })?;
+    let root = identity.canonical_root().to_path_buf();
+    let _ = construct_repository_for_admission(git, &root)?;
+    identity
+        .revalidate(git, &root)
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
+    admit_repository_identity(state, identity)
+}
+
+#[cfg(target_os = "windows")]
+fn admit_repository_identity(
+    state: &DesktopAppState,
+    identity: RepositoryAdmissionIdentity,
+) -> Result<RepositoryMemberId, FrontendError> {
+    let root = identity.canonical_root().to_path_buf();
     let _coordination = state
         .membership_coordination
         .lock()
@@ -6752,20 +6780,23 @@ async fn activate_admitted_member(
     let git = selected_git_executable().map_err(|_| FrontendError::RepositoryMemberStale)?;
     member
         .identity
-        .revalidate(&git, &member.root)
-        .map_err(|error| {
-            let _ = error;
-            tracing::warn!("admitted repository member is stale");
-            FrontendError::RepositoryMemberStale
-        })?;
+        .revalidate_git(&git, &member.root)
+        .await
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
     let repository = construct_repository_for_admission(&git, &member.root)?;
     member
         .identity
-        .revalidate(&git, &member.root)
+        .revalidate_git(&git, &member.root)
+        .await
         .map_err(|_| FrontendError::RepositoryMemberStale)?;
     // Test synchronization is deliberately before the final gate so stale
     // and loser candidates cannot pass through post-invalidation state.
     activation_pre_publication_barrier(state, member_id);
+    member
+        .identity
+        .revalidate_git(&git, &member.root)
+        .await
+        .map_err(|_| FrontendError::RepositoryMemberStale)?;
     publish_activation_if_current(state, &transaction, repository)?;
     Ok(ActivationOutcome::Activated)
 }
@@ -7057,7 +7088,26 @@ fn reorder_remembered_workspace_candidates(
     ))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
+async fn admit_remembered_candidate(
+    state: &DesktopAppState,
+    candidate_id: RememberedCandidateId,
+) -> Result<RepositoryMemberId, FrontendError> {
+    let location = match state.remembered_workspace.location_hint(&candidate_id) {
+        Ok(Some(location)) => location,
+        Ok(None) => return Err(FrontendError::RememberedLocationRequired),
+        Err(RememberedWorkspaceLookupError::Unavailable) => {
+            return Err(FrontendError::RememberedCatalogUnavailable);
+        }
+        Err(RememberedWorkspaceLookupError::NotFound) => {
+            return Err(FrontendError::RememberedCandidateNotFound);
+        }
+    };
+    let git = selected_git_executable()?;
+    admit_repository(state, &git, &location).await
+}
+
+#[cfg(all(target_os = "windows", test))]
 fn admit_remembered_candidate(
     state: &DesktopAppState,
     candidate_id: RememberedCandidateId,
@@ -7078,11 +7128,14 @@ fn admit_remembered_candidate(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn admit_remembered_workspace_candidate(
+async fn admit_remembered_workspace_candidate(
     state: State<'_, DesktopAppState>,
     candidate_id: String,
 ) -> Result<RememberedAdmissionResult, FrontendError> {
     let candidate_id = parse_remembered_candidate_id(candidate_id)?;
+    #[cfg(not(test))]
+    let member_id = admit_remembered_candidate(state.inner(), candidate_id.clone()).await?;
+    #[cfg(test)]
     let member_id = admit_remembered_candidate(state.inner(), candidate_id.clone())?;
     Ok(RememberedAdmissionResult {
         candidate_id: candidate_id.as_str().to_owned(),
@@ -7599,6 +7652,9 @@ async fn choose_repository(
         .into_path()
         .map_err(|_| FrontendError::RepositoryDialogFailed)?;
     let git = selected_git_executable()?;
+    #[cfg(not(test))]
+    let member_id = admit_repository(state.inner(), &git, &path).await?;
+    #[cfg(test)]
     let member_id = admit_repository(state.inner(), &git, &path)?;
     if let Err(error) = activate_admitted_member(state.inner(), member_id).await {
         state
@@ -10304,7 +10360,7 @@ mod tests {
 
         fn directory_repository(&self) -> DesktopRepository {
             let git = Self::native_git();
-            let authority = RepositoryDirectoryCreationAuthority::new(&self.0)
+            let authority = RepositoryDirectoryCreationAuthority::new(&git, &self.0)
                 .expect("host directory creation authority should construct");
             DesktopRepository::new_with_authorities(
                 &git,
@@ -10432,6 +10488,101 @@ mod tests {
         Untracked,
         Modified,
         Staged,
+    }
+
+    struct LinkedWorktreeFixture {
+        base: PathBuf,
+        git: PathBuf,
+        main: PathBuf,
+        linked_a: PathBuf,
+        linked_b: PathBuf,
+    }
+
+    impl LinkedWorktreeFixture {
+        fn new() -> Self {
+            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!(
+                "rah-desktop-linked-{}-{sequence}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time should follow Unix epoch")
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&base).expect("linked fixture base should be created");
+            let main = base.join("main");
+            let linked_a = base.join("linked-a");
+            let linked_b = base.join("linked-b");
+            fs::create_dir(&main).expect("main worktree root should be created");
+            let git = TestRepository::native_git();
+            let fixture = Self {
+                base,
+                git,
+                main,
+                linked_a,
+                linked_b,
+            };
+            fixture.run(&fixture.main, &["init", "--quiet", "--initial-branch=main"]);
+            fixture.run(&fixture.main, &["config", "user.name", "RAH Desktop Test"]);
+            fixture.run(
+                &fixture.main,
+                &["config", "user.email", "rah-desktop-test@example.invalid"],
+            );
+            fixture.run(&fixture.main, &["config", "core.autocrlf", "false"]);
+            fs::write(fixture.main.join("tracked.txt"), b"initial\n")
+                .expect("initial tracked file should be written");
+            fixture.run(&fixture.main, &["add", "--", "tracked.txt"]);
+            fixture.run(&fixture.main, &["commit", "--quiet", "-m", "initial"]);
+            fixture.run(
+                &fixture.main,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "linked-a",
+                    fixture
+                        .linked_a
+                        .to_str()
+                        .expect("fixture path should be UTF-8"),
+                ],
+            );
+            fixture.run(
+                &fixture.main,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "linked-b",
+                    fixture
+                        .linked_b
+                        .to_str()
+                        .expect("fixture path should be UTF-8"),
+                ],
+            );
+            fixture
+        }
+
+        fn run(&self, root: &Path, arguments: &[&str]) -> std::process::Output {
+            let output = Command::new(&self.git)
+                .args(arguments)
+                .current_dir(root)
+                .output()
+                .expect("native Git fixture command should start");
+            assert!(
+                output.status.success(),
+                "Git fixture command failed: {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        }
+    }
+
+    impl Drop for LinkedWorktreeFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
     }
 
     fn counting_delete_registry(
@@ -17457,6 +17608,224 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn task_359_linked_worktrees_use_one_revalidated_active_composition() {
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+        let fixture = LinkedWorktreeFixture::new();
+        let roots = [&fixture.main, &fixture.linked_a, &fixture.linked_b];
+        for root in roots {
+            rah_tools::RepositoryAdmissionIdentity::capture(&fixture.git, root)
+                .expect("linked fixture identity should capture")
+                .validate_git()
+                .await
+                .expect("linked fixture identity should validate");
+        }
+
+        let member_main =
+            admit_repository(&state, &fixture.git, &fixture.main).expect("main should be admitted");
+        let member_a = admit_repository(&state, &fixture.git, &fixture.linked_a)
+            .expect("linked A should be admitted");
+        let member_b = admit_repository(&state, &fixture.git, &fixture.linked_b)
+            .expect("linked B should be admitted");
+        assert_ne!(member_main, member_a);
+        assert_ne!(member_main, member_b);
+        assert_ne!(member_a, member_b);
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 3);
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member()
+                .is_none()
+        );
+        assert!(state.repository.lock().unwrap().is_none());
+
+        activate_admitted_member(&state, member_main)
+            .await
+            .expect("main should activate");
+        let main_composition = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            main_composition.root,
+            fs::canonicalize(&fixture.main).unwrap()
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_main)
+        );
+
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("linked A should activate");
+        let a_composition = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            a_composition.root,
+            fs::canonicalize(&fixture.linked_a).unwrap()
+        );
+        assert!(!Arc::ptr_eq(&main_composition, &a_composition));
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+
+        let authority = effective_authority_snapshot_for_state(&state);
+        assert!(authority.repository.selected);
+        let authority_json = serde_json::to_string(&authority).unwrap();
+        let private_git_dir = String::from_utf8(
+            fixture
+                .run(
+                    &fixture.linked_a,
+                    &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
+                )
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let common_git_dir = String::from_utf8(
+            fixture
+                .run(
+                    &fixture.linked_a,
+                    &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                )
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        for private_path in [&private_git_dir, &common_git_dir] {
+            assert!(!authority_json.contains(private_path));
+        }
+
+        activate_admitted_member(&state, member_b)
+            .await
+            .expect("linked B should activate");
+        let b_composition = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            b_composition.root,
+            fs::canonicalize(&fixture.linked_b).unwrap()
+        );
+        assert!(!Arc::ptr_eq(&a_composition, &b_composition));
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_b)
+        );
+
+        let registrations_before_close = fixture
+            .run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])
+            .stdout;
+        let generation = *state.repository_generation.lock().unwrap();
+        close_repository_transition(&state, close_request(member_b, generation))
+            .expect("linked B should close");
+        assert!(state.repository.lock().unwrap().is_none());
+        assert!(
+            state
+                .workspace_membership
+                .lock()
+                .unwrap()
+                .active_member()
+                .is_none()
+        );
+        assert!(fixture.linked_b.is_dir());
+        assert_eq!(
+            fixture
+                .run(&fixture.main, &["worktree", "list", "--porcelain", "-z"],)
+                .stdout,
+            registrations_before_close
+        );
+        assert!(
+            !effective_authority_snapshot_for_state(&state)
+                .repository
+                .selected
+        );
+
+        activate_admitted_member(&state, member_a)
+            .await
+            .expect("linked A should reactivate after close");
+        let reactivated_a = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            reactivated_a.root,
+            fs::canonicalize(&fixture.linked_a).unwrap()
+        );
+        assert!(!Arc::ptr_eq(&a_composition, &reactivated_a));
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_a)
+        );
+        assert_eq!(state.workspace_membership.lock().unwrap().member_count(), 3);
+
+        activate_admitted_member(&state, member_main)
+            .await
+            .expect("main should reactivate before removing inactive A");
+        let registrations_before_remove_a = fixture
+            .run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])
+            .stdout;
+        let refs_before_remove_a = fixture.run(&fixture.main, &["show-ref"]).stdout;
+        let removal = remove_repository_member_selector(&state, &member_a.selector())
+            .expect("inactive A membership should be removable");
+        assert_eq!(
+            removal.outcome,
+            super::RepositoryMemberRemovalOutcomePresentation::Removed
+        );
+        assert!(fixture.linked_a.is_dir());
+        assert_eq!(
+            fixture
+                .run(&fixture.main, &["worktree", "list", "--porcelain", "-z"],)
+                .stdout,
+            registrations_before_remove_a
+        );
+        assert_eq!(
+            fixture.run(&fixture.main, &["show-ref"]).stdout,
+            refs_before_remove_a
+        );
+        let fresh_identity =
+            rah_tools::RepositoryAdmissionIdentity::capture(&fixture.git, &fixture.linked_a)
+                .expect("A should admit again with a fresh identity");
+        fresh_identity
+            .validate_git()
+            .await
+            .expect("fresh A identity should validate");
+        let fresh_member_a = admit_repository(&state, &fixture.git, &fixture.linked_a)
+            .expect("A should receive a fresh member");
+        assert_ne!(fresh_member_a, member_a);
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(member_main)
+        );
+        activate_admitted_member(&state, fresh_member_a)
+            .await
+            .expect("fresh A member should activate");
+        let fresh_a_composition = state.repository.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            fresh_a_composition.root,
+            fs::canonicalize(&fixture.linked_a).unwrap()
+        );
+        assert!(!Arc::ptr_eq(&reactivated_a, &fresh_a_composition));
+
+        fixture.run(
+            &fixture.main,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                fixture.linked_b.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            activate_admitted_member(&state, member_b).await,
+            Err(FrontendError::RepositoryMemberStale)
+        );
+        assert_eq!(
+            state.workspace_membership.lock().unwrap().active_member(),
+            Some(fresh_member_a)
+        );
+        assert_eq!(
+            state.repository.lock().unwrap().as_ref().unwrap().root,
+            fs::canonicalize(&fixture.linked_a).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn task_318_membership_presentation_and_selector_route_are_active_only() {
         let storage = TestRepository::new();
         let state = DesktopAppState::new(storage.0.clone());
@@ -21896,7 +22265,7 @@ fn main() {
             &git,
             &fixture.0,
             Some(
-                RepositoryDirectoryCreationAuthority::new(&fixture.0)
+                RepositoryDirectoryCreationAuthority::new(&git, &fixture.0)
                     .expect("directory authority should construct"),
             ),
             Some(
@@ -26830,7 +27199,7 @@ fn main() {
         store.save(&remembered).expect("catalog saves");
 
         let process_a = DesktopAppState::new(storage.0.clone());
-        let repository = TestRepository::new();
+        let repository = TestRepository::git_repository(GitRepositoryState::Clean);
         let git = TestRepository::native_git();
         let member =
             admit_repository(&process_a, &git, &repository.0).expect("process A admits repository");

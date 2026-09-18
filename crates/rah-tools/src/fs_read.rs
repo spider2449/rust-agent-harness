@@ -342,4 +342,29 @@ mod tests {
             }
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn linked_repository_read_stays_within_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(fixture.main.join("selected.txt"), "main").unwrap();
+        fs::write(fixture.linked_a.join("selected.txt"), "A").unwrap();
+        fs::write(fixture.linked_b.join("selected.txt"), "B").unwrap();
+        let tool = FsReadTool::new_repository(&fixture.linked_a, 32).unwrap();
+        let output = tool
+            .execute(
+                ToolInput(json!({"path":"selected.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        let [ToolContent::Text(text)] = output.content.as_slice() else {
+            panic!("text output required");
+        };
+        assert_eq!(text, "A");
+        assert!(
+            tool.execute(ToolInput(json!({"path":".git"})), ToolContext::default(),)
+                .await
+                .is_err()
+        );
+    }
 }

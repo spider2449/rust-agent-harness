@@ -398,7 +398,7 @@ impl RepositoryCreateDirectoryFixture {
     }
 
     async fn compose(&self) -> EffectiveProfileComposition {
-        let authority = RepositoryDirectoryCreationAuthority::new(&self.root)
+        let authority = RepositoryDirectoryCreationAuthority::new(git_executable(), &self.root)
             .expect("host should construct directory creation authority");
         compose_with_repository_directory_creation_authority(
             TrustedStaticProfile::load(&self.profile).unwrap(),

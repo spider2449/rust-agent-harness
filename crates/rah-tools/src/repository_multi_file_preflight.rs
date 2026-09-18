@@ -27,6 +27,7 @@ use crate::{
     git_stage::repository_lease,
     host_execute::{is_beneath, paths_equivalent},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
     repository_worktree_patch::escape_review_text,
 };
 
@@ -693,7 +694,7 @@ fn build_multi_file_review(
         intended_effect: "replace complete postimages of the reviewed clean tracked files in host order",
         non_effects: vec![
             "preparation performs no Tool execution or native replacement",
-            "the worktree, index, HEAD, refs, and history remain unchanged",
+            "the worktree, index, selected HEAD, and history remain unchanged",
             "Stage, Unstage, and Commit remain separate operations",
             "no provider, model, runtime, shell, process, or network action occurs",
         ],
@@ -734,7 +735,7 @@ fn compute_multi_file_review_identity(
     update_identity(&mut digest, &policy.git_identity);
     digest.update(&plan.repository.index);
     digest.update(&plan.repository.head);
-    digest.update(&plan.repository.refs);
+    digest.update(&plan.repository.head_oid);
     for target in &plan.targets {
         digest.update(target.canonical_logical.as_bytes());
         update_identity(&mut digest, &target.target.identity);
@@ -797,6 +798,7 @@ pub(crate) struct RepositoryMultiFileMutationPolicy {
     root_identity: Identity,
     dot_git: PathBuf,
     dot_git_identity: Identity,
+    layout: RepositoryGitLayout,
     boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
@@ -809,20 +811,18 @@ impl RepositoryMultiFileMutationPolicy {
             ));
         }
         reject_reparse_ancestry(root, "repository root")?;
-        let root = canonical_directory(root, "repository root")?;
+        let layout = RepositoryGitLayout::capture(git, root)
+            .map_err(|_| PreflightError::Precondition("repository Git layout is unsupported"))?;
+        let root = layout.root().to_path_buf();
         let dot_git = root.join(".git");
         reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-            return Err(PreflightError::Precondition(
-                "linked worktrees are unsupported",
-            ));
-        }
         let git = canonical_file(git, "Git executable")?;
         Ok(Self {
             git_identity: Identity::capture(&git)?,
             git,
             root_identity: Identity::capture(&root)?,
             dot_git_identity: Identity::capture(&dot_git)?,
+            layout,
             dot_git,
             boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: repository_lease(&root),
@@ -853,8 +853,12 @@ impl RepositoryMultiFileMutationPolicy {
         input: &ToolInput,
     ) -> Result<MultiFileEditOutcome, PreflightError> {
         let _lease = self.acquire_lease().await;
+        self.layout
+            .validate_git(&self.git)
+            .await
+            .map_err(|_| PreflightError::Precondition("repository Git layout is stale"))?;
         let plan = self.prepare_retained_locked(input)?;
-        Ok(self.commit_prepared(&plan))
+        Ok(self.commit_prepared(&plan).await)
     }
 
     #[allow(dead_code)]
@@ -863,6 +867,10 @@ impl RepositoryMultiFileMutationPolicy {
         input: &ToolInput,
     ) -> Result<PreparedMultiFilePlan, PreflightError> {
         let _lease = self.acquire_lease().await;
+        self.layout
+            .validate_git(&self.git)
+            .await
+            .map_err(|_| PreflightError::Precondition("repository Git layout is stale"))?;
         self.prepare_retained_locked(input)
     }
 
@@ -1040,7 +1048,7 @@ impl RepositoryMultiFileMutationPolicy {
         Ok(targets)
     }
 
-    fn commit_prepared(&self, plan: &PreparedMultiFilePlan) -> MultiFileEditOutcome {
+    async fn commit_prepared(&self, plan: &PreparedMultiFilePlan) -> MultiFileEditOutcome {
         let mut effects = plan
             .targets
             .iter()
@@ -1051,7 +1059,9 @@ impl RepositoryMultiFileMutationPolicy {
             .collect::<Vec<_>>();
         for index in 0..plan.targets.len() {
             let committed = index;
-            if self.revalidate_commit_state(plan, committed).is_err() {
+            if self.layout.validate_git(&self.git).await.is_err()
+                || self.revalidate_commit_state(plan, committed).is_err()
+            {
                 return self.classify_stop(plan, &mut effects, committed, index, false);
             }
             #[cfg(test)]
@@ -1095,6 +1105,7 @@ impl RepositoryMultiFileMutationPolicy {
                 return self.uncertain(effects);
             }
             if self.target_matches(target, &target.postimage).is_err()
+                || self.layout.validate_git(&self.git).await.is_err()
                 || self.revalidate_repository().is_err()
                 || self.repository_observation().ok().as_ref() != Some(&plan.repository)
             {
@@ -1120,7 +1131,7 @@ impl RepositoryMultiFileMutationPolicy {
         self.revalidate_repository()?;
         if self.repository_observation()? != plan.repository {
             return Err(PreflightError::Precondition(
-                "repository/index/HEAD/refs changed",
+                "repository/index/selected HEAD changed",
             ));
         }
         for (index, prepared) in plan.targets.iter().enumerate() {
@@ -1259,7 +1270,7 @@ impl RepositoryMultiFileMutationPolicy {
         self.revalidate_repository()?;
         if self.repository_observation()? != plan.repository {
             return Err(PreflightError::Precondition(
-                "repository/index/HEAD/refs changed",
+                "repository/index/selected HEAD changed",
             ));
         }
         for prepared in &plan.targets {
@@ -1286,6 +1297,9 @@ impl RepositoryMultiFileMutationPolicy {
                 "repository root identity changed",
             ));
         }
+        self.layout
+            .revalidate()
+            .map_err(|_| PreflightError::Precondition("repository Git layout identity changed"))?;
         reject_link_or_reparse(&self.dot_git, "repository metadata")?;
         if Identity::capture(&self.dot_git)? != self.dot_git_identity {
             return Err(PreflightError::Precondition(
@@ -1302,12 +1316,16 @@ impl RepositoryMultiFileMutationPolicy {
     }
 
     fn repository_observation(&self) -> Result<RepositoryObservation, PreflightError> {
-        let index = fs::read(self.dot_git.join("index"))
+        let index = fs::read(self.layout.index_path())
             .map_err(|_| PreflightError::Precondition("could not observe raw index"))?;
-        let head = fs::read(self.dot_git.join("HEAD"))
+        let head = fs::read(self.layout.git_dir().join("HEAD"))
             .map_err(|_| PreflightError::Precondition("could not observe HEAD"))?;
-        let refs = self.git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])?;
-        Ok(RepositoryObservation { index, head, refs })
+        let head_oid = self.git_output(&["rev-parse", "--verify", "HEAD"])?;
+        Ok(RepositoryObservation {
+            index,
+            head,
+            head_oid,
+        })
     }
 
     fn validate_git_target(&self, target: &SafeTarget) -> Result<(), PreflightError> {
@@ -1929,7 +1947,7 @@ fn canonicalize_prepared_target(target: &mut PreparedTarget) {
 struct RepositoryObservation {
     index: Vec<u8>,
     head: Vec<u8>,
-    refs: Vec<u8>,
+    head_oid: Vec<u8>,
 }
 struct PreparedTarget {
     canonical_logical: String,
@@ -2757,7 +2775,7 @@ mod tests {
             repository: RepositoryObservation {
                 index: vec![],
                 head: vec![],
-                refs: vec![],
+                head_oid: vec![],
             },
             targets: vec![
                 PreparedTarget {
@@ -3054,7 +3072,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn shared_revalidation_rejects_protected_head_ref_and_index_drift() {
+    async fn shared_revalidation_tracks_selected_head_and_index_without_global_ref_invalidation() {
         let (_base, git_path, root) = TestDirectory::repository();
         let preparer = RepositoryMultiFileEditPreparer::new(&git_path, &root).unwrap();
         let preparation = preparer
@@ -3065,6 +3083,27 @@ mod tests {
             &git_path,
             &root,
             &["update-ref", "refs/heads/task-259-test", "HEAD"],
+        );
+        assert!(preparer.revalidate(&preparation).await.is_ok());
+
+        let preparation = preparer
+            .prepare(human_request(&["a.txt"], &[("old", "new")]))
+            .await
+            .unwrap();
+        git(
+            &git_path,
+            &root,
+            &[
+                "-c",
+                "user.name=RAH",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "advance selected branch",
+            ],
         );
         assert!(matches!(
             preparer.revalidate(&preparation).await,
@@ -3265,32 +3304,34 @@ mod tests {
         plan.cleanup_temporaries();
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn retained_plan_revalidation_rejects_index_head_and_ref_races() {
+    async fn retained_plan_revalidation_tracks_index_and_selected_head_not_unrelated_refs() {
         let (_base, git_path, root) = TestDirectory::repository();
         let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &root).unwrap();
-        for args in [
-            vec!["add", "--", "sentinel.txt"],
-            vec!["update-ref", "refs/rah/test", "HEAD"],
-        ] {
-            let plan = policy
-                .prepare_retained_for_test(&multi(&root, &["a.txt"]))
-                .await
-                .unwrap();
-            if args[0] == "add" {
-                fs::write(root.join("sentinel.txt"), b"index mutation\n").unwrap();
-            }
-            git(&git_path, &root, &args);
-            assert!(policy.revalidate_pre_commit(&plan).is_err());
-            assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A old\n");
-            plan.cleanup_temporaries();
-            git(
-                &git_path,
-                &root,
-                &["reset", "--quiet", "HEAD", "--", "sentinel.txt"],
-            );
-            fs::write(root.join("sentinel.txt"), b"sentinel\n").unwrap();
-            git(&git_path, &root, &["update-ref", "-d", "refs/rah/test"]);
-        }
+        let plan = policy
+            .prepare_retained_for_test(&multi(&root, &["a.txt"]))
+            .await
+            .unwrap();
+        fs::write(root.join("sentinel.txt"), b"index mutation\n").unwrap();
+        git(&git_path, &root, &["add", "--", "sentinel.txt"]);
+        assert!(policy.revalidate_pre_commit(&plan).is_err());
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A old\n");
+        plan.cleanup_temporaries();
+        git(
+            &git_path,
+            &root,
+            &["reset", "--quiet", "HEAD", "--", "sentinel.txt"],
+        );
+        fs::write(root.join("sentinel.txt"), b"sentinel\n").unwrap();
+
+        let plan = policy
+            .prepare_retained_for_test(&multi(&root, &["a.txt"]))
+            .await
+            .unwrap();
+        git(&git_path, &root, &["update-ref", "refs/rah/test", "HEAD"]);
+        assert!(policy.revalidate_pre_commit(&plan).is_ok());
+        plan.cleanup_temporaries();
+        git(&git_path, &root, &["update-ref", "-d", "refs/rah/test"]);
+
         let plan = policy
             .prepare_retained_for_test(&multi(&root, &["a.txt"]))
             .await
@@ -3675,7 +3716,7 @@ mod tests {
         plan.cleanup_temporaries();
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn linked_worktree_git_file_form_is_rejected() {
+    async fn linked_worktree_preflight_observes_selected_private_index_and_head() {
         let (_base, git_path, root) = TestDirectory::repository();
         let worktree = root.parent().unwrap().join("linked-worktree");
         git(
@@ -3683,9 +3724,17 @@ mod tests {
             &root,
             &["worktree", "add", "--quiet", worktree.to_str().unwrap()],
         );
-        assert!(
-            RepositoryMultiFileMutationPolicy::new(&git_path, &worktree).is_err(),
-            "the inherited directory-only .git metadata contract rejects linked worktrees"
+        let policy = RepositoryMultiFileMutationPolicy::new(&git_path, &worktree).unwrap();
+        let observation = policy.repository_observation().unwrap();
+        let selected_index = RepositoryGitLayout::capture(&git_path, &worktree)
+            .unwrap()
+            .index_path();
+        assert_eq!(observation.index, fs::read(&selected_index).unwrap());
+        assert_ne!(
+            selected_index,
+            RepositoryGitLayout::capture(&git_path, &root)
+                .unwrap()
+                .index_path()
         );
     }
     #[test]

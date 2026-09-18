@@ -1,20 +1,16 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use rah_protocol::{ToolDefinition, ToolInput, ToolOutput};
 
 use crate::{
     HostArgumentPolicy, HostExecutionPolicy, HostExecutionTool, Tool, ToolContext, ToolError,
-    git_support::git_environment,
+    git_support::{git_environment, git_error},
+    repository_git_layout::RepositoryGitLayout,
 };
 
 /// Stable tool name for the repository-specific host Git status capability.
 pub const GIT_STATUS_TOOL_NAME: &str = "host.git.status";
-
-const MAX_GIT_FILE_BYTES: u64 = 64 * 1024;
 
 /// Runs exactly `git status --porcelain=v1` in one host-authorized repository.
 ///
@@ -23,7 +19,8 @@ const MAX_GIT_FILE_BYTES: u64 = 64 * 1024;
 /// Model input is restricted to an empty object and cannot select process or
 /// repository details.
 pub struct GitStatusTool {
-    repository: RepositoryIdentity,
+    repository: RepositoryGitLayout,
+    git: PathBuf,
     inner: HostExecutionTool,
 }
 
@@ -34,16 +31,21 @@ impl GitStatusTool {
         git_executable: impl AsRef<Path>,
         repository_root: impl AsRef<Path>,
     ) -> Result<Self, ToolError> {
-        let repository = RepositoryIdentity::capture(repository_root.as_ref())?;
+        if !repository_root.as_ref().is_absolute() {
+            return Err(git_error("repository root must be an absolute path"));
+        }
         let policy = HostExecutionPolicy::new(
-            git_executable,
+            git_executable.as_ref(),
             HostArgumentPolicy::Exact(vec!["status".to_owned(), "--porcelain=v1".to_owned()]),
-            &repository.root,
+            repository_root.as_ref(),
             ".",
         )?
         .with_environment(git_environment())?;
+        let repository =
+            RepositoryGitLayout::capture(git_executable.as_ref(), repository_root.as_ref())?;
         Ok(Self {
             repository,
+            git: git_executable.as_ref().to_path_buf(),
             inner: HostExecutionTool::new(
                 GIT_STATUS_TOOL_NAME,
                 "Reports porcelain status for one host-authorized Git repository.",
@@ -65,193 +67,46 @@ impl Tool for GitStatusTool {
         context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         self.repository.revalidate()?;
+        if self.repository.is_linked() {
+            self.repository.validate_git(&self.git).await?;
+        }
         self.inner.execute(input, context).await
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RepositoryIdentity {
-    root: PathBuf,
-    root_file: FileIdentity,
-    dot_git: DotGitIdentity,
-}
+#[cfg(test)]
+mod tests {
+    use std::fs;
 
-impl RepositoryIdentity {
-    fn capture(path: &Path) -> Result<Self, ToolError> {
-        if !path.is_absolute() {
-            return Err(repository_error("repository root must be an absolute path"));
-        }
-        let root = canonical_directory(path, "repository root")?;
-        let root_file = FileIdentity::capture(&root)?;
-        let dot_git = DotGitIdentity::capture(&root.join(".git"))?;
-        Ok(Self {
-            root,
-            root_file,
-            dot_git,
-        })
-    }
+    use rah_protocol::{ToolContent, ToolInput};
+    use serde_json::json;
 
-    fn revalidate(&self) -> Result<(), ToolError> {
-        let root = canonical_directory(&self.root, "repository root")?;
-        if root != self.root || FileIdentity::capture(&root)? != self.root_file {
-            return Err(repository_error("repository root identity changed"));
-        }
-        let dot_git = DotGitIdentity::capture(&root.join(".git"))
-            .map_err(|_| repository_error("repository metadata identity changed"))?;
-        if dot_git != self.dot_git {
-            return Err(repository_error("repository metadata identity changed"));
-        }
-        Ok(())
-    }
-}
+    use crate::{Tool, ToolContext};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum DotGitIdentity {
-    Directory {
-        identity: FileIdentity,
-        canonical_path: PathBuf,
-    },
-    File {
-        identity: FileIdentity,
-        contents: Vec<u8>,
-    },
-}
+    use super::GitStatusTool;
 
-impl DotGitIdentity {
-    fn capture(path: &Path) -> Result<Self, ToolError> {
-        let link_metadata =
-            fs::symlink_metadata(path).map_err(|error| repository_error(error.to_string()))?;
-        if link_metadata.file_type().is_symlink() {
-            return Err(repository_error(
-                "repository .git representation must not be a symbolic link",
-            ));
-        }
-        if link_metadata.is_dir() {
-            let canonical_path = canonical_directory(path, "repository .git directory")?;
-            let head = canonical_path.join("HEAD");
-            if !fs::metadata(&head).is_ok_and(|metadata| metadata.is_file()) {
-                return Err(repository_error(
-                    "repository .git directory must contain a regular HEAD file",
-                ));
-            }
-            return Ok(Self::Directory {
-                identity: FileIdentity::capture(&canonical_path)?,
-                canonical_path,
-            });
-        }
-        if link_metadata.is_file() {
-            if link_metadata.len() > MAX_GIT_FILE_BYTES {
-                return Err(repository_error("repository .git file is too large"));
-            }
-            let contents = fs::read(path).map_err(|error| repository_error(error.to_string()))?;
-            if !contents.starts_with(b"gitdir:") {
-                return Err(repository_error(
-                    "repository .git file must use the gitdir representation",
-                ));
-            }
-            return Ok(Self::File {
-                identity: FileIdentity::capture(path)?,
-                contents,
-            });
-        }
-        Err(repository_error(
-            "repository .git representation must be a directory or regular file",
-        ))
-    }
-}
+    #[tokio::test]
+    async fn linked_status_reads_only_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(fixture.linked_b.join("sibling-only.txt"), "sibling\n").unwrap();
+        let tool = GitStatusTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("Git status should return one JSON object")
+        };
+        assert_eq!(value["stdout"], "");
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(windows)]
-    volume_serial_number: u32,
-    #[cfg(windows)]
-    file_index: u64,
-    #[cfg(not(any(unix, windows)))]
-    length: u64,
-    #[cfg(not(any(unix, windows)))]
-    modified: Option<std::time::SystemTime>,
-}
-
-impl FileIdentity {
-    fn capture(path: &Path) -> Result<Self, ToolError> {
-        #[cfg(windows)]
-        return capture_file_identity(path);
-        #[cfg(not(windows))]
-        {
-            let metadata =
-                fs::metadata(path).map_err(|error| repository_error(error.to_string()))?;
-            capture_file_identity(&metadata)
-        }
-    }
-}
-
-#[cfg(unix)]
-fn capture_file_identity(metadata: &fs::Metadata) -> Result<FileIdentity, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
-    Ok(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(windows)]
-fn capture_file_identity(path: &Path) -> Result<FileIdentity, ToolError> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
-    };
-
-    let mut options = fs::OpenOptions::new();
-    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    let file = options
-        .open(path)
-        .map_err(|error| repository_error(error.to_string()))?;
-    // The handle remains owned by `file` throughout the Windows API call, and
-    // the API initializes the out structure when it reports success.
-    let information = unsafe {
-        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
-        if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
-            return Err(repository_error(
-                std::io::Error::last_os_error().to_string(),
-            ));
-        }
-        information
-    };
-    Ok(FileIdentity {
-        volume_serial_number: information.dwVolumeSerialNumber,
-        file_index: u64::from(information.nFileIndexHigh) << 32
-            | u64::from(information.nFileIndexLow),
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn capture_file_identity(metadata: &fs::Metadata) -> Result<FileIdentity, ToolError> {
-    Ok(FileIdentity {
-        length: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ToolError> {
-    let canonical = fs::canonicalize(path).map_err(|error| repository_error(error.to_string()))?;
-    if !canonical.is_dir() {
-        return Err(repository_error(format!(
-            "{label} must be an existing directory"
-        )));
-    }
-    Ok(canonical)
-}
-
-fn repository_error(message: impl Into<String>) -> ToolError {
-    ToolError::Execution {
-        message: format!(
-            "Git status repository policy rejected capability: {}",
-            message.into()
-        ),
+        fs::write(fixture.linked_a.join("selected-only.txt"), "selected\n").unwrap();
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("Git status should return one JSON object")
+        };
+        assert_eq!(value["stdout"], "?? selected-only.txt\n");
     }
 }

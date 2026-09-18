@@ -26,7 +26,7 @@ use crate::{
     git_stage::repository_lease,
     git_support::{git_environment, git_error},
     host_execute::paths_equivalent,
-    repository_observer::{FileIdentity, RepositoryIdentity, reject_link_or_reparse},
+    repository_observer::{FileIdentity, RepositoryIdentity},
 };
 
 /// Stable name for the bounded repository local-branch creation capability.
@@ -241,15 +241,7 @@ struct ReflogEntry {
 
 impl RepositoryBranchCreationPolicy {
     fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
-        let repository = RepositoryIdentity::capture(root)?;
-        let dot_git = repository.root().join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(io_error)?.is_dir() || dot_git.join("commondir").exists()
-        {
-            return Err(git_error(
-                "branch creation requires a normal repository with a real .git directory",
-            ));
-        }
+        let repository = RepositoryIdentity::capture(git, root)?;
         let hooks = unique_empty_hooks_directory(repository.root())?;
         let hooks_identity = FileIdentity::capture(&hooks)?;
         let git = fs::canonicalize(git).map_err(io_error)?;
@@ -389,7 +381,7 @@ impl RepositoryBranchCreationPolicy {
         if self.output(&["cat-file", "-t", &oid]).await? != "commit" {
             return Err(git_error("HEAD is not a commit object"));
         }
-        let local_heads = self.local_heads().await?;
+        let local_heads = self.local_heads(name).await?;
         reject_collisions(name, &local_heads)?;
         self.require_absent_reflog(name).await?;
         Ok(RepositorySnapshot {
@@ -400,7 +392,7 @@ impl RepositoryBranchCreationPolicy {
         })
     }
 
-    async fn capture_post_state(&self, _name: &str) -> Result<RepositorySnapshot, ToolError> {
+    async fn capture_post_state(&self, name: &str) -> Result<RepositorySnapshot, ToolError> {
         self.revalidate_static().await?;
         let branch = self
             .output_bytes(&["symbolic-ref", "--quiet", "HEAD"])
@@ -417,7 +409,7 @@ impl RepositoryBranchCreationPolicy {
             branch,
             oid,
             branch_oid,
-            local_heads: self.local_heads().await?,
+            local_heads: self.local_heads(name).await?,
         })
     }
 
@@ -575,7 +567,7 @@ impl RepositoryBranchCreationPolicy {
                 && entry.email == HOST_COMMITTER_EMAIL)
     }
 
-    async fn local_heads(&self) -> Result<Vec<LocalHeadEntry>, ToolError> {
+    async fn local_heads(&self, name: &str) -> Result<Vec<LocalHeadEntry>, ToolError> {
         let output = self
             .run(vec![
                 "for-each-ref".into(),
@@ -600,7 +592,7 @@ impl RepositoryBranchCreationPolicy {
         }
         let (pairs, remainder) = fields.as_slice().as_chunks::<2>();
         debug_assert!(remainder.is_empty());
-        pairs
+        let heads = pairs
             .iter()
             .map(|pair| {
                 let name = trim_line_end(pair[0]);
@@ -615,19 +607,19 @@ impl RepositoryBranchCreationPolicy {
                     oid: oid.into(),
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let target = format!("refs/heads/{name}");
+        let folded = ascii_fold(target.as_bytes());
+        Ok(heads
+            .into_iter()
+            .filter(|entry| head_names_collide(&folded, &entry.name))
+            .collect())
     }
 
     async fn revalidate_static(&self) -> Result<(), ToolError> {
         self.repository.revalidate()?;
+        self.repository.layout().validate_git(&self.git).await?;
         self.git_binding.revalidate()?;
-        let dot_git = self.repository.root().join(".git");
-        if !fs::metadata(&dot_git).map_err(io_error)?.is_dir() || dot_git.join("commondir").exists()
-        {
-            return Err(git_error(
-                "repository topology is not a normal .git directory",
-            ));
-        }
         self.revalidate_hooks()?;
         if self.output(&["rev-parse", "--is-bare-repository"]).await? != "false" {
             return Err(git_error("bare repositories are unsupported"));
@@ -649,12 +641,14 @@ impl RepositoryBranchCreationPolicy {
             self.repository.root().join(refs)
         };
         let refs = fs::canonicalize(refs).map_err(io_error)?;
-        let expected = fs::canonicalize(dot_git.join("refs")).map_err(io_error)?;
+        let expected = fs::canonicalize(self.repository.layout().common_git_dir().join("refs"))
+            .map_err(io_error)?;
         if !paths_equivalent(&refs, &expected) || !refs.is_dir() {
             return Err(git_error(
                 "repository ref backend is not the ordinary files backend",
             ));
         }
+        let private_git_dir = self.repository.layout().git_dir();
         for marker in [
             "MERGE_HEAD",
             "CHERRY_PICK_HEAD",
@@ -665,7 +659,7 @@ impl RepositoryBranchCreationPolicy {
             "rebase-merge",
             "sequencer",
         ] {
-            if dot_git.join(marker).exists() {
+            if private_git_dir.join(marker).exists() {
                 return Err(git_error("repository is in an unsupported special state"));
             }
         }
@@ -815,17 +809,20 @@ fn reject_collisions(name: &str, heads: &[LocalHeadEntry]) -> Result<(), ToolErr
     let target = format!("refs/heads/{name}");
     let folded = ascii_fold(target.as_bytes());
     for reference in heads {
-        let other = ascii_fold(&reference.name);
-        if other == folded
-            || other.starts_with(&with_slash(&folded))
-            || folded.starts_with(&with_slash(&other))
-        {
+        if head_names_collide(&folded, &reference.name) {
             return Err(git_error(
                 "branch name collides with an existing local head",
             ));
         }
     }
     Ok(())
+}
+
+fn head_names_collide(folded_target: &[u8], other: &[u8]) -> bool {
+    let folded_other = ascii_fold(other);
+    folded_other == folded_target
+        || folded_other.starts_with(&with_slash(folded_target))
+        || folded_target.starts_with(&with_slash(&folded_other))
 }
 
 fn heads_without(heads: &[LocalHeadEntry], excluded: &[u8]) -> Vec<LocalHeadEntry> {
@@ -1881,7 +1878,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detached_unborn_bare_linked_and_special_state_are_rejected() {
+    async fn detached_unborn_bare_and_special_states_are_rejected_but_linked_branch_creation_works()
+    {
         let (git, root) = fixture();
         git_ok(&git, &root, &["checkout", "--detach", "HEAD"]);
         assert!(matches!(
@@ -1902,11 +1900,35 @@ mod tests {
                 "worktree",
                 "add",
                 "--quiet",
+                "-b",
+                "branch-worktree",
                 linked.to_str().unwrap(),
-                "HEAD",
             ],
         );
-        assert!(RepositoryBranchCreationPolicy::new(&git, &linked).is_err());
+        let main_head_before = stdout(&git, &root, &["rev-parse", "HEAD"]);
+        let linked_head_before = stdout(&git, &linked, &["rev-parse", "HEAD"]);
+        assert!(matches!(
+            policy(&git, &linked)
+                .create("created-from-linked".into())
+                .await,
+            BranchCreationDisposition::BranchCreatedVerified { .. }
+        ));
+        assert_eq!(
+            stdout(&git, &root, &["rev-parse", "HEAD"]),
+            main_head_before
+        );
+        assert_eq!(
+            stdout(&git, &linked, &["rev-parse", "HEAD"]),
+            linked_head_before
+        );
+        assert!(
+            !stdout(
+                &git,
+                &linked,
+                &["show-ref", "--verify", "refs/heads/created-from-linked"]
+            )
+            .is_empty()
+        );
         cleanup(linked);
         cleanup(root);
         let root = std::env::temp_dir().join(format!(

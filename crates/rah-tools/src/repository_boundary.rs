@@ -35,6 +35,11 @@ impl RepositoryNestedBoundaryPolicy {
 
     /// Validates an existing target or existing creation parent.
     pub(crate) fn validate_existing(&self, path: &Path) -> Result<(), ToolError> {
+        if is_active_git_metadata(&self.root, path) {
+            return Err(boundary_error(
+                "repository path targets active Git metadata",
+            ));
+        }
         let mut current = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_dir() => path.to_path_buf(),
             Ok(_) => path
@@ -116,6 +121,16 @@ impl RepositoryNestedBoundaryPolicy {
         }
         Ok(())
     }
+}
+
+fn is_active_git_metadata(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    relative
+        .components()
+        .next()
+        .is_some_and(|component| is_dot_git_name(component.as_os_str()))
 }
 
 fn reject_nested_marker(directory: &Path) -> Result<(), ToolError> {
@@ -303,6 +318,27 @@ mod tests {
                 .is_err()
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_root_git_directory_or_gitfile_cannot_be_a_repository_path_target() {
+        let first_root = root("active-git-dir");
+        fs::create_dir(first_root.join(".git")).unwrap();
+        fs::write(first_root.join(".git/config"), b"private configuration").unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&first_root);
+        assert!(policy.validate_existing(&first_root.join(".git")).is_err());
+        assert!(
+            policy
+                .validate_existing(&first_root.join(".git/config"))
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(&first_root);
+
+        let second_root = root("active-git-file");
+        fs::write(second_root.join(".git"), b"gitdir: private\n").unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&second_root);
+        assert!(policy.validate_existing(&second_root.join(".git")).is_err());
+        let _ = fs::remove_dir_all(second_root);
     }
 
     #[cfg(unix)]

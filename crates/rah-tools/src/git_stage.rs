@@ -18,6 +18,7 @@ use crate::{
     git_support::{git_environment, git_error},
     host_execute::{is_beneath, paths_equivalent},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
 };
 
 /// Stable name for the single-target host-authorized Git staging capability.
@@ -82,16 +83,16 @@ pub(crate) enum GitIndexMutation {
 }
 
 pub(crate) struct GitIndexMutationPolicy {
+    git: PathBuf,
     root: PathBuf,
     root_identity: FileIdentity,
-    dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     boundary: RepositoryNestedBoundaryPolicy,
     target: Target,
     track: HostExecutionPolicy,
     mutation: HostExecutionPolicy,
     head: HostExecutionPolicy,
     head_tree: HostExecutionPolicy,
-    refs: HostExecutionPolicy,
     index: HostExecutionPolicy,
     lease: Arc<AsyncMutex<()>>,
     #[cfg(test)]
@@ -116,12 +117,8 @@ impl GitIndexMutationPolicy {
             return Err(git_error("authorized target must be an absolute path"));
         }
         reject_link(root, "repository root")?;
-        let root = canonical_directory(root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link(&dot_git, "repository metadata")?;
-        if !dot_git.exists() {
-            return Err(git_error("repository metadata is missing"));
-        }
+        let layout = RepositoryGitLayout::capture(git, root)?;
+        let root = layout.root().to_path_buf();
         let target = Target::capture(&root, symbolic_target, target_path)?;
         let boundary = RepositoryNestedBoundaryPolicy::new(&root);
         boundary.validate_existing(&target.path)?;
@@ -134,8 +131,9 @@ impl GitIndexMutationPolicy {
                 .with_environment(git_environment())
         };
         Ok(Self {
+            git: git.to_path_buf(),
             root_identity: FileIdentity::capture(&root)?,
-            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            layout,
             boundary,
             lease: repository_lease(&root),
             track: exact(vec![
@@ -154,10 +152,6 @@ impl GitIndexMutationPolicy {
                 "HEAD".into(),
                 "--".into(),
                 relative.clone(),
-            ])?,
-            refs: exact(vec![
-                "for-each-ref".into(),
-                "--format=%(refname)%00%(objectname)%00".into(),
             ])?,
             index: exact(vec!["ls-files".into(), "-s".into(), "-z".into()])?,
             root,
@@ -199,6 +193,7 @@ impl GitIndexMutationPolicy {
     async fn capture_state(&self, mutation_kind: GitIndexMutation) -> Result<State, ToolError> {
         self.revalidate()?;
         let head = successful_output(&self.head).await?;
+        self.layout.validate_git(&self.git).await?;
         let head_entry = match mutation_kind {
             GitIndexMutation::Stage => None,
             GitIndexMutation::Unstage => Some(parse_head_entry(
@@ -206,12 +201,10 @@ impl GitIndexMutationPolicy {
                 self.target.git_relative.as_bytes(),
             )?),
         };
-        let refs = successful_output(&self.refs).await?;
         let index = successful_output(&self.index).await?;
         Ok(State {
             head,
             head_entry,
-            refs,
             index: parse_index(&index)?,
             worktree: WorktreeSnapshot::capture(&self.root, &self.boundary)?,
         })
@@ -220,16 +213,12 @@ impl GitIndexMutationPolicy {
     fn revalidate(&self) -> Result<(), ToolError> {
         reject_link(&self.root, "repository root")?;
         let root = canonical_directory(&self.root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link(&dot_git, "repository metadata")?;
         if !paths_equivalent(&root, &self.root)
             || FileIdentity::capture(&root)? != self.root_identity
         {
             return Err(git_error("repository root identity changed"));
         }
-        if FileIdentity::capture(&dot_git)? != self.dot_git_identity {
-            return Err(git_error("repository metadata identity changed"));
-        }
+        self.layout.revalidate()?;
         self.target.revalidate(&self.root)?;
         self.boundary.validate_existing(&self.target.path)
     }
@@ -341,7 +330,6 @@ impl Target {
 struct State {
     head: Vec<u8>,
     head_entry: Option<Vec<u8>>,
-    refs: Vec<u8>,
     index: BTreeMap<Vec<u8>, Vec<u8>>,
     worktree: WorktreeSnapshot,
 }
@@ -472,7 +460,6 @@ fn verify(
             .is_some_and(|head_entry| post.index.get(&target) == Some(head_entry)),
     };
     let violation = pre.head != post.head
-        || pre.refs != post.refs
         || pre.worktree.0 != post.worktree.0
         || !unrelated_equal
         || !mutation_matches_authority;
@@ -908,14 +895,12 @@ mod tests {
         let pre = State {
             head: b"head".to_vec(),
             head_entry: Some(b"100644 object 0".to_vec()),
-            refs: b"refs".to_vec(),
             index: pre_index,
             worktree: WorktreeSnapshot(BTreeMap::new()),
         };
         let post = State {
             head: b"head".to_vec(),
             head_entry: Some(b"100644 object 0".to_vec()),
-            refs: b"refs".to_vec(),
             index: post_index,
             worktree: WorktreeSnapshot(BTreeMap::new()),
         };
@@ -1229,5 +1214,74 @@ mod tests {
         );
         assert_eq!(index_bytes(&git, &root), before);
         assert_eq!(policy.mutation_attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn linked_stage_and_unstage_change_only_the_selected_worktree_index() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let main_index =
+            crate::repository_git_layout::RepositoryGitLayout::capture(&fixture.git, &fixture.main)
+                .unwrap()
+                .index_path();
+        let a_index = crate::repository_git_layout::RepositoryGitLayout::capture(
+            &fixture.git,
+            &fixture.linked_a,
+        )
+        .unwrap()
+        .index_path();
+        let b_index = crate::repository_git_layout::RepositoryGitLayout::capture(
+            &fixture.git,
+            &fixture.linked_b,
+        )
+        .unwrap()
+        .index_path();
+        let main_before = fs::read(&main_index).unwrap();
+        let a_before = fs::read(&a_index).unwrap();
+        fs::write(fixture.linked_b.join("sibling-only.txt"), b"B commit\n").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["add", "--", "sibling-only.txt"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["commit", "--quiet", "-m", "unrelated B commit"],
+        );
+        let b_before = fs::read(&b_index).unwrap();
+
+        fs::write(fixture.linked_a.join("tracked.txt"), b"staged only in A\n").unwrap();
+        let stage = GitStageTool::new(
+            &fixture.git,
+            &fixture.linked_a,
+            "tracked-file",
+            fixture.linked_a.join("tracked.txt"),
+        )
+        .unwrap();
+        let staged = stage
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(!staged.is_error);
+        let a_staged = fs::read(&a_index).unwrap();
+        assert_ne!(a_staged, a_before);
+        assert_eq!(fs::read(&main_index).unwrap(), main_before);
+        assert_eq!(fs::read(&b_index).unwrap(), b_before);
+
+        let unstage = GitUnstageTool::new(
+            &fixture.git,
+            &fixture.linked_a,
+            "tracked-file",
+            fixture.linked_a.join("tracked.txt"),
+        )
+        .unwrap();
+        let unstaged = unstage
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        assert!(!unstaged.is_error);
+        assert_ne!(fs::read(&a_index).unwrap(), a_staged);
+        assert_eq!(fs::read(&main_index).unwrap(), main_before);
+        assert_eq!(fs::read(&b_index).unwrap(), b_before);
     }
 }

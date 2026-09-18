@@ -24,6 +24,7 @@ use crate::{
     git_support::{git_environment, git_error},
     host_execute::{is_beneath, paths_equivalent},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
 };
 
 /// Stable name for the bounded repository worktree text replacement capability.
@@ -670,6 +671,7 @@ struct RepositoryWorktreeMutationPolicy {
     root: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     boundary: RepositoryNestedBoundaryPolicy,
     lease: std::sync::Arc<AsyncMutex<()>>,
     limits: PatchLimits,
@@ -683,21 +685,18 @@ impl RepositoryWorktreeMutationPolicy {
             return Err(policy_error("repository root must be an absolute path"));
         }
         reject_reparse_ancestry(root, "repository root")?;
-        let root = canonical_directory(root, "repository root")?;
+        let layout = RepositoryGitLayout::capture(git, root)?;
+        let root = layout.root().to_path_buf();
         validate_directory_path(&root, &root, "repository root")?;
         let dot_git = root.join(".git");
         reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-            return Err(policy_error(
-                "repository metadata must be a directory; linked worktrees are unsupported",
-            ));
-        }
         let git = canonical_git_executable(git)?;
         Ok(Self {
             git_identity: FileIdentity::capture(&git)?,
             git,
             root_identity: FileIdentity::capture(&root)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            layout,
             boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: crate::git_stage::repository_lease(&root),
             root,
@@ -1069,9 +1068,9 @@ impl RepositoryWorktreeMutationPolicy {
         let current = canonical_directory(&self.root, "repository root")?;
         let dot_git = current.join(".git");
         reject_link_or_reparse(&dot_git, "repository metadata")?;
+        self.layout.revalidate()?;
         if !paths_equivalent(&current, &self.root)
             || FileIdentity::capture(&current)? != self.root_identity
-            || !fs::metadata(&dot_git).map_err(fs_error)?.is_dir()
             || FileIdentity::capture(&dot_git)? != self.dot_git_identity
         {
             return Err(policy_error("repository identity changed"));
@@ -1080,6 +1079,7 @@ impl RepositoryWorktreeMutationPolicy {
     }
 
     async fn git_state(&self, target: &Target) -> Result<GitState, ToolError> {
+        self.layout.validate_git(&self.git).await?;
         let top = self
             .git_output(vec!["rev-parse", "--show-toplevel"])
             .await?;
@@ -1128,23 +1128,13 @@ impl RepositoryWorktreeMutationPolicy {
                 &target.git_path,
             ])
             .await?;
-        let refs = self
-            .git_output(vec![
-                "for-each-ref",
-                "--format=%(refname)%00%(objectname)%00",
-            ])
-            .await?;
         let head_entry = parse_head_entry(&head_entry, target.git_path.as_bytes())?;
         let index_entry = parse_index_entry(&index_entry, target.git_path.as_bytes())?;
         if head_entry != index_entry {
             return Err(git_error("target has staged or index divergence"));
         }
         require_normal_index_tag(&tag, target.git_path.as_bytes())?;
-        Ok(GitState {
-            head,
-            head_entry,
-            refs,
-        })
+        Ok(GitState { head, head_entry })
     }
 
     async fn git_output(&self, arguments: Vec<&str>) -> Result<Vec<u8>, ToolError> {
@@ -1571,7 +1561,6 @@ struct Postimage {
 struct GitState {
     head: Vec<u8>,
     head_entry: GitEntry,
-    refs: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1957,7 +1946,6 @@ fn compute_review_identity(
     digest.update(&pre.git.head);
     digest.update(&pre.git.head_entry.mode);
     digest.update(&pre.git.head_entry.object);
-    digest.update(&pre.git.refs);
     let bytes = digest.finalize();
     let mut identity = String::with_capacity(64);
     for byte in bytes {
@@ -2937,11 +2925,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn head_and_ref_change_make_preparation_stale() {
+    async fn unrelated_ref_change_stays_current_but_selected_head_change_is_stale() {
         let base = TestDirectory::new("revalidate-head");
         let root = base.repository();
         let preparer = RepositoryPatchPreparer::new(git_executable(), &root).unwrap();
         let preparation = prepare_default(&preparer).await;
+
+        git(
+            &root,
+            &["update-ref", "refs/heads/task-359-unrelated", "HEAD"],
+        );
+        assert_eq!(preparer.revalidate(&preparation).await, Ok(()));
 
         fs::write(root.join("other.txt"), b"other changed\n").unwrap();
         git(&root, &["add", "--", "other.txt"]);
@@ -4167,6 +4161,30 @@ mod tests {
             returned_status,
             returned_reason,
         )
+    }
+
+    #[tokio::test]
+    async fn linked_patch_changes_only_the_selected_worktree_file() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let tool = RepositoryWorktreePatchTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        let output = run(
+            &tool,
+            request("tracked.txt", b"initial\n", "initial", "changed"),
+        )
+        .await;
+        assert_eq!(content(&output)["status"], "ok");
+        assert_eq!(
+            fs::read(fixture.linked_a.join("tracked.txt")).unwrap(),
+            b"changed\n"
+        );
+        assert_eq!(
+            fs::read(fixture.main.join("tracked.txt")).unwrap(),
+            b"initial\n"
+        );
+        assert_eq!(
+            fs::read(fixture.linked_b.join("tracked.txt")).unwrap(),
+            b"initial\n"
+        );
     }
 
     fn request(path: &str, bytes: &[u8], old: &str, replacement: &str) -> Value {

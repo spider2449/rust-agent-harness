@@ -319,7 +319,7 @@ fn source_identity_and_missing_target_drift_are_stale() {
 }
 
 #[test]
-fn source_index_head_and_ref_drift_are_stale() {
+fn source_index_and_selected_head_drift_are_stale_but_unrelated_refs_stay_current() {
     let fixture = Fixture::new();
     let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.root).unwrap();
     let preparation = prepare(&preparer, "target.txt").unwrap();
@@ -343,10 +343,7 @@ fn source_index_head_and_ref_drift_are_stale() {
     let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.root).unwrap();
     let preparation = prepare(&preparer, "target.txt").unwrap();
     run(&fixture.git, &fixture.root, &["branch", "unrelated-ref"]);
-    assert_eq!(
-        revalidate(&preparer, &preparation),
-        Err(RepositoryDeleteFilePreparationError::Stale)
-    );
+    assert_eq!(revalidate(&preparer, &preparation), Ok(()));
 }
 
 #[test]

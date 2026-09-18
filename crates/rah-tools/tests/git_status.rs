@@ -298,22 +298,12 @@ async fn executable_and_repository_identities_are_revalidated_before_spawn() {
 }
 
 #[tokio::test]
-async fn worktree_style_git_file_is_supported_and_revalidated() {
+async fn unsupported_generic_gitfile_is_rejected() {
     let root = TestDirectory::new("git-file");
     let repository = root.0.join("repository");
     fs::create_dir(&repository).unwrap();
     fs::write(repository.join(".git"), "gitdir: ../metadata\n").unwrap();
-    let tool = GitStatusTool::new(fixture(), &repository).unwrap();
-    fs::write(repository.join(".git"), "gitdir: ../replacement\n").unwrap();
-    let error = tool
-        .execute(ToolInput(json!({})), ToolContext::default())
-        .await
-        .expect_err("changed .git file must fail before spawn");
-    assert!(
-        error
-            .to_string()
-            .contains("repository metadata identity changed")
-    );
+    assert!(GitStatusTool::new(fixture(), &repository).is_err());
 }
 
 #[tokio::test]

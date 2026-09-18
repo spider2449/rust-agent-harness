@@ -27,6 +27,7 @@ mod repository_delete_file;
 mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
+mod repository_git_layout;
 mod repository_multi_file_edit;
 mod repository_multi_file_preflight;
 mod repository_mutation;

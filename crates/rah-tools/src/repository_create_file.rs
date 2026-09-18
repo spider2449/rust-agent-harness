@@ -21,6 +21,7 @@ use crate::{
     git_support::git_environment,
     native_repository_create::{NativeCreateError, NativeObjectIdentity, NativeParent, create_new},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
     repository_worktree_patch::FileIdentity,
 };
 
@@ -648,6 +649,7 @@ struct RepositoryFileCreationPolicy {
     git: PathBuf,
     root_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     git_identity: FileIdentity,
     boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
@@ -658,7 +660,9 @@ impl RepositoryFileCreationPolicy {
         if !root.is_absolute() || !git.is_absolute() {
             return Err(config_error("host paths must be absolute"));
         }
-        let root = fs::canonicalize(root).map_err(config_error)?;
+        let layout = RepositoryGitLayout::capture(git, root)
+            .map_err(|_| config_error("repository layout is invalid"))?;
+        let root = layout.root().to_path_buf();
         let git = fs::canonicalize(git).map_err(config_error)?;
         let dot_git = root.join(".git");
         if !root.is_dir()
@@ -666,7 +670,6 @@ impl RepositoryFileCreationPolicy {
             || is_link_or_reparse(&root)
             || is_link_or_reparse(&git)
             || is_link_or_reparse(&dot_git)
-            || !dot_git.is_dir()
         {
             return Err(config_error("repository or Git identity is invalid"));
         }
@@ -679,6 +682,7 @@ impl RepositoryFileCreationPolicy {
             git,
             root_identity,
             dot_git_identity,
+            layout,
             git_identity,
             boundary: RepositoryNestedBoundaryPolicy::new(&root),
         })
@@ -688,6 +692,7 @@ impl RepositoryFileCreationPolicy {
     }
     async fn validate(&self, request: &CreateRequest) -> Result<PreState, ()> {
         self.revalidate_root()?;
+        self.layout.validate_git(&self.git).await.map_err(|_| ())?;
         let path = self.root.join(&request.path);
         let parent = path.parent().ok_or(())?;
         self.boundary.validate_existing(parent).map_err(|_| ())?;
@@ -705,11 +710,7 @@ impl RepositoryFileCreationPolicy {
                 .git_output(&["rev-parse", "--verify", "HEAD"])
                 .await
                 .map_err(|_| ())?,
-            refs: self
-                .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
-                .await
-                .map_err(|_| ())?,
-            index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
+            index: fs::read(self.layout.index_path()).map_err(|_| ())?,
         })
     }
     async fn revalidate(
@@ -810,12 +811,7 @@ impl RepositoryFileCreationPolicy {
             .await
             .map_err(|_| ())?
             != pre.head
-            || self
-                .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
-                .await
-                .map_err(|_| ())?
-                != pre.refs
-            || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
+            || fs::read(self.layout.index_path()).map_err(|_| ())? != pre.index
         {
             return Err(());
         }
@@ -858,12 +854,7 @@ impl RepositoryFileCreationPolicy {
             .await
             .map_err(|_| ())?
             != pre.head
-            || self
-                .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
-                .await
-                .map_err(|_| ())?
-                != pre.refs
-            || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
+            || fs::read(self.layout.index_path()).map_err(|_| ())? != pre.index
         {
             return Err(());
         }
@@ -903,25 +894,20 @@ impl RepositoryFileCreationPolicy {
             .await
             .map_err(|_| ())?
             != pre.head
-            || self
-                .git_output(&["for-each-ref", "--format=%(refname)%00%(objectname)%00"])
-                .await
-                .map_err(|_| ())?
-                != pre.refs
-            || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
+            || fs::read(self.layout.index_path()).map_err(|_| ())? != pre.index
         {
             return Err(());
         }
         Ok(())
     }
     fn revalidate_root(&self) -> Result<(), ()> {
+        self.layout.revalidate().map_err(|_| ())?;
         let canonical = fs::canonicalize(&self.root).map_err(|_| ())?;
         let root_identity = FileIdentity::capture(&self.root).map_err(|_| ())?;
         let dot_git_identity = FileIdentity::capture(&self.root.join(".git")).map_err(|_| ())?;
         let git_identity = FileIdentity::capture(&self.git).map_err(|_| ())?;
         if canonical != self.root
             || is_link_or_reparse(&self.root)
-            || !self.root.join(".git").is_dir()
             || !root_identity.same_object(&self.root_identity)
             || !dot_git_identity.same_object(&self.dot_git_identity)
             || !git_identity.same_object(&self.git_identity)
@@ -969,7 +955,6 @@ struct PreState {
     path: PathBuf,
     parent_chain: Vec<NativeObjectIdentity>,
     head: Vec<u8>,
-    refs: Vec<u8>,
     index: Vec<u8>,
 }
 struct CreateRequest {
@@ -1200,7 +1185,6 @@ fn compute_create_review_identity(
     digest.update(format!("{:?}", policy.git_identity).as_bytes());
     digest.update(format!("{:?}", pre.parent_chain).as_bytes());
     digest.update(&pre.head);
-    digest.update(&pre.refs);
     digest.update(&pre.index);
     hex_digest(digest.finalize())
 }
@@ -1232,7 +1216,6 @@ fn serialized_preparation_size(preparation: &RepositoryCreateFilePreparation) ->
     .unwrap_or(usize::MAX);
     public_size
         .saturating_add(preparation.pre.head.len())
-        .saturating_add(preparation.pre.refs.len())
         .saturating_add(preparation.pre.index.len())
         .saturating_add(preparation.pre.parent_chain.len().saturating_mul(32))
         .saturating_add(1024)
@@ -1606,5 +1589,22 @@ mod tests {
             b"external replacement"
         );
         assert_eq!(tool.test_hook.native_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn linked_create_file_is_confined_to_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let tool = RepositoryFileCreationTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        let result = execute(
+            &tool,
+            json!({"path":"created-only-in-a.txt","content":"A only"}),
+        );
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            fs::read(fixture.linked_a.join("created-only-in-a.txt")).unwrap(),
+            b"A only"
+        );
+        assert!(!fixture.main.join("created-only-in-a.txt").exists());
+        assert!(!fixture.linked_b.join("created-only-in-a.txt").exists());
     }
 }

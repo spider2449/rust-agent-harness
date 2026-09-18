@@ -134,13 +134,7 @@ struct RepositoryCommitPolicy {
 
 impl RepositoryCommitPolicy {
     fn new(git: &Path, root: &Path, name: String, email: String) -> Result<Self, ToolError> {
-        let repository = RepositoryIdentity::capture(root)?;
-        let dot_git = repository.root().join(".git");
-        if !fs::metadata(&dot_git).map_err(io_error)?.is_dir() {
-            return Err(git_error(
-                "linked worktrees and .git indirection are unsupported",
-            ));
-        }
+        let repository = RepositoryIdentity::capture(git, root)?;
         let hooks = unique_empty_hooks_directory()?;
         // HostExecutionPolicy captures and validates the exact native executable.
         let git_binding = HostExecutionPolicy::new(
@@ -334,6 +328,7 @@ impl RepositoryCommitPolicy {
 
     async fn capture_snapshot(&self) -> Result<CommitSnapshot, ToolError> {
         self.repository.revalidate()?;
+        self.repository.validate_git(&self.git).await?;
         self.git_binding.revalidate()?;
         self.revalidate_hooks()?;
         self.require_ordinary_state()?;
@@ -366,8 +361,7 @@ impl RepositoryCommitPolicy {
         }
         // Capture raw bytes last: fixed Git observations may refresh cache
         // extensions, while this value binds the state immediately before use.
-        let index =
-            fs::read(self.repository.root().join(".git").join("index")).map_err(io_error)?;
+        let index = fs::read(self.repository.index_path()).map_err(io_error)?;
         if index.len() < 12 || &index[..4] != b"DIRC" {
             return Err(git_error("index is malformed or unsupported"));
         }
@@ -381,7 +375,7 @@ impl RepositoryCommitPolicy {
     }
 
     fn require_ordinary_state(&self) -> Result<(), ToolError> {
-        let git = self.repository.root().join(".git");
+        let git = self.repository.git_dir();
         for name in [
             "MERGE_HEAD",
             "CHERRY_PICK_HEAD",
@@ -410,8 +404,8 @@ impl RepositoryCommitPolicy {
         }
         if self
             .repository
-            .root()
-            .join(".git/info/sparse-checkout")
+            .git_dir()
+            .join("info/sparse-checkout")
             .exists()
         {
             return Err(git_error("sparse checkout is unsupported"));
@@ -420,6 +414,7 @@ impl RepositoryCommitPolicy {
     }
 
     async fn run_commit(&self, message: &str) -> Result<HostProcessOutput, ToolError> {
+        self.repository.validate_git(&self.git).await?;
         let mut args = self.commit_config();
         args.extend([
             "commit".into(),
@@ -434,6 +429,7 @@ impl RepositoryCommitPolicy {
     }
 
     async fn run(&self, arguments: &[&str]) -> Result<HostProcessOutput, ToolError> {
+        self.repository.validate_git(&self.git).await?;
         self.policy(
             arguments.iter().map(|arg| (*arg).to_owned()).collect(),
             Duration::from_secs(5),
@@ -983,7 +979,7 @@ mod test_phase {
             Some((generation, selected, Fault::IndexLock)) if generation == _policy.generation && selected == phase
         ) {
             std::fs::write(
-                _policy.repository.root().join(".git/index.lock"),
+                _policy.repository.index_path().with_file_name("index.lock"),
                 b"test-owned lock",
             )
             .map_err(super::io_error)?;
@@ -1089,6 +1085,145 @@ mod tests {
         drop(pending);
         assert!(control.try_clear_authorization_now());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn linked_commit_uses_only_the_selected_worktree_index_and_branch() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(fixture.linked_a.join("tracked.txt"), b"commit from A\n").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["add", "--", "tracked.txt"],
+        );
+
+        let main_layout =
+            crate::repository_git_layout::RepositoryGitLayout::capture(&fixture.git, &fixture.main)
+                .unwrap();
+        let a_layout = crate::repository_git_layout::RepositoryGitLayout::capture(
+            &fixture.git,
+            &fixture.linked_a,
+        )
+        .unwrap();
+        let b_layout = crate::repository_git_layout::RepositoryGitLayout::capture(
+            &fixture.git,
+            &fixture.linked_b,
+        )
+        .unwrap();
+        let main_index_before = fs::read(main_layout.index_path()).unwrap();
+        let a_index_before = fs::read(a_layout.index_path()).unwrap();
+        let a_head_before = String::from_utf8(
+            crate::repository_git_layout::test_fixture::run(
+                &fixture.git,
+                &fixture.linked_a,
+                &["rev-parse", "HEAD"],
+            )
+            .stdout,
+        )
+        .unwrap();
+        let (tool, control) = RepositoryCommitTool::compose(
+            &fixture.git,
+            &fixture.linked_a,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_, review) = control.review_current_staged_snapshot().await.unwrap();
+        fs::write(
+            fixture.linked_b.join("committed-only-in-b.txt"),
+            b"B advances its branch\n",
+        )
+        .unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["add", "--", "committed-only-in-b.txt"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["commit", "--quiet", "-m", "unrelated B commit"],
+        );
+        fs::write(
+            fixture.linked_b.join("staged-only-in-b.txt"),
+            b"B staged but not committed\n",
+        )
+        .unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["add", "--", "staged-only-in-b.txt"],
+        );
+        let b_head_before = crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["rev-parse", "HEAD"],
+        )
+        .stdout;
+        let b_index_before = fs::read(b_layout.index_path()).unwrap();
+        control
+            .authorize_reviewed_snapshot(&review.expect("A's staged snapshot is reviewable"))
+            .await
+            .unwrap();
+        let result = tool
+            .execute(
+                ToolInput(serde_json::json!({"message":"commit only A"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{result:?}");
+
+        let a_head_after = String::from_utf8(
+            crate::repository_git_layout::test_fixture::run(
+                &fixture.git,
+                &fixture.linked_a,
+                &["rev-parse", "HEAD"],
+            )
+            .stdout,
+        )
+        .unwrap();
+        let b_head_after = String::from_utf8(
+            crate::repository_git_layout::test_fixture::run(
+                &fixture.git,
+                &fixture.linked_b,
+                &["rev-parse", "HEAD"],
+            )
+            .stdout,
+        )
+        .unwrap();
+        assert_ne!(a_head_after, a_head_before);
+        assert_eq!(b_head_after.as_bytes(), b_head_before);
+        assert!(
+            Command::new(&fixture.git)
+                .args(["cat-file", "-e", a_head_after.trim()])
+                .current_dir(&fixture.linked_b)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_ne!(fs::read(a_layout.index_path()).unwrap(), a_index_before);
+        assert_eq!(fs::read(b_layout.index_path()).unwrap(), b_index_before);
+        assert_eq!(
+            fs::read(main_layout.index_path()).unwrap(),
+            main_index_before
+        );
+        assert_eq!(
+            crate::repository_git_layout::test_fixture::run(
+                &fixture.git,
+                &fixture.linked_b,
+                &["show", "HEAD:committed-only-in-b.txt"],
+            )
+            .stdout,
+            b"B advances its branch\n"
+        );
+        assert!(fixture.linked_b.join("staged-only-in-b.txt").exists());
+        let staged_only_lookup = Command::new(&fixture.git)
+            .args(["cat-file", "-e", "HEAD:staged-only-in-b.txt"])
+            .current_dir(&fixture.linked_b)
+            .output()
+            .unwrap();
+        assert!(!staged_only_lookup.status.success());
     }
 
     #[tokio::test]
@@ -1709,6 +1844,48 @@ mod tests {
         assert!(control.authorize_reviewed_snapshot(&review).await.is_err());
         assert!(!control.has_pending_authorization().await);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn linked_commit_review_stales_when_its_selected_branch_ref_moves() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(fixture.linked_a.join("tracked.txt"), b"reviewed in A\n").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["add", "--", "tracked.txt"],
+        );
+        let (tool, control) = RepositoryCommitTool::compose(
+            &fixture.git,
+            &fixture.linked_a,
+            "RAH Host".into(),
+            "rah-host@example.invalid".into(),
+        )
+        .unwrap();
+        let (_presentation, review) = control.review_current_staged_snapshot().await.unwrap();
+        let review = review.expect("linked A staged content should have a review");
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "external A update",
+            ],
+        );
+        assert!(control.authorize_reviewed_snapshot(&review).await.is_err());
+        assert!(!control.has_pending_authorization().await);
+        let result = tool
+            .execute(
+                ToolInput(serde_json::json!({"message":"stale linked review"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert_eq!(tool.policy.attempts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

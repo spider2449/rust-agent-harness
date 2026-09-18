@@ -20,6 +20,7 @@ use crate::{
     git_support::git_environment,
     host_execute::paths_equivalent,
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         reject_unsupported_file_attributes, validate_directory_path, validate_existing_target,
@@ -443,8 +444,7 @@ impl RepositoryDeleteFilePreparer {
         {
             return false;
         }
-        if fs::read(self.policy.root.join(".git/index")).ok() != Some(preparation.pre.index.clone())
-        {
+        if fs::read(self.policy.layout.index_path()).ok() != Some(preparation.pre.index.clone()) {
             return false;
         }
         let Ok(current_git) = self
@@ -680,6 +680,7 @@ struct RepositoryFileDeletionPolicy {
     root_identity: FileIdentity,
     git_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
     #[cfg(test)]
@@ -701,13 +702,11 @@ impl RepositoryFileDeletionPolicy {
             return Err(policy_error("host identities must be absolute"));
         }
         reject_reparse_ancestry(root, "repository root")?;
-        let root = fs::canonicalize(root).map_err(fs_error)?;
+        let layout = RepositoryGitLayout::capture(git, root)?;
+        let root = layout.root().to_path_buf();
         validate_directory_path(&root, &root, "repository root")?;
         let dot_git = root.join(".git");
         reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-            return Err(policy_error("linked worktrees are unsupported"));
-        }
         let git = fs::canonicalize(git).map_err(fs_error)?;
         if !fs::metadata(&git).map_err(fs_error)?.is_file() {
             return Err(policy_error("Git identity is invalid"));
@@ -718,6 +717,7 @@ impl RepositoryFileDeletionPolicy {
             root_identity: FileIdentity::capture(&root)?,
             git_identity: FileIdentity::capture(&git)?,
             dot_git_identity: FileIdentity::capture(&dot_git)?,
+            layout,
             boundary: RepositoryNestedBoundaryPolicy::new(&root),
             git,
             root,
@@ -763,6 +763,7 @@ impl RepositoryFileDeletionPolicy {
         reviewed: bool,
     ) -> Result<Preimage, ()> {
         self.repository_ok().map_err(|_| ())?;
+        self.layout.validate_git(&self.git).await.map_err(|_| ())?;
         let path = validate_existing_target(&self.root, path).map_err(|_| ())?;
         self.boundary.validate_existing(&path).map_err(|_| ())?;
         let metadata = fs::metadata(&path).map_err(|_| ())?;
@@ -791,7 +792,7 @@ impl RepositoryFileDeletionPolicy {
             identity,
             bytes,
             git,
-            index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
+            index: fs::read(self.layout.index_path()).map_err(|_| ())?,
             parent_identity,
         })
     }
@@ -823,7 +824,7 @@ impl RepositoryFileDeletionPolicy {
         {
             return Err(());
         }
-        if fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index
+        if fs::read(self.layout.index_path()).map_err(|_| ())? != pre.index
             || self
                 .git_state(Path::new(&pre.git_path), false)
                 .await?
@@ -836,6 +837,7 @@ impl RepositoryFileDeletionPolicy {
     }
 
     fn repository_ok(&self) -> Result<(), ToolError> {
+        self.layout.revalidate()?;
         reject_reparse_ancestry(&self.root, "repository root")?;
         let current = fs::canonicalize(&self.root).map_err(fs_error)?;
         let dot_git = current.join(".git");
@@ -903,20 +905,13 @@ impl RepositoryFileDeletionPolicy {
         let blob = self
             .git_output(vec!["show", &format!("HEAD:{target}")])
             .await?;
-        let refs = self
-            .git_output(vec![
-                "for-each-ref",
-                "--format=%(refname)%00%(objectname)%00",
-            ])
-            .await?;
         Ok(GitState {
             head: head.clone(),
             branch: branch.clone(),
             head_entry: tree.clone(),
             index_entry: index.clone(),
             blob,
-            refs: refs.clone(),
-            fingerprint: [head, branch, tree, index, refs].concat(),
+            fingerprint: [head, branch, tree, index].concat(),
         })
     }
 
@@ -944,7 +939,7 @@ impl RepositoryFileDeletionPolicy {
             "rebase-merge",
             "rebase-apply",
         ] {
-            if self.root.join(".git").join(marker).exists() {
+            if self.layout.git_dir().join(marker).exists() {
                 return Err(());
             }
         }
@@ -1012,7 +1007,6 @@ struct GitState {
     head_entry: Vec<u8>,
     index_entry: Vec<u8>,
     blob: Vec<u8>,
-    refs: Vec<u8>,
     fingerprint: Vec<u8>,
 }
 struct DeleteRequest {
@@ -1319,7 +1313,6 @@ fn compute_delete_review_identity(
     digest.update(&pre.git.branch);
     digest.update(&pre.git.head_entry);
     digest.update(&pre.git.index_entry);
-    digest.update(&pre.git.refs);
     hex_digest(digest.finalize())
 }
 
@@ -1360,7 +1353,6 @@ fn serialized_preparation_size(preparation: &RepositoryDeleteFilePreparation) ->
         .saturating_add(preparation.pre.git.head_entry.len())
         .saturating_add(preparation.pre.git.index_entry.len())
         .saturating_add(preparation.pre.git.blob.len())
-        .saturating_add(preparation.pre.git.refs.len())
         .saturating_add(preparation.pre.git.fingerprint.len())
         .saturating_add(preparation.pre.path.to_string_lossy().len())
         .saturating_add(preparation.pre.git_path.len())
@@ -1740,5 +1732,46 @@ mod tests {
             .bytes
             .resize(MAX_PREPARED_REPRESENTATION_BYTES, 0);
         assert!(serialized_preparation_size(&preparation) > MAX_PREPARED_REPRESENTATION_BYTES);
+    }
+
+    #[test]
+    fn linked_delete_file_is_confined_to_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let tool = RepositoryFileDeletionTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        let input = json!({
+            "path": "tracked.txt",
+            "expected_file_sha256": sha256(b"initial\n"),
+            "expected_file_byte_length": 8
+        });
+        assert_eq!(execute(&tool, input)["status"], "deleted_verified");
+        assert!(!fixture.linked_a.join("tracked.txt").exists());
+        assert!(fixture.main.join("tracked.txt").exists());
+        assert!(fixture.linked_b.join("tracked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn unrelated_sibling_commit_does_not_stale_linked_delete_review() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let preparer = RepositoryDeleteFilePreparer::new(&fixture.git, &fixture.linked_a).unwrap();
+        let preparation = preparer
+            .prepare(RepositoryDeleteFilePreparationRequest {
+                path: "tracked.txt".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        fs::write(fixture.linked_b.join("sibling-commit.txt"), b"sibling\n").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["add", "--", "sibling-commit.txt"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &["commit", "--quiet", "-m", "sibling change"],
+        );
+
+        assert_eq!(preparer.revalidate(&preparation).await, Ok(()));
     }
 }

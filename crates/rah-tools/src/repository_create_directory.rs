@@ -16,6 +16,7 @@ use crate::{
     git_stage::repository_lease,
     native_repository_create::{NativeCreateError, NativeParent, create_directory},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         validate_directory_path,
@@ -40,10 +41,14 @@ pub struct RepositoryDirectoryCreationAuthority {
 }
 
 impl RepositoryDirectoryCreationAuthority {
-    /// Binds the authority to a host-selected canonical repository.
-    pub fn new(repository_root: impl AsRef<Path>) -> Result<Self, ToolError> {
+    /// Binds the authority to a host-selected Git executable and repository.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
         Ok(Self {
             policy: Arc::new(RepositoryDirectoryCreationPolicy::new(
+                git_executable.as_ref(),
                 repository_root.as_ref(),
             )?),
         })
@@ -57,10 +62,13 @@ impl RepositoryDirectoryCreationAuthority {
 }
 
 impl RepositoryDirectoryCreationTool {
-    /// Constructs the tool from a host-selected repository authority.
-    pub fn new(repository_root: impl AsRef<Path>) -> Result<Self, ToolError> {
+    /// Constructs the tool from a host-selected Git executable and repository.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
         Ok(Self::from_authority(
-            RepositoryDirectoryCreationAuthority::new(repository_root)?,
+            RepositoryDirectoryCreationAuthority::new(git_executable, repository_root)?,
         ))
     }
 
@@ -98,11 +106,17 @@ impl Tool for RepositoryDirectoryCreationTool {
             Err(()) => return Ok(result("invalid_input", None, false)),
         };
         let _lease = self.authority.policy.acquire_lease().await;
-        let pre = match self.authority.policy.capture(&request) {
+        let pre = match self.authority.policy.capture(&request).await {
             Ok(pre) => pre,
             Err(()) => return Ok(result("precondition_failed", Some(&request.path), false)),
         };
-        if self.authority.policy.revalidate(&request, &pre).is_err() {
+        if self
+            .authority
+            .policy
+            .revalidate(&request, &pre)
+            .await
+            .is_err()
+        {
             return Ok(result("precondition_failed", Some(&request.path), false));
         }
         #[cfg(test)]
@@ -127,7 +141,7 @@ impl Tool for RepositoryDirectoryCreationTool {
                 {
                     return Ok(result("uncertain", None, true));
                 }
-                if self.authority.policy.verify_post(&pre).is_ok() {
+                if self.authority.policy.verify_post(&pre).await.is_ok() {
                     Ok(result(
                         "directory_created_verified",
                         Some(&request.path),
@@ -138,14 +152,14 @@ impl Tool for RepositoryDirectoryCreationTool {
                 }
             }
             Err(NativeCreateError::AlreadyExists) => {
-                if self.authority.policy.known_no_effect(&pre).is_ok() {
+                if self.authority.policy.known_no_effect(&pre).await.is_ok() {
                     Ok(result("known_no_effect", Some(&request.path), false))
                 } else {
                     Ok(result("uncertain", None, true))
                 }
             }
             Err(_) => {
-                if self.authority.policy.known_no_effect(&pre).is_ok() {
+                if self.authority.policy.known_no_effect(&pre).await.is_ok() {
                     Ok(result("known_no_effect", Some(&request.path), false))
                 } else {
                     Ok(result("uncertain", None, true))
@@ -157,8 +171,10 @@ impl Tool for RepositoryDirectoryCreationTool {
 
 struct RepositoryDirectoryCreationPolicy {
     root: PathBuf,
+    git: PathBuf,
     root_identity: FileIdentity,
-    dot_git_identity: FileIdentity,
+    git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     boundary: RepositoryNestedBoundaryPolicy,
     lease: Arc<AsyncMutex<()>>,
 }
@@ -175,28 +191,29 @@ struct PreState {
 struct GitSnapshot {
     index: Option<Vec<u8>>,
     head: Vec<u8>,
-    packed_refs: Option<Vec<u8>>,
-    refs: Vec<(PathBuf, Vec<u8>)>,
 }
 
 impl RepositoryDirectoryCreationPolicy {
-    fn new(root: &Path) -> Result<Self, ToolError> {
-        if !root.is_absolute() {
-            return Err(policy_error("repository root must be absolute"));
+    fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
+        if !root.is_absolute() || !git.is_absolute() {
+            return Err(policy_error("host identities must be absolute"));
         }
         reject_reparse_ancestry(root, "repository root")?;
-        let root = fs::canonicalize(root).map_err(fs_error)?;
+        let layout = RepositoryGitLayout::capture(git, root)?;
+        let root = layout.root().to_path_buf();
         validate_directory_path(&root, &root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-            return Err(policy_error("bare or unsupported repository metadata"));
+        reject_reparse_ancestry(git, "Git executable")?;
+        let git = fs::canonicalize(git).map_err(fs_error)?;
+        if !fs::metadata(&git).map_err(fs_error)?.is_file() {
+            return Err(policy_error("Git executable is invalid"));
         }
         Ok(Self {
             root_identity: FileIdentity::capture(&root)?,
-            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            git_identity: FileIdentity::capture(&git)?,
+            layout,
             boundary: RepositoryNestedBoundaryPolicy::new(&root),
             lease: repository_lease(&root),
+            git,
             root,
         })
     }
@@ -205,8 +222,8 @@ impl RepositoryDirectoryCreationPolicy {
         self.lease.lock().await
     }
 
-    fn capture(&self, request: &CreateDirectoryRequest) -> Result<PreState, ()> {
-        self.repository_ok().map_err(|_| ())?;
+    async fn capture(&self, request: &CreateDirectoryRequest) -> Result<PreState, ()> {
+        self.repository_ok().await.map_err(|_| ())?;
         let path = self.root.join(&request.path);
         let parent = path.parent().ok_or(())?;
         validate_directory_path(&self.root, parent, "directory parent").map_err(|_| ())?;
@@ -228,12 +245,12 @@ impl RepositoryDirectoryCreationPolicy {
             name,
             parent: native_parent,
             parent_identity,
-            git: git_snapshot(&self.root).map_err(|_| ())?,
+            git: git_snapshot(&self.layout).map_err(|_| ())?,
         })
     }
 
-    fn revalidate(&self, request: &CreateDirectoryRequest, pre: &PreState) -> Result<(), ()> {
-        let current = self.capture(request)?;
+    async fn revalidate(&self, request: &CreateDirectoryRequest, pre: &PreState) -> Result<(), ()> {
+        let current = self.capture(request).await?;
         if current.path != pre.path
             || !current.parent_identity.same_object(&pre.parent_identity)
             || current.git != pre.git
@@ -243,8 +260,8 @@ impl RepositoryDirectoryCreationPolicy {
         Ok(())
     }
 
-    fn verify_post(&self, pre: &PreState) -> Result<(), ()> {
-        self.repository_ok().map_err(|_| ())?;
+    async fn verify_post(&self, pre: &PreState) -> Result<(), ()> {
+        self.repository_ok().await.map_err(|_| ())?;
         self.boundary
             .validate_existing(pre.path.parent().ok_or(())?)
             .map_err(|_| ())?;
@@ -263,15 +280,15 @@ impl RepositoryDirectoryCreationPolicy {
             return Err(());
         }
         if fs::read_dir(&pre.path).map_err(|_| ())?.next().is_some()
-            || git_snapshot(&self.root).map_err(|_| ())? != pre.git
+            || git_snapshot(&self.layout).map_err(|_| ())? != pre.git
         {
             return Err(());
         }
         Ok(())
     }
 
-    fn known_no_effect(&self, pre: &PreState) -> Result<(), ()> {
-        self.repository_ok().map_err(|_| ())?;
+    async fn known_no_effect(&self, pre: &PreState) -> Result<(), ()> {
+        self.repository_ok().await.map_err(|_| ())?;
         self.boundary
             .validate_existing(pre.path.parent().ok_or(())?)
             .map_err(|_| ())?;
@@ -279,23 +296,23 @@ impl RepositoryDirectoryCreationPolicy {
             || !FileIdentity::capture(pre.path.parent().ok_or(())?)
                 .map_err(|_| ())?
                 .same_object(&pre.parent_identity)
-            || git_snapshot(&self.root).map_err(|_| ())? != pre.git
+            || git_snapshot(&self.layout).map_err(|_| ())? != pre.git
         {
             return Err(());
         }
         Ok(())
     }
 
-    fn repository_ok(&self) -> Result<(), ToolError> {
+    async fn repository_ok(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
         let root = fs::canonicalize(&self.root).map_err(fs_error)?;
-        let dot_git = root.join(".git");
         if root != self.root
             || !FileIdentity::capture(&root)?.same_object(&self.root_identity)
-            || !FileIdentity::capture(&dot_git)?.same_object(&self.dot_git_identity)
+            || !FileIdentity::capture(&self.git)?.same_object(&self.git_identity)
         {
             return Err(policy_error("repository identity changed"));
         }
+        self.layout.validate_git(&self.git).await?;
         Ok(())
     }
 }
@@ -325,20 +342,10 @@ impl CreateDirectoryRequest {
     }
 }
 
-fn git_snapshot(root: &Path) -> Result<GitSnapshot, std::io::Error> {
-    let dot_git = root.join(".git");
-    let index = optional_file(&dot_git.join("index"))?;
-    let head = fs::read(dot_git.join("HEAD"))?;
-    let packed_refs = optional_file(&dot_git.join("packed-refs"))?;
-    let mut refs = Vec::new();
-    collect_files(&dot_git.join("refs"), &dot_git, &mut refs)?;
-    refs.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(GitSnapshot {
-        index,
-        head,
-        packed_refs,
-        refs,
-    })
+fn git_snapshot(layout: &RepositoryGitLayout) -> Result<GitSnapshot, std::io::Error> {
+    let index = optional_file(&layout.index_path())?;
+    let head = fs::read(layout.head_path())?;
+    Ok(GitSnapshot { index, head })
 }
 
 fn optional_file(path: &Path) -> Result<Option<Vec<u8>>, std::io::Error> {
@@ -347,33 +354,6 @@ fn optional_file(path: &Path) -> Result<Option<Vec<u8>>, std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-fn collect_files(
-    path: &Path,
-    base: &Path,
-    files: &mut Vec<(PathBuf, Vec<u8>)>,
-) -> Result<(), std::io::Error> {
-    if !path.exists() {
-        return Ok(());
-    }
-    reject_link_or_reparse(path, "repository refs")
-        .map_err(|_| std::io::Error::other("unsafe repository refs"))?;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let child = entry.path();
-        reject_link_or_reparse(&child, "repository refs")
-            .map_err(|_| std::io::Error::other("unsafe repository refs"))?;
-        if entry.file_type()?.is_dir() {
-            collect_files(&child, base, files)?;
-        } else {
-            files.push((
-                child.strip_prefix(base).unwrap_or(&child).to_path_buf(),
-                fs::read(child)?,
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn reserved_windows_name(component: &str) -> bool {
@@ -425,37 +405,32 @@ struct TestHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
-    use std::{
-        sync::atomic::Ordering,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::sync::atomic::Ordering;
 
     struct Fixture {
+        _worktrees: crate::repository_git_layout::test_fixture::WorktreeFixture,
+        git: PathBuf,
         root: PathBuf,
     }
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "rah-create-directory-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
-            fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+            let worktrees = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+            let root = worktrees.main.clone();
             fs::create_dir(root.join("existing")).unwrap();
-            Self { root }
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+            Self {
+                git: worktrees.git.clone(),
+                root,
+                _worktrees: worktrees,
+            }
         }
     }
     fn execute(tool: &RepositoryDirectoryCreationTool, value: Value) -> Value {
-        block_on(tool.execute(ToolInput(value), ToolContext::default()))
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(tool.execute(ToolInput(value), ToolContext::default()))
             .unwrap()
             .content
             .into_iter()
@@ -470,7 +445,7 @@ mod tests {
     #[test]
     fn creates_one_leaf_under_root_and_nested_parent() {
         let fixture = Fixture::new();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
         assert_eq!(
             execute(&tool, json!({"path":"new-dir"}))["status"],
             "directory_created_verified"
@@ -490,11 +465,24 @@ mod tests {
     }
 
     #[test]
+    fn linked_creation_is_confined_to_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        assert_eq!(
+            execute(&tool, json!({"path":"new-dir"}))["status"],
+            "directory_created_verified"
+        );
+        assert!(fixture.linked_a.join("new-dir").is_dir());
+        assert!(!fixture.main.join("new-dir").exists());
+        assert!(!fixture.linked_b.join("new-dir").exists());
+    }
+
+    #[test]
     fn rejects_nested_repository_parent_before_native_creation() {
         let fixture = Fixture::new();
         fs::create_dir(fixture.root.join("nested")).unwrap();
         fs::create_dir(fixture.root.join("nested/.git")).unwrap();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
 
         assert_eq!(
             execute(&tool, json!({"path":"nested/new-dir"}))["status"],
@@ -507,7 +495,7 @@ mod tests {
     #[test]
     fn rejects_authority_input_and_path_contract_failures() {
         let fixture = Fixture::new();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
         for value in [
             json!({}),
             json!({"path":""}),
@@ -528,7 +516,7 @@ mod tests {
     fn rejects_existing_objects_and_file_parent() {
         let fixture = Fixture::new();
         fs::write(fixture.root.join("file"), b"x").unwrap();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
         assert_eq!(
             execute(&tool, json!({"path":"existing"}))["status"],
             "precondition_failed"
@@ -542,7 +530,7 @@ mod tests {
     #[test]
     fn target_race_is_known_no_effect_without_retry() {
         let fixture = Fixture::new();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
         tool.test_hook
             .create_target_before_native
             .store(true, Ordering::SeqCst);
@@ -556,7 +544,7 @@ mod tests {
     #[test]
     fn uncertain_postcondition_is_not_replayed_or_deleted() {
         let fixture = Fixture::new();
-        let tool = RepositoryDirectoryCreationTool::new(&fixture.root).unwrap();
+        let tool = RepositoryDirectoryCreationTool::new(&fixture.git, &fixture.root).unwrap();
         tool.test_hook.force_uncertain.store(true, Ordering::SeqCst);
         assert_eq!(
             execute(&tool, json!({"path":"uncertain"}))["status"],

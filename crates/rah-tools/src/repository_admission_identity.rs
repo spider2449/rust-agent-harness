@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::ToolError;
+use crate::repository_git_layout::RepositoryGitLayout;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FileIdentity {
@@ -96,13 +97,13 @@ pub enum RepositoryAdmissionRelation {
 pub struct RepositoryAdmissionIdentity {
     canonical_root: PathBuf,
     root_identity: FileIdentity,
-    dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     git_executable: PathBuf,
     git_identity: FileIdentity,
 }
 
 impl RepositoryAdmissionIdentity {
-    /// Captures a supported ordinary non-bare repository binding.
+    /// Captures a supported main or linked non-bare repository binding.
     pub fn capture(
         git_executable: impl AsRef<Path>,
         repository_root: impl AsRef<Path>,
@@ -112,21 +113,14 @@ impl RepositoryAdmissionIdentity {
         let canonical_root = canonical_directory(requested_root, "repository root")?;
         reject_ambiguous_ancestry(&canonical_root, "repository root")?;
 
-        let dot_git = canonical_root.join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
-        if !fs::metadata(&dot_git).map_err(identity_error)?.is_dir() {
-            return Err(identity_error(
-                "repository metadata must be a supported directory",
-            ));
-        }
-
         let requested_git = git_executable.as_ref();
         reject_ambiguous_ancestry(requested_git, "Git executable")?;
         let canonical_git = canonical_file(requested_git, "Git executable")?;
+        let layout = RepositoryGitLayout::capture(&canonical_git, &canonical_root)?;
 
         Ok(Self {
             root_identity: FileIdentity::capture(&canonical_root)?,
-            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            layout,
             git_identity: FileIdentity::capture(&canonical_git)?,
             canonical_root,
             git_executable: canonical_git,
@@ -138,6 +132,11 @@ impl RepositoryAdmissionIdentity {
         &self.canonical_root
     }
 
+    /// Validates the retained layout against fixed Git semantic probes.
+    pub async fn validate_git(&self) -> Result<(), ToolError> {
+        self.layout.validate_git(&self.git_executable).await
+    }
+
     /// Re-captures all bound evidence and fails if any part became stale.
     pub fn revalidate(
         &self,
@@ -147,7 +146,8 @@ impl RepositoryAdmissionIdentity {
         let current = Self::capture(git_executable, repository_root)?;
         if current.canonical_root != self.canonical_root
             || !current.root_identity.same_object(&self.root_identity)
-            || !current.dot_git_identity.same_object(&self.dot_git_identity)
+            || !current.layout.same_private_target(&self.layout)
+            || current.layout != self.layout
             || current.git_executable != self.git_executable
             || !current.git_identity.same_object(&self.git_identity)
         {
@@ -156,12 +156,23 @@ impl RepositoryAdmissionIdentity {
         Ok(())
     }
 
+    /// Revalidates both private filesystem evidence and fixed Git semantics.
+    pub async fn revalidate_git(
+        &self,
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<(), ToolError> {
+        self.revalidate(git_executable.as_ref(), repository_root.as_ref())?;
+        self.validate_git().await?;
+        self.revalidate(git_executable.as_ref(), repository_root.as_ref())
+    }
+
     /// Compares the complete private admission binding without exposing its
     /// filesystem identities or turning it into a generic filesystem ID.
     pub fn same_binding(&self, other: &Self) -> bool {
         self.canonical_root == other.canonical_root
             && self.root_identity.same_object(&other.root_identity)
-            && self.dot_git_identity.same_object(&other.dot_git_identity)
+            && self.layout == other.layout
             && self.git_executable == other.git_executable
             && self.git_identity.same_object(&other.git_identity)
     }
@@ -169,7 +180,7 @@ impl RepositoryAdmissionIdentity {
     /// Compares two safely captured roots without exposing their raw evidence.
     pub fn relation(&self, other: &Self) -> RepositoryAdmissionRelation {
         if self.root_identity.same_object(&other.root_identity)
-            || self.dot_git_identity.same_object(&other.dot_git_identity)
+            || self.layout.same_private_target(&other.layout)
         {
             return RepositoryAdmissionRelation::Same;
         }

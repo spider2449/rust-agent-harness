@@ -206,7 +206,120 @@ mod tests {
         WorkspaceMembershipDeactivation, WorkspaceMembershipState,
     };
     use rah_tools::RepositoryAdmissionIdentity;
-    use std::sync::atomic::Ordering;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::atomic::Ordering,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct LinkedFixture {
+        base: PathBuf,
+        git: PathBuf,
+        main: PathBuf,
+        linked_a: PathBuf,
+        linked_b: PathBuf,
+    }
+
+    impl LinkedFixture {
+        fn new() -> Self {
+            let sequence = NEXT_WORKSPACE_EPOCH.fetch_add(1, Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!(
+                "RAH_V030_PRIVATE_COMMON_SENTINEL-{}-{sequence}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time should follow Unix epoch")
+                    .as_nanos()
+            ));
+            let main = base.join("main");
+            let linked_a = base.join("linked-a");
+            let linked_b = base.join("linked-b");
+            fs::create_dir_all(&main).expect("main worktree should be created");
+            #[cfg(windows)]
+            let output = Command::new("where.exe")
+                .arg("git.exe")
+                .output()
+                .expect("Git should be discoverable");
+            #[cfg(not(windows))]
+            let output = Command::new("which")
+                .arg("git")
+                .output()
+                .expect("Git should be discoverable");
+            assert!(output.status.success(), "Git should be available");
+            let git = fs::canonicalize(
+                String::from_utf8(output.stdout)
+                    .expect("Git path should be UTF-8")
+                    .lines()
+                    .next()
+                    .expect("Git path should be present"),
+            )
+            .expect("Git executable should be canonical");
+            run(&git, &main, &["init", "--quiet", "--initial-branch=main"]);
+            run(&git, &main, &["config", "user.name", "RAH Membership Test"]);
+            run(
+                &git,
+                &main,
+                &["config", "user.email", "rah@example.invalid"],
+            );
+            run(&git, &main, &["config", "core.autocrlf", "false"]);
+            fs::write(main.join("base.txt"), b"base\n").expect("tracked file should be written");
+            run(&git, &main, &["add", "--", "base.txt"]);
+            run(&git, &main, &["commit", "--quiet", "-m", "base"]);
+            run(
+                &git,
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "linked-a",
+                    linked_a.to_str().expect("fixture path should be UTF-8"),
+                ],
+            );
+            run(
+                &git,
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "linked-b",
+                    linked_b.to_str().expect("fixture path should be UTF-8"),
+                ],
+            );
+            Self {
+                base,
+                git,
+                main,
+                linked_a,
+                linked_b,
+            }
+        }
+    }
+
+    impl Drop for LinkedFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn run(git: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new(git)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("Git fixture command should start");
+        assert!(
+            output.status.success(),
+            "Git fixture command failed {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
 
     fn admitted_membership() -> (
         WorkspaceMembershipState,
@@ -356,5 +469,139 @@ mod tests {
         assert!(membership.publish_active(member_a));
         assert_eq!(membership.active_member(), Some(member_a));
         assert_eq!(membership.membership_generation(), before_generation);
+    }
+
+    #[tokio::test]
+    async fn sibling_worktrees_are_distinct_members_and_removal_keeps_git_registration() {
+        use super::WorkspaceMembershipRemoval;
+
+        let fixture = LinkedFixture::new();
+        let roots = [&fixture.main, &fixture.linked_a, &fixture.linked_b];
+        let identities =
+            roots.map(|root| RepositoryAdmissionIdentity::capture(&fixture.git, root).unwrap());
+        for identity in &identities {
+            identity.validate_git().await.unwrap();
+        }
+        let common_dirs = roots.map(|root| {
+            let output = run(
+                &fixture.git,
+                root,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            );
+            fs::canonicalize(String::from_utf8(output).unwrap().trim()).unwrap()
+        });
+        assert_eq!(common_dirs[0], common_dirs[1]);
+        assert_eq!(common_dirs[1], common_dirs[2]);
+
+        let mut membership = WorkspaceMembershipState::new();
+        let mut members = Vec::new();
+        for (name, root, identity) in [
+            ("main", &fixture.main, &identities[0]),
+            ("A", &fixture.linked_a, &identities[1]),
+            ("B", &fixture.linked_b, &identities[2]),
+        ] {
+            assert_eq!(membership.relation_to_existing(identity), None);
+            members.push(membership.admit(name.to_owned(), root.clone(), identity.clone()));
+        }
+        assert_ne!(members[0].id, members[1].id);
+        assert_ne!(members[1].id, members[2].id);
+        assert_ne!(members[0].id, members[2].id);
+        assert_eq!(membership.active_member(), None);
+        let membership_json =
+            serde_json::to_string(&crate::repository_membership_presentation_from(&membership))
+                .unwrap();
+        assert!(!membership_json.contains("RAH_V030_PRIVATE_COMMON_SENTINEL"));
+        assert!(!membership_json.contains(".git"));
+        assert_eq!(
+            membership.relation_to_existing(&identities[1]),
+            Some(rah_tools::RepositoryAdmissionRelation::Same)
+        );
+
+        let alias = RepositoryAdmissionIdentity::capture(
+            &fixture.git,
+            fixture.linked_a.join("..").join("linked-a"),
+        )
+        .unwrap();
+        assert_eq!(
+            membership.relation_to_existing(&alias),
+            Some(rah_tools::RepositoryAdmissionRelation::Same)
+        );
+        let copied = fixture.base.join("copied");
+        fs::create_dir(&copied).expect("copied candidate root should be created");
+        fs::copy(fixture.linked_a.join(".git"), copied.join(".git"))
+            .expect("candidate gitfile should be copied");
+        assert!(RepositoryAdmissionIdentity::capture(&fixture.git, &copied).is_err());
+
+        assert!(membership.publish_active(members[0].id));
+        assert!(membership.publish_active(members[1].id));
+        assert!(membership.publish_active(members[2].id));
+        assert_eq!(membership.active_member(), Some(members[2].id));
+        let worktrees_before_close = run(
+            &fixture.git,
+            &fixture.main,
+            &["worktree", "list", "--porcelain", "-z"],
+        );
+        let listed = String::from_utf8_lossy(&worktrees_before_close).replace('\\', "/");
+        assert_eq!(listed.matches("worktree ").count(), 3);
+        let refs_before_close = run(&fixture.git, &fixture.main, &["show-ref"]);
+        assert!(matches!(
+            membership.deactivate_expected(members[2].id),
+            WorkspaceMembershipDeactivation::Deactivated
+        ));
+        assert!(matches!(
+            membership.remove(members[2].id),
+            WorkspaceMembershipRemoval::Removed
+        ));
+        assert!(fixture.linked_b.is_dir());
+        assert_eq!(
+            run(
+                &fixture.git,
+                &fixture.main,
+                &["worktree", "list", "--porcelain", "-z"],
+            ),
+            worktrees_before_close
+        );
+        assert_eq!(
+            run(&fixture.git, &fixture.main, &["show-ref"]),
+            refs_before_close
+        );
+        assert!(membership.publish_active(members[1].id));
+        assert_eq!(membership.active_member(), Some(members[1].id));
+
+        let before = worktrees_before_close;
+        assert!(matches!(
+            membership.remove(members[1].id),
+            WorkspaceMembershipRemoval::Active
+        ));
+        assert!(matches!(
+            membership.deactivate_expected(members[1].id),
+            WorkspaceMembershipDeactivation::Deactivated
+        ));
+        assert!(membership.publish_active(members[0].id));
+        assert!(matches!(
+            membership.remove(members[1].id),
+            WorkspaceMembershipRemoval::Removed
+        ));
+        assert!(fixture.linked_a.is_dir());
+        assert_eq!(
+            run(
+                &fixture.git,
+                &fixture.main,
+                &["worktree", "list", "--porcelain", "-z"],
+            ),
+            before
+        );
+        assert_eq!(
+            run(&fixture.git, &fixture.main, &["show-ref"]),
+            refs_before_close
+        );
+        let fresh_a =
+            RepositoryAdmissionIdentity::capture(&fixture.git, &fixture.linked_a).unwrap();
+        fresh_a.validate_git().await.unwrap();
+        assert_eq!(membership.relation_to_existing(&fresh_a), None);
+        let fresh_member =
+            membership.admit("A again".to_owned(), fixture.linked_a.clone(), fresh_a);
+        assert_ne!(fresh_member.id, members[1].id);
+        assert_eq!(membership.active_member(), Some(members[0].id));
     }
 }

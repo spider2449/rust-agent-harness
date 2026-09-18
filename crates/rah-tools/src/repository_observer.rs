@@ -23,6 +23,7 @@ use crate::{
     host_execute::paths_equivalent,
     repository_boundary::RepositoryNestedBoundaryPolicy,
     repository_diff::DiffBaseline,
+    repository_git_layout::RepositoryGitLayout,
 };
 
 const FILE_INFO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +49,7 @@ pub(crate) enum ObserverCommand {
 
 /// One private, host-configured repository observer envelope.
 pub(crate) struct RepositoryObserver {
+    git: PathBuf,
     repository: RepositoryIdentity,
     index: HostExecutionPolicy,
     head: HostExecutionPolicy,
@@ -66,7 +68,7 @@ pub(crate) struct RepositoryObserver {
 
 impl RepositoryObserver {
     pub(crate) fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
-        let repository = RepositoryIdentity::capture(root)?;
+        let repository = RepositoryIdentity::capture(git, root)?;
         let environment = repository_observer_environment(&repository.root)?;
         let exact = |arguments: Vec<String>| {
             HostExecutionPolicy::new(
@@ -103,6 +105,7 @@ impl RepositoryObserver {
         };
 
         Ok(Self {
+            git: git.to_path_buf(),
             index: path(vec![
                 "--no-pager".into(),
                 "--literal-pathspecs".into(),
@@ -313,6 +316,7 @@ impl RepositoryObserver {
         started: Instant,
     ) -> Result<HostProcessOutput, ToolError> {
         self.revalidate()?;
+        self.repository.validate_git(&self.git).await?;
         if matches!(
             command,
             ObserverCommand::Status
@@ -367,25 +371,20 @@ impl RepositoryObserver {
 pub(crate) struct RepositoryIdentity {
     root: PathBuf,
     root_identity: FileIdentity,
-    dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
 }
 
 impl RepositoryIdentity {
-    pub(crate) fn capture(root: &Path) -> Result<Self, ToolError> {
+    pub(crate) fn capture(git: &Path, root: &Path) -> Result<Self, ToolError> {
         if !root.is_absolute() {
             return Err(git_error("repository root must be an absolute path"));
         }
         reject_reparse_ancestry(root, "repository root")?;
         let root = canonical_directory(root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
-        let metadata = fs::metadata(&dot_git).map_err(fs_error)?;
-        if !metadata.is_dir() && !metadata.is_file() {
-            return Err(git_error("repository metadata must be a directory or file"));
-        }
+        let layout = RepositoryGitLayout::capture(git, &root)?;
         Ok(Self {
             root_identity: FileIdentity::capture(&root)?,
-            dot_git_identity: FileIdentity::capture(&dot_git)?,
+            layout,
             root,
         })
     }
@@ -393,19 +392,35 @@ impl RepositoryIdentity {
     pub(crate) fn revalidate(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
         let root = canonical_directory(&self.root, "repository root")?;
-        let dot_git = root.join(".git");
-        reject_link_or_reparse(&dot_git, "repository metadata")?;
         if !paths_equivalent(&root, &self.root)
             || FileIdentity::capture(&root)? != self.root_identity
-            || FileIdentity::capture(&dot_git)? != self.dot_git_identity
         {
             return Err(git_error("repository identity changed"));
         }
+        self.layout.revalidate()?;
         Ok(())
+    }
+
+    pub(crate) async fn validate_git(&self, git: &Path) -> Result<(), ToolError> {
+        self.revalidate()?;
+        self.layout.validate_git(git).await?;
+        self.revalidate()
+    }
+
+    pub(crate) fn layout(&self) -> &RepositoryGitLayout {
+        &self.layout
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn git_dir(&self) -> &Path {
+        self.layout.git_dir()
+    }
+
+    pub(crate) fn index_path(&self) -> PathBuf {
+        self.layout.index_path()
     }
 }
 
@@ -527,7 +542,9 @@ mod tests {
         time::{Duration, timeout},
     };
 
-    use super::RepositoryObserver;
+    use std::time::Instant;
+
+    use super::{ObserverCommand, RepositoryObserver};
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -577,5 +594,44 @@ mod tests {
             .unwrap();
         waiter.await.unwrap();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn linked_observers_read_the_selected_worktree_head() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let observer_a = RepositoryObserver::new(&fixture.git, &fixture.linked_a).unwrap();
+        let observer_b = RepositoryObserver::new(&fixture.git, &fixture.linked_b).unwrap();
+        let head_a_before = observer_a
+            .run(ObserverCommand::Head, None, Instant::now())
+            .await
+            .unwrap()
+            .stdout;
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_b,
+            &[
+                "-c",
+                "user.name=RAH Test",
+                "-c",
+                "user.email=rah@example.invalid",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "only B",
+            ],
+        );
+        let head_a_after = observer_a
+            .run(ObserverCommand::Head, None, Instant::now())
+            .await
+            .unwrap()
+            .stdout;
+        let head_b_after = observer_b
+            .run(ObserverCommand::Head, None, Instant::now())
+            .await
+            .unwrap()
+            .stdout;
+        assert_eq!(head_a_before, head_a_after);
+        assert_ne!(head_a_after, head_b_after);
     }
 }

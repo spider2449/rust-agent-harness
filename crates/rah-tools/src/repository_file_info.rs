@@ -676,4 +676,51 @@ mod tests {
             json!({"encoding":"base64","value":"YmFk/w=="})
         );
     }
+
+    #[tokio::test]
+    async fn linked_file_info_reads_the_selected_worktree_file_and_head() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        let selected_bytes = b"A has a distinct committed file\n";
+        fs::write(fixture.linked_a.join("tracked.txt"), selected_bytes).unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["add", "--", "tracked.txt"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["commit", "--quiet", "-m", "distinct A state"],
+        );
+        let tool = RepositoryFileInfoTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        let output = tool
+            .execute(
+                ToolInput(json!({"path":"tracked.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        let [ToolContent::Json(value)] = output.content.as_slice() else {
+            panic!("JSON file-info output required");
+        };
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["worktree"]["size_bytes"], selected_bytes.len());
+        assert_ne!(
+            value["head"]["object_id"],
+            String::from_utf8(
+                crate::repository_git_layout::test_fixture::run(
+                    &fixture.git,
+                    &fixture.linked_b,
+                    &["rev-parse", "HEAD:tracked.txt"],
+                )
+                .stdout,
+            )
+            .unwrap()
+            .trim()
+        );
+        assert_eq!(
+            fs::read(fixture.linked_b.join("tracked.txt")).unwrap(),
+            b"initial\n"
+        );
+    }
 }

@@ -21,6 +21,7 @@ use crate::{
     git_support::git_environment,
     host_execute::{is_beneath, paths_equivalent},
     repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_git_layout::RepositoryGitLayout,
     repository_worktree_patch::{
         FileIdentity, parse_logical_path, reject_link_or_reparse, reject_reparse_ancestry,
         reject_unsupported_file_attributes, validate_directory_path, validate_existing_target,
@@ -696,6 +697,7 @@ struct RepositoryFileRenamePolicy {
     root_identity: FileIdentity,
     git_identity: FileIdentity,
     dot_git_identity: FileIdentity,
+    layout: RepositoryGitLayout,
     lease: Arc<AsyncMutex<()>>,
     #[cfg(test)]
     test_hook: TestHook,
@@ -721,7 +723,8 @@ impl RepositoryFileRenamePolicy {
         reject_reparse_ancestry(root, "repository root")?;
         let root = fs::canonicalize(root).map_err(fs_error)?;
         validate_directory_path(&root, &root, "repository root")?;
-        let dot_git_identity = validate_supported_dot_git(&root)?;
+        let layout = RepositoryGitLayout::capture(git, &root)?;
+        let dot_git_identity = FileIdentity::capture(&root.join(".git"))?;
         reject_reparse_ancestry(git, "Git executable")?;
         let git = fs::canonicalize(git).map_err(fs_error)?;
         if !fs::metadata(&git).map_err(fs_error)?.is_file() {
@@ -731,6 +734,7 @@ impl RepositoryFileRenamePolicy {
             root_identity: FileIdentity::capture(&root)?,
             git_identity: FileIdentity::capture(&git)?,
             dot_git_identity,
+            layout,
             lease: crate::git_stage::repository_lease(&root),
             git,
             root,
@@ -812,7 +816,7 @@ impl RepositoryFileRenamePolicy {
             destination_parent_identity,
             bytes,
             git,
-            index: fs::read(self.root.join(".git/index")).map_err(|_| ())?,
+            index: fs::read(self.layout.index_path()).map_err(|_| ())?,
         })
     }
     async fn reviewed_source_bytes(&self, path: &Path) -> Result<Vec<u8>, ()> {
@@ -930,7 +934,7 @@ impl RepositoryFileRenamePolicy {
             return Err(());
         }
         let git = self.git_state(&pre.source_path).await?;
-        if git != pre.git || fs::read(self.root.join(".git/index")).map_err(|_| ())? != pre.index {
+        if git != pre.git || fs::read(self.layout.index_path()).map_err(|_| ())? != pre.index {
             return Err(());
         }
         Ok(())
@@ -948,7 +952,8 @@ impl RepositoryFileRenamePolicy {
     fn repository_ok(&self) -> Result<(), ToolError> {
         reject_reparse_ancestry(&self.root, "repository root")?;
         let root = fs::canonicalize(&self.root).map_err(fs_error)?;
-        let dot_git_identity = validate_supported_dot_git(&self.root)?;
+        self.layout.revalidate()?;
+        let dot_git_identity = FileIdentity::capture(&self.root.join(".git"))?;
         if !paths_equivalent(&root, &self.root)
             || FileIdentity::capture(&root)? != self.root_identity
             || dot_git_identity != self.dot_git_identity
@@ -959,6 +964,7 @@ impl RepositoryFileRenamePolicy {
         Ok(())
     }
     async fn git_state(&self, path: &Path) -> Result<GitState, ()> {
+        self.layout.validate_git(&self.git).await.map_err(|_| ())?;
         self.require_supported_repository_state().await?;
         let target = path.to_string_lossy().replace('\\', "/");
         let head = self
@@ -1001,12 +1007,6 @@ impl RepositoryFileRenamePolicy {
         let blob = self
             .git_output(vec!["show", &format!("HEAD:{target}")])
             .await?;
-        let refs = self
-            .git_output(vec![
-                "for-each-ref",
-                "--format=%(refname)%00%(objectname)%00",
-            ])
-            .await?;
         let sparse = [
             self.git_optional_output(vec!["config", "--bool", "core.sparseCheckout"])
                 .await?,
@@ -1023,7 +1023,7 @@ impl RepositoryFileRenamePolicy {
             blob,
             head_entry,
             index_entry,
-            fingerprint: [head, branch, tree, index, refs, sparse.concat()].concat(),
+            fingerprint: [head, branch, tree, index, sparse.concat()].concat(),
         })
     }
     async fn destination_git_absent(&self, path: &Path) -> Result<(), ()> {
@@ -1150,7 +1150,7 @@ impl RepositoryFileRenamePolicy {
             "rebase-merge",
             "rebase-apply",
         ] {
-            match fs::symlink_metadata(self.root.join(".git").join(marker)) {
+            match fs::symlink_metadata(self.layout.git_dir().join(marker)) {
                 Ok(_) => return Err(()),
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(_) => return Err(()),
@@ -1199,15 +1199,6 @@ impl RepositoryFileRenamePolicy {
             Err(())
         }
     }
-}
-
-fn validate_supported_dot_git(root: &Path) -> Result<FileIdentity, ToolError> {
-    let dot_git = root.join(".git");
-    reject_link_or_reparse(&dot_git, "repository metadata")?;
-    if !fs::metadata(&dot_git).map_err(fs_error)?.is_dir() {
-        return Err(policy_error("linked worktrees are unsupported"));
-    }
-    FileIdentity::capture(&dot_git)
 }
 
 #[derive(PartialEq, Eq)]
@@ -2317,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktree_gitfile_remains_unsupported() {
+    fn malformed_gitfile_is_rejected() {
         let f = Fixture::new();
         let dot_git = f.root.join(".git");
         fs::remove_dir_all(&dot_git).unwrap();
@@ -3095,6 +3086,40 @@ mod tests {
                 .rename_attempts
                 .load(std::sync::atomic::Ordering::SeqCst),
             1
+        );
+    }
+
+    #[test]
+    fn linked_rename_file_is_confined_to_the_selected_worktree() {
+        let fixture = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::write(fixture.linked_a.join("tracked.txt"), b"rename bytes").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["add", "--", "tracked.txt"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &fixture.git,
+            &fixture.linked_a,
+            &["commit", "--quiet", "-m", "prepare rename fixture"],
+        );
+        let tool = RepositoryFileRenameTool::new(&fixture.git, &fixture.linked_a).unwrap();
+        assert_eq!(
+            execute(&tool, request("tracked.txt", "renamed-only-in-a.txt"))["status"],
+            "renamed_verified"
+        );
+        assert!(!fixture.linked_a.join("tracked.txt").exists());
+        assert_eq!(
+            fs::read(fixture.linked_a.join("renamed-only-in-a.txt")).unwrap(),
+            b"rename bytes"
+        );
+        assert_eq!(
+            fs::read(fixture.main.join("tracked.txt")).unwrap(),
+            b"initial\n"
+        );
+        assert_eq!(
+            fs::read(fixture.linked_b.join("tracked.txt")).unwrap(),
+            b"initial\n"
         );
     }
 }
