@@ -1,5 +1,81 @@
 # Changelog
 
+## v0.29.0 — prepared / not yet published
+
+The release theme is **Explicit Active Repository Close**.
+
+### Added
+
+- An explicit human Desktop Close Repository workflow that withdraws the
+  currently active repository into a valid zero-active state.
+- The closed repository remains admitted as an inactive member. A later use
+  requires a separate explicit activation.
+- Confirmation captures the expected active member and repository generation.
+  A stale confirmation for A is rejected if B becomes active; it never closes
+  whichever repository happens to be active at Confirm time.
+- Close withdraws safe prepared repository-bound workflow, Commit review and
+  authorization state. Started or uncertain owners remain owned and block
+  Close.
+- Checked repository, observation, and action sequence advancement prevents
+  generation wraparound and stale selector reuse.
+- Windows host-driven live certification of the production Desktop backend.
+
+### Authority and effects
+
+Authority delta: **NONE**. Close withdraws existing active repository
+authority under ADR 0027. It is not a Tool, HostExplicit action, Codex dynamic
+Tool, MCP Tool, Process Plugin Tool, Git authority, or filesystem authority.
+HostExplicit remains exactly 11. ADR 0027 and ADR 0028 remain authoritative and
+unchanged; no v0.29 ADR was required. Zero-active state was already allowed by
+ADR 0027, and remembered workspaces remain descriptive under ADR 0028.
+
+Close requires the existing runtime/provider lifecycle to be fully
+disconnected. It does not implicitly Disconnect. A connected-runtime Close is
+rejected; explicit Disconnect must finish first. Close is not cancellation,
+rollback, replay, or compensation. It performs no worktree write, create,
+delete, rename, Stage, Unstage, Commit, branch/ref/history mutation, `.git`
+mutation, network Git, or remembered-catalog write. Fixture setup outside a
+measured Close interval is not attributed to Close.
+
+### Windows certification record
+
+Task 352 verdict: **PASS WITH EXPLICIT NONCLAIMS**. Certified source:
+`c9cff2afac40f9d518310da38ba4c9e158af1641`; source exact-head CI
+`35212728847` passed. Certification docs head:
+`b51d85fcfa7fcca4ee81b4bcd73af391ebc8ad2e`; docs exact-head CI
+`35214134363` passed. The marker was
+`RAH_V029_ACTIVE_REPOSITORY_CLOSE_LIVE_OK`.
+
+The host-driven run used Windows 10 Professional build 19045 x64, Rust/Cargo
+1.96.0, Git 2.54.0.windows.1, and certified `codex-cli 0.149.0` with SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+The Desktop package was 0.28.0, workspace count 13 at 0.28.0, edition 2024,
+and HostExplicit count 11. The certified Codex runtime was used only for
+connection lifecycle validation; no inference was run.
+
+Measured Close intervals had zero Git mutation. Model requests, model Tool
+requests, MCP activations, Process Plugin activations, network Git operations,
+automatic commits, automatic activations, automatic provider reconnects, and
+model-selected Close actions were all zero.
+
+### Limitations and nonclaims
+
+- GUI automation, a live model-turn/chat-owner busy case, a live HostRunning
+  case, and full live HostExplicit Prepare/Confirm were **NOT EXECUTED**.
+  The HostPrepared live check used a test-only reservation seam.
+- Model-selected dynamic Tool dispatch is not established by this gate.
+- No OS sandbox, network isolation, rollback/replay/compensation, race-free
+  TOCTOU, cross-platform live parity, linked-worktree Close semantics, or
+  persistent executable repository membership is claimed.
+- Close does not implicitly Disconnect; restart does not automatically
+  Resume a transcript.
+- Historical certification-harness cleanup limitation: seven storage-only
+  roots from earlier non-certifying attempts remained after inspection. Their
+  repository fixture trees were absent, their owning test PIDs were no longer
+  running, and execution policy rejected deletion of those exact roots. No
+  alternate deletion was attempted. They were not live repository authority
+  or running-process leaks.
+
 ## v0.28.0 — released (2026-09-16)
 
 RAH v0.28.0 was published by Task 345. The release theme is **Explicit

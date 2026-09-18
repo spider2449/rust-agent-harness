@@ -1,8 +1,69 @@
-# RAH v0.28.0 Architecture - prepared, not yet published
+# RAH v0.29.0 Architecture - prepared, not yet published
 
 This section records the release-preparation architecture for **Explicit
-Inactive Repository Member Removal**. It completes the process-local curation
-loop defined by ADR 0027 while retaining the descriptive remembered-candidate
+Active Repository Close**. Close exposes ADR 0027's existing zero-active state
+as an explicit human Desktop workflow; it adds no repository authority.
+
+```text
+active repository A
+       |
+       | explicit human Close
+       | expected member + repository generation guard
+       v
+lifecycle/currentness checks
+       |
+       v
+withdraw safe repository-bound executable state
+       |
+       v
+repository generation advances once
+       |
+       v
+active member = none
+       |
+       v
+A remains admitted / inactive
+```
+
+The active-member ID and repository generation frozen by confirmation are
+equality/currentness guards, not authority. Backend validation rejects a
+stale request; if B becomes active after the user confirmed A, the request
+returns `active_changed` and leaves B active. It is never reinterpreted as a
+request to close the current member.
+
+Membership is distinct from executable authority. There is one or zero active
+repositories. A successful Close preserves membership and its generation,
+advances repository generation exactly once with checked arithmetic, removes
+the active `DesktopRepository`, registry and reviewed Commit authority, and
+publishes no active member. Repeated or rejected Close does not churn
+repository generation. Explicit reactivation retains the admitted member but
+constructs fresh repository currentness. Workflow observation and selector
+publication recheck current repository, generation, and member so stale async
+work cannot reinstall state after Close or switch.
+
+Close requires a disconnected runtime and provider lifecycle. It does not
+invoke Disconnect. Started or uncertain owners remain owned and block Close;
+safe prepared state is invalidated. The transition is not cancellation,
+rollback, replay, or compensation. It performs no Git or filesystem operation
+and does not write the remembered catalog or completed transcript. In-memory
+executable repository conversation context is reset; transcript persistence is
+not deleted or automatically resumed. Restart remains free of executable
+repository membership and authority.
+
+The Task 351 independent audit hardened terminal conversation publication
+ownership, poisoned/incoherent fail-closed handling, checked workflow
+observation/action sequences, Unstage reservation coverage, Effective
+Authority assertions, and Connect ordering. Task 352 then certified the
+Windows production backend on its exact source. This host-driven evidence is
+not GUI automation and does not establish model-selected Tool dispatch or
+cross-platform live parity. See `RAH_V0.29_RELEASE_GATE.md` and
+`RAH_V0.29_LIVE_CERTIFICATION.md` for exact identities and limits.
+
+# Historical RAH v0.28.0 Architecture - released
+
+This section records the released v0.28 architecture for **Explicit Inactive
+Repository Member Removal**. It completes the process-local curation loop
+defined by ADR 0027 while retaining the descriptive remembered-candidate
 boundary defined by ADR 0028.
 
 ```text
@@ -178,9 +239,9 @@ This document records the released v0.25.0 architecture.
 
 RAH v0.25.0 is **RELEASED**.
 
-The current immutable release is `v0.25.0`.
+This is a historical immutable release; `v0.26.0` followed it.
 
-The current immutable release source is:
+The v0.25.0 release source is:
 `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
 
 The prior immutable release is `v0.24.0`.
@@ -287,7 +348,7 @@ This document describes the released v0.24.0 architecture.
 
 RAH v0.24.0 is **RELEASED**.
 
-The current immutable release is `v0.24.0`.
+This is a historical immutable release; `v0.25.0` followed it.
 
 The immutable v0.24.0 release source is:
 `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.

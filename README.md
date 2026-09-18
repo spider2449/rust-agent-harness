@@ -5,37 +5,36 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.28.0 prepared — not yet published
+## RAH v0.29.0 prepared — not yet published
 
-RAH v0.28.0 is prepared for publication but has not been released. The release
-theme is **Explicit Inactive Repository Member Removal**.
+The release theme is **Explicit Active Repository Close**. RAH Desktop can
+explicitly close the active repository and enter a valid zero-active state.
+The repository remains admitted as an inactive member and can be used again
+only after a separate explicit activation.
+
+Close does not remove or forget the repository, delete or change files, mutate
+Git, or change the remembered workspace catalog. Disconnect remains a separate
+action: the runtime must already be disconnected before Close can succeed.
+
+The v0.29 Windows evidence is host-driven production-backend certification,
+not GUI automation. Model-selected dynamic Tool dispatch and cross-platform
+live parity are not established. See the [v0.29 release gate](docs/RAH_V0.29_RELEASE_GATE.md)
+and [Windows live certification](docs/RAH_V0.29_LIVE_CERTIFICATION.md) for
+the full evidence and preserved nonclaims.
+
+## RAH v0.28.0 released
 
 RAH Desktop can explicitly remove an admitted repository member when it is
-inactive. The active repository must first be explicitly switched away from;
-the active member cannot be removed directly. Removal changes only the current
-process-local membership set: it does not delete repository files, mutate Git,
-or forget a remembered workspace candidate.
+inactive. Removal changes only the current process-local membership set; it
+does not delete repository files, mutate Git, or forget a remembered
+workspace candidate.
 
 RAH Desktop may durably remember descriptive repository candidates across
-restart. Restart restores zero executable repository authority: no repository
-membership, active repository, ToolRegistry, provider/runtime state, Commit,
-Stage/Unstage, or HostExplicit state is restored.
-
-A remembered candidate remains descriptive and independent of process-local
-membership. It becomes executable only through explicit human fresh admission,
+restart. Restart restores zero executable repository authority. A remembered
+candidate becomes executable only through explicit human fresh admission,
 current repository validation, a fresh process-local `RepositoryMemberId`, and
 a separate explicit activation. Membership is process-local and is not
 restored across restart.
-
-The v0.28 Windows evidence is host-driven production-backend certification,
-not GUI certification. It retains the required nonclaim:
-
-`MODEL-SELECTED DYNAMIC TOOL DISPATCH NOT ESTABLISHED UNDER THE APPROVED GPT-5.6-TERRA LIVE GATE.`
-
-GUI automation, model-selected dynamic Tool dispatch, cross-platform live
-parity, network isolation, race-free TOCTOU protection, rollback/replay or
-compensation after uncertain native effects, and cross-process or
-linked-worktree membership semantics are not claimed.
 
 ## RAH v0.26.0 released
 
@@ -64,8 +63,7 @@ model-selected dynamic Tool behavior was not established.
 
 ## RAH v0.25.0 released
 
-RAH v0.25.0 is the current immutable published release. v0.24.0 is the prior
-immutable published release. The v0.25 release theme is **HostExplicit Reviewed
+RAH v0.25.0 was published before v0.26.0. The v0.25 release theme is **HostExplicit Reviewed
 File Rename/Move (`repo.rename-file`)**, based on Task 304's **Verdict A - READY
 FOR RELEASE PREPARATION** at baseline
 `b3532f52b79be9575f3f9d8e818efa2096da4e12`.
@@ -134,9 +132,8 @@ Tools. Frontend/Tauri are presentation and input surfaces, not authority.
 
 ## RAH v0.24.0 released
 
-RAH v0.24.0 is the current immutable published release, with the release theme
-**HostExplicit Reviewed File Deletion (`repo.delete-file`)**. v0.23.0 is the
-prior immutable published release.
+RAH v0.24.0 was published before v0.25.0. Its release theme was
+**HostExplicit Reviewed File Deletion (`repo.delete-file`)**.
 
 The immutable v0.24.0 release source is
 `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.

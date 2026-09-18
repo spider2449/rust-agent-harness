@@ -1,4 +1,87 @@
-# RAH v0.28.0 Security Model - prepared, not yet published
+# RAH v0.29.0 Security Model - prepared, not yet published
+
+The release theme is **Explicit Active Repository Close**. Close withdraws
+the current repository under ADR 0027's existing authority-composition
+boundary. Authority delta: **NONE**. It is not a Tool, HostExplicit action,
+Codex dynamic Tool, MCP Tool, Process Plugin Tool, Git authority, or filesystem
+authority. HostExplicit remains exactly 11. ADR 0027 and ADR 0028 are unchanged;
+no v0.29 ADR was required. ADR 0027 already permits zero active repositories,
+while ADR 0028 keeps remembered workspaces descriptive.
+
+## Currentness and human intent
+
+The frontend confirmation captures the expected active `RepositoryMemberId`
+and repository generation. Those values are equality/currentness guards, not
+authority. Backend validation under lifecycle coordination preserves the
+captured intent. If A was confirmed and B becomes active first, Close returns
+`active_changed`, preserves B, and does not reinterpret the request against B.
+The exact Desktop command permission is `allow-close-repository`, mapped only
+to `close_repository`; it adds no model ToolRegistry, HostExplicit, Codex
+dynamic Tool, MCP Tool, or Process Plugin route. Model and provider output
+cannot request Close.
+
+## Withdrawal and failure behavior
+
+Close preserves all admitted membership and membership generation. On
+success, it removes the active repository composition, clears safe prepared
+workflow and reviewed Commit authority, resets in-memory executable repository
+conversation context, advances repository generation exactly once, and
+publishes no active member. Checked generation arithmetic prevents wraparound;
+rejected or repeated Close does not churn repository generation. Workflow
+observation and selector/action sequence arithmetic is checked; exhaustion
+does not reuse stale IDs. Final async workflow publication rechecks the exact
+repository, member, and generation under lifecycle coordination.
+
+The backend fails closed on poisoned or incoherent Close state, including a
+missing active member/repository relationship or invalid zero-active runtime
+state. A runtime/provider lifecycle that is Connected, Connecting, or
+Disconnecting blocks Close. Close never calls Disconnect; explicit Disconnect
+must complete first.
+
+Started or uncertain model, HostExplicit, Stage/Unstage, Commit, or other
+effect owners are retained and block Close. A safe HostPrepared ticket or
+no-effect reviewed Commit authorization may be invalidated as part of
+successful withdrawal. Close is not cancellation, rollback, replay, or
+compensation. Stage/Unstage reservations remain owned by their existing
+completion path; Close itself performs no index mutation.
+
+Close performs no worktree write, create/delete/rename, Stage, Unstage, Commit,
+branch/ref/history mutation, `.git` mutation, or network Git. It does not
+write remembered-workspace catalog bytes or delete completed transcript
+persistence. The transcript is not automatically resumed. Membership alone
+does not imply executable authority; Effective Authority after Close reports
+no active/selected repository authority, no active repository generation or
+Tool inventory, no reviewed Commit authority, and a disconnected runtime.
+
+## Windows evidence and limitations
+
+Task 352's exact certified source is
+`c9cff2afac40f9d518310da38ba4c9e158af1641`; its source CI `35212728847` passed.
+Certification docs head `b51d85fcfa7fcca4ee81b4bcd73af391ebc8ad2e` passed
+exact-head CI `35214134363`. Verdict: **PASS WITH EXPLICIT NONCLAIMS**; marker:
+`RAH_V029_ACTIVE_REPOSITORY_CLOSE_LIVE_OK`. The environment was Windows 10
+Professional build 19045 x64, Rust/Cargo 1.96.0, Git 2.54.0.windows.1, and
+certified `codex-cli 0.149.0` SHA-256
+`14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+HostExplicit was exactly 11. The certified Codex runtime was used only for
+connection lifecycle validation; no inference was run.
+
+The gate does not claim GUI automation, a live model-turn/chat-owner busy
+case, live HostRunning, complete live HostExplicit Prepare/Confirm, or
+model-selected dynamic Tool dispatch. Its HostPrepared check used a test-only
+reservation seam. It does not claim an OS sandbox, network isolation,
+rollback/replay/compensation, race-free TOCTOU, cross-platform live parity,
+linked-worktree Close semantics, persistent executable repository membership,
+automatic transcript Resume, or implicit Disconnect.
+
+Historical Task 352 harness cleanup inspection found seven storage-only roots
+from earlier non-certifying attempts. Their repository fixture trees were
+absent and owning test PIDs were no longer running. Execution policy rejected
+deletion of those exact roots; no alternate deletion route was attempted.
+They were left as a non-blocking historical certification-harness cleanup
+limitation. They are not live repository fixtures or running-process leaks.
+
+# Historical RAH v0.28.0 Security Model - released
 
 This section records the v0.28 inactive-member-removal security boundary. The
 dedicated `RememberedWorkspaceStore` owns the private
@@ -84,9 +167,8 @@ established.
 
 # RAH v0.26.0 Security Model — released
 
-This section records the released v0.26 security boundary. RAH v0.26.0 is the
-current immutable published release and v0.25.0 is the prior immutable
-published release. The v0.26 release source is
+This section records the historical released v0.26 security boundary. RAH
+v0.26.0 followed v0.25.0 and preceded v0.27.0. The v0.26 release source is
 `8b22b18739a54b752ce11e791fe380e522c10049`, annotated tag `v0.26.0`, tag
 object `f60ee2465c1819b59b5671f20387b74734ace019`, and peeled target
 `8b22b18739a54b752ce11e791fe380e522c10049`. Release-preparation CI
@@ -168,9 +250,9 @@ This document records the released v0.25.0 security posture.
 
 RAH v0.25.0 is **RELEASED**.
 
-The current immutable release is `v0.25.0`.
+This is a historical immutable release; `v0.26.0` followed it.
 
-The current immutable release source is:
+The v0.25.0 release source is:
 `a8b4d7b92f545a37d2ef2c8eae224f91c9d939c4`.
 
 The prior immutable release is `v0.24.0`.
@@ -281,7 +363,7 @@ This document describes the released v0.24.0 security posture.
 
 RAH v0.24.0 is **RELEASED**.
 
-The current immutable release is `v0.24.0`.
+This is a historical immutable release; `v0.25.0` followed it.
 
 The immutable v0.24.0 release source is:
 `2d4cf0e4d89a461f54250ff81ad9808929d854f0`.
