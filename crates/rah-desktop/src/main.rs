@@ -33457,29 +33457,13 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             serde_json::json!({"path":".git/RAH_V030_METADATA_TARGET","content":"must not write"}),
         )
         .await?;
-        let nested = fixture.linked_a.join("nested-boundary");
-        fs::create_dir(&nested).map_err(|_| "nested-boundary fixture setup failed")?;
-        fixture.git_run(&nested, &["init", "--quiet"])?;
-        fs::write(nested.join("secret.txt"), b"nested private content\n")
-            .map_err(|_| "nested-boundary sentinel setup failed")?;
-        let read_tool = a_registry
-            .get(&ToolName::new("fs.read"))
-            .ok_or_else(|| "active A registry lacks fs.read".to_owned())?;
-        let nested_read_rejected = read_tool
-            .execute(
-                ToolInput(serde_json::json!({"path":"nested-boundary/secret.txt"})),
-                ToolContext::default(),
-            )
-            .await
-            .is_err();
         task361_require(
             task361_output_status(&metadata_write).as_deref() != Some("ok")
                 && !fixture
                     .linked_a
                     .join(".git/RAH_V030_METADATA_TARGET")
-                    .exists()
-                && nested_read_rejected,
-            "root .git metadata and nested repository content are protected boundaries",
+                    .exists(),
+            "root .git metadata remains a protected boundary",
         )?;
 
         fs::write(
@@ -33667,6 +33651,26 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     == a_head_after_stale_rejection
                 && task361_capture(fixture, &fixture.linked_a)?.head == stale_branch_target,
             "selected branch-ref movement rejects the old review before native Commit spawn",
+        )?;
+
+        let nested = fixture.linked_a.join("nested-boundary");
+        fs::create_dir(&nested).map_err(|_| "nested-boundary fixture setup failed")?;
+        fixture.git_run(&nested, &["init", "--quiet"])?;
+        fs::write(nested.join("secret.txt"), b"nested private content\n")
+            .map_err(|_| "nested-boundary sentinel setup failed")?;
+        let read_tool = a_registry
+            .get(&ToolName::new("fs.read"))
+            .ok_or_else(|| "active A registry lacks fs.read".to_owned())?;
+        let nested_read_rejected = read_tool
+            .execute(
+                ToolInput(serde_json::json!({"path":"nested-boundary/secret.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .is_err();
+        task361_require(
+            nested_read_rejected,
+            "nested repository content is a protected boundary",
         )?;
 
         task361_require(
