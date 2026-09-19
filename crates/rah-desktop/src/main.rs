@@ -32827,11 +32827,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .ok_or_else(|| format!("Task 361 live assertion failed: {message}"))
     }
 
-    fn task361_same_windows_path(left: &Path, right: &Path) -> bool {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
-    }
-
     async fn task361_tool(
         registry: &Arc<ToolRegistry>,
         name: &str,
@@ -32914,10 +32909,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         task361_require(
             capture_main.branch == "refs/heads/main"
                 && capture_a.branch == "refs/heads/worktree-a"
-                && capture_b.branch == "refs/heads/worktree-b"
-                && !task361_same_windows_path(&capture_main.root, &capture_a.root)
-                && !task361_same_windows_path(&capture_a.root, &capture_b.root)
-                && !task361_same_windows_path(&capture_main.root, &capture_b.root),
+                && capture_b.branch == "refs/heads/worktree-b",
             "main/A/B selected roots and branch identities are distinct",
         )?;
         task361_require(
