@@ -33515,20 +33515,34 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         .await?;
         task361_require(
             task361_output_status(&branch_output).as_deref() == Some("branch_created_verified")
-                && branch_oid == a_before_branch.head
-                && task361_capture(fixture, &fixture.linked_a)?.branch == a_before_branch.branch
+                && branch_oid == a_before_branch.head,
+            "branch creation uses the selected A HEAD",
+        )?;
+        task361_require(
+            task361_capture(fixture, &fixture.linked_a)?.branch == a_before_branch.branch
                 && task361_capture(fixture, &fixture.linked_a)?.head == a_before_branch.head
-                && task361_capture(fixture, &fixture.linked_b)?.head == b_before_branch.head
-                && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
-                    == registrations_before_branch
-                && refs_after_branch != refs_before_branch
-                && task361_output_status(&branch_conflict).as_deref()
-                    == Some("precondition_failed")
-                && fixture.git_run(
-                    &fixture.main,
-                    &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
-                )? == refs_after_branch,
-            "branch creation uses A HEAD without switching and rejects an existing target ref",
+                && task361_capture(fixture, &fixture.linked_b)?.head == b_before_branch.head,
+            "branch creation does not switch A or affect B",
+        )?;
+        task361_require(
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                == registrations_before_branch,
+            "branch creation does not add or switch a worktree",
+        )?;
+        task361_require(
+            refs_after_branch != refs_before_branch,
+            "branch creation advances the intended local ref set",
+        )?;
+        task361_require(
+            task361_output_status(&branch_conflict).as_deref() == Some("precondition_failed"),
+            "branch creation rejects an existing target ref",
+        )?;
+        task361_require(
+            fixture.git_run(
+                &fixture.main,
+                &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
+            )? == refs_after_branch,
+            "branch conflict leaves refs unchanged",
         )?;
 
         fs::write(
