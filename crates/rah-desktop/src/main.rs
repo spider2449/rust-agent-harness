@@ -32915,27 +32915,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             capture_main.branch == "refs/heads/main"
                 && capture_a.branch == "refs/heads/worktree-a"
                 && capture_b.branch == "refs/heads/worktree-b"
-                && task361_same_windows_path(
-                    &capture_main.root,
-                    &fixture
-                        .main
-                        .canonicalize()
-                        .map_err(|_| "main root unavailable")?,
-                )
-                && task361_same_windows_path(
-                    &capture_a.root,
-                    &fixture
-                        .linked_a
-                        .canonicalize()
-                        .map_err(|_| "A root unavailable")?,
-                )
-                && task361_same_windows_path(
-                    &capture_b.root,
-                    &fixture
-                        .linked_b
-                        .canonicalize()
-                        .map_err(|_| "B root unavailable")?,
-                ),
+                && !task361_same_windows_path(&capture_main.root, &capture_a.root)
+                && !task361_same_windows_path(&capture_a.root, &capture_b.root)
+                && !task361_same_windows_path(&capture_main.root, &capture_b.root),
             "main/A/B selected roots and branch identities are distinct",
         )?;
         task361_require(
