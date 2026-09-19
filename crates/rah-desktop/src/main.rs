@@ -33353,7 +33353,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             unstage_snapshot
                 .status_entries
                 .iter()
-                .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "none"),
+                .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "unmodified"),
             "Unstage clears the selected A staged entry",
         )?;
         task361_require(
