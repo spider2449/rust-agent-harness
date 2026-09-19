@@ -32725,25 +32725,51 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         root: &Path,
     ) -> Result<Task361RepositoryCapture, String> {
         let text = |args: &[&str]| fixture.git_text(root, args);
-        let root_from_git = PathBuf::from(text(&["rev-parse", "--show-toplevel"])?);
-        let private_git_dir = PathBuf::from(text(&["rev-parse", "--absolute-git-dir"])?);
-        let common_git_dir = PathBuf::from(text(&[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])?);
-        let head_path = PathBuf::from(text(&[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "HEAD",
-        ])?);
-        let index_path = PathBuf::from(text(&[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "index",
-        ])?);
+        let root_from_git = root
+            .canonicalize()
+            .map_err(|_| "Task 361 selected root could not be canonicalized")?;
+        let git_entry = root.join(".git");
+        let private_git_dir = if git_entry.is_dir() {
+            git_entry
+                .canonicalize()
+                .map_err(|_| "Task 361 main Git directory could not be canonicalized")?
+        } else {
+            let record = fs::read_to_string(&git_entry)
+                .map_err(|_| "Task 361 linked Gitfile could not be read")?;
+            let target = record
+                .strip_prefix("gitdir:")
+                .ok_or_else(|| "Task 361 linked Gitfile record was malformed".to_owned())?
+                .trim();
+            let target = PathBuf::from(target);
+            let target = if target.is_absolute() {
+                target
+            } else {
+                git_entry
+                    .parent()
+                    .ok_or_else(|| "Task 361 linked Gitfile parent was absent".to_owned())?
+                    .join(target)
+            };
+            target
+                .canonicalize()
+                .map_err(|_| "Task 361 linked private Git directory could not be canonicalized")?
+        };
+        let common_git_dir = if private_git_dir.join("commondir").is_file() {
+            let record = fs::read_to_string(private_git_dir.join("commondir"))
+                .map_err(|_| "Task 361 commondir record could not be read".to_owned())?;
+            let target = PathBuf::from(record.trim());
+            let target = if target.is_absolute() {
+                target
+            } else {
+                private_git_dir.join(target)
+            };
+            target
+                .canonicalize()
+                .map_err(|_| "Task 361 common Git directory could not be canonicalized")?
+        } else {
+            private_git_dir.clone()
+        };
+        let head_path = private_git_dir.join("HEAD");
+        let index_path = private_git_dir.join("index");
         let branch = text(&["symbolic-ref", "-q", "HEAD"])?;
         let head = text(&["rev-parse", "HEAD"])?;
         let index = fs::read(&index_path).map_err(|error| {
