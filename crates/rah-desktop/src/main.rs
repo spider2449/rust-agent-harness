@@ -33608,9 +33608,38 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             stale_stage.status == "ok",
             "stale A target staged before review",
         )?;
-        let _stale_review_snapshot = refresh_repository_workflow(&state)
-            .await
-            .map_err(|_| "stale A Commit review capture failed")?;
+        let stale_repository_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stale_identity_generation = *state
+            .commit_identity_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (stale_snapshot, stale_review) = desktop_repository_snapshot_with_review(
+            &active_a,
+            Some(Arc::clone(&commit_control)),
+        )
+        .await
+        .map_err(|_| "stale A Commit review capture failed")?;
+        let stale_snapshot = install_repository_workflow(
+            &state,
+            &active_a,
+            stale_repository_generation,
+            stale_snapshot,
+            stale_review,
+            stale_identity_generation,
+        );
+        task361_require(
+            matches!(
+                stale_snapshot.review,
+                StagedReviewPresentation::ReviewAvailable {
+                    review_id: Some(_),
+                    ..
+                }
+            ),
+            "stale A Commit review was captured",
+        )?;
         let stale_review_selector = state
             .repository_workflow
             .lock()
