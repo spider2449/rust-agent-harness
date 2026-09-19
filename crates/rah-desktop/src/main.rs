@@ -32532,12 +32532,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             Ok(output.stdout)
         }
 
-        fn git_text(&self, cwd: &Path, arguments: &[&str]) -> Result<String, String> {
-            String::from_utf8(self.git_run(cwd, arguments)?)
-                .map(|value| value.trim().to_owned())
-                .map_err(|_| "Task 361 fixture Git returned non-UTF-8 text".to_owned())
-        }
-
         fn add_branch_worktree(&self, branch: &str, root: &Path) -> Result<(), String> {
             let root = root
                 .to_str()
