@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.30.0 - prepared / not yet published
+
+The release theme is **Linked Git Worktree Repository Support**.
+
+### Added
+
+- Explicit admission of ordinary main worktrees and validated, already-registered
+  linked Git worktrees as distinct process-local repository members.
+- Absolute/default and supported relative linked relationship spellings, with
+  closed private Git, common Git, backlink, registration, filesystem, and
+  read-only semantic validation.
+- Selected-worktree observation, content authoring, Stage/Unstage index
+  isolation, selected-HEAD reviewed Commit, and selected-HEAD local branch
+  creation across admitted linked members.
+- Windows host-driven certification of the production linked-worktree paths,
+  including external identity staleness and detached observation behavior.
+
+### Authority and currentness
+
+ADR 0029 is an Accepted **NARROW IDENTITY EXTENSION** under ADR 0027. It is
+not a new authority category. HostExplicit remains exactly 11; no permission,
+Tool schema, Stage/Unstage authority, Commit authority, generic Git/filesystem
+authority, provider authority, model routing authority, or persistence/schema
+authority was added.
+
+Main, linked A, and linked B may share one common Git directory while remaining
+distinct members. Same common Git state does not merge authority. The one-active
+repository rule remains unchanged: inactive members carry no executable
+composition and there is no model/provider worktree selector.
+
+Currentness is operation-specific. An unrelated sibling Commit or ordinary
+shared object creation does not globally stale a selected review, while movement
+of the selected branch ref makes that review stale with zero native Commit
+spawn and no retry or rebinding. Stage/Unstage target only the selected
+worktree's private index.
+
+### Closed scope and lifecycle
+
+Invalid, arbitrary, copied, fabricated, or malformed gitfiles; stale/prunable
+registrations; submodules; `--separate-git-dir`; bare repositories; unsupported
+nested relationships; and symlink/reparse-mediated identity are rejected
+fail-closed. RAH recognizes an existing valid worktree identity but does not
+create, remove, prune, repair, move, lock, or unlock Git worktrees. External
+move/removal or relation mutation makes retained identity stale and requires
+fresh explicit admission.
+
+### Certification record
+
+Task 361 verdict: **PASS WITH EXPLICIT NONCLAIMS**. Marker:
+`RAH_V030_LINKED_WORKTREE_LIVE_OK`. Production behavior source:
+`a684405ecd0143093fba669b9b52e84bc32f7590`; deterministic/audit tree:
+`3771a52227d2ef85944e971a2a0dc9c0e5d5856f` (CI `35352376409`, PASS);
+Windows-certified source:
+`93a522c2a42b438d539d296ba92cbb9dd1eea297` (CI `35420903926`, PASS);
+certification docs head:
+`1ed6380c6b5ebb6e57baa9c253a0923289c05470` (CI `35421216647`, PASS).
+
+The certified environment was Windows 11 IoT Enterprise LTSC build 26100,
+x64, Rust/Cargo 1.98.1, and Git 2.55.0.windows.5. The project lifecycle
+baseline remains `codex-cli 0.149.0`; it was unavailable on the Task 361 host,
+ambient `0.155.1` was not substituted, and Codex inference was not executed.
+
+### Limitations and nonclaims
+
+GUI automation, model-selected worktree routing, Codex inference, Linux/macOS
+live certification, cross-platform live parity, OS sandboxing, network
+isolation, race-free TOCTOU, a machine-wide external-Git lock,
+rollback/replay/compensation, submodule support, `--separate-git-dir` support,
+worktree lifecycle authority, multiple active repositories, and persistent
+executable membership are not claimed. Existing broader RAH security limits
+remain unchanged.
+
 ## v0.29.0 — released (2026-09-18)
 
 The release theme is **Explicit Active Repository Close**.

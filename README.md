@@ -5,6 +5,24 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.30.0 prepared — not yet published
+
+The release theme is **Linked Git Worktree Repository Support**. RAH Desktop
+can explicitly admit an ordinary repository or a supported, already-registered
+linked Git worktree as a distinct process-local repository member. Only one
+member is active at a time, and shared Git common state never creates sibling
+execution authority. Observation, Stage/Unstage, content authoring, branch
+creation, and reviewed Commit remain bound to the selected active worktree.
+
+RAH recognizes an existing validated linked-worktree identity; it does not
+create, remove, prune, repair, move, lock, or unlock Git worktrees. The accepted
+linked relationship is closed and fail-closed: arbitrary, copied, malformed,
+submodule, separate-git-dir, stale, or reparse-mediated layouts are not
+supported. ADR 0029 is a narrow identity extension under ADR 0027, not a new
+authority category. See the [v0.30 release gate](docs/RAH_V0.30_RELEASE_GATE.md)
+and [Windows live certification](docs/RAH_V0.30_LIVE_CERTIFICATION.md) for
+evidence and preserved nonclaims.
+
 ## RAH v0.29.0 released
 
 The release theme is **Explicit Active Repository Close**. RAH Desktop can

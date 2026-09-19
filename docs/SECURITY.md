@@ -1,4 +1,97 @@
-# RAH v0.29.0 Security Model - prepared, not yet published
+# RAH v0.30.0 Security Model - prepared, not yet published
+
+The release theme is **Linked Git Worktree Repository Support**. The authority
+classification is **NARROW EXTENSION** under ADR 0027. ADR 0029 is Accepted and
+adds one closed linked-worktree identity form; it adds no new mutation,
+PermissionLevel, Tool, HostExplicit, provider, model-routing, generic Git, or
+generic filesystem authority. HostExplicit remains exactly 11. ADR 0028 and
+the existing mutation and Commit ADRs remain authoritative and unchanged.
+
+## Closed identity and admission
+
+Admission is host-owned and starts from the selected root. An ordinary main
+worktree requires a real `root/.git` directory. A linked worktree requires the
+bounded `.git` gitfile, private worktree Git directory, standard `commondir`
+relation, shared common Git directory, backlink to the selected root's `.git`,
+and exactly one matching native registration. Filesystem identities and fixed
+read-only Git semantic probes must agree before inert membership publication.
+
+Absolute and supported relative gitfile/backlink spellings are resolved against
+their containing metadata location and then subjected to the same canonical,
+closed relationship checks. Relative spelling does not imply generic gitfile
+support. Arbitrary, copied, fabricated, malformed, stale/prunable, submodule,
+`--separate-git-dir`, bare, nested-unsupported, symlink/reparse-mediated, or
+otherwise semantically disagreeing layouts fail closed.
+
+The selected exact Git executable runs fixed read-only arguments with the
+selected-root cwd, controlled environment, bounded output, timeout, and no
+shell. RAH does not accept model-selected Git argv, network Git, or arbitrary
+Git commands. Admission and activation repeat identity/currentness validation;
+stale retained identity is rejected and never silently migrated, repaired, or
+re-admitted.
+
+## Membership, isolation, and currentness
+
+Main, linked A, and linked B can share one common Git directory while remaining
+distinct repository members. Same common directory is not duplicate identity
+and does not merge authority. Duplicate identity is based on the selected root
+identity or the validated private worktree target. There are zero or one active
+members, one active-only ToolRegistry, and no model/provider worktree selector.
+Inactive members carry no executable repository composition.
+
+Observation is selected-worktree scoped. Stage and Unstage retain their
+existing authority and target only the selected active worktree's private
+index. Content authoring remains inside the selected root. Reviewed Commit
+retains ADR 0016's binding to selected identity, private index, selected HEAD,
+attached branch, and expected selected branch OID; detached observation/read is
+valid but detached Commit remains unavailable.
+
+Currentness is capability-specific. An unrelated sibling Commit on another
+branch or ordinary shared object creation does not automatically stale a
+selected review. Movement of the selected branch ref does stale that review,
+causes native Commit spawn to remain zero, and does not retry or rebind it.
+There is no common-directory global generation and no machine-wide external-Git
+lock. External Git races and TOCTOU remain explicit nonclaims.
+
+Native external worktree move/removal, registration removal, root `.git`
+mutation, backlink mutation, or `commondir` mutation makes retained identity
+stale. RAH does not prune, repair, move, migrate, or automatically re-admit;
+fresh explicit admission is required after a stable identity change. Close
+withdraws process-local authority, and inactive removal does not invoke
+`git worktree remove` or prune.
+
+## Privacy and persistence
+
+Private linked evidence remains host-private: private/common Git paths,
+registration directories, gitfile/backlink/commondir bytes, registration IDs,
+and filesystem identities do not enter Tool input/schema, Effective Authority,
+generic Activity, model/provider state, remembered-workspace persistence, or
+unbounded errors. Remembered linked worktrees may retain only existing bounded
+descriptive candidate/location behavior. Restart restores zero members, no
+active repository, no repository ToolRegistry, no Stage/Unstage authority, no
+Commit authorization, and no HostExplicit prepared state. Fresh admission
+reruns the complete validation.
+
+## Effects and explicit limitations
+
+Admission, activation, switch, Close, and inactive removal perform no Git
+mutation. Stage/Unstage change only the selected index; content authoring stays
+inside the selected root; Commit changes the selected HEAD/index/branch plus
+normal shared objects and selected-ref state; branch creation writes one
+intended local branch ref. RAH does not manage worktree lifecycle commands
+(`add`, `remove`, `prune`, `repair`, `move`, `lock`, or `unlock`).
+
+Task 361's Windows result is **PASS WITH EXPLICIT NONCLAIMS** and emitted
+`RAH_V030_LINKED_WORKTREE_LIVE_OK`. GUI automation, model-selected worktree
+routing, Codex inference, Linux/macOS live certification, cross-platform live
+parity, OS sandboxing, network isolation, race-free TOCTOU, machine-wide
+external-Git locking, rollback/replay/compensation, submodule support,
+`--separate-git-dir` support, multiple active repositories, worktree lifecycle
+authority, and persistent executable membership are not claimed. The certified
+`codex-cli 0.149.0` was unavailable; ambient `0.155.1` was not substituted and
+no Codex inference ran.
+
+## Historical RAH v0.29.0 Security Model - released
 
 The release theme is **Explicit Active Repository Close**. Close withdraws
 the current repository under ADR 0027's existing authority-composition

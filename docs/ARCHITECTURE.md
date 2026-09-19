@@ -1,7 +1,88 @@
-# RAH v0.29.0 Architecture - prepared, not yet published
+# RAH v0.30.0 Architecture - prepared, not yet published
 
-This section records the release-preparation architecture for **Explicit
-Active Repository Close**. Close exposes ADR 0027's existing zero-active state
+The release theme is **Linked Git Worktree Repository Support**. ADR 0029 adds
+one closed linked-worktree identity form under ADR 0027's existing repository
+membership and authority-composition boundary. It adds no executable authority
+category.
+
+```text
+human-selected worktree root
+        |
+        v
+RepositoryAdmissionIdentity
+        |
+        +-- ordinary main layout
+        |
+        +-- validated linked layout
+              private Git state
+                    |
+                    +---- validated relationship ----> common Git state
+                                                        |
+                                                        v
+                                          relationship/dependency context
+                                          NOT sibling authority
+```
+
+An ordinary main worktree has a real directory at `root/.git`. A supported
+linked worktree has a bounded `.git` gitfile resolving to private worktree Git
+state, a standard `commondir` relation to shared common state, a backlink to
+the selected root's `.git`, and exactly one matching native registration.
+Absolute and supported relative link spellings are accepted only when the
+complete relationship, filesystem identities, and fixed read-only Git probes
+agree. Arbitrary gitfiles are not accepted.
+
+The identity model keeps the following distinctions explicit:
+
+```text
+same common Git directory != same repository member
+common Git state          != sibling executable authority
+
+one admitted member selected active
+        -> one active-only ToolRegistry
+        -> selected HEAD/index/currentness
+```
+
+Main, linked A, and linked B may share common Git state while remaining
+distinct members. There are zero or one active members, never a union
+ToolRegistry or parallel active repositories. Activation revalidates identity
+and currentness before publishing fresh active-only composition. Close withdraws
+composition; inactive removal changes only process-local membership and does
+not invoke Git worktree lifecycle commands.
+
+Repository observation and content authoring use only the selected worktree
+root. Stage and Unstage use only its private index. Reviewed Commit binds the
+selected identity, private index, selected HEAD, attached branch, and expected
+selected branch OID. Currentness is capability-specific: unrelated sibling
+common-state changes do not globally stale every preparation, while movement of
+the selected branch ref does stale its reviewed Commit. No common-directory
+generation or sibling authority is introduced.
+
+RAH recognizes an existing valid worktree identity. It does not create,
+remove, prune, repair, move, lock, or unlock Git worktrees. Restart restores no
+executable repository membership or authority; remembered worktrees remain
+descriptive candidates under ADR 0028.
+
+## Authority and decision status
+
+The authority classification is **NARROW EXTENSION**, not a new authority
+category. HostExplicit remains exactly 11. No PermissionLevel, Tool field,
+Stage/Unstage authority, Commit authority, generic Git/filesystem authority,
+provider authority, model routing authority, or persistence/schema authority
+was added. ADR 0027 remains authoritative; ADR 0029 is Accepted and adds only
+the closed identity form. ADR 0028 and existing mutation/Commit ADRs remain
+unchanged.
+
+Task 360 provided deterministic security/currentness hardening and Task 361
+provided Windows host-driven certification with explicit nonclaims. GUI
+automation, model-selected worktree routing, Codex inference, Linux/macOS live
+parity, race-free TOCTOU, OS sandboxing, network isolation, rollback/replay,
+machine-wide external-Git locking, submodules, separate-git-dir layouts, and
+worktree lifecycle authority remain outside the claim.
+
+# Historical RAH v0.29.0 Architecture - released
+
+This section records the released v0.29 architecture for **Explicit Active
+Repository Close**. Close exposes ADR 0027's existing zero-active state
 as an explicit human Desktop workflow; it adds no repository authority.
 
 ```text
