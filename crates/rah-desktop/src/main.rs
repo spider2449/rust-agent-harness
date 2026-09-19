@@ -32827,6 +32827,11 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .ok_or_else(|| format!("Task 361 live assertion failed: {message}"))
     }
 
+    fn task361_same_windows_path(left: &Path, right: &Path) -> bool {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+
     async fn task361_tool(
         registry: &Arc<ToolRegistry>,
         name: &str,
@@ -32910,21 +32915,27 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             capture_main.branch == "refs/heads/main"
                 && capture_a.branch == "refs/heads/worktree-a"
                 && capture_b.branch == "refs/heads/worktree-b"
-                && capture_main.root
-                    == fixture
+                && task361_same_windows_path(
+                    &capture_main.root,
+                    &fixture
                         .main
                         .canonicalize()
-                        .map_err(|_| "main root unavailable")?
-                && capture_a.root
-                    == fixture
+                        .map_err(|_| "main root unavailable")?,
+                )
+                && task361_same_windows_path(
+                    &capture_a.root,
+                    &fixture
                         .linked_a
                         .canonicalize()
-                        .map_err(|_| "A root unavailable")?
-                && capture_b.root
-                    == fixture
+                        .map_err(|_| "A root unavailable")?,
+                )
+                && task361_same_windows_path(
+                    &capture_b.root,
+                    &fixture
                         .linked_b
                         .canonicalize()
                         .map_err(|_| "B root unavailable")?,
+                ),
             "main/A/B selected roots and branch identities are distinct",
         )?;
         task361_require(
