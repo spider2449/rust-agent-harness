@@ -33546,6 +33546,31 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "branch conflict leaves the intended ref unchanged",
         )?;
 
+        drop(a_registry);
+        let branch_refresh_generation = *state
+            .repository_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        close_repository_transition(
+            &state,
+            CloseRepositoryRequest {
+                expected_active_member_id: fresh_member_a.selector(),
+                expected_repository_generation: branch_refresh_generation,
+            },
+        )
+        .map_err(|_| "A branch refresh Close failed")?;
+        activate_admitted_member(&state, fresh_member_a)
+            .await
+            .map_err(|_| "A branch refresh reactivation failed")?;
+        let active_a = state
+            .repository
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| "A repository disappeared after branch refresh".to_owned())?;
+        let a_registry = desktop_tool_registry(Some(&active_a), None)
+            .map_err(|_| "A registry rebuild after branch refresh failed")?;
+
         fs::write(
             fixture.linked_a.join("commit-a.txt"),
             b"reviewed A commit\n",
