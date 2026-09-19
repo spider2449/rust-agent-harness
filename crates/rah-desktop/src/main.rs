@@ -33465,20 +33465,20 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         let read_tool = a_registry
             .get(&ToolName::new("fs.read"))
             .ok_or_else(|| "active A registry lacks fs.read".to_owned())?;
-        let nested_read = read_tool
+        let nested_read_rejected = read_tool
             .execute(
                 ToolInput(serde_json::json!({"path":"nested-boundary/secret.txt"})),
                 ToolContext::default(),
             )
             .await
-            .map_err(|_| "nested-boundary read dispatch failed")?;
+            .is_err();
         task361_require(
             task361_output_status(&metadata_write).as_deref() != Some("ok")
                 && !fixture
                     .linked_a
                     .join(".git/RAH_V030_METADATA_TARGET")
                     .exists()
-                && nested_read.is_error,
+                && nested_read_rejected,
             "root .git metadata and nested repository content are protected boundaries",
         )?;
 
