@@ -1,6 +1,52 @@
-# RAH v0.30.0 Architecture - prepared, not yet published
+# RAH v0.31.0 Architecture - prepared, not yet published
 
-The release theme is **Linked Git Worktree Repository Support**. ADR 0029 adds
+The release theme is **Bounded Repository Discovery / Search**. `repo.search`
+extends the existing repository observation family without creating a parallel
+search authority or generic Git layer.
+
+```text
+host-selected active repository identity
+        |
+        v
+existing repository observer envelope
+        |
+        v
+fixed Git tracked inventory
+        |
+        v
+bounded host-side literal matching
+        |
+        v
+repository-relative paths / line numbers
+```
+
+The Tool has closed `path` and `text` modes. It searches tracked, currently
+present, ordinary regular files in the selected active worktree only. Git is
+used only for the fixed inventory command
+`git --no-pager ls-files --cached --deduplicate -z --full-name --`; query,
+prefix, matching, and all bounds remain host-owned Rust behavior. Text mode
+reads current selected-worktree bytes. Results are deterministic, bounded,
+best-effort observations with literal case-sensitive matching and no snippets.
+
+An active linked worktree A may search A's tracked worktree files, but cannot
+search main or linked B contents. The shared common Git directory does not
+create sibling authority, and no Tool input supplies a repository, worktree,
+member, or root selector. There is no union ToolRegistry, background index,
+filesystem walker, external search executable, or mutation path.
+
+`repo.search` is classified as `ReadOnly` / `RepositoryObservation`, uses the
+existing repository-bound `Execute` gate, and is not HostExplicit. The exact
+HostExplicit set remains the existing 11 names; `repo.create-directory` remains
+ineligible.
+
+Task 368 recorded the independent audit as **PASS WITH NARROW HARDENING**.
+Task 369 recorded Windows live certification as **PASS WITH EXPLICIT CODEX
+NONCLAIM**. See the v0.31 release gate for certification evidence and
+nonclaims.
+
+## Historical RAH v0.30.0 Architecture - released
+
+The release theme was **Linked Git Worktree Repository Support**. ADR 0029 adds
 one closed linked-worktree identity form under ADR 0027's existing repository
 membership and authority-composition boundary. It adds no executable authority
 category.

@@ -5,7 +5,28 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.30.0 prepared — not yet published
+## RAH v0.31.0 prepared — not yet published
+
+The release theme is **Bounded Repository Discovery / Search**. RAH Desktop
+now provides the first-party `repo.search` Tool so an agent can locate relevant
+tracked files inside the host-selected active repository before using the
+existing read and authoring capabilities. It supports bounded `path` and
+`text` modes with literal, case-sensitive host-side matching, repository-
+relative results, and current selected-worktree bytes for text mode.
+
+Search is observation only: it uses a fixed Git tracked-file inventory and
+does not search untracked or ignored files. It is not regex, fuzzy, semantic,
+filesystem, cross-worktree, or generic shell/Git search. The one-active
+repository and linked-worktree isolation rules remain unchanged. See the
+[v0.31 release gate](docs/RAH_V0.31_RELEASE_GATE.md) and [Task 369 Windows
+certification record](docs/plans/2026-09-19-task-369-repository-search-windows-live-certification.md)
+for evidence and explicit nonclaims.
+
+Untracked/ignored discovery, regex/fuzzy/semantic search, generic
+shell/process authority, deferred network MCP, Git worktree lifecycle, and
+multiple active repositories remain unsupported.
+
+## RAH v0.30.0 released
 
 The release theme is **Linked Git Worktree Repository Support**. RAH Desktop
 can explicitly admit an ordinary repository or a supported, already-registered

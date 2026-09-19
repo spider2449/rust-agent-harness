@@ -1,4 +1,47 @@
-# RAH v0.30.0 Security Model - prepared, not yet published
+# RAH v0.31.0 Security Model - prepared, not yet published
+
+The release theme is **Bounded Repository Discovery / Search**. `repo.search`
+is a narrow extension of the existing selected-repository observation boundary:
+`EffectClass::ReadOnly`, `AuthorityCategory::RepositoryObservation`,
+`PermissionLevel::Execute`, and `repository_bound = true`. It adds no
+PermissionLevel, authority category, HostExplicit route, mutation authority,
+network authority, persistence, or generic Git/process authority.
+
+## Search boundary
+
+The host selects the active repository and linked-worktree member before
+dispatch. `repo.search` accepts only its closed `mode`, `query`, and optional
+`path_prefix` input; the model cannot select a repository, root, worktree,
+member, executable, argv, environment, timeout, or limits. The fixed Git
+command is `git --no-pager ls-files --cached --deduplicate -z --full-name --`
+with the selected repository cwd and existing observer environment. Git is an
+inventory source only; matching is literal, case-sensitive, and host-owned.
+
+The inventory is tracked-only, selected-active-worktree-only, and limited to
+currently present ordinary regular files. Search rejects nested repositories,
+symlinks, junctions, and other Windows reparse traversal; it does not expose
+`.git`, private linked-worktree metadata, common Git storage, or sibling
+worktree contents. Text mode reads current worktree bytes, not historical or
+index-only bytes. There is no untracked/ignored search, regex/fuzzy/semantic
+search, filesystem walker, background index, sibling selector, or union
+repository registry.
+
+Requests, inventory, files, matches, output, and execution are bounded.
+Results expose only bounded repository-relative UTF-8 paths, line numbers,
+omission counts, and completion/truncation state. Absolute roots, private or
+common Git paths, worktree registration, gitfile/backlink/commondir evidence,
+filesystem identities, Git executable paths, profile source paths, raw stderr,
+generations, and authority handles remain private. The operation is a
+best-effort observation: no race-free TOCTOU, transactional snapshot, global
+external-Git lock, rollback, compensation, or replay guarantee is claimed.
+
+Task 368 was **PASS WITH NARROW HARDENING**. Task 369 was **PASS WITH EXPLICIT
+CODEX NONCLAIM**. Its Windows live evidence passed the production and Generic
+Tool Bridge paths, but did not certify real model-selected inference under
+unavailable `codex-cli 0.149.0`; ambient `0.155.1` was not substituted. Windows
+symlink live behavior was also not certified.
+
+## Historical RAH v0.30.0 Security Model - released
 
 The release theme is **Linked Git Worktree Repository Support**. The authority
 classification is **NARROW EXTENSION** under ADR 0027. ADR 0029 is Accepted and

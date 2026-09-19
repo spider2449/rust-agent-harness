@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.31.0 - prepared / not yet published (2026-09-19)
+
+The release theme is **Bounded Repository Discovery / Search**.
+
+### Added
+
+- First-party `repo.search` with closed `path` and `text` modes for bounded
+  tracked-file discovery in the selected active worktree.
+- Fixed Git tracked inventory via `git --no-pager ls-files --cached
+  --deduplicate -z --full-name --`; text mode reads current selected-worktree
+  bytes and returns bounded repository-relative paths and line numbers.
+- Literal, case-sensitive host-side matching with deterministic result and
+  omission bounds, linked-worktree isolation, nested-repository rejection, and
+  symlink/reparse non-traversal.
+
+### Authority and audit record
+
+`repo.search` remains `ReadOnly` / `RepositoryObservation` / repository-bound
+with existing `Execute` permission. No new authority category or permission
+level was added, and HostExplicit remains exactly 11; `repo.search` and
+`repo.create-directory` remain ineligible.
+
+Task 368 independently returned **PASS WITH NARROW HARDENING** and confirmed
+the known parallel-test contention family was reproducible on the clean
+pre-Task-367 baseline. Task 369 returned **PASS WITH EXPLICIT CODEX NONCLAIM**
+after Windows live certification of the production and Generic Tool Bridge
+paths. The v0.31 gate records the exact checkpoints and all preserved
+nonclaims, including unavailable `codex-cli 0.149.0` model-selected inference
+and unavailable Windows symlink live certification.
+
 ## v0.30.0 - released (2026-09-19)
 
 The release theme is **Linked Git Worktree Repository Support**.
