@@ -33576,6 +33576,20 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             b"reviewed A commit\n",
         )
         .map_err(|_| "A Commit target setup failed")?;
+        fixture
+            .git_run(
+                &fixture.linked_a,
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--untracked-files=normal",
+                    "--ignored=no",
+                    "--no-renames",
+                    "--ignore-submodules=all",
+                ],
+            )
+            .map_err(|_| "native Git status failed after branch creation")?;
         desktop_repository_snapshot_with_review(&active_a, None)
             .await
             .map_err(|stage| format!("A Commit observer failed at {stage:?}"))?;
