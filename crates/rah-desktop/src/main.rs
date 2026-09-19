@@ -33559,7 +33559,16 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .iter()
             .find(|entry| entry.path == "commit-a.txt")
             .and_then(|entry| entry.stage_action_id.clone())
-            .ok_or_else(|| "A Commit target had no production Stage selector".to_owned())?;
+            .ok_or_else(|| {
+                format!(
+                    "A Commit target had no production Stage selector; paths={:?}",
+                    commit_stage_snapshot
+                        .status_entries
+                        .iter()
+                        .map(|entry| (entry.path.clone(), entry.index_state.clone(), entry.worktree_state.clone()))
+                        .collect::<Vec<_>>()
+                )
+            })?;
         let commit_stage = repository_index_action(
             &state,
             commit_stage_action,
