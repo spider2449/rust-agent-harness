@@ -1,8 +1,24 @@
 # Changelog
 
-## v0.30.0 - prepared / not yet published
+## v0.30.0 - released (2026-09-19)
 
 The release theme is **Linked Git Worktree Repository Support**.
+
+### Immutable publication record
+
+- Immutable release source: `ea37a428a39ac4732335f563a9b31c0c86f3150a`.
+- Annotated tag: `v0.30.0`; annotation: `RAH v0.30.0`.
+- Tag object: `254e9ec110cc45fc677b543874728277ae67bef1`.
+- Peeled target: `ea37a428a39ac4732335f563a9b31c0c86f3150a`.
+- Release-preparation CI: `35425103860` - PASS.
+- Tag CI: `35425678366` - PASS.
+- GitHub Release ID: `391934835`; name: `RAH v0.30.0`.
+- Published: `2026-09-19T06:08:26Z`; `draft=false`; `prerelease=false`;
+  assets=`0`.
+
+Task 364 is a later documentation-only descendant and is **not** the
+immutable v0.30.0 release source. The v0.30.0 tag remains attached to the
+release source above.
 
 ### Added
 
