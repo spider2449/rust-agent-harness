@@ -33565,7 +33565,11 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     commit_stage_snapshot
                         .status_entries
                         .iter()
-                        .map(|entry| (entry.path.clone(), entry.index_state.clone(), entry.worktree_state.clone()))
+                        .map(|entry| (
+                            entry.path.clone(),
+                            entry.index_state.clone(),
+                            entry.worktree_state.clone()
+                        ))
                         .collect::<Vec<_>>()
                 )
             })?;
