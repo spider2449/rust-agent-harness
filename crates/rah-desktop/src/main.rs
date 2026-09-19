@@ -34055,12 +34055,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             &["commit", "--quiet", "-m", "local submodule"],
         )?;
         let submodule_path = fixture.main.join("nested-module");
-        let source_text = submodule_source
-            .to_str()
-            .ok_or_else(|| "submodule source path is not UTF-8".to_owned())?;
-        let target_text = submodule_path
-            .to_str()
-            .ok_or_else(|| "submodule target path is not UTF-8".to_owned())?;
         fixture.git_run(
             &fixture.main,
             &[
@@ -34069,8 +34063,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 "submodule",
                 "add",
                 "--quiet",
-                source_text,
-                target_text,
+                "../local-submodule-source",
+                "nested-module",
             ],
         )?;
         task361_require(
