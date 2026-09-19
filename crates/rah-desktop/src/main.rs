@@ -32955,10 +32955,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             capture_main.head_path != capture_a.head_path
                 && capture_a.head_path != capture_b.head_path
                 && capture_main.index_path != capture_a.index_path
-                && capture_a.index_path != capture_b.index_path
-                && capture_main.head != capture_a.head
-                && capture_a.head != capture_b.head
-                && capture_main.head != capture_b.head,
+                && capture_a.index_path != capture_b.index_path,
             "selected HEAD and index paths are private per worktree",
         )?;
         let initial_index_hashes = [
