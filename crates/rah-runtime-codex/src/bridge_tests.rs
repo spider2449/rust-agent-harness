@@ -23,8 +23,8 @@ use rah_protocol::{
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{
     EchoTool, FsReadTool, RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
-    RepositoryFileRenameAuthority, Tool, ToolContext, ToolError, ToolRegistry,
-    TrustedStaticProfile,
+    RepositoryFileRenameAuthority, RepositorySearchTool, Tool, ToolContext, ToolError,
+    ToolRegistry, TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1119,6 +1119,67 @@ async fn fs_read_is_advertised_by_private_alias_and_resolves_to_exact_rah_name()
             if tool_call.name == ToolName::new("fs.read")
                 && tool_call.input == ToolInput(json!({"path": "note.txt"}))
     )));
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn repository_search_dispatches_through_the_generic_bridge() {
+    let directory = TestDirectory::new();
+    let root = directory.path().join("repository");
+    fs::create_dir(&root).expect("repository directory should be created");
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["config", "user.email", "bridge@example.invalid"]);
+    git(&root, &["config", "user.name", "RAH bridge test"]);
+    fs::write(root.join("bridge-search.txt"), "BRIDGE_SEARCH_SENTINEL\n")
+        .expect("search fixture should be written");
+    git(&root, &["add", "--", "bridge-search.txt"]);
+    git(&root, &["commit", "--quiet", "-m", "search fixture"]);
+
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(
+            RepositorySearchTool::new(git_executable(), &root)
+                .expect("repository search tool should compose"),
+        ))
+        .expect("repository search should register");
+    let (runtime, mut peer, _) =
+        connected_bridge(Arc::new(registry), vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let advertised = &thread["params"]["dynamicTools"][0];
+    let alias = advertised["name"]
+        .as_str()
+        .expect("repository search alias should be a string")
+        .to_owned();
+    assert_eq!(
+        advertised["inputSchema"]["required"],
+        json!(["mode", "query"])
+    );
+
+    let result = bridge_call(
+        &mut peer,
+        json!(914),
+        "repository-search",
+        &alias,
+        json!({"mode":"text","query":"BRIDGE_SEARCH_SENTINEL"}),
+    )
+    .await;
+    assert_eq!(
+        result["matches"],
+        json!([{"path":"bridge-search.txt","lines":[1]}])
+    );
+    assert_eq!(result["consistency"], "best_effort");
+
+    peer.notify("item/started", dynamic_item());
+    peer.notify("item/completed", dynamic_item());
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRequested { tool_call, .. }
+            if tool_call.name == ToolName::new("repo.search")
+                && tool_call.input == ToolInput(json!({"mode":"text","query":"BRIDGE_SEARCH_SENTINEL"}))
+    )));
+    assert_eq!(tool_event_count(&events), 3);
     runtime.shutdown().await.expect("shutdown");
 }
 

@@ -87,9 +87,9 @@ use rah_tools::{
     RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
     RepositoryPatchPreparationRequest, RepositoryPatchResultClassification,
     RepositoryRenameFilePreparationError, RepositoryRenameFilePreparationRequest,
-    RepositoryRenameFileProof, RepositoryStatusTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
-    classify_repository_patch_output,
+    RepositoryRenameFileProof, RepositorySearchTool, RepositoryStatusTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use remembered_workspace::{
@@ -8075,6 +8075,7 @@ fn desktop_tool_registry(
         let diff = RepositoryDiffTool::new(&repository.git_executable, &repository.root)?;
         let diff_staged =
             RepositoryDiffStagedTool::new(&repository.git_executable, &repository.root)?;
+        let search = RepositorySearchTool::new(&repository.git_executable, &repository.root)?;
         let patch = RepositoryWorktreePatchTool::new(&repository.git_executable, &repository.root)?;
         let create_file =
             RepositoryFileCreationTool::new(&repository.git_executable, &repository.root)?;
@@ -8085,6 +8086,7 @@ fn desktop_tool_registry(
         registry.register(Arc::new(status))?;
         registry.register(Arc::new(diff))?;
         registry.register(Arc::new(diff_staged))?;
+        registry.register(Arc::new(search))?;
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(create_file))?;
         if let Some(authority) = &repository.directory_creation_authority {
@@ -10043,7 +10045,7 @@ mod tests {
         io::{Read, Write},
         net::{Ipv4Addr, SocketAddrV4, TcpListener},
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, Stdio},
         sync::{
             Arc, Mutex, OnceLock,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -25021,6 +25023,7 @@ fn main() {
                 "repo.edit-files",
                 "repo.file-info",
                 "repo.patch",
+                "repo.search",
                 "repo.status",
             ]
         );
@@ -25050,7 +25053,7 @@ fn main() {
                 .iter()
                 .filter(|&&permission| permission == PermissionLevel::Execute)
                 .count(),
-            7
+            8
         );
         let output = registry
             .execute(
@@ -32509,6 +32512,10 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         }
 
         fn command_output(&self, command: &mut Command) -> Result<std::process::Output, String> {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             let child = command
                 .spawn()
                 .map_err(|_| "Task 361 owned child process could not start".to_owned())?;
@@ -34290,6 +34297,504 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         println!("RAH_V030_WINDOWS_REPARSE_RELATIONS_REJECTED=1");
         println!("RAH_V030_DETACHED_OBSERVATION_COMMIT_UNAVAILABLE=1");
         println!("RAH_V030_EXTERNAL_MOVE_REMOVE_AND_METADATA_STALE=1");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_V031_REPOSITORY_SEARCH_LIVE=1"]
+    async fn task369_windows_repository_search_live_certification() -> Result<(), String> {
+        if std::env::var("RAH_RUN_V031_REPOSITORY_SEARCH_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_V031_REPOSITORY_SEARCH_LIVE=1 for Task 369 certification".to_owned(),
+            );
+        }
+        let git = selected_git_executable()
+            .map_err(|_| "Task 369 native Git discovery failed".to_owned())?;
+        let fixture = Task361LiveFixture::new(git)?;
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+
+        type Task369RepositoryState = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+        fn repository_state(
+            fixture: &Task361LiveFixture,
+            root: &Path,
+        ) -> Result<Task369RepositoryState, String> {
+            let head = fixture.git_run(root, &["rev-parse", "HEAD"])?;
+            let branch = fixture.git_run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+            let status = fixture.git_run(root, &["status", "--porcelain=v2", "-z"])?;
+            let index_path = task361_capture(fixture, root)?.index_path;
+            let index = fs::read(index_path)
+                .map_err(|error| format!("selected index could not be read: {error}"))?;
+            Ok((head, branch, status, index))
+        }
+
+        for (root, name, contents) in [
+            (
+                &fixture.main,
+                "main-only.txt",
+                b"MAIN_ONLY_SEARCH_SENTINEL\n".as_slice(),
+            ),
+            (
+                &fixture.linked_b,
+                "b-only.txt",
+                b"B_ONLY_SEARCH_SENTINEL\n".as_slice(),
+            ),
+        ] {
+            fs::write(root.join(name), contents).map_err(|error| error.to_string())?;
+            fixture.git_run(root, &["add", "--", name])?;
+            fixture.git_run(
+                root,
+                &["commit", "--quiet", "-m", "Task 369 sibling sentinel"],
+            )?;
+        }
+
+        fs::create_dir_all(fixture.linked_a.join("src")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("src2")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("docs")).map_err(|error| error.to_string())?;
+        for (path, contents) in [
+            ("a-only.txt", b"A_ONLY_SEARCH_SENTINEL\n".to_vec()),
+            ("src/repository_search_alpha.rs", b"alpha\n".to_vec()),
+            ("src/repository_search_beta.rs", b"beta\n".to_vec()),
+            ("src2/repository_search_sibling.rs", b"sibling\n".to_vec()),
+            (
+                "docs/search-notes.txt",
+                b"line one\nRAH_SEARCH_TEXT_SENTINEL\nline three\nanother RAH_SEARCH_TEXT_SENTINEL occurrence\n".to_vec(),
+            ),
+            (
+                "crlf-search.txt",
+                b"line one\r\nCRLF_SEARCH_SENTINEL\r\nline three\r\n".to_vec(),
+            ),
+            ("tracked-modified.txt", b"baseline\n".to_vec()),
+            ("staged-new.txt", b"baseline\n".to_vec()),
+            ("tracked-ignored.txt", b"TRACKED_IGNORED_SEARCH_SENTINEL\n".to_vec()),
+            ("current-worktree.txt", b"OLD_INDEX_SENTINEL\n".to_vec()),
+        ] {
+            fs::write(fixture.linked_a.join(path), contents)
+                .map_err(|error| format!("fixture file {path} failed: {error}"))?;
+        }
+        fs::write(
+            fixture.linked_a.join(".gitignore"),
+            b"ignored-secret.txt\ntracked-ignored.txt\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("binary-search.bin"),
+            b"BINARY_SEARCH_SENTINEL\0binary\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let mut oversized = b"OVERSIZED_SEARCH_SENTINEL\n".to_vec();
+        oversized.resize(1024 * 1024 + 1, b'x');
+        fs::write(fixture.linked_a.join("oversized-search.txt"), oversized)
+            .map_err(|error| error.to_string())?;
+        for index in 0..130 {
+            fs::write(
+                fixture.linked_a.join(format!("saturation-{index:03}.txt")),
+                b"saturation\n",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        fixture.git_run(&fixture.linked_a, &["add", "--all"])?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["add", "-f", "--", "tracked-ignored.txt"],
+        )?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["commit", "--quiet", "-m", "Task 369 search fixtures"],
+        )?;
+        fs::write(
+            fixture.linked_a.join("tracked-modified.txt"),
+            b"TRACKED_MODIFIED_SEARCH_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("current-worktree.txt"),
+            b"CURRENT_WORKTREE_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("staged-new.txt"),
+            b"STAGED_NEW_SEARCH_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fixture.git_run(&fixture.linked_a, &["add", "--", "staged-new.txt"])?;
+        fs::write(
+            fixture.linked_a.join("untracked-secret.txt"),
+            b"UNTRACKED_SEARCH_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("ignored-secret.txt"),
+            b"IGNORED_UNTRACKED_SEARCH_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let main_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.main)
+                .await
+                .map_err(|_| "main admission failed".to_owned())?;
+        let a_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .map_err(|_| "linked A admission failed".to_owned())?;
+        let b_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_b)
+                .await
+                .map_err(|_| "linked B admission failed".to_owned())?;
+        activate_admitted_member(&state, a_member)
+            .await
+            .map_err(|_| "linked A activation failed".to_owned())?;
+        let selected_a = state
+            .repository
+            .lock()
+            .map_err(|_| "repository lock poisoned".to_owned())?
+            .clone()
+            .ok_or_else(|| "linked A was not selected".to_owned())?;
+        let registry_a = desktop_tool_registry(Some(&selected_a), None)
+            .map_err(|error| format!("Desktop active-A registry failed: {error}"))?;
+        let composition_a = desktop_tool_composition_from_registry(
+            Arc::clone(&registry_a),
+            Some(&selected_a),
+            false,
+            &[],
+        )
+        .map_err(|error| format!("Desktop active-A composition failed: {error:?}"))?;
+        let search_definition = registry_a
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.search")
+            .ok_or_else(|| "Desktop active-A registry omitted repo.search".to_owned())?;
+        task361_require(
+            search_definition.permission == PermissionLevel::Execute,
+            "repo.search retained Execute permission",
+        )?;
+        let search_entry = composition_a
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.search")
+            .ok_or_else(|| "effective active-A composition omitted repo.search".to_owned())?;
+        task361_require(
+            search_entry.effect_class == crate::effective_authority::EffectClass::ReadOnly
+                && search_entry.authority_category
+                    == crate::effective_authority::AuthorityCategory::RepositoryObservation
+                && search_entry.repository_bound
+                && search_entry.source_kind
+                    == crate::effective_authority::SourceKind::RepositoryHost,
+            "effective authority classifies repo.search as selected repository observation",
+        )?;
+        let authority_json = serde_json::to_string(&composition_a.tools)
+            .map_err(|error| format!("effective authority serialization failed: {error}"))?;
+        let captured_a = task361_capture(&fixture, &fixture.linked_a)?;
+        let captured_main = task361_capture(&fixture, &fixture.main)?;
+        let captured_b = task361_capture(&fixture, &fixture.linked_b)?;
+        task361_require(
+            captured_main.common_git_dir == captured_a.common_git_dir
+                && captured_a.common_git_dir == captured_b.common_git_dir,
+            "main/A/B share one common Git directory",
+        )?;
+        task361_require(
+            captured_main.private_git_dir != captured_a.private_git_dir
+                && captured_a.private_git_dir != captured_b.private_git_dir,
+            "main/A/B retain distinct private Git directories",
+        )?;
+        let forbidden_private_values = [
+            captured_a.private_git_dir.to_string_lossy().into_owned(),
+            captured_a.common_git_dir.to_string_lossy().into_owned(),
+            captured_a.root.to_string_lossy().into_owned(),
+            captured_main.root.to_string_lossy().into_owned(),
+            captured_b.root.to_string_lossy().into_owned(),
+        ];
+        task361_require(
+            forbidden_private_values
+                .iter()
+                .all(|value| !authority_json.contains(value)),
+            "effective authority remains redacted",
+        )?;
+
+        let search = |registry: Arc<ToolRegistry>, input: Value| async move {
+            let output = registry
+                .execute(
+                    ToolCall {
+                        id: ToolCallId::new(),
+                        name: ToolName::new("repo.search"),
+                        input: ToolInput(input),
+                    },
+                    ToolContext::default(),
+                )
+                .await
+                .map_err(|error| format!("repo.search failed: {error}"))?;
+            task361_output_value(&output)
+                .ok_or_else(|| "repo.search returned no JSON content".to_owned())
+        };
+        let before = [
+            repository_state(&fixture, &fixture.main)?,
+            repository_state(&fixture, &fixture.linked_a)?,
+            repository_state(&fixture, &fixture.linked_b)?,
+        ];
+        let path = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"path","query":"repository_search"}),
+        )
+        .await?;
+        task361_require(
+            path["matches"]
+                == serde_json::json!([
+                    {"path":"src/repository_search_alpha.rs"},
+                    {"path":"src/repository_search_beta.rs"},
+                    {"path":"src2/repository_search_sibling.rs"}
+                ]),
+            "path mode returned deterministic literal A paths",
+        )?;
+        let prefixed = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"path","query":"search","path_prefix":"src"}),
+        )
+        .await?;
+        task361_require(
+            prefixed["matches"]
+                == serde_json::json!([
+                    {"path":"src/repository_search_alpha.rs"},
+                    {"path":"src/repository_search_beta.rs"}
+                ]),
+            "path_prefix selected src without including src2",
+        )?;
+        let text = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"text","query":"RAH_SEARCH_TEXT_SENTINEL"}),
+        )
+        .await?;
+        task361_require(
+            text["matches"] == serde_json::json!([{"path":"docs/search-notes.txt","lines":[2,4]}])
+                && text["consistency"] == "best_effort",
+            "text mode returned only paths, one-based lines, and best_effort consistency",
+        )?;
+        let crlf = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"text","query":"CRLF_SEARCH_SENTINEL"}),
+        )
+        .await?;
+        task361_require(
+            crlf["matches"] == serde_json::json!([{"path":"crlf-search.txt","lines":[2]}]),
+            "CRLF text mode line numbering was normalized",
+        )?;
+        for (query, expected_path) in [
+            ("A_ONLY_SEARCH_SENTINEL", "a-only.txt"),
+            ("TRACKED_MODIFIED_SEARCH_SENTINEL", "tracked-modified.txt"),
+            ("STAGED_NEW_SEARCH_SENTINEL", "staged-new.txt"),
+            ("TRACKED_IGNORED_SEARCH_SENTINEL", "tracked-ignored.txt"),
+            ("CURRENT_WORKTREE_SENTINEL", "current-worktree.txt"),
+        ] {
+            let value = search(
+                Arc::clone(&registry_a),
+                serde_json::json!({"mode":"text","query":query}),
+            )
+            .await?;
+            task361_require(
+                value["matches"].as_array().is_some_and(|matches| {
+                    matches.iter().any(|item| item["path"] == expected_path)
+                }),
+                "tracked current/staged worktree content was searchable",
+            )?;
+        }
+        for query in [
+            "OLD_INDEX_SENTINEL",
+            "UNTRACKED_SEARCH_SENTINEL",
+            "IGNORED_UNTRACKED_SEARCH_SENTINEL",
+            "BINARY_SEARCH_SENTINEL",
+            "OVERSIZED_SEARCH_SENTINEL",
+        ] {
+            let value = search(
+                Arc::clone(&registry_a),
+                serde_json::json!({"mode":"text","query":query}),
+            )
+            .await?;
+            if value["matches"] != serde_json::json!([]) {
+                return Err(format!(
+                    "Task 361 live assertion failed: excluded query returned a match: {query}"
+                ));
+            }
+            if query == "BINARY_SEARCH_SENTINEL" {
+                task361_require(
+                    value["omitted"]["non_text"]
+                        .as_u64()
+                        .is_some_and(|count| count >= 1),
+                    "binary omission was reported",
+                )?;
+            }
+            if query == "OVERSIZED_SEARCH_SENTINEL" {
+                task361_require(
+                    value["omitted"]["oversized"]
+                        .as_u64()
+                        .is_some_and(|count| count >= 1),
+                    "oversized omission was reported",
+                )?;
+            }
+        }
+        let saturated = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"path","query":"saturation-"}),
+        )
+        .await?;
+        task361_require(
+            saturated["complete"] == false
+                && saturated["truncation_reason"] == "result_limit"
+                && saturated["matches"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == 128),
+            "path result saturation returned the bounded deterministic prefix",
+        )?;
+        let after = [
+            repository_state(&fixture, &fixture.main)?,
+            repository_state(&fixture, &fixture.linked_a)?,
+            repository_state(&fixture, &fixture.linked_b)?,
+        ];
+        task361_require(
+            before == after,
+            "repo.search caused no intentional repository mutation",
+        )?;
+
+        activate_admitted_member(&state, b_member)
+            .await
+            .map_err(|_| "linked B activation failed".to_owned())?;
+        let selected_b = state
+            .repository
+            .lock()
+            .map_err(|_| "repository lock poisoned after B activation".to_owned())?
+            .clone()
+            .ok_or_else(|| "linked B was not selected".to_owned())?;
+        let registry_b = desktop_tool_registry(Some(&selected_b), None)
+            .map_err(|error| format!("Desktop active-B registry failed: {error}"))?;
+        let b_only = search(
+            Arc::clone(&registry_b),
+            serde_json::json!({"mode":"text","query":"B_ONLY_SEARCH_SENTINEL"}),
+        )
+        .await?;
+        let a_absent = search(
+            Arc::clone(&registry_b),
+            serde_json::json!({"mode":"text","query":"A_ONLY_SEARCH_SENTINEL"}),
+        )
+        .await?;
+        task361_require(
+            b_only["matches"] == serde_json::json!([{"path":"b-only.txt","lines":[1]}])
+                && a_absent["matches"] == serde_json::json!([]),
+            "fresh B composition searched B only after active switch",
+        )?;
+        activate_admitted_member(&state, a_member)
+            .await
+            .map_err(|_| "linked A reactivation failed".to_owned())?;
+
+        let external = fixture.root.join("reparse-external");
+        fs::create_dir(&external).map_err(|error| error.to_string())?;
+        fs::write(external.join("escape.txt"), b"REPARSE_ESCAPE_SENTINEL\n")
+            .map_err(|error| error.to_string())?;
+        let junction = fixture.linked_a.join("reparse-escape");
+        fixture.create_junction(&junction, &external)?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["add", "-f", "--", "reparse-escape/escape.txt"],
+        )?;
+        let reparse_result = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"text","query":"REPARSE_ESCAPE_SENTINEL"}),
+        )
+        .await;
+        task361_require(
+            reparse_result.is_err(),
+            "junction-backed tracked content failed closed without disclosure",
+        )?;
+        fixture.remove_junction(&junction)?;
+
+        let symlink_target = fixture.root.join("symlink-target.txt");
+        fs::write(&symlink_target, b"SYMLINK_ESCAPE_SENTINEL\n")
+            .map_err(|error| error.to_string())?;
+        let symlink = fixture.linked_a.join("symlink-escape.txt");
+        let symlink_created = Command::new("cmd.exe")
+            .args([
+                "/d",
+                "/c",
+                "mklink",
+                symlink.to_string_lossy().as_ref(),
+                symlink_target.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if symlink_created {
+            let _ = fixture.git_run(
+                &fixture.linked_a,
+                &["add", "-f", "--", "symlink-escape.txt"],
+            );
+            let symlink_result = search(
+                Arc::clone(&registry_a),
+                serde_json::json!({"mode":"text","query":"SYMLINK_ESCAPE_SENTINEL"}),
+            )
+            .await?;
+            task361_require(
+                symlink_result["matches"] == serde_json::json!([]),
+                "created Windows symlink was not followed",
+            )?;
+            println!("RAH_V031_WINDOWS_SYMLINK_LIVE_CERTIFIED=1");
+            let _ = fs::remove_file(&symlink);
+        } else {
+            println!("RAH_V031_WINDOWS_SYMLINK_LIVE_NONCLAIM=1");
+        }
+
+        let nested = fixture.linked_a.join("nested-repository");
+        fs::create_dir(&nested).map_err(|error| error.to_string())?;
+        fixture.git_run(&nested, &["init", "--quiet"])?;
+        let nested_result = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"path","query":"repository"}),
+        )
+        .await;
+        task361_require(
+            nested_result.is_err(),
+            "nested repository boundary rejected the whole search",
+        )?;
+        fs::remove_dir_all(&nested).map_err(|error| error.to_string())?;
+        let host_names = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+            "repo.rename-file",
+        ];
+        task361_require(
+            host_names
+                .iter()
+                .filter(|name| host_kind(name).is_some())
+                .count()
+                == 11
+                && host_kind("repo.search").is_none(),
+            "HostExplicit remained exactly 11 and repo.search stayed ineligible",
+        )?;
+        for output in [path, prefixed, text, crlf, saturated, b_only, a_absent] {
+            let serialized = output.to_string();
+            task361_require(
+                forbidden_private_values
+                    .iter()
+                    .all(|value| !serialized.contains(value)),
+                "ToolOutput contained only redacted repository-relative data",
+            )?;
+        }
+        let cleanup_pids = fixture.cleanup()?;
+        task361_require(
+            !cleanup_pids.is_empty(),
+            "fixture child processes were owned and reaped",
+        )?;
+        println!("RAH_V031_REPOSITORY_SEARCH_LIVE_OK");
+        let _ = main_member;
         Ok(())
     }
 
