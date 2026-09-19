@@ -182,13 +182,13 @@ pub(crate) fn is_dot_git_name(name: &OsStr) -> bool {
 }
 
 #[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     metadata.file_attributes() & 0x400 != 0
 }
 
 #[cfg(not(windows))]
-fn is_reparse_point(_: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(_: &fs::Metadata) -> bool {
     false
 }
 

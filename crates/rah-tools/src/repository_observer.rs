@@ -29,15 +29,18 @@ use crate::{
 const FILE_INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const DIFF_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_STDOUT_LIMIT: usize = 96 * 1024;
 const OBSERVER_STDERR_LIMIT: usize = 8 * 1024;
 pub(crate) const STATUS_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 pub(crate) const DIFF_OUTPUT_LIMIT: usize = 1024 * 1024;
+pub(crate) const SEARCH_INVENTORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
 /// The only command shapes currently authorized for repository observation.
 #[derive(Clone, Copy)]
 pub(crate) enum ObserverCommand {
     Index,
+    TrackedInventory,
     Head,
     HeadTree,
     FileInfoStatus,
@@ -52,6 +55,7 @@ pub(crate) struct RepositoryObserver {
     git: PathBuf,
     repository: RepositoryIdentity,
     index: HostExecutionPolicy,
+    tracked_inventory: HostExecutionPolicy,
     head: HostExecutionPolicy,
     head_tree: HostExecutionPolicy,
     file_info_status: HostExecutionPolicy,
@@ -117,6 +121,21 @@ impl RepositoryObserver {
                 "--no-abbrev".into(),
                 "--".into(),
             ])?,
+            tracked_inventory: exact(vec![
+                "--no-pager".into(),
+                "ls-files".into(),
+                "--cached".into(),
+                "--deduplicate".into(),
+                "-z".into(),
+                "--full-name".into(),
+                "--".into(),
+            ])?
+            .with_timeout(SEARCH_TIMEOUT)?
+            .with_output_limits(OutputLimits {
+                stdout_bytes: SEARCH_INVENTORY_OUTPUT_LIMIT,
+                stderr_bytes: OBSERVER_STDERR_LIMIT,
+                combined_bytes: SEARCH_INVENTORY_OUTPUT_LIMIT + OBSERVER_STDERR_LIMIT,
+            })?,
             head: exact(vec![
                 "--no-pager".into(),
                 "rev-parse".into(),
@@ -320,6 +339,7 @@ impl RepositoryObserver {
         if matches!(
             command,
             ObserverCommand::Status
+                | ObserverCommand::TrackedInventory
                 | ObserverCommand::DiffRaw(_)
                 | ObserverCommand::DiffNumstat(_)
                 | ObserverCommand::DiffPatch(_)
@@ -328,6 +348,7 @@ impl RepositoryObserver {
         }
         let timeout = match command {
             ObserverCommand::Status => STATUS_TIMEOUT,
+            ObserverCommand::TrackedInventory => SEARCH_TIMEOUT,
             ObserverCommand::DiffRaw(_)
             | ObserverCommand::DiffNumstat(_)
             | ObserverCommand::DiffPatch(_) => DIFF_TIMEOUT,
@@ -346,6 +367,7 @@ impl RepositoryObserver {
         }
         let policy = match command {
             ObserverCommand::Index => &self.index,
+            ObserverCommand::TrackedInventory => &self.tracked_inventory,
             ObserverCommand::Head => &self.head,
             ObserverCommand::HeadTree => &self.head_tree,
             ObserverCommand::FileInfoStatus => &self.file_info_status,
@@ -522,6 +544,28 @@ pub(crate) fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), Too
         }
     }
     Ok(())
+}
+
+/// Opens one already-validated worktree file without following a final link.
+///
+/// The caller still performs ordinary-file and boundary checks before and
+/// after opening; this only closes the final-component link-following gap
+/// during a bounded read.
+pub(crate) fn open_regular_no_follow(path: &Path) -> Result<fs::File, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
 }
 
 fn fs_error(error: std::io::Error) -> ToolError {

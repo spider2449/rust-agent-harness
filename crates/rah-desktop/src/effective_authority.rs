@@ -289,7 +289,7 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
     Some(match name {
         "echo" => (EffectClass::Execute, AuthorityCategory::Execute, false),
         "fs.read" => (EffectClass::ReadOnly, AuthorityCategory::Read, true),
-        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" => (
+        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search" => (
             EffectClass::ReadOnly,
             AuthorityCategory::RepositoryObservation,
             true,
@@ -520,6 +520,7 @@ pub(crate) fn compose(
             "repo.status",
             "repo.diff",
             "repo.diff-staged",
+            "repo.search",
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",
@@ -722,6 +723,7 @@ mod tests {
             "repo.status",
             "repo.diff",
             "repo.diff-staged",
+            "repo.search",
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",
@@ -753,6 +755,18 @@ mod tests {
             serde_json::to_string(&AuthorityCategory::RepositoryLocalBranchCreation)
                 .expect("category serializes"),
             "\"repository_local_branch_creation\""
+        );
+    }
+
+    #[test]
+    fn repository_search_has_the_existing_observation_classification() {
+        assert_eq!(
+            metadata("repo.search"),
+            Some((
+                EffectClass::ReadOnly,
+                AuthorityCategory::RepositoryObservation,
+                true,
+            ))
         );
     }
 

@@ -1041,7 +1041,7 @@ fn capability_contract(
         ),
         "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
         | "repo.delete-file" | "repo.rename-file" | "repo.file-info" | "repo.status"
-        | "repo.diff" | "repo.diff-staged" => (
+        | "repo.diff" | "repo.diff-staged" | "repo.search" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -1063,7 +1063,7 @@ fn capability_contract(
 fn is_repository_observer(name: &str) -> bool {
     matches!(
         name,
-        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged"
+        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search"
     )
 }
 
@@ -1232,6 +1232,8 @@ fn repository_observer_binding(
     if capability.workspace.is_some()
         || capability.max_bytes.is_some()
         || capability.cwd_resource.is_some()
+        || capability.identity_name.is_some()
+        || capability.identity_email.is_some()
     {
         return Err(ProfileError::InvalidProfile {
             reason: "capability_binding",
@@ -1769,13 +1771,14 @@ mod tests {
                 {"name": "repo.file-info", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.status", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.diff", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
-                {"name": "repo.diff-staged", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
+                {"name": "repo.diff-staged", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.search", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
             ]
         });
         let loaded = TrustedStaticProfile::load(directory.profile(&document.to_string()))
             .expect("observer static profile should not construct tools");
         assert!(loaded.registry().definitions().is_empty());
-        assert_eq!(loaded.repository_observers().len(), 4);
+        assert_eq!(loaded.repository_observers().len(), 5);
         for capability in &loaded.effective_profile().capabilities {
             assert!(capability.enabled);
             assert!(!capability.registered);
@@ -1800,6 +1803,8 @@ mod tests {
             json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "max_bytes":1}),
             json!({"name":"repo.status", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "cwd_resource":"workspace"}),
             json!({"name":"repo.status", "enabled":true, "permission":"read", "executable":"git", "repository":"workspace"}),
+            json!({"name":"repo.search", "enabled":true, "permission":"execute", "repository":"workspace"}),
+            json!({"name":"repo.search", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace", "identity_name":"unexpected"}),
             json!({"name":"repo.unknown", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}),
         ] {
             let mut invalid_document = document.clone();
@@ -1816,6 +1821,7 @@ mod tests {
             "repo.status",
             "repo.diff",
             "repo.diff-staged",
+            "repo.search",
         ] {
             duplicate["capabilities"] = json!([
                 {"name":name, "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
