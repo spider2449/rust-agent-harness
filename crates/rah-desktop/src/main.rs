@@ -32724,7 +32724,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         fixture: &Task361LiveFixture,
         root: &Path,
     ) -> Result<Task361RepositoryCapture, String> {
-        let text = |args: &[&str]| fixture.git_text(root, args);
         let root_from_git = root
             .canonicalize()
             .map_err(|_| "Task 361 selected root could not be canonicalized")?;
@@ -32770,8 +32769,21 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         };
         let head_path = private_git_dir.join("HEAD");
         let index_path = private_git_dir.join("index");
-        let branch = text(&["symbolic-ref", "-q", "HEAD"])?;
-        let head = text(&["rev-parse", "HEAD"])?;
+        let head_record = fs::read_to_string(&head_path)
+            .map_err(|_| "Task 361 selected HEAD could not be captured")?;
+        let branch = head_record
+            .trim()
+            .strip_prefix("ref: ")
+            .unwrap_or_default()
+            .to_owned();
+        let head = if branch.is_empty() {
+            head_record.trim().to_owned()
+        } else {
+            fs::read_to_string(common_git_dir.join(&branch))
+                .map_err(|_| "Task 361 selected branch ref could not be captured")?
+                .trim()
+                .to_owned()
+        };
         let index = fs::read(&index_path).map_err(|error| {
             format!(
                 "Task 361 selected index could not be captured ({error:?}; root={:?}, private_git_dir={:?}, index={:?}, root_exists={}, git_dir_exists={}, index_parent_exists={}, index_exists={})",
@@ -33343,9 +33355,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                     .status_entries
                     .iter()
                     .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "none")
-                && fixture
-                    .git_text(&fixture.linked_b, &["diff", "--cached", "--name-only"])?
-                    .contains("b-initial-staged.txt"),
+                && unstage_indexes[2] == stage_baseline[2],
             "Unstage affects only A and preserves independently staged B content",
         )?;
         task361_require(
@@ -33474,10 +33484,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "root .git metadata and nested repository content are protected boundaries",
         )?;
 
-        let a_head_before_branch = fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?;
-        let b_head_before_branch = fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?;
-        let a_branch_before_branch =
-            fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?;
+        let a_before_branch = task361_capture(fixture, &fixture.linked_a)?;
+        let b_before_branch = task361_capture(fixture, &fixture.linked_b)?;
         let registrations_before_branch =
             fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
         let refs_before_branch = fixture.git_run(
@@ -33509,13 +33517,10 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         .await?;
         task361_require(
             task361_output_status(&branch_output).as_deref() == Some("branch_created_verified")
-                && branch_oid == a_head_before_branch
-                && fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?
-                    == a_branch_before_branch
-                && fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?
-                    == a_head_before_branch
-                && fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?
-                    == b_head_before_branch
+                && branch_oid == a_before_branch.head
+                && task361_capture(fixture, &fixture.linked_a)?.branch == a_before_branch.branch
+                && task361_capture(fixture, &fixture.linked_a)?.head == a_before_branch.head
+                && task361_capture(fixture, &fixture.linked_b)?.head == b_before_branch.head
                 && fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
                     == registrations_before_branch
                 && refs_after_branch != refs_before_branch
@@ -33560,10 +33565,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .map_err(|_| "main index before Commit review could not be captured")?;
         task361_require(
             review_control.has_pending_authorization().await
-                && fixture.git_text(&fixture.linked_a, &["symbolic-ref", "-q", "HEAD"])?
-                    == "refs/heads/worktree-a"
-                && fixture.git_text(&fixture.linked_b, &["symbolic-ref", "-q", "HEAD"])?
-                    == "refs/heads/worktree-b",
+                && a_review_state.branch == "refs/heads/worktree-a"
+                && b_review_state.branch == "refs/heads/worktree-b",
             "A reviewed Commit authorization binds the selected attached branch",
         )?;
 
@@ -33583,17 +33586,14 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         )
         .map_err(|_| "B retained staged-state setup failed")?;
         fixture.git_run(&fixture.linked_b, &["add", "--", "b-remains-staged.txt"])?;
-        let b_head_after_external_commit =
-            fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?;
         let b_index_before_a_commit = fs::read(&capture_b.index_path)
             .map_err(|_| "B index before A Commit could not be captured")?;
+        let b_after_external_commit = task361_capture(fixture, &fixture.linked_b)?;
         let a_before_commit = task361_capture(fixture, &fixture.linked_a)?;
         task361_require(
             a_before_commit.head == a_review_state.head
                 && a_before_commit.index_sha256 == a_review_state.index_sha256
-                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
-                    == a_review_state.head
-                && b_head_after_external_commit != b_review_state.head
+                && b_after_external_commit.head != b_review_state.head
                 && review_control.has_pending_authorization().await,
             "unrelated B Commit and index state do not stale the valid selected A review",
         )?;
@@ -33620,19 +33620,17 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             task361_output_status(&commit_output).as_deref() == Some("committed_verified")
                 && a_after_commit.head != a_review_state.head
                 && a_after_commit.branch == "refs/heads/worktree-a"
-                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
-                    == a_after_commit.head
-                && fixture.git_text(&fixture.linked_b, &["rev-parse", "HEAD"])?
-                    == b_head_after_external_commit
+                && task361_capture(fixture, &fixture.linked_b)?.head
+                    == b_after_external_commit.head
                 && fs::read(&capture_b.index_path)
                     .map_err(|_| "B index after A Commit could not be read")?
                     == b_index_before_a_commit
                 && fs::read(&capture_main.index_path)
                     .map_err(|_| "main index after A Commit could not be read")?
                     == main_review_index
-                && fixture
-                    .git_text(&fixture.linked_b, &["diff", "--cached", "--name-only"])?
-                    .contains("b-remains-staged.txt")
+                && fs::read(&capture_b.index_path)
+                    .map_err(|_| "B index staged state after A Commit could not be read")?
+                    == b_index_before_a_commit
                 && fixture
                     .git_run(&fixture.linked_b, &["cat-file", "-e", &a_after_commit.head])
                     .is_ok(),
@@ -33671,15 +33669,14 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .review_selector
             .clone()
             .ok_or_else(|| "stale A Commit review selector was not issued".to_owned())?;
-        let stale_branch_target = fixture.git_text(&fixture.main, &["rev-parse", "HEAD"])?;
+        let stale_branch_target = capture_main.head.clone();
         fixture.git_run(
             &fixture.linked_a,
             &["update-ref", "refs/heads/worktree-a", &stale_branch_target],
         )?;
         let stale_review_authorization =
             authorize_repository_commit_review(&state, &stale_review_selector).await;
-        let a_head_after_stale_rejection =
-            fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?;
+        let a_head_after_stale_rejection = task361_capture(fixture, &fixture.linked_a)?.head;
         let current_commit_tool = state
             .commit_capability
             .lock()
@@ -33701,10 +33698,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 && !review_control.has_pending_authorization().await
                 && task361_output_status(&stale_commit_output).as_deref()
                     == Some("precondition_failed")
-                && fixture.git_text(&fixture.linked_a, &["rev-parse", "HEAD"])?
+                && task361_capture(fixture, &fixture.linked_a)?.head
                     == a_head_after_stale_rejection
-                && fixture.git_text(&fixture.linked_a, &["rev-parse", "refs/heads/worktree-a"])?
-                    == stale_branch_target,
+                && task361_capture(fixture, &fixture.linked_a)?.head == stale_branch_target,
             "selected branch-ref movement rejects the old review before native Commit spawn",
         )?;
 
