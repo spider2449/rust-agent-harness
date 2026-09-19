@@ -33551,6 +33551,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             b"reviewed A commit\n",
         )
         .map_err(|_| "A Commit target setup failed")?;
+        desktop_repository_snapshot_with_review(&active_a, None)
+            .await
+            .map_err(|stage| format!("A Commit observer failed at {stage:?}"))?;
         let commit_stage_snapshot = refresh_repository_workflow(&state)
             .await
             .map_err(|_| "A Commit Stage workflow refresh failed")?;
