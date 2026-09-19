@@ -33346,17 +33346,21 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .await
             .map_err(|_| "post-Unstage observer refresh failed")?;
         task361_require(
-            unstage_result.status == "ok"
-                && unstage_result.changed
-                && unstage_indexes[0] == stage_baseline[0]
+            unstage_result.status == "ok" && unstage_result.changed,
+            "Unstage returns a changed success result",
+        )?;
+        task361_require(
+            unstage_indexes[0] == stage_baseline[0]
                 && unstage_indexes[1] != stage_indexes[1]
-                && unstage_indexes[2] == stage_baseline[2]
-                && unstage_snapshot
-                    .status_entries
-                    .iter()
-                    .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "none")
                 && unstage_indexes[2] == stage_baseline[2],
-            "Unstage affects only A and preserves independently staged B content",
+            "Unstage changes only the selected A index",
+        )?;
+        task361_require(
+            unstage_snapshot
+                .status_entries
+                .iter()
+                .any(|entry| entry.path == "stage-a.txt" && entry.index_state == "none"),
+            "Unstage clears the selected A staged entry",
         )?;
         task361_require(
             task361_index_lock_absent(&[&capture_main, &capture_a, &capture_b]),
