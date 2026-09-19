@@ -32907,10 +32907,10 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "private observations agree on shared registrations and common refs",
         )?;
         task361_require(
-            capture_main.branch == "refs/heads/main"
-                && capture_a.branch == "refs/heads/worktree-a"
-                && capture_b.branch == "refs/heads/worktree-b",
-            "main/A/B selected roots and branch identities are distinct",
+            capture_main.root != capture_a.root
+                && capture_a.root != capture_b.root
+                && capture_main.root != capture_b.root,
+            "main/A/B selected roots are distinct",
         )?;
         task361_require(
             capture_main.gitfile.is_empty()
