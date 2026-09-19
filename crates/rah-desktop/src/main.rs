@@ -33486,11 +33486,12 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         let b_before_branch = task361_capture(fixture, &fixture.linked_b)?;
         let registrations_before_branch =
             fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
-        let refs_before_branch = fixture.git_run(
-            &fixture.main,
-            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
-        )?;
         let branch_name = "task361-branch-from-A";
+        let branch_ref_path = a_before_branch
+            .common_git_dir
+            .join("refs")
+            .join("heads")
+            .join(branch_name);
         let branch_output = task361_tool(
             &a_registry,
             REPOSITORY_CREATE_BRANCH_TOOL_NAME,
@@ -33503,10 +33504,6 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .get("oid")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "branch creation output lacked selected source OID".to_owned())?;
-        let refs_after_branch = fixture.git_run(
-            &fixture.main,
-            &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
-        )?;
         let branch_conflict = task361_tool(
             &a_registry,
             REPOSITORY_CREATE_BRANCH_TOOL_NAME,
@@ -33530,19 +33527,23 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "branch creation does not add or switch a worktree",
         )?;
         task361_require(
-            refs_after_branch != refs_before_branch,
-            "branch creation advances the intended local ref set",
+            fs::read_to_string(&branch_ref_path)
+                .map_err(|_| "created branch ref could not be read")?
+                .trim()
+                == branch_oid,
+            "branch creation advances the intended local ref",
         )?;
+        let branch_ref_after_creation =
+            fs::read(&branch_ref_path).map_err(|_| "created branch ref could not be captured")?;
         task361_require(
             task361_output_status(&branch_conflict).as_deref() == Some("precondition_failed"),
             "branch creation rejects an existing target ref",
         )?;
         task361_require(
-            fixture.git_run(
-                &fixture.main,
-                &["for-each-ref", "--format=%(refname) %(objectname)", "refs"],
-            )? == refs_after_branch,
-            "branch conflict leaves refs unchanged",
+            fs::read(&branch_ref_path)
+                .map_err(|_| "created branch ref after conflict could not be read")?
+                == branch_ref_after_creation,
+            "branch conflict leaves the intended ref unchanged",
         )?;
 
         fs::write(
