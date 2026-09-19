@@ -32747,7 +32747,13 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         let branch = text(&["symbolic-ref", "-q", "HEAD"])?;
         let head = text(&["rev-parse", "HEAD"])?;
         let index = fs::read(&index_path).map_err(|error| {
-            format!("Task 361 selected index could not be captured ({error:?})")
+            format!(
+                "Task 361 selected index could not be captured ({error:?}; root_exists={}, git_dir_exists={}, index_parent_exists={}, index_exists={})",
+                root.is_dir(),
+                private_git_dir.is_dir(),
+                index_path.parent().is_some_and(Path::is_dir),
+                index_path.is_file(),
+            )
         })?;
         let sentinel = fs::read(root.join("sentinel.txt"))
             .map_err(|_| "Task 361 selected sentinel could not be captured".to_owned())?;
