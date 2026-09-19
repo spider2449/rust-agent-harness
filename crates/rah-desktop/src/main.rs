@@ -33482,114 +33482,11 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "root .git metadata and nested repository content are protected boundaries",
         )?;
 
-        let a_before_branch = task361_capture(fixture, &fixture.linked_a)?;
-        let b_before_branch = task361_capture(fixture, &fixture.linked_b)?;
-        let registrations_before_branch =
-            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
-        let branch_name = "task361-branch-from-A";
-        let branch_ref_path = a_before_branch
-            .common_git_dir
-            .join("refs")
-            .join("heads")
-            .join(branch_name);
-        let branch_output = task361_tool(
-            &a_registry,
-            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-            serde_json::json!({"name":branch_name}),
-        )
-        .await?;
-        let branch_value = task361_output_value(&branch_output)
-            .ok_or_else(|| "branch creation output was not structured".to_owned())?;
-        let branch_oid = branch_value
-            .get("oid")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "branch creation output lacked selected source OID".to_owned())?;
-        let branch_conflict = task361_tool(
-            &a_registry,
-            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
-            serde_json::json!({"name":"worktree-a"}),
-        )
-        .await?;
-        task361_require(
-            task361_output_status(&branch_output).as_deref() == Some("branch_created_verified")
-                && branch_oid == a_before_branch.head,
-            "branch creation uses the selected A HEAD",
-        )?;
-        task361_require(
-            task361_capture(fixture, &fixture.linked_a)?.branch == a_before_branch.branch
-                && task361_capture(fixture, &fixture.linked_a)?.head == a_before_branch.head
-                && task361_capture(fixture, &fixture.linked_b)?.head == b_before_branch.head,
-            "branch creation does not switch A or affect B",
-        )?;
-        task361_require(
-            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
-                == registrations_before_branch,
-            "branch creation does not add or switch a worktree",
-        )?;
-        task361_require(
-            fs::read_to_string(&branch_ref_path)
-                .map_err(|_| "created branch ref could not be read")?
-                .trim()
-                == branch_oid,
-            "branch creation advances the intended local ref",
-        )?;
-        let branch_ref_after_creation =
-            fs::read(&branch_ref_path).map_err(|_| "created branch ref could not be captured")?;
-        task361_require(
-            task361_output_status(&branch_conflict).as_deref() == Some("precondition_failed"),
-            "branch creation rejects an existing target ref",
-        )?;
-        task361_require(
-            fs::read(&branch_ref_path)
-                .map_err(|_| "created branch ref after conflict could not be read")?
-                == branch_ref_after_creation,
-            "branch conflict leaves the intended ref unchanged",
-        )?;
-
-        drop(a_registry);
-        let branch_refresh_generation = *state
-            .repository_generation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        close_repository_transition(
-            &state,
-            CloseRepositoryRequest {
-                expected_active_member_id: fresh_member_a.selector(),
-                expected_repository_generation: branch_refresh_generation,
-            },
-        )
-        .map_err(|_| "A branch refresh Close failed")?;
-        activate_admitted_member(&state, fresh_member_a)
-            .await
-            .map_err(|_| "A branch refresh reactivation failed")?;
-        let active_a = state
-            .repository
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .ok_or_else(|| "A repository disappeared after branch refresh".to_owned())?;
-        let a_registry = desktop_tool_registry(Some(&active_a), None)
-            .map_err(|_| "A registry rebuild after branch refresh failed")?;
-
         fs::write(
             fixture.linked_a.join("commit-a.txt"),
             b"reviewed A commit\n",
         )
         .map_err(|_| "A Commit target setup failed")?;
-        fixture
-            .git_run(
-                &fixture.linked_a,
-                &[
-                    "status",
-                    "--porcelain=v2",
-                    "-z",
-                    "--untracked-files=normal",
-                    "--ignored=no",
-                    "--no-renames",
-                    "--ignore-submodules=all",
-                ],
-            )
-            .map_err(|_| "native Git status failed after branch creation")?;
         desktop_repository_snapshot_with_review(&active_a, None)
             .await
             .map_err(|stage| format!("A Commit observer failed at {stage:?}"))?;
@@ -33863,6 +33760,70 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 .windows(member_a.selector().len())
                 .any(|window| window == member_a.selector().as_bytes()),
             "serialized product surfaces and remembered candidate exclude private/common topology and executable member identity",
+        )?;
+
+        let a_before_branch = task361_capture(fixture, &fixture.linked_a)?;
+        let b_before_branch = task361_capture(fixture, &fixture.linked_b)?;
+        let registrations_before_branch =
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let branch_name = "task361-branch-from-A";
+        let branch_ref_path = a_before_branch
+            .common_git_dir
+            .join("refs")
+            .join("heads")
+            .join(branch_name);
+        let branch_output = task361_tool(
+            &a_registry,
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+            serde_json::json!({"name":branch_name}),
+        )
+        .await?;
+        let branch_value = task361_output_value(&branch_output)
+            .ok_or_else(|| "branch creation output was not structured".to_owned())?;
+        let branch_oid = branch_value
+            .get("oid")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "branch creation output lacked selected source OID".to_owned())?;
+        let branch_conflict = task361_tool(
+            &a_registry,
+            REPOSITORY_CREATE_BRANCH_TOOL_NAME,
+            serde_json::json!({"name":"worktree-a"}),
+        )
+        .await?;
+        task361_require(
+            task361_output_status(&branch_output).as_deref() == Some("branch_created_verified")
+                && branch_oid == a_before_branch.head,
+            "branch creation uses the selected A HEAD",
+        )?;
+        task361_require(
+            task361_capture(fixture, &fixture.linked_a)?.branch == a_before_branch.branch
+                && task361_capture(fixture, &fixture.linked_a)?.head == a_before_branch.head
+                && task361_capture(fixture, &fixture.linked_b)?.head == b_before_branch.head,
+            "branch creation does not switch A or affect B",
+        )?;
+        task361_require(
+            fixture.git_run(&fixture.main, &["worktree", "list", "--porcelain", "-z"])?
+                == registrations_before_branch,
+            "branch creation does not add or switch a worktree",
+        )?;
+        task361_require(
+            fs::read_to_string(&branch_ref_path)
+                .map_err(|_| "created branch ref could not be read")?
+                .trim()
+                == branch_oid,
+            "branch creation advances the intended local ref",
+        )?;
+        let branch_ref_after_creation =
+            fs::read(&branch_ref_path).map_err(|_| "created branch ref could not be captured")?;
+        task361_require(
+            task361_output_status(&branch_conflict).as_deref() == Some("precondition_failed"),
+            "branch creation rejects an existing target ref",
+        )?;
+        task361_require(
+            fs::read(&branch_ref_path)
+                .map_err(|_| "created branch ref after conflict could not be read")?
+                == branch_ref_after_creation,
+            "branch conflict leaves the intended ref unchanged",
         )?;
 
         let registrations_before_final_close =
