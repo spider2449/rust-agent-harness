@@ -33587,7 +33587,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         )?;
 
         fs::write(
-            fixture.linked_a.join("stale-review.txt"),
+            fixture.linked_a.join("stage-a.txt"),
             b"stale review target\n",
         )
         .map_err(|_| "stale A review fixture setup failed")?;
@@ -33597,7 +33597,7 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         let stale_stage_action = stale_stage_snapshot
             .status_entries
             .iter()
-            .find(|entry| entry.path == "stale-review.txt")
+            .find(|entry| entry.path == "stage-a.txt")
             .and_then(|entry| entry.stage_action_id.clone())
             .ok_or_else(|| "stale A review target had no Stage selector".to_owned())?;
         let stale_stage =
