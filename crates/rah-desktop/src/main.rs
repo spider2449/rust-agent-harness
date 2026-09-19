@@ -32748,7 +32748,10 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         let head = text(&["rev-parse", "HEAD"])?;
         let index = fs::read(&index_path).map_err(|error| {
             format!(
-                "Task 361 selected index could not be captured ({error:?}; root_exists={}, git_dir_exists={}, index_parent_exists={}, index_exists={})",
+                "Task 361 selected index could not be captured ({error:?}; root={:?}, private_git_dir={:?}, index={:?}, root_exists={}, git_dir_exists={}, index_parent_exists={}, index_exists={})",
+                root,
+                private_git_dir,
+                index_path,
                 root.is_dir(),
                 private_git_dir.is_dir(),
                 index_path.parent().is_some_and(Path::is_dir),
