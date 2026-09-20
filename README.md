@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.31.0 prepared — not yet published
+## RAH v0.31.0 released
 
 The release theme is **Bounded Repository Discovery / Search**. RAH Desktop
 now provides the first-party `repo.search` Tool so an agent can locate relevant

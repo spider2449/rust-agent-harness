@@ -1,4 +1,4 @@
-# RAH v0.31.0 Architecture - prepared, not yet published
+# RAH v0.31.0 Architecture - released
 
 The release theme is **Bounded Repository Discovery / Search**. `repo.search`
 extends the existing repository observation family without creating a parallel

@@ -1,8 +1,25 @@
 # Changelog
 
-## v0.31.0 - prepared / not yet published (2026-09-19)
+## v0.31.0 - released (2026-09-20)
 
 The release theme is **Bounded Repository Discovery / Search**.
+
+### Immutable publication record
+
+- Release source: `c4d21deac56b034c2df6c96060b29ae259bf536f`.
+- Annotated tag: `v0.31.0`; annotation: `RAH v0.31.0`.
+- Tag object: `732ee33ff06ef456a8fa0d7d1b9af6a246e01980`.
+- Peeled target: `c4d21deac56b034c2df6c96060b29ae259bf536f`.
+- Release-preparation CI: `35447671491` - PASS.
+- Tag CI: `35481008480` - PASS.
+- GitHub Release ID: `392273508`; name: `RAH v0.31.0`.
+- Published: `2026-09-20T01:20:20Z`; `draft=false`; `prerelease=false`;
+  assets=`0`.
+
+Task 370 prepared the immutable source and stopped before publication. Task
+371 published the annotated tag and GitHub Release without a repository
+commit. Task 372 is a later documentation-only cleanup and is **not** the
+v0.31.0 release source.
 
 ### Added
 

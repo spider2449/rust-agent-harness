@@ -1,10 +1,11 @@
 # RAH v0.31.0 Release Gate
 
-Status: **READY FOR PUBLICATION - NOT YET RELEASED**
+Status: **RELEASED - HISTORICAL RECORD**
 
-Task 370 is the v0.31 milestone audit and release preparation. This gate stops
-before creation of the annotated tag, tag push, GitHub Release, and any
-post-release cleanup.
+Task 370 was the v0.31 milestone audit and release preparation and stopped
+before publication as designed. Task 371 subsequently published v0.31.0 from
+the immutable Task 370 source. Task 372 is the later docs-only historical
+cleanup; its commit is not the v0.31.0 release source.
 
 ## Release theme
 
@@ -36,11 +37,29 @@ as nonclaims rather than converted into unsupported claims.
 | --- | --- |
 | Task 367/368 implementation checkpoint | `152a5fff96f621083a3ec43892ecdeffc2f6ff62` (`feat: add bounded repository search`) |
 | Task 369 complete Windows-certified production candidate | `c5a67f10b334299cc5a5de49c37e94eb38640c5a` (`fix: complete repository search desktop integration`) |
-| Task 370 release-preparation source | this commit; exact SHA is recorded after commit |
+| Task 370 release-preparation and immutable release source | `c4d21deac56b034c2df6c96060b29ae259bf536f` (`docs: prepare RAH v0.31.0 release`) |
 
 `152a5ff` is not the complete production source: Task 369 corrected the narrow
 Desktop registration omission and certified `c5a67f1` as the complete
 production candidate.
+
+## Immutable publication record
+
+| Publication fact | Identity |
+| --- | --- |
+| Release source | `c4d21deac56b034c2df6c96060b29ae259bf536f` |
+| Annotated tag and annotation | `v0.31.0`; `RAH v0.31.0` |
+| Tag object | `732ee33ff06ef456a8fa0d7d1b9af6a246e01980` |
+| Peeled target | `c4d21deac56b034c2df6c96060b29ae259bf536f` |
+| Release-preparation CI | `35447671491` - PASS |
+| Tag CI | `35481008480` - PASS |
+| GitHub Release | ID `392273508`; name `RAH v0.31.0` |
+| Publication state | `2026-09-20T01:20:20Z`; `draft=false`; `prerelease=false`; assets=`0` |
+
+The GitHub Release metadata value `target_commitish=master` does not supersede
+the annotated tag identity. `v0.31.0^{}` peels to the immutable release source
+above. Task 372's later documentation commit must never be described as that
+release source.
 
 ## Product and authority boundary
 
@@ -251,9 +270,10 @@ parallel contention family; it is not represented as a passing local result.
 The repository CI workflow's exact-head result remains an independent release
 signal.
 
-## Publication hard stop
+## Historical publication boundary
 
-Task 370 ends with the release-preparation commit, a clean worktree, and this
-gate status. It does not create `v0.31.0`, push a tag, create a GitHub Release,
-mark the changelog released, or perform post-release cleanup. Publication is a
-separate authorized task.
+Task 370 ended with the release-preparation commit and did not create
+`v0.31.0`, push a tag, create a GitHub Release, mark the changelog released, or
+perform post-release cleanup. Task 371 separately performed publication. Task
+372 only converts the prepared-state documentation into this historical
+record.

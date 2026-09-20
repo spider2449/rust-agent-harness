@@ -1,4 +1,4 @@
-# RAH v0.31.0 Security Model - prepared, not yet published
+# RAH v0.31.0 Security Model - released
 
 The release theme is **Bounded Repository Discovery / Search**. `repo.search`
 is a narrow extension of the existing selected-repository observation boundary:
