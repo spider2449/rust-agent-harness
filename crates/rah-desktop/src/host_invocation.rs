@@ -695,6 +695,7 @@ mod tests {
             "repo.commit",
             "repo.create-directory",
             "repo.search",
+            "repo.list",
             "echo",
             "fixture",
             "mcp.example.tool",

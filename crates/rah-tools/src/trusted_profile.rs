@@ -1041,7 +1041,7 @@ fn capability_contract(
         ),
         "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
         | "repo.delete-file" | "repo.rename-file" | "repo.file-info" | "repo.status"
-        | "repo.diff" | "repo.diff-staged" | "repo.search" => (
+        | "repo.diff" | "repo.diff-staged" | "repo.search" | "repo.list" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -1063,7 +1063,12 @@ fn capability_contract(
 fn is_repository_observer(name: &str) -> bool {
     matches!(
         name,
-        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search"
+        "repo.file-info"
+            | "repo.status"
+            | "repo.diff"
+            | "repo.diff-staged"
+            | "repo.search"
+            | "repo.list"
     )
 }
 
@@ -1772,13 +1777,14 @@ mod tests {
                 {"name": "repo.status", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.diff", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.diff-staged", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
-                {"name": "repo.search", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
+                {"name": "repo.search", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.list", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
             ]
         });
         let loaded = TrustedStaticProfile::load(directory.profile(&document.to_string()))
             .expect("observer static profile should not construct tools");
         assert!(loaded.registry().definitions().is_empty());
-        assert_eq!(loaded.repository_observers().len(), 5);
+        assert_eq!(loaded.repository_observers().len(), 6);
         for capability in &loaded.effective_profile().capabilities {
             assert!(capability.enabled);
             assert!(!capability.registered);
@@ -1822,6 +1828,7 @@ mod tests {
             "repo.diff",
             "repo.diff-staged",
             "repo.search",
+            "repo.list",
         ] {
             duplicate["capabilities"] = json!([
                 {"name":name, "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},

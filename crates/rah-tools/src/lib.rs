@@ -28,6 +28,7 @@ mod repository_diff;
 mod repository_diff_staged;
 mod repository_file_info;
 mod repository_git_layout;
+mod repository_list;
 mod repository_multi_file_edit;
 mod repository_multi_file_preflight;
 mod repository_mutation;
@@ -103,6 +104,7 @@ pub use repository_delete_file::{
 pub use repository_diff::{REPOSITORY_DIFF_TOOL_NAME, RepositoryDiffTool};
 pub use repository_diff_staged::{REPOSITORY_DIFF_STAGED_TOOL_NAME, RepositoryDiffStagedTool};
 pub use repository_file_info::{REPOSITORY_FILE_INFO_TOOL_NAME, RepositoryFileInfoTool};
+pub use repository_list::{REPOSITORY_LIST_TOOL_NAME, RepositoryListTool};
 #[cfg(feature = "live-test-support")]
 pub use repository_multi_file_edit::live_test_multi_file_tool_executions::{
     clear as clear_live_test_multi_file_tool_executions,

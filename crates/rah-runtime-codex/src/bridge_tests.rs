@@ -23,8 +23,8 @@ use rah_protocol::{
 use rah_runtime::{AgentHandle, AgentRuntime};
 use rah_tools::{
     EchoTool, FsReadTool, RepositoryDirectoryCreationAuthority, RepositoryFileDeletionAuthority,
-    RepositoryFileRenameAuthority, RepositorySearchTool, Tool, ToolContext, ToolError,
-    ToolRegistry, TrustedStaticProfile,
+    RepositoryFileRenameAuthority, RepositoryListTool, RepositorySearchTool, Tool, ToolContext,
+    ToolError, ToolRegistry, TrustedStaticProfile,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1178,6 +1178,69 @@ async fn repository_search_dispatches_through_the_generic_bridge() {
         AgentEvent::ToolRequested { tool_call, .. }
             if tool_call.name == ToolName::new("repo.search")
                 && tool_call.input == ToolInput(json!({"mode":"text","query":"BRIDGE_SEARCH_SENTINEL"}))
+    )));
+    assert_eq!(tool_event_count(&events), 3);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn repository_list_dispatches_through_the_generic_bridge() {
+    let directory = TestDirectory::new();
+    let root = directory.path().join("repository");
+    fs::create_dir(&root).expect("repository directory should be created");
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["config", "user.email", "bridge@example.invalid"]);
+    git(&root, &["config", "user.name", "RAH bridge test"]);
+    fs::create_dir(root.join("src")).expect("source directory should be created");
+    fs::write(root.join("README.md"), "BRIDGE_LIST_SENTINEL\n")
+        .expect("list fixture should be written");
+    fs::write(root.join("src/lib.rs"), "source\n").expect("nested fixture should be written");
+    git(&root, &["add", "--all"]);
+    git(&root, &["commit", "--quiet", "-m", "list fixture"]);
+
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(
+            RepositoryListTool::new(git_executable(), &root)
+                .expect("repository list tool should compose"),
+        ))
+        .expect("repository list should register");
+    let (runtime, mut peer, _) =
+        connected_bridge(Arc::new(registry), vec![PermissionLevel::Execute]).await;
+    let (handle, thread) = start_bridge(&runtime, &mut peer).await;
+    let advertised = &thread["params"]["dynamicTools"][0];
+    let alias = advertised["name"]
+        .as_str()
+        .expect("repository list alias should be a string")
+        .to_owned();
+    assert_eq!(
+        advertised["inputSchema"],
+        json!({
+            "type":"object",
+            "additionalProperties":false,
+            "properties":{"path":{"type":"string"}}
+        })
+    );
+
+    let result = bridge_call(&mut peer, json!(915), "repository-list", &alias, json!({})).await;
+    assert_eq!(
+        result["entries"],
+        json!([
+            {"path":"README.md","kind":"file"},
+            {"path":"src","kind":"directory"}
+        ])
+    );
+    assert_eq!(result["consistency"], "best_effort");
+
+    peer.notify("item/started", dynamic_item());
+    peer.notify("item/completed", dynamic_item());
+    finish_turn(&peer, "completed");
+    let events = handle.into_events().collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRequested { tool_call, .. }
+            if tool_call.name == ToolName::new("repo.list")
+                && tool_call.input == ToolInput(json!({}))
     )));
     assert_eq!(tool_event_count(&events), 3);
     runtime.shutdown().await.expect("shutdown");

@@ -289,7 +289,8 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
     Some(match name {
         "echo" => (EffectClass::Execute, AuthorityCategory::Execute, false),
         "fs.read" => (EffectClass::ReadOnly, AuthorityCategory::Read, true),
-        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search" => (
+        "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search"
+        | "repo.list" => (
             EffectClass::ReadOnly,
             AuthorityCategory::RepositoryObservation,
             true,
@@ -521,6 +522,7 @@ pub(crate) fn compose(
             "repo.diff",
             "repo.diff-staged",
             "repo.search",
+            "repo.list",
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",
@@ -724,6 +726,7 @@ mod tests {
             "repo.diff",
             "repo.diff-staged",
             "repo.search",
+            "repo.list",
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",
@@ -762,6 +765,18 @@ mod tests {
     fn repository_search_has_the_existing_observation_classification() {
         assert_eq!(
             metadata("repo.search"),
+            Some((
+                EffectClass::ReadOnly,
+                AuthorityCategory::RepositoryObservation,
+                true,
+            ))
+        );
+    }
+
+    #[test]
+    fn repository_list_has_the_existing_observation_classification() {
+        assert_eq!(
+            metadata("repo.list"),
             Some((
                 EffectClass::ReadOnly,
                 AuthorityCategory::RepositoryObservation,

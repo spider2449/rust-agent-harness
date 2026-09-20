@@ -21,7 +21,7 @@ use crate::{
     HostArgumentPolicy, HostExecutionPolicy, ToolError,
     git_support::{git_error, repository_observer_environment},
     host_execute::paths_equivalent,
-    repository_boundary::RepositoryNestedBoundaryPolicy,
+    repository_boundary::{RepositoryNestedBoundaryPolicy, is_reparse_point},
     repository_diff::DiffBaseline,
     repository_git_layout::RepositoryGitLayout,
 };
@@ -35,6 +35,8 @@ const OBSERVER_STDERR_LIMIT: usize = 8 * 1024;
 pub(crate) const STATUS_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 pub(crate) const DIFF_OUTPUT_LIMIT: usize = 1024 * 1024;
 pub(crate) const SEARCH_INVENTORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const OBSERVER_MAX_RECORDS: usize = 100_000;
+pub(crate) const OBSERVER_MAX_PATH_BYTES: usize = 1024;
 
 /// The only command shapes currently authorized for repository observation.
 #[derive(Clone, Copy)]
@@ -544,6 +546,115 @@ pub(crate) fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), Too
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+pub(crate) struct TrackedInventory {
+    pub(crate) paths: Vec<String>,
+    pub(crate) non_addressable_path: u64,
+}
+
+pub(crate) enum TrackedCandidate {
+    Eligible(fs::Metadata),
+    Missing,
+    NonRegular,
+}
+
+pub(crate) fn successful_tracked_inventory(
+    output: rah_sandbox::HostProcessOutput,
+) -> Result<Vec<u8>, ToolError> {
+    if output.exit_code == Some(0)
+        && !output.timed_out
+        && output.overflow.is_none()
+        && output.stdout.len() <= SEARCH_INVENTORY_OUTPUT_LIMIT
+    {
+        Ok(output.stdout)
+    } else {
+        Err(git_error(
+            "tracked repository inventory did not complete successfully",
+        ))
+    }
+}
+
+pub(crate) fn parse_tracked_inventory(bytes: &[u8]) -> Result<TrackedInventory, ToolError> {
+    if bytes.len() > SEARCH_INVENTORY_OUTPUT_LIMIT {
+        return Err(git_error("tracked repository inventory exceeded its limit"));
+    }
+    if bytes.is_empty() {
+        return Ok(TrackedInventory::default());
+    }
+    if !bytes.ends_with(&[0]) {
+        return Err(git_error(
+            "tracked repository inventory had a malformed NUL record",
+        ));
+    }
+    let mut inventory = TrackedInventory::default();
+    let mut start = 0;
+    let mut records = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != 0 {
+            continue;
+        }
+        if index == start {
+            return Err(git_error(
+                "tracked repository inventory had an empty record",
+            ));
+        }
+        records += 1;
+        if records > OBSERVER_MAX_RECORDS {
+            return Err(git_error(
+                "tracked repository inventory record limit exceeded",
+            ));
+        }
+        let record = &bytes[start..index];
+        match std::str::from_utf8(record) {
+            Ok(path) if is_safe_repository_path(path, OBSERVER_MAX_PATH_BYTES) => {
+                inventory.paths.push(path.to_owned())
+            }
+            _ => inventory.non_addressable_path += 1,
+        }
+        start = index + 1;
+    }
+    inventory.paths.sort();
+    inventory.paths.dedup();
+    Ok(inventory)
+}
+
+pub(crate) fn is_safe_repository_path(path: &str, limit: usize) -> bool {
+    if path.is_empty()
+        || path.len() > limit
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+        || path.contains(':')
+        || path.contains('\0')
+    {
+        return false;
+    }
+    path.split('/').all(|component| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && !component.eq_ignore_ascii_case(".git")
+    })
+}
+
+pub(crate) fn repository_target_path(root: &Path, path: &str) -> PathBuf {
+    root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+pub(crate) fn inspect_tracked_candidate(path: &Path) -> Result<TrackedCandidate, ToolError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TrackedCandidate::Missing);
+        }
+        Err(_) => return Err(git_error("repository candidate could not be inspected")),
+    };
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) || !metadata.is_file() {
+        return Ok(TrackedCandidate::NonRegular);
+    }
+    Ok(TrackedCandidate::Eligible(metadata))
 }
 
 /// Opens one already-validated worktree file without following a final link.

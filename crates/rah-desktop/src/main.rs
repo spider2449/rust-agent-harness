@@ -82,13 +82,13 @@ use rah_tools::{
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
-    RepositoryMultiFileEditPreparationError, RepositoryMultiFileEditPreparationRequest,
-    RepositoryMultiFileEditPreparationTarget, RepositoryMultiFileEditTextReplacement,
-    RepositoryMultiFileEditTool, RepositoryPatchPreparationError,
-    RepositoryPatchPreparationRequest, RepositoryPatchResultClassification,
-    RepositoryRenameFilePreparationError, RepositoryRenameFilePreparationRequest,
-    RepositoryRenameFileProof, RepositorySearchTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    RepositoryListTool, RepositoryMultiFileEditPreparationError,
+    RepositoryMultiFileEditPreparationRequest, RepositoryMultiFileEditPreparationTarget,
+    RepositoryMultiFileEditTextReplacement, RepositoryMultiFileEditTool,
+    RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
+    RepositoryPatchResultClassification, RepositoryRenameFilePreparationError,
+    RepositoryRenameFilePreparationRequest, RepositoryRenameFileProof, RepositorySearchTool,
+    RepositoryStatusTool, RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
     authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
@@ -8076,6 +8076,7 @@ fn desktop_tool_registry(
         let diff_staged =
             RepositoryDiffStagedTool::new(&repository.git_executable, &repository.root)?;
         let search = RepositorySearchTool::new(&repository.git_executable, &repository.root)?;
+        let list = RepositoryListTool::new(&repository.git_executable, &repository.root)?;
         let patch = RepositoryWorktreePatchTool::new(&repository.git_executable, &repository.root)?;
         let create_file =
             RepositoryFileCreationTool::new(&repository.git_executable, &repository.root)?;
@@ -8087,6 +8088,7 @@ fn desktop_tool_registry(
         registry.register(Arc::new(diff))?;
         registry.register(Arc::new(diff_staged))?;
         registry.register(Arc::new(search))?;
+        registry.register(Arc::new(list))?;
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(create_file))?;
         if let Some(authority) = &repository.directory_creation_authority {
@@ -25022,6 +25024,7 @@ fn main() {
                 "repo.diff-staged",
                 "repo.edit-files",
                 "repo.file-info",
+                "repo.list",
                 "repo.patch",
                 "repo.search",
                 "repo.status",
@@ -25053,7 +25056,7 @@ fn main() {
                 .iter()
                 .filter(|&&permission| permission == PermissionLevel::Execute)
                 .count(),
-            8
+            9
         );
         let output = registry
             .execute(

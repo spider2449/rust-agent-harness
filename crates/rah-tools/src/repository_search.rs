@@ -4,11 +4,7 @@
 //! constraint, filesystem eligibility decision, and match is evaluated by
 //! RAH-owned Rust code against the selected worktree.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{path::Path, time::Instant};
 
 use async_trait::async_trait;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
@@ -18,10 +14,10 @@ use tokio::io::AsyncReadExt;
 use crate::{
     Tool, ToolContext, ToolError,
     git_support::git_error,
-    repository_boundary::is_reparse_point,
     repository_observer::{
-        ObserverCommand, RepositoryObserver, SEARCH_INVENTORY_OUTPUT_LIMIT, SEARCH_TIMEOUT,
-        open_regular_no_follow,
+        ObserverCommand, RepositoryObserver, SEARCH_TIMEOUT, TrackedCandidate, TrackedInventory,
+        inspect_tracked_candidate, is_safe_repository_path, open_regular_no_follow,
+        parse_tracked_inventory, repository_target_path, successful_tracked_inventory,
     },
 };
 
@@ -31,8 +27,6 @@ pub const REPOSITORY_SEARCH_TOOL_NAME: &str = "repo.search";
 const MAX_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_PREFIX_BYTES: usize = 1024;
-const MAX_RECORDS: usize = 100_000;
-const MAX_CANDIDATE_PATH_BYTES: usize = 1024;
 const MAX_PATH_RESULTS: usize = 128;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_AGGREGATE_BYTES: u64 = 16 * 1024 * 1024;
@@ -103,9 +97,9 @@ impl RepositorySearchTool {
             .observer
             .run(ObserverCommand::TrackedInventory, None, started)
             .await?;
-        let inventory = successful_inventory(inventory)?;
+        let inventory = successful_tracked_inventory(inventory)?;
         self.observer.revalidate()?;
-        let mut candidates = parse_inventory(&inventory)?;
+        let mut candidates = parse_tracked_inventory(&inventory)?;
         candidates.paths.retain(|path| {
             request
                 .path_prefix
@@ -124,7 +118,7 @@ impl RepositorySearchTool {
     fn search_paths(
         &self,
         request: &SearchRequest,
-        candidates: Inventory,
+        candidates: TrackedInventory,
         started: Instant,
     ) -> Result<SearchResult, ToolError> {
         let mut matches = Vec::new();
@@ -135,15 +129,15 @@ impl RepositorySearchTool {
         let mut truncation_reason = None;
         for path in candidates.paths {
             ensure_time(started)?;
-            let target = target_path(self.observer.root(), &path);
+            let target = repository_target_path(self.observer.root(), &path);
             self.observer.validate_target(&target)?;
-            match inspect_candidate(&target)? {
-                CandidateState::Eligible(_) => {}
-                CandidateState::Missing => {
+            match inspect_tracked_candidate(&target)? {
+                TrackedCandidate::Eligible(_) => {}
+                TrackedCandidate::Missing => {
                     omitted.changed_or_missing += 1;
                     continue;
                 }
-                CandidateState::NonRegular => {
+                TrackedCandidate::NonRegular => {
                     omitted.non_regular += 1;
                     continue;
                 }
@@ -167,7 +161,7 @@ impl RepositorySearchTool {
     async fn search_text(
         &self,
         request: &SearchRequest,
-        candidates: Inventory,
+        candidates: TrackedInventory,
         started: Instant,
     ) -> Result<SearchResult, ToolError> {
         let mut matches = Vec::new();
@@ -181,15 +175,15 @@ impl RepositorySearchTool {
 
         for (index, path) in candidates.paths.iter().enumerate() {
             ensure_time(started)?;
-            let target = target_path(self.observer.root(), path);
+            let target = repository_target_path(self.observer.root(), path);
             self.observer.validate_target(&target)?;
-            let metadata = match inspect_candidate(&target)? {
-                CandidateState::Eligible(metadata) => metadata,
-                CandidateState::Missing => {
+            let metadata = match inspect_tracked_candidate(&target)? {
+                TrackedCandidate::Eligible(metadata) => metadata,
+                TrackedCandidate::Missing => {
                     omitted.changed_or_missing += 1;
                     continue;
                 }
-                CandidateState::NonRegular => {
+                TrackedCandidate::NonRegular => {
                     omitted.non_regular += 1;
                     continue;
                 }
@@ -383,108 +377,12 @@ fn validate_path(path: &str, limit: usize, label: &str) -> Result<(), ToolError>
             "`{label}` must be a slash-separated repository-relative path"
         )));
     }
-    for component in path.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.eq_ignore_ascii_case(".git")
-        {
-            return Err(invalid(format!(
-                "`{label}` contains a forbidden path component"
-            )));
-        }
+    if !is_safe_repository_path(path, limit) {
+        return Err(invalid(format!(
+            "`{label}` contains a forbidden path component"
+        )));
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct Inventory {
-    paths: Vec<String>,
-    non_addressable_path: u64,
-}
-
-fn successful_inventory(output: rah_sandbox::HostProcessOutput) -> Result<Vec<u8>, ToolError> {
-    if output.exit_code == Some(0)
-        && !output.timed_out
-        && output.overflow.is_none()
-        && output.stdout.len() <= SEARCH_INVENTORY_OUTPUT_LIMIT
-    {
-        Ok(output.stdout)
-    } else {
-        Err(search_error(
-            "tracked repository inventory did not complete successfully",
-        ))
-    }
-}
-
-fn parse_inventory(bytes: &[u8]) -> Result<Inventory, ToolError> {
-    if bytes.len() > SEARCH_INVENTORY_OUTPUT_LIMIT {
-        return Err(search_error(
-            "tracked repository inventory exceeded its limit",
-        ));
-    }
-    if bytes.is_empty() {
-        return Ok(Inventory::default());
-    }
-    if !bytes.ends_with(&[0]) {
-        return Err(search_error(
-            "tracked repository inventory had a malformed NUL record",
-        ));
-    }
-    let mut inventory = Inventory::default();
-    let mut start = 0;
-    let mut records = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != 0 {
-            continue;
-        }
-        if index == start {
-            return Err(search_error(
-                "tracked repository inventory had an empty record",
-            ));
-        }
-        records += 1;
-        if records > MAX_RECORDS {
-            return Err(search_error(
-                "tracked repository inventory record limit exceeded",
-            ));
-        }
-        let record = &bytes[start..index];
-        match std::str::from_utf8(record) {
-            Ok(path) if validate_path(path, MAX_CANDIDATE_PATH_BYTES, "path").is_ok() => {
-                inventory.paths.push(path.to_owned())
-            }
-            _ => inventory.non_addressable_path += 1,
-        }
-        start = index + 1;
-    }
-    inventory.paths.sort();
-    inventory.paths.dedup();
-    Ok(inventory)
-}
-
-fn target_path(root: &Path, path: &str) -> PathBuf {
-    root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
-}
-
-enum CandidateState {
-    Eligible(fs::Metadata),
-    Missing,
-    NonRegular,
-}
-
-fn inspect_candidate(path: &Path) -> Result<CandidateState, ToolError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CandidateState::Missing);
-        }
-        Err(_) => return Err(search_error("repository candidate could not be inspected")),
-    };
-    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) || !metadata.is_file() {
-        return Ok(CandidateState::NonRegular);
-    }
-    Ok(CandidateState::Eligible(metadata))
 }
 
 struct ReadFile {
@@ -718,6 +616,7 @@ mod tests {
     use rah_protocol::ToolContent;
     use serde_json::json;
 
+    use crate::repository_observer::OBSERVER_MAX_RECORDS;
     use crate::{Tool, ToolContext};
 
     use super::*;
@@ -834,19 +733,19 @@ mod tests {
 
     #[test]
     fn inventory_is_nul_safe_sorted_deduplicated_and_fail_closed() {
-        let inventory = parse_inventory(b"z.txt\0src/a.rs\0src/a.rs\0").unwrap();
+        let inventory = parse_tracked_inventory(b"z.txt\0src/a.rs\0src/a.rs\0").unwrap();
         assert_eq!(inventory.paths, ["src/a.rs", "z.txt"]);
-        assert!(parse_inventory(b"src/a.rs").is_err());
-        assert!(parse_inventory(b"src/a.rs\0\0").is_err());
-        let invalid = parse_inventory(b"ok.txt\0bad\xff\0").unwrap();
+        assert!(parse_tracked_inventory(b"src/a.rs").is_err());
+        assert!(parse_tracked_inventory(b"src/a.rs\0\0").is_err());
+        let invalid = parse_tracked_inventory(b"ok.txt\0bad\xff\0").unwrap();
         assert_eq!(invalid.paths, ["ok.txt"]);
         assert_eq!(invalid.non_addressable_path, 1);
 
         let mut oversized = Vec::new();
-        for _ in 0..=MAX_RECORDS {
+        for _ in 0..=OBSERVER_MAX_RECORDS {
             oversized.extend_from_slice(b"tracked\0");
         }
-        assert!(parse_inventory(&oversized).is_err());
+        assert!(parse_tracked_inventory(&oversized).is_err());
     }
 
     #[test]
