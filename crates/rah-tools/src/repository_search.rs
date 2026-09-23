@@ -878,6 +878,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_omitted_tracked_parent_is_reported_not_rejected() {
+        let fixture = Fixture::new();
+        let git = native_git();
+        fs::create_dir_all(fixture.0.join("a/b/c")).unwrap();
+        fs::write(fixture.0.join("a/b/c/file.txt"), b"sentinel\n").unwrap();
+        run(&git, &fixture.0, &["add", "--all"]);
+        run(&git, &fixture.0, &["commit", "--quiet", "-m", "initial"]);
+        fs::remove_dir_all(fixture.0.join("a")).unwrap();
+
+        let tool = RepositorySearchTool::new(&git, &fixture.0).unwrap();
+        let output = json_output(
+            tool.execute(
+                ToolInput(json!({"mode":"path","query":"file.txt"})),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(output["matches"], json!([]));
+        assert_eq!(output["omitted"]["changed_or_missing"], 1);
+    }
+
+    #[tokio::test]
     async fn path_search_is_literal_case_sensitive_and_result_bounded() {
         let fixture = Fixture::new();
         let git = native_git();

@@ -46,10 +46,9 @@ impl RepositoryNestedBoundaryPolicy {
                 .parent()
                 .ok_or_else(|| boundary_error("repository target ancestry is unavailable"))?
                 .to_path_buf(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => path
-                .parent()
-                .ok_or_else(|| boundary_error("repository target ancestry is unavailable"))?
-                .to_path_buf(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                nearest_existing_ancestor(path)?
+            }
             Err(error) => return Err(boundary_observation_error(error)),
         };
         loop {
@@ -120,6 +119,30 @@ impl RepositoryNestedBoundaryPolicy {
             }
         }
         Ok(())
+    }
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ToolError> {
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                reject_ambiguous_component(&current)?;
+                if metadata.is_dir() {
+                    return Ok(current);
+                }
+                return Err(boundary_error(
+                    "repository target ancestry is not a directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = current
+                    .parent()
+                    .ok_or_else(|| boundary_error("repository target ancestry is unavailable"))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(boundary_observation_error(error)),
+        }
     }
 }
 
@@ -209,7 +232,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{RepositoryNestedBoundaryPolicy, is_dot_git_name};
+    use super::{RepositoryNestedBoundaryPolicy, is_dot_git_name, nearest_existing_ancestor};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -254,6 +277,125 @@ mod tests {
         );
         assert!(policy.validate_observation().is_ok());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_descendant_uses_existing_ancestor_without_bypassing_boundaries() {
+        let root = root("missing-ancestor");
+        fs::create_dir(root.join(".git")).unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&root);
+        fs::create_dir(root.join("safe")).unwrap();
+        assert_eq!(
+            nearest_existing_ancestor(&root.join("safe/omitted/file.txt")).unwrap(),
+            root.join("safe")
+        );
+        assert!(
+            policy
+                .validate_existing(&root.join("safe/omitted/file.txt"))
+                .is_ok()
+        );
+        assert!(
+            policy
+                .validate_existing(&root.join("sparse/omitted/file.txt"))
+                .is_ok()
+        );
+
+        fs::create_dir_all(root.join("nested/.git")).unwrap();
+        assert!(
+            policy
+                .validate_existing(&root.join("nested/omitted/file.txt"))
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_regular_file_ancestor_fails_closed_without_climbing_past_it() {
+        let root = root("file-ancestor");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("a"), b"not a directory").unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&root);
+
+        assert!(
+            policy
+                .validate_existing(&root.join("a/b/c/file.txt"))
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_ancestor_rejects_all_missing_descendant_depths() {
+        let root = root("symlink-ancestor");
+        fs::create_dir(root.join(".git")).unwrap();
+        let external = root("symlink-ancestor-target");
+        fs::write(external.join("sentinel.txt"), b"outside").unwrap();
+        std::os::unix::fs::symlink(&external, root.join("a")).unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&root);
+
+        for descendant in [
+            "a/b/c/file.txt",
+            "a/x/missing.txt",
+            "a/x/y/missing.txt",
+            "a/x/y/z/missing.txt",
+        ] {
+            assert!(policy.validate_existing(&root.join(descendant)).is_err());
+        }
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(external);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_junction_ancestor_rejects_missing_descendant() {
+        let root_path = root("junction-ancestor");
+        fs::create_dir(root_path.join(".git")).unwrap();
+        let external = root("junction-ancestor-target");
+        fs::write(external.join("sentinel.txt"), b"outside").unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(root_path.join("a"))
+            .arg(&external)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let policy = RepositoryNestedBoundaryPolicy::new(&root_path);
+
+        assert!(
+            policy
+                .validate_existing(&root_path.join("a/b/c/file.txt"))
+                .is_err()
+        );
+
+        let _ = fs::remove_dir(root_path.join("a"));
+        let _ = fs::remove_dir_all(root_path);
+        let _ = fs::remove_dir_all(external);
+    }
+
+    #[test]
+    fn root_is_the_last_existing_ancestor_and_is_not_bypassed() {
+        let root = root("root-termination");
+        fs::create_dir(root.join(".git")).unwrap();
+
+        assert_eq!(
+            nearest_existing_ancestor(&root.join("a/b/c/file.txt")).unwrap(),
+            root
+        );
+        assert!(
+            RepositoryNestedBoundaryPolicy::new(&root)
+                .validate_existing(&root.join("a/b/c/file.txt"))
+                .is_ok()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_not_found_metadata_error_fails_closed() {
+        let invalid = std::path::Path::new("invalid\0path");
+        assert!(nearest_existing_ancestor(invalid).is_err());
     }
 
     #[test]

@@ -477,6 +477,56 @@ mod tests {
         assert_eq!(entries[127]["path"], "entry-127.txt");
     }
 
+    #[tokio::test]
+    async fn deep_tracked_path_lists_in_ordinary_and_linked_worktrees() {
+        let ordinary = Fixture::new();
+        fs::create_dir_all(ordinary.0.join("a/b/c")).unwrap();
+        fs::write(ordinary.0.join("a/b/c/file.txt"), b"ordinary\n").unwrap();
+        ordinary.commit_all();
+        let ordinary_tool = RepositoryListTool::new(native_git(), &ordinary.0).unwrap();
+
+        let linked = crate::repository_git_layout::test_fixture::WorktreeFixture::new();
+        fs::create_dir_all(linked.linked_a.join("a/b/c")).unwrap();
+        fs::write(linked.linked_a.join("a/b/c/file.txt"), b"linked\n").unwrap();
+        crate::repository_git_layout::test_fixture::run(
+            &linked.git,
+            &linked.linked_a,
+            &["add", "--all"],
+        );
+        crate::repository_git_layout::test_fixture::run(
+            &linked.git,
+            &linked.linked_a,
+            &["commit", "--quiet", "-m", "deep path"],
+        );
+        let linked_tool = RepositoryListTool::new(native_git(), &linked.linked_a).unwrap();
+
+        let ordinary_expected_root = json!([{"path":"a","kind":"directory"}]);
+        let linked_expected_root =
+            json!([{"path":"a","kind":"directory"},{"path":"tracked.txt","kind":"file"}]);
+        for (tool, expected_root, expected_entries) in [
+            (&ordinary_tool, "a", ordinary_expected_root),
+            (&linked_tool, "a", linked_expected_root),
+        ] {
+            let root = list(tool, json!({})).await;
+            assert_eq!(root["entries"], expected_entries);
+            let a = list(tool, json!({"path":"a"})).await;
+            assert_eq!(a["entries"], json!([{"path":"a/b","kind":"directory"}]));
+            let b = list(tool, json!({"path":"a/b"})).await;
+            assert_eq!(b["entries"], json!([{"path":"a/b/c","kind":"directory"}]));
+            let c = list(tool, json!({"path":"a/b/c"})).await;
+            assert_eq!(
+                c["entries"],
+                json!([{"path":"a/b/c/file.txt","kind":"file"}])
+            );
+            assert_eq!(root["entries"][0]["path"], expected_root);
+        }
+
+        fs::remove_dir_all(ordinary.0.join("a")).unwrap();
+        let omitted = list(&ordinary_tool, json!({})).await;
+        assert_eq!(omitted["entries"], json!([]));
+        assert_eq!(omitted["omitted"]["changed_or_missing"], 1);
+    }
+
     #[test]
     fn conflicting_file_and_directory_projection_fails_closed() {
         let mut entries = BTreeMap::new();

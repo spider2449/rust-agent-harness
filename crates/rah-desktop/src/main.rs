@@ -32536,7 +32536,8 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 self.command_output(Command::new(&self.git).args(arguments).current_dir(cwd))?;
             if !output.status.success() {
                 return Err(format!(
-                    "Task 361 fixture Git operation failed: {arguments:?}"
+                    "Task 361 fixture Git operation failed: {arguments:?}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
             Ok(output.stdout)
@@ -32800,8 +32801,9 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
                 index_path.is_file(),
             )
         })?;
-        let sentinel = fs::read(root.join("sentinel.txt"))
-            .map_err(|_| "Task 361 selected sentinel could not be captured".to_owned())?;
+        // Sparse checkout may intentionally omit this tracked fixture sentinel.
+        // An absent worktree copy is still a valid capture state.
+        let sentinel = fs::read(root.join("sentinel.txt")).unwrap_or_default();
         let gitfile_path = root.join(".git");
         let gitfile = if gitfile_path.is_file() {
             fs::read(&gitfile_path)
@@ -32869,6 +32871,21 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             .get("status")?
             .as_str()
             .map(str::to_owned)
+    }
+
+    async fn task379_list_value(
+        registry: &Arc<ToolRegistry>,
+        input: Value,
+    ) -> Result<Value, String> {
+        let tool = registry
+            .get(&ToolName::new("repo.list"))
+            .ok_or_else(|| "Task 379 selected registry lacks repo.list".to_owned())?;
+        let output = tool
+            .execute(ToolInput(input), ToolContext::default())
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        task361_output_value(&output)
+            .ok_or_else(|| "Task 379 repo.list returned no JSON content".to_owned())
     }
 
     fn task361_index_lock_absent(captures: &[&Task361RepositoryCapture]) -> bool {
@@ -34696,11 +34713,15 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
         fs::write(external.join("escape.txt"), b"REPARSE_ESCAPE_SENTINEL\n")
             .map_err(|error| error.to_string())?;
         let junction = fixture.linked_a.join("reparse-escape");
-        fixture.create_junction(&junction, &external)?;
+        fs::create_dir_all(&junction).map_err(|error| error.to_string())?;
+        fs::write(junction.join("escape.txt"), b"REPARSE_ESCAPE_SENTINEL\n")
+            .map_err(|error| error.to_string())?;
         fixture.git_run(
             &fixture.linked_a,
-            &["add", "-f", "--", "reparse-escape/escape.txt"],
+            &["add", "--sparse", "-f", "--", "reparse-escape/escape.txt"],
         )?;
+        fs::remove_dir_all(&junction).map_err(|error| error.to_string())?;
+        fixture.create_junction(&junction, &external)?;
         let reparse_result = search(
             Arc::clone(&registry_a),
             serde_json::json!({"mode":"text","query":"REPARSE_ESCAPE_SENTINEL"}),
@@ -34797,6 +34818,678 @@ if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress -Depth 3
             "fixture child processes were owned and reaped",
         )?;
         println!("RAH_V031_REPOSITORY_SEARCH_LIVE_OK");
+        let _ = main_member;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires explicit RAH_RUN_TASK379_REPOSITORY_LIST_LIVE=1"]
+    async fn task379_windows_repository_list_live_certification() -> Result<(), String> {
+        if std::env::var("RAH_RUN_TASK379_REPOSITORY_LIST_LIVE")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return Err(
+                "set RAH_RUN_TASK379_REPOSITORY_LIST_LIVE=1 for Task 379 certification".to_owned(),
+            );
+        }
+        let git = selected_git_executable()
+            .map_err(|_| "Task 379 native Git discovery failed".to_owned())?;
+        let fixture = Task361LiveFixture::new(git)?;
+        let storage = TestRepository::new();
+        let state = DesktopAppState::new(storage.0.clone());
+
+        type Task379RepositoryState = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+        fn repository_state(
+            fixture: &Task361LiveFixture,
+            root: &Path,
+        ) -> Result<Task379RepositoryState, String> {
+            let head = fixture.git_run(root, &["rev-parse", "HEAD"])?;
+            let branch = fixture.git_run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+            let status = fixture.git_run(root, &["status", "--porcelain=v2", "-z"])?;
+            let index = fixture.git_run(root, &["diff", "--cached", "--binary"])?;
+            Ok((head, branch, status, index))
+        }
+
+        for (root, name, contents) in [
+            (
+                &fixture.main,
+                "main-only.txt",
+                b"MAIN_ONLY_LIST_SENTINEL\n".as_slice(),
+            ),
+            (
+                &fixture.linked_b,
+                "b-only.txt",
+                b"B_ONLY_LIST_SENTINEL\n".as_slice(),
+            ),
+        ] {
+            fs::write(root.join(name), contents).map_err(|error| error.to_string())?;
+            fixture.git_run(root, &["add", "--", name])?;
+            fixture.git_run(
+                root,
+                &["commit", "--quiet", "-m", "Task 379 sibling sentinel"],
+            )?;
+        }
+
+        fs::create_dir_all(fixture.linked_a.join("crates/alpha/src"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("crates/beta/src"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("docs")).map_err(|error| error.to_string())?;
+        for (path, contents) in [
+            (
+                "Cargo.toml",
+                b"[package]\nname = \"list-fixture\"\n".to_vec(),
+            ),
+            (
+                "crates/alpha/src/lib.rs",
+                b"pub const ALPHA: &str = \"alpha\";\n".to_vec(),
+            ),
+            (
+                "crates/beta/src/lib.rs",
+                b"pub const BETA: &str = \"beta\";\n".to_vec(),
+            ),
+            ("docs/guide.md", b"# guide\n".to_vec()),
+            ("a-only.txt", b"A_ONLY_LIST_SENTINEL\n".to_vec()),
+            (
+                "tracked-ignore.txt",
+                b"TRACKED_IGNORE_LIST_SENTINEL\n".to_vec(),
+            ),
+            (
+                "deleted-only/deleted.txt",
+                b"DELETED_LIST_SENTINEL\n".to_vec(),
+            ),
+            (
+                "sparse-only/secret.txt",
+                b"SPARSE_OMITTED_LIST_SENTINEL\n".to_vec(),
+            ),
+            (
+                "sparse-only/deep/omitted/file.rs",
+                b"SPARSE_MULTI_DEPTH_LIST_SENTINEL\n".to_vec(),
+            ),
+            ("ASCII-root.txt", b"ASCII\n".to_vec()),
+            ("Case-root.txt", b"upper\n".to_vec()),
+            ("case-root.txt", b"lower\n".to_vec()),
+            ("é-root.txt", b"unicode\n".to_vec()),
+        ] {
+            let target = fixture.linked_a.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(target, contents)
+                .map_err(|error| format!("Task 379 fixture file {path} failed: {error}"))?;
+        }
+        fs::write(
+            fixture.linked_a.join(".gitignore"),
+            b"ignored-only/\nuntracked-only/\nphysical-untracked/\ndeleted-only/\ntracked-ignore.txt\nignored-secret.txt\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("untracked-only"))
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("untracked-only/secret.txt"),
+            b"UNTRACKED_LIST_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("ignored-only"))
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("ignored-only/ignored.txt"),
+            b"IGNORED_UNTRACKED_LIST_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("physical-empty"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("physical-untracked"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(fixture.linked_a.join("saturation"))
+            .map_err(|error| error.to_string())?;
+        for index in 0..130 {
+            fs::write(
+                fixture
+                    .linked_a
+                    .join(format!("saturation/entry-{index:03}.txt")),
+                b"saturation\n",
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        fixture.git_run(&fixture.linked_a, &["add", "--all"])?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["add", "-f", "--", "tracked-ignore.txt"],
+        )?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &[
+                "commit",
+                "--quiet",
+                "-m",
+                "Task 379 repository list structure",
+            ],
+        )?;
+        fs::write(
+            fixture.linked_a.join("staged-new.txt"),
+            b"STAGED_NEW_LIST_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fixture.git_run(&fixture.linked_a, &["add", "--", "staged-new.txt"])?;
+        fs::remove_dir_all(fixture.linked_a.join("deleted-only"))
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("crates/alpha/src/lib.rs"),
+            b"pub const ALPHA: &str = \"MODIFIED_LIST_SENTINEL\";\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let main_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.main)
+                .await
+                .map_err(|_| "Task 379 main admission failed".to_owned())?;
+        let a_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_a)
+                .await
+                .map_err(|_| "Task 379 linked A admission failed".to_owned())?;
+        let b_member =
+            admit_repository_with_semantic_validation(&state, &fixture.git, &fixture.linked_b)
+                .await
+                .map_err(|_| "Task 379 linked B admission failed".to_owned())?;
+        activate_admitted_member(&state, a_member)
+            .await
+            .map_err(|_| "Task 379 linked A activation failed".to_owned())?;
+        let selected_a = state
+            .repository
+            .lock()
+            .map_err(|_| "Task 379 repository lock poisoned".to_owned())?
+            .clone()
+            .ok_or_else(|| "Task 379 linked A was not selected".to_owned())?;
+        let registry_a = desktop_tool_registry(Some(&selected_a), None)
+            .map_err(|error| format!("Task 379 active-A registry failed: {error}"))?;
+        let composition_a = desktop_tool_composition_from_registry(
+            Arc::clone(&registry_a),
+            Some(&selected_a),
+            false,
+            &[],
+        )
+        .map_err(|error| format!("Task 379 active-A composition failed: {error:?}"))?;
+        let list_definition = registry_a
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.list")
+            .ok_or_else(|| "Task 379 Desktop production registry omitted repo.list".to_owned())?;
+        task361_require(
+            list_definition.permission == PermissionLevel::Execute
+                && list_definition.input_schema
+                    == serde_json::json!({
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{"path":{"type":"string"}}
+                    }),
+            "Desktop production registry contains the closed repo.list definition",
+        )?;
+        let list_entry = composition_a
+            .tools
+            .iter()
+            .find(|entry| entry.public_tool_name == "repo.list")
+            .ok_or_else(|| "Task 379 effective composition omitted repo.list".to_owned())?;
+        task361_require(
+            list_entry.effect_class == EffectClass::ReadOnly
+                && list_entry.authority_category == AuthorityCategory::RepositoryObservation
+                && list_entry.repository_bound
+                && list_entry.source_kind == SourceKind::RepositoryHost,
+            "repo.list effective authority is read-only selected-repository observation",
+        )?;
+        let authority_json = serde_json::to_string(&composition_a.tools)
+            .map_err(|error| format!("Task 379 authority serialization failed: {error}"))?;
+        let capture_a = task361_capture(&fixture, &fixture.linked_a)?;
+        let capture_main = task361_capture(&fixture, &fixture.main)?;
+        let capture_b = task361_capture(&fixture, &fixture.linked_b)?;
+        let forbidden_private_values = [
+            capture_a.private_git_dir.to_string_lossy().into_owned(),
+            capture_a.common_git_dir.to_string_lossy().into_owned(),
+            capture_a.root.to_string_lossy().into_owned(),
+            capture_main.root.to_string_lossy().into_owned(),
+            capture_b.root.to_string_lossy().into_owned(),
+        ];
+        task361_require(
+            capture_main.common_git_dir == capture_a.common_git_dir
+                && capture_a.common_git_dir == capture_b.common_git_dir
+                && capture_main.private_git_dir != capture_a.private_git_dir
+                && capture_a.private_git_dir != capture_b.private_git_dir
+                && forbidden_private_values
+                    .iter()
+                    .all(|value| !authority_json.contains(value)),
+            "A/B/main share common storage but retain private isolated worktrees and redacted authority",
+        )?;
+
+        let before = [
+            repository_state(&fixture, &fixture.main)?,
+            repository_state(&fixture, &fixture.linked_a)?,
+            repository_state(&fixture, &fixture.linked_b)?,
+        ];
+        let entry = |value: &Value, path: &str, kind: &str| {
+            value["entries"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|item| item["path"] == path && item["kind"] == kind)
+            })
+        };
+        let paths = |value: &Value| {
+            value["entries"]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|item| item["path"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let root = task379_list_value(&registry_a, serde_json::json!({})).await?;
+        task361_require(
+            root["status"] == "ok"
+                && root["path"].is_null()
+                && entry(&root, "Cargo.toml", "file")
+                && entry(&root, "a-only.txt", "file")
+                && entry(&root, "staged-new.txt", "file")
+                && entry(&root, "tracked-ignore.txt", "file")
+                && entry(&root, "crates", "directory")
+                && entry(&root, "docs", "directory")
+                && !root.to_string().contains("crates/alpha")
+                && !root.to_string().contains("docs/guide.md")
+                && !root.to_string().contains("untracked-only")
+                && !root.to_string().contains("ignored-only")
+                && !root.to_string().contains("physical-empty")
+                && !root.to_string().contains("physical-untracked")
+                && !root.to_string().contains("deleted-only")
+                && !root.to_string().contains("gitlink-only"),
+            "A root listing is tracked-only direct projection with synthesized directories",
+        )?;
+        let crates = task379_list_value(&registry_a, serde_json::json!({"path":"crates"})).await?;
+        let registry_alpha = desktop_tool_registry(Some(&selected_a), None)
+            .map_err(|error| format!("Task 379 second active-A registry failed: {error}"))?;
+        task361_require(
+            crates["entries"]
+                == serde_json::json!([
+                    {"path":"crates/alpha","kind":"directory"},
+                    {"path":"crates/beta","kind":"directory"}
+                ]),
+            "crates listing contains only direct alpha and beta directories",
+        )?;
+        let alpha =
+            task379_list_value(&registry_alpha, serde_json::json!({"path":"crates/alpha"})).await?;
+        task361_require(
+            alpha["entries"] == serde_json::json!([{"path":"crates/alpha/src","kind":"directory"}]),
+            "alpha listing contains only its direct src directory",
+        )?;
+        let source =
+            task379_list_value(&registry_a, serde_json::json!({"path":"crates/alpha/src"})).await?;
+        task361_require(
+            entry(&source, "crates/alpha/src/lib.rs", "file")
+                && source["entries"]
+                    .as_array()
+                    .is_some_and(|entries| entries.len() == 1),
+            "source listing contains the direct modified file only",
+        )?;
+        for input in [
+            serde_json::json!({"path":""}),
+            serde_json::json!({"path":"."}),
+            serde_json::json!({"path":".."}),
+            serde_json::json!({"path":"/"}),
+            serde_json::json!({"path":"crates/"}),
+            serde_json::json!({"path":"crates\\alpha"}),
+            serde_json::json!({"path":".git"}),
+            serde_json::json!({"path":".GIT"}),
+            serde_json::json!({"path":"does-not-exist"}),
+            serde_json::json!({"path":"Cargo.toml"}),
+        ] {
+            let error = task379_list_value(&registry_a, input).await;
+            task361_require(
+                error.is_err(),
+                "invalid, nonexistent, and file targets fail closed",
+            )?;
+            if let Err(error) = error {
+                task361_require(
+                    forbidden_private_values
+                        .iter()
+                        .all(|value| !error.contains(value)),
+                    "repo.list errors remain sanitized",
+                )?;
+            }
+        }
+        let ordering = paths(&root);
+        let mut sorted = ordering.clone();
+        sorted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        task361_require(
+            ordering == sorted,
+            "root ordering is repository-relative UTF-8 byte order",
+        )?;
+        let repeated = task379_list_value(&registry_a, serde_json::json!({})).await?;
+        task361_require(
+            root["entries"] == repeated["entries"],
+            "repeated root listing is identical",
+        )?;
+
+        let saturation =
+            task379_list_value(&registry_a, serde_json::json!({"path":"saturation"})).await?;
+        let saturation_repeat =
+            task379_list_value(&registry_a, serde_json::json!({"path":"saturation"})).await?;
+        task361_require(
+            saturation["complete"] == false
+                && saturation["truncation_reason"] == "result_limit"
+                && saturation["entries"]
+                    .as_array()
+                    .is_some_and(|entries| entries.len() == 128)
+                && saturation["entries"] == saturation_repeat["entries"],
+            "saturation is explicit, bounded, and deterministic",
+        )?;
+
+        let search = |registry: Arc<ToolRegistry>, input: Value| async move {
+            let output = registry
+                .execute(
+                    ToolCall {
+                        id: ToolCallId::new(),
+                        name: ToolName::new("repo.search"),
+                        input: ToolInput(input),
+                    },
+                    ToolContext::default(),
+                )
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            task361_output_value(&output)
+                .ok_or_else(|| "Task 379 repo.search returned no JSON content".to_owned())
+        };
+        let search_path = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"path","query":"crates/alpha/src"}),
+        )
+        .await?;
+        let search_text = search(
+            Arc::clone(&registry_a),
+            serde_json::json!({"mode":"text","query":"MODIFIED_LIST_SENTINEL"}),
+        )
+        .await?;
+        task361_require(
+            search_path["matches"]
+                .as_array()
+                .is_some_and(|matches| !matches.is_empty())
+                && search_text["matches"]
+                    == serde_json::json!([{"path":"crates/alpha/src/lib.rs","lines":[1]}]),
+            "repo.search path and text smoke regression passed on the live A fixture",
+        )?;
+
+        let submodule_source = fixture.root.join("list-submodule-source");
+        fs::create_dir_all(&submodule_source).map_err(|error| error.to_string())?;
+        fixture.git_run(
+            &submodule_source,
+            &["init", "--quiet", "--initial-branch=submodule"],
+        )?;
+        fixture.git_run(
+            &submodule_source,
+            &["config", "--local", "user.name", "RAH v0.32 Certification"],
+        )?;
+        fixture.git_run(
+            &submodule_source,
+            &[
+                "config",
+                "--local",
+                "user.email",
+                "rah-v032@example.invalid",
+            ],
+        )?;
+        fs::write(
+            submodule_source.join("submodule.txt"),
+            b"SUBMODULE_CONTENT_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fixture.git_run(&submodule_source, &["add", "--", "submodule.txt"])?;
+        fixture.git_run(
+            &submodule_source,
+            &["commit", "--quiet", "-m", "list submodule"],
+        )?;
+        let submodule_path = fixture.linked_a.join("nested-module");
+        fixture.git_run(
+            &fixture.linked_a,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                "../list-submodule-source",
+                "nested-module",
+            ],
+        )?;
+        task361_require(
+            submodule_path.join(".git").is_file(),
+            "fresh list fixture installed a modern submodule gitfile",
+        )?;
+        let submodule_result = task379_list_value(&registry_a, serde_json::json!({})).await;
+        task361_require(
+            submodule_result.is_err(),
+            "submodule-backed list observation fails closed without traversal",
+        )?;
+        if let Err(error) = submodule_result {
+            task361_require(
+                !error.contains("SUBMODULE_CONTENT_SENTINEL") && !error.contains("nested-module"),
+                "submodule rejection remains sanitized",
+            )?;
+        }
+        fixture.git_run(
+            &fixture.linked_a,
+            &["submodule", "deinit", "-f", "--", "nested-module"],
+        )?;
+        fs::remove_file(fixture.linked_a.join(".gitmodules")).map_err(|error| error.to_string())?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["reset", "--quiet", "--", "nested-module", ".gitmodules"],
+        )?;
+
+        fixture.git_run(&fixture.linked_a, &["sparse-checkout", "init", "--no-cone"])?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &[
+                "sparse-checkout",
+                "set",
+                "--no-cone",
+                "Cargo.toml",
+                "crates/",
+                "docs/",
+                "a-only.txt",
+            ],
+        )?;
+        let sparse_root = task379_list_value(&registry_a, serde_json::json!({})).await?;
+        task361_require(
+            !sparse_root.to_string().contains("sparse-only")
+                && !sparse_root
+                    .to_string()
+                    .contains("SPARSE_OMITTED_LIST_SENTINEL"),
+            "sparse-omitted tracked structure is absent",
+        )?;
+        activate_admitted_member(&state, b_member)
+            .await
+            .map_err(|_| "Task 379 linked B activation failed".to_owned())?;
+        let selected_b = state
+            .repository
+            .lock()
+            .map_err(|_| "Task 379 repository lock poisoned after B activation".to_owned())?
+            .clone()
+            .ok_or_else(|| "Task 379 linked B was not selected".to_owned())?;
+        let registry_b = desktop_tool_registry(Some(&selected_b), None)
+            .map_err(|error| format!("Task 379 active-B registry failed: {error}"))?;
+        let b_root = task379_list_value(&registry_b, serde_json::json!({})).await?;
+        task361_require(
+            b_root.to_string().contains("b-only.txt")
+                && !b_root.to_string().contains("a-only.txt")
+                && !b_root.to_string().contains("main-only.txt"),
+            "fresh B production composition sees B only after active switch",
+        )?;
+        activate_admitted_member(&state, a_member)
+            .await
+            .map_err(|_| "Task 379 linked A reactivation failed".to_owned())?;
+
+        let external = fixture.root.join("reparse-external");
+        fs::create_dir(&external).map_err(|error| error.to_string())?;
+        fs::write(
+            external.join("escape.txt"),
+            b"REPO_LIST_REPARSE_ESCAPE_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let junction = fixture.linked_a.join("reparse-escape");
+        fs::create_dir_all(&junction).map_err(|error| error.to_string())?;
+        fs::write(
+            junction.join("escape.txt"),
+            b"REPO_LIST_REPARSE_ESCAPE_SENTINEL\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["add", "--sparse", "-f", "--", "reparse-escape/escape.txt"],
+        )?;
+        fs::remove_dir_all(&junction).map_err(|error| error.to_string())?;
+        fixture.create_junction(&junction, &external)?;
+        let reparse = task379_list_value(&registry_a, serde_json::json!({})).await;
+        task361_require(
+            reparse.is_err()
+                && reparse
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| !error.contains("REPO_LIST_REPARSE_ESCAPE_SENTINEL")),
+            "junction/reparse escape fails closed without partial disclosure",
+        )?;
+        fixture.remove_junction(&junction)?;
+        fixture.git_run(
+            &fixture.linked_a,
+            &["reset", "--quiet", "--", "reparse-escape/escape.txt"],
+        )?;
+        fs::create_dir(fixture.linked_a.join("nested-repository"))
+            .map_err(|error| error.to_string())?;
+        fixture.git_run(
+            &fixture.linked_a.join("nested-repository"),
+            &["init", "--quiet"],
+        )?;
+        let nested = task379_list_value(&registry_a, serde_json::json!({})).await;
+        task361_require(
+            nested.is_err(),
+            "descendant nested repository rejects the whole observation",
+        )?;
+        fs::remove_dir_all(fixture.linked_a.join("nested-repository"))
+            .map_err(|error| error.to_string())?;
+        fs::create_dir(fixture.linked_a.join("nested-case")).map_err(|error| error.to_string())?;
+        fs::write(
+            fixture.linked_a.join("nested-case/.GIT"),
+            b"case-equivalent nested marker",
+        )
+        .map_err(|error| error.to_string())?;
+        let case_nested = task379_list_value(&registry_a, serde_json::json!({})).await;
+        task361_require(
+            case_nested.is_err(),
+            "case-equivalent .GIT marker rejects observation",
+        )?;
+        fs::remove_dir_all(fixture.linked_a.join("nested-case"))
+            .map_err(|error| error.to_string())?;
+
+        let symlink_target = fixture.root.join("symlink-target.txt");
+        fs::write(&symlink_target, b"REPO_LIST_SYMLINK_ESCAPE_SENTINEL\n")
+            .map_err(|error| error.to_string())?;
+        let symlink = fixture.linked_a.join("symlink-escape.txt");
+        let symlink_created = Command::new("cmd.exe")
+            .args([
+                "/d",
+                "/c",
+                "mklink",
+                symlink.to_string_lossy().as_ref(),
+                symlink_target.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if symlink_created {
+            fixture.git_run(
+                &fixture.linked_a,
+                &["add", "-f", "--", "symlink-escape.txt"],
+            )?;
+            let symlink_root = task379_list_value(&registry_a, serde_json::json!({})).await?;
+            task361_require(
+                !symlink_root
+                    .to_string()
+                    .contains("REPO_LIST_SYMLINK_ESCAPE_SENTINEL")
+                    && !symlink_root.to_string().contains("symlink-escape.txt"),
+                "Windows symlink is not followed or disclosed",
+            )?;
+            fs::remove_file(&symlink).map_err(|error| error.to_string())?;
+            fixture.git_run(
+                &fixture.linked_a,
+                &["reset", "--quiet", "--", "symlink-escape.txt"],
+            )?;
+            println!("RAH_V032_WINDOWS_SYMLINK_LIVE_CERTIFIED=1");
+        } else {
+            println!("RAH_V032_WINDOWS_SYMLINK_LIVE_NONCLAIM=1");
+        }
+
+        let host_names = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+            "repo.rename-file",
+        ];
+        task361_require(
+            host_names
+                .iter()
+                .filter(|name| host_kind(name).is_some())
+                .count()
+                == 11
+                && host_kind("repo.list").is_none()
+                && host_kind("repo.search").is_none()
+                && host_kind("repo.create-directory").is_none(),
+            "HostExplicit remains exactly 11 and repo.list is ineligible",
+        )?;
+        fixture.git_run(&fixture.linked_a, &["sparse-checkout", "disable"])?;
+        for output in [
+            root,
+            crates,
+            alpha,
+            source,
+            saturation,
+            search_path,
+            search_text,
+            sparse_root,
+            b_root,
+        ] {
+            let serialized = output.to_string();
+            task361_require(
+                forbidden_private_values
+                    .iter()
+                    .all(|value| !serialized.contains(value))
+                    && !serialized.contains("REPO_LIST_REPARSE_ESCAPE_SENTINEL")
+                    && !serialized.contains("REPO_LIST_SYMLINK_ESCAPE_SENTINEL")
+                    && !serialized.contains("SUBMODULE_CONTENT_SENTINEL"),
+                "repo.list/search outputs expose only bounded repository-relative data",
+            )?;
+        }
+        let after = [
+            repository_state(&fixture, &fixture.main)?,
+            repository_state(&fixture, &fixture.linked_a)?,
+            repository_state(&fixture, &fixture.linked_b)?,
+        ];
+        task361_require(
+            before == after,
+            "repo.list and repo.search caused no intentional repository mutation",
+        )?;
+        let cleanup_pids = fixture.cleanup()?;
+        task361_require(
+            !cleanup_pids.is_empty(),
+            "Task 379 fixture child processes were owned and reaped",
+        )?;
+        println!("RAH_V032_REPOSITORY_LIST_LIVE_OK");
         let _ = main_member;
         Ok(())
     }
