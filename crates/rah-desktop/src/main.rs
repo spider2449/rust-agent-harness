@@ -9,6 +9,8 @@ mod desktop_preferences;
 #[cfg(target_os = "windows")]
 mod desktop_preferences_commands;
 #[cfg(target_os = "windows")]
+mod desktop_status_commands;
+#[cfg(target_os = "windows")]
 mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
@@ -4572,12 +4574,6 @@ fn host_cancel_tool_invocation(
         },
     );
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn app_status(state: State<'_, DesktopAppState>) -> AppStatus {
-    state.status()
 }
 
 #[cfg(target_os = "windows")]
@@ -9836,7 +9832,7 @@ fn main() -> ExitCode {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_status,
+            desktop_status_commands::app_status,
             trusted_profile_selection,
             choose_trusted_profile,
             restore_trusted_profile,
