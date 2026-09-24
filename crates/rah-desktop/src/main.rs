@@ -5,6 +5,8 @@ mod codex_baseline;
 #[cfg(target_os = "windows")]
 mod conversation_persistence;
 #[cfg(target_os = "windows")]
+mod desktop_model_configuration_commands;
+#[cfg(target_os = "windows")]
 mod desktop_preferences;
 #[cfg(target_os = "windows")]
 mod desktop_preferences_commands;
@@ -4827,44 +4829,6 @@ fn clear_trusted_profile(state: State<'_, DesktopAppState>) -> Result<(), Fronte
     ensure_trusted_profile_selection_allowed(state.inner())?;
     clear_trusted_profile_selection(state.inner());
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationPresentation {
-    let (selection, generation, readiness) = {
-        let model = state
-            .model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (model.selection.clone(), model.generation, model.readiness)
-    };
-    let connection = state
-        .connection
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    ModelConfigurationPresentation {
-        provider: selection.provider,
-        model: selection.model,
-        endpoint: selection
-            .llama_cpp_endpoint
-            .as_ref()
-            .map(ProviderEndpointPresentation::from),
-        insecure_transport: selection
-            .llama_cpp_endpoint
-            .as_ref()
-            .is_some_and(ProviderEndpoint::insecure_transport),
-        readiness,
-        status: model_configuration_status(
-            match &*connection {
-                ConnectionState::Connected {
-                    model_generation, ..
-                } => Some(*model_generation),
-                _ => None,
-            },
-            generation,
-        ),
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -9838,7 +9802,7 @@ fn main() -> ExitCode {
             restore_trusted_profile,
             forget_trusted_profile,
             clear_trusted_profile,
-            model_configuration,
+            desktop_model_configuration_commands::model_configuration,
             commit_identity,
             desktop_preferences_commands::desktop_preferences_warning,
             set_model_configuration,
