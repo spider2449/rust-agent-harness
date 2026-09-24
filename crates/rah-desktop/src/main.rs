@@ -7,6 +7,8 @@ mod conversation_persistence;
 #[cfg(target_os = "windows")]
 mod desktop_preferences;
 #[cfg(target_os = "windows")]
+mod desktop_preferences_commands;
+#[cfg(target_os = "windows")]
 mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
@@ -4867,20 +4869,6 @@ fn model_configuration(state: State<'_, DesktopAppState>) -> ModelConfigurationP
             generation,
         ),
     }
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn desktop_preferences_warning(state: State<'_, DesktopAppState>) -> Option<&'static str> {
-    state
-        .preferences
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take_warning()
-        .map(|warning| match warning {
-            PreferencesWarning::RestoreFailed => "preferences_restore_failed",
-            PreferencesWarning::SaveFailed => "preferences_save_failed",
-        })
 }
 
 #[cfg(target_os = "windows")]
@@ -9856,7 +9844,7 @@ fn main() -> ExitCode {
             clear_trusted_profile,
             model_configuration,
             commit_identity,
-            desktop_preferences_warning,
+            desktop_preferences_commands::desktop_preferences_warning,
             set_model_configuration,
             set_commit_identity,
             reset_model_preferences,
