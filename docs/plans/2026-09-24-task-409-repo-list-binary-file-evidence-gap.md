@@ -1,7 +1,7 @@
 # Task 409 — Close `repo.list` Binary-File Evidence Gap
 
 Date: 2026-09-24
-Status: **IN PROGRESS — deterministic gate passed; Windows live gate pending**
+Status: **STOP — required Desktop harness validation failed before Windows live certification**
 
 ## Scope and starting checkpoint
 
@@ -81,9 +81,10 @@ No binary-specific classification is introduced.
 - Test preflight and exact test frozen: complete.
 - Deterministic test implementation/validation: passed.
 - Independent evidence audit: passed.
-- Deterministic evidence commit: pending.
-- Fresh Windows live binary certification: pending.
-- Final evidence audit/verdict: pending.
+- Deterministic evidence commit: `580880f2619de4ed1e3810aec31b2ad27d6d91c3`.
+- Windows live harness validation: **failed**; no certification was run.
+- Fresh Windows live binary certification: **not run; stopped at failed validation gate**.
+- Final evidence audit/verdict: **STOP; Task 409 is incomplete**.
 
 ## Deterministic evidence and independent audit
 
@@ -139,10 +140,75 @@ git diff --check
   PASS
 ```
 
-The bounded deterministic evidence commit and exact resulting `HEAD` will be
-recorded here before any live certification.
+The deterministic test and this audit record were committed as:
+
+```text
+580880f2619de4ed1e3810aec31b2ad27d6d91c3
+test: cover repo.list binary no-content contract
+```
+
+## Required Windows harness validation stop
+
+The existing ignored Task 379/382 Windows certification harness was inspected
+as the planned live path. A binary-only test-harness addition was prepared in
+`crates/rah-desktop/src/main_tests.rs`: add and track the binary file in the
+existing linked-A fixture, record a relative path/length/SHA-256, and assert
+closed structural output through the active-A registry path. Formatting passed,
+but the required `cargo test -p rah-desktop -- --test-threads=1` package
+validation failed. In accordance with Task 409's stop rule, the live
+certification was not run. The uncommitted harness change was removed; no
+production code or committed harness code changed.
+
+Exact package result:
+
+```text
+316 passed; 4 failed; 18 ignored; 0 measured
+```
+
+Failures:
+
+```text
+tests::task349_close_clears_pending_no_effect_commit_authorization
+  crates/rah-desktop/src/main_tests.rs:9542
+  staged repository should have an authorizable review
+
+tests::task_321_c_authorization_preparation_cannot_rearm_after_activation
+  crates/rah-desktop/src/main_tests.rs:10887
+  fresh review observes: StagedDiffExecution
+
+tests::task_321_e_unstage_reservation_wins_over_activation
+  crates/rah-desktop/src/main_tests.rs:11385
+  A should expose an Unstage action
+
+tests::task_321_i_real_stage_reservation_rejects_real_connect_publication
+  crates/rah-desktop/src/main_tests.rs:9047
+  workflow should expose the requested real index action
+```
+
+None of the four reported failure names concerns the new binary fixture.
+This does not establish whether those pre-existing workflow failures are
+reproducible independently. The Windows edition/build, rustc/Cargo/Git
+versions, certification HEAD, binary fixture output/fingerprint, live request
+result, live privacy/isolation, HostExplicit live result, and live no-content
+assertions remain **uncertified and unrecorded**. The deterministic evidence
+HEAD at the stop is the committed
+`580880f2619de4ed1e3810aec31b2ad27d6d91c3`.
+
+Required stop verdict:
+
+```text
+STOP — REPO.LIST BINARY WINDOWS CERTIFICATION NOT RUN AFTER REQUIRED DESKTOP PACKAGE VALIDATION FAILED
+```
+
+No Task 410 work is started. A follow-up must resolve or independently
+disposition the four validation failures before rerunning the unchanged binary
+certification gate.
 
 ## Final report
 
-To be completed after all three mandatory gates. No release or publication
-work is part of this artifact.
+Task 409 does **not** pass. The deterministic binary no-content gate is closed,
+but the required Windows live binary gate remains open because its required
+Desktop package validation failed. No production Rust, authority, permission,
+schema, dependency, version, changelog, release gate, or certification
+harness code changed. No push or tag occurred. No Task 410 release preparation
+is authorized or started.
