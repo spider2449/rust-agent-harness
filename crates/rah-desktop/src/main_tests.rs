@@ -22770,13 +22770,17 @@ fn task361_output_status(output: &rah_protocol::ToolOutput) -> Option<String> {
 }
 
 async fn task379_list_value(registry: &Arc<ToolRegistry>, input: Value) -> Result<Value, String> {
-    let tool = registry
-        .get(&ToolName::new("repo.list"))
-        .ok_or_else(|| "Task 379 selected registry lacks repo.list".to_owned())?;
-    let output = tool
-        .execute(ToolInput(input), ToolContext::default())
+    let output = registry
+        .execute(
+            ToolCall {
+                id: ToolCallId::new(),
+                name: ToolName::new("repo.list"),
+                input: ToolInput(input),
+            },
+            ToolContext::default(),
+        )
         .await
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|_| "Task 379 Desktop registry dispatch failed for repo.list".to_owned())?;
     task361_output_value(&output)
         .ok_or_else(|| "Task 379 repo.list returned no JSON content".to_owned())
 }
@@ -24706,6 +24710,9 @@ async fn task379_windows_repository_list_live_certification() -> Result<(), Stri
     let fixture = Task361LiveFixture::new(git)?;
     let storage = TestRepository::new();
     let state = DesktopAppState::new(storage.0.clone());
+    const BINARY_PATH: &str = "binary-sentinel.dat";
+    const BINARY_SENTINEL: &[u8] = b"RAH_REPO_LIST_BINARY_SENTINEL";
+    let binary_payload = [b"\0\xff".as_slice(), BINARY_SENTINEL, b"\x80\0".as_slice()].concat();
 
     type Task379RepositoryState = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
@@ -24780,6 +24787,7 @@ async fn task379_windows_repository_list_live_certification() -> Result<(), Stri
         ("Case-root.txt", b"upper\n".to_vec()),
         ("case-root.txt", b"lower\n".to_vec()),
         ("é-root.txt", b"unicode\n".to_vec()),
+        (BINARY_PATH, binary_payload.clone()),
     ] {
         let target = fixture.linked_a.join(path);
         if let Some(parent) = target.parent() {
@@ -24834,6 +24842,24 @@ async fn task379_windows_repository_list_live_certification() -> Result<(), Stri
             "Task 379 repository list structure",
         ],
     )?;
+    let binary_tracked = fixture.git_run(
+        &fixture.linked_a,
+        &["ls-files", "--error-unmatch", "--", BINARY_PATH],
+    )?;
+    task361_require(
+        binary_tracked == format!("{BINARY_PATH}\n").as_bytes(),
+        "binary fixture is an exact tracked direct child of linked A",
+    )?;
+    println!("RAH_V032_BINARY_FIXTURE_PATH={BINARY_PATH}");
+    println!("RAH_V032_BINARY_FIXTURE_BYTES={}", binary_payload.len());
+    println!(
+        "RAH_V032_BINARY_FIXTURE_SHA256={}",
+        live_sha256(&binary_payload)
+    );
+    println!(
+        "RAH_V032_BINARY_FIXTURE_GIT_TRACKED={}",
+        String::from_utf8_lossy(&binary_tracked).trim()
+    );
     fs::write(
         fixture.linked_a.join("staged-new.txt"),
         b"STAGED_NEW_LIST_SENTINEL\n",
@@ -24951,6 +24977,51 @@ async fn task379_windows_repository_list_live_certification() -> Result<(), Stri
             .unwrap_or_default()
     };
     let root = task379_list_value(&registry_a, serde_json::json!({})).await?;
+    println!("RAH_V032_BINARY_REPO_LIST_REQUEST={{}}");
+    let root_serialized = root.to_string();
+    let binary_entry = root["entries"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|item| item["path"] == BINARY_PATH));
+    let binary_entry_fields = binary_entry
+        .and_then(Value::as_object)
+        .map(|entry| entry.keys().map(String::as_str).collect::<Vec<_>>());
+    let root_fields = root
+        .as_object()
+        .map(|response| response.keys().map(String::as_str).collect::<Vec<_>>());
+    task361_require(
+        binary_entry.is_some_and(|entry| entry["kind"] == "file")
+            && binary_entry_fields.as_deref() == Some(["kind", "path"].as_slice())
+            && root_fields.as_deref()
+                == Some(
+                    [
+                        "complete",
+                        "consistency",
+                        "entries",
+                        "omitted",
+                        "path",
+                        "status",
+                        "truncation_reason",
+                    ]
+                    .as_slice(),
+                )
+            && !root_serialized.contains(std::str::from_utf8(BINARY_SENTINEL).unwrap())
+            && !root_serialized.contains(&live_sha256(&binary_payload))
+            && forbidden_private_values
+                .iter()
+                .all(|value| !root_serialized.contains(value))
+            && !root_serialized.contains("main-only.txt")
+            && !root_serialized.contains("b-only.txt"),
+        "tracked binary is structurally listed with closed fields, no payload disclosure, sanitized paths, and active-A isolation",
+    )?;
+    println!("RAH_V032_BINARY_TRACKED_ENTRY_PRESENT=PASS");
+    if let Some(entry) = binary_entry {
+        println!("RAH_V032_BINARY_RESPONSE_ENTRY={entry}");
+    }
+    println!("RAH_V032_BINARY_KIND_FILE=PASS");
+    println!("RAH_V032_BINARY_CLOSED_SCHEMA_NO_CONTENT=PASS");
+    println!("RAH_V032_BINARY_SENTINEL_ABSENT=PASS");
+    println!("RAH_V032_BINARY_RAW_HOST_PATH_ABSENT=PASS");
+    println!("RAH_V032_BINARY_ACTIVE_REPOSITORY_ISOLATION=PASS");
     task361_require(
         root["status"] == "ok"
             && root["path"].is_null()
