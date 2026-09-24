@@ -11,7 +11,10 @@ use std::sync::Arc;
 use crate::host_invocation::{
     CoordinatorState, HostInvocationDescriptor, host_descriptor_with_rename,
 };
-use crate::{CodexExecutableSource, CommitAuthorizationPresentation, DesktopRepository};
+use crate::{
+    CodexExecutableSource, CommitAuthorizationPresentation, DesktopRepository,
+    EffectiveAuthoritySnapshotInputs,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -627,9 +630,303 @@ pub(crate) fn reviewed_commit(
     }
 }
 
+pub(super) fn compose_effective_authority_snapshot(
+    inputs: EffectiveAuthoritySnapshotInputs,
+) -> EffectiveAuthoritySnapshot {
+    let (status, connection_current) = match inputs.connection_state {
+        ConnectionBindingState::Connected => {
+            let current = inputs.context_current
+                && inputs.publication_current
+                && inputs.repository_context_matches
+                && inputs.registry_tool_count_matches;
+            let status = if current {
+                SnapshotStatus::ConnectedCurrent
+            } else if inputs.context_current {
+                SnapshotStatus::Stale
+            } else {
+                SnapshotStatus::ReconnectRequired
+            };
+            (status, current)
+        }
+        ConnectionBindingState::Connecting => (SnapshotStatus::Connecting, false),
+        ConnectionBindingState::Disconnecting => (SnapshotStatus::Stale, false),
+        ConnectionBindingState::Error => (SnapshotStatus::Unavailable, false),
+        ConnectionBindingState::NotConnected => (
+            if inputs.selected {
+                SnapshotStatus::Disconnected
+            } else {
+                SnapshotStatus::NoRepository
+            },
+            false,
+        ),
+    };
+    let connection = ConnectionBinding {
+        state: inputs.connection_state,
+        runtime_kind: (inputs.connection_state == ConnectionBindingState::Connected)
+            .then_some("codex"),
+        runtime_source: inputs.runtime_source.map(source_label),
+        captured_repository_generation: inputs.captured_repository_generation,
+        captured_model_generation: inputs.captured_model_generation,
+        captured_connection_generation: inputs.captured_connection_generation,
+        advertised: connection_current,
+    };
+    let mut effective_tools = inputs.effective_tools;
+    for tool in &mut effective_tools {
+        tool.advertised = connection.advertised;
+        tool.host_invocation = host_descriptor_with_rename(
+            tool,
+            status == SnapshotStatus::ConnectedCurrent,
+            inputs.selected,
+            inputs.allowed_permissions.contains(&tool.permission),
+            inputs.branch_authority_present,
+            inputs.patch_preparer_present,
+            inputs.multi_file_edit_preparer_present,
+            inputs.create_file_preparer_present,
+            inputs.delete_file_preparer_present,
+            inputs.rename_file_preparer_present,
+            inputs.coordinator_state,
+        );
+    }
+    let mut unavailable_capabilities = inputs.unavailable_capabilities;
+    if !inputs.composition_present {
+        let reason = if inputs.connection_state == ConnectionBindingState::Error {
+            UnavailableReason::ProviderUnavailable
+        } else {
+            UnavailableReason::ProviderNotEffective
+        };
+        unavailable_capabilities.extend(
+            inputs
+                .configured_external_tools
+                .iter()
+                .map(|tool| external_unavailable(tool, reason)),
+        );
+    }
+    let repository = RepositoryBinding {
+        selected: inputs.selected,
+        display_name: inputs.repository_display_name,
+        kind: if inputs.selected {
+            RepositoryKind::SelectedRepository
+        } else {
+            RepositoryKind::None
+        },
+        current_generation: inputs
+            .selected
+            .then_some(inputs.current_repository_generation),
+        captured_generation: connection.captured_repository_generation,
+        identity: if !inputs.selected {
+            RepositoryIdentity::NotSelected
+        } else if connection.advertised {
+            RepositoryIdentity::Current
+        } else if connection.captured_repository_generation.is_some() {
+            RepositoryIdentity::Stale
+        } else {
+            RepositoryIdentity::Unknown
+        },
+    };
+    EffectiveAuthoritySnapshot {
+        schema_version: 1,
+        status,
+        repository,
+        connection,
+        configured: inputs.configured,
+        effective_tools,
+        unavailable_capabilities,
+        reviewed_commit: reviewed_commit(inputs.commit_authorization, inputs.selected),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_inputs() -> EffectiveAuthoritySnapshotInputs {
+        EffectiveAuthoritySnapshotInputs {
+            selected: true,
+            repository_display_name: Some("private-repo".to_owned()),
+            current_repository_generation: 7,
+            captured_repository_generation: Some(7),
+            connection_state: ConnectionBindingState::Connected,
+            runtime_source: Some(CodexExecutableSource::CertifiedBaseline),
+            captured_model_generation: Some(3),
+            captured_connection_generation: Some(9),
+            context_current: true,
+            publication_current: true,
+            repository_context_matches: true,
+            registry_tool_count_matches: true,
+            composition_present: true,
+            allowed_permissions: vec![PermissionLevel::Read, PermissionLevel::Write],
+            effective_tools: vec![EffectiveToolEntry {
+                public_tool_name: "repo.status".to_owned(),
+                source_kind: SourceKind::RepositoryHost,
+                source_label: "desktop_repository".to_owned(),
+                effect_class: EffectClass::ReadOnly,
+                authority_category: AuthorityCategory::RepositoryObservation,
+                permission: PermissionLevel::Read,
+                repository_bound: true,
+                advertised: false,
+                host_invocation: HostInvocationDescriptor {
+                    eligible: false,
+                    kind: None,
+                    unavailable_reason: None,
+                },
+            }],
+            unavailable_capabilities: Vec::new(),
+            configured: ConfiguredSummary {
+                profile_source: Some(SourceKind::BuiltIn),
+                configured_provider_count: 0,
+                configured_capability_count: 1,
+            },
+            configured_external_tools: Vec::new(),
+            branch_authority_present: true,
+            patch_preparer_present: true,
+            multi_file_edit_preparer_present: true,
+            create_file_preparer_present: true,
+            delete_file_preparer_present: true,
+            rename_file_preparer_present: true,
+            coordinator_state: CoordinatorState::Idle,
+            commit_authorization: CommitAuthorizationPresentation::ReviewRequired,
+        }
+    }
+
+    #[test]
+    fn snapshot_composition_preserves_current_stale_and_reconnect_reporting() {
+        let current = compose_effective_authority_snapshot(snapshot_inputs());
+        assert_eq!(current.status, SnapshotStatus::ConnectedCurrent);
+        assert!(current.connection.advertised);
+        assert_eq!(current.repository.identity, RepositoryIdentity::Current);
+
+        let mut stale_inputs = snapshot_inputs();
+        stale_inputs.publication_current = false;
+        let stale = compose_effective_authority_snapshot(stale_inputs);
+        assert_eq!(stale.status, SnapshotStatus::Stale);
+        assert!(!stale.connection.advertised);
+        assert_eq!(stale.repository.identity, RepositoryIdentity::Stale);
+
+        let mut reconnect_inputs = snapshot_inputs();
+        reconnect_inputs.context_current = false;
+        let reconnect = compose_effective_authority_snapshot(reconnect_inputs);
+        assert_eq!(reconnect.status, SnapshotStatus::ReconnectRequired);
+        assert!(!reconnect.connection.advertised);
+    }
+
+    #[test]
+    fn snapshot_composition_keeps_host_explicit_availability_presentation() {
+        let current = compose_effective_authority_snapshot(snapshot_inputs());
+        let descriptor = &current.effective_tools[0].host_invocation;
+        assert!(descriptor.eligible);
+        assert_eq!(
+            descriptor.kind,
+            Some(crate::host_invocation::HostInvocationKind::RepoStatus {})
+        );
+        assert_eq!(descriptor.unavailable_reason, None);
+
+        let mut busy_inputs = snapshot_inputs();
+        busy_inputs.coordinator_state = CoordinatorState::HostPrepared;
+        let busy = compose_effective_authority_snapshot(busy_inputs);
+        let descriptor = &busy.effective_tools[0].host_invocation;
+        assert!(!descriptor.eligible);
+        assert_eq!(
+            descriptor.unavailable_reason,
+            Some(crate::host_invocation::HostInvocationUnavailableReason::HostInvocationBusy)
+        );
+    }
+
+    #[test]
+    fn snapshot_composition_keeps_the_eleven_host_explicit_kinds() {
+        use crate::host_invocation::HostInvocationKind as Kind;
+
+        let names = [
+            "fs.read",
+            "repo.file-info",
+            "repo.status",
+            "repo.diff",
+            "repo.diff-staged",
+            "repo.create-branch",
+            "repo.patch",
+            "repo.edit-files",
+            "repo.create-file",
+            "repo.delete-file",
+            "repo.rename-file",
+        ];
+        let mut inputs = snapshot_inputs();
+        inputs.effective_tools = names
+            .into_iter()
+            .map(|name| EffectiveToolEntry {
+                public_tool_name: name.to_owned(),
+                source_kind: SourceKind::RepositoryHost,
+                source_label: "desktop_repository".to_owned(),
+                effect_class: EffectClass::ReadOnly,
+                authority_category: AuthorityCategory::RepositoryObservation,
+                permission: PermissionLevel::Read,
+                repository_bound: true,
+                advertised: false,
+                host_invocation: HostInvocationDescriptor {
+                    eligible: false,
+                    kind: None,
+                    unavailable_reason: None,
+                },
+            })
+            .collect();
+
+        let snapshot = compose_effective_authority_snapshot(inputs);
+        let kinds = snapshot
+            .effective_tools
+            .iter()
+            .map(|tool| tool.host_invocation.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                Some(Kind::FsRead),
+                Some(Kind::RepoFileInfo),
+                Some(Kind::RepoStatus {}),
+                Some(Kind::RepoDiff {}),
+                Some(Kind::RepoDiffStaged {}),
+                Some(Kind::RepoCreateBranch),
+                Some(Kind::RepoPatch),
+                Some(Kind::RepoEditFiles),
+                Some(Kind::RepoCreateFile),
+                Some(Kind::RepoDeleteFile),
+                Some(Kind::RepoRenameFile),
+            ]
+        );
+    }
+
+    #[test]
+    fn composed_snapshot_keeps_closed_schema_and_safe_presentation() {
+        let snapshot = compose_effective_authority_snapshot(snapshot_inputs());
+        let json = serde_json::to_string(&snapshot).expect("snapshot serializes");
+        let object = serde_json::from_str::<serde_json::Value>(&json).expect("snapshot is JSON");
+        for field in [
+            "schemaVersion",
+            "status",
+            "repository",
+            "connection",
+            "configured",
+            "effectiveTools",
+            "unavailableCapabilities",
+            "reviewedCommit",
+        ] {
+            assert!(
+                object.get(field).is_some(),
+                "missing snapshot field: {field}"
+            );
+        }
+        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(
+            snapshot.repository.display_name.as_deref(),
+            Some("private-repo")
+        );
+        for secret in [
+            r#"C:\Users\SECRET_USER\private-repo"#,
+            "SUPER_SECRET_TOKEN",
+            "https://user:password@example.invalid/mcp",
+            "SECRET_STDERR",
+            "rah_tool_17",
+        ] {
+            assert!(!json.contains(secret), "secret leaked: {secret}");
+        }
+    }
 
     #[test]
     fn complete_snapshot_serialization_is_sanitized_and_closed() {

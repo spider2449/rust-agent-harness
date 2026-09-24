@@ -40,10 +40,12 @@ use desktop_preferences::{
 };
 #[cfg(target_os = "windows")]
 use effective_authority::{
-    ConfiguredSummary, ConnectionBinding, ConnectionBindingState, DesktopToolComposition,
-    EffectiveAuthoritySnapshot, EffectiveToolEntry, ExternalToolDescriptor, RepositoryBinding,
-    RepositoryIdentity, RepositoryKind, SnapshotStatus, SourceKind,
+    ConfiguredSummary, ConnectionBindingState, DesktopToolComposition, EffectiveAuthoritySnapshot,
+    EffectiveToolEntry, ExternalToolDescriptor, SourceKind, UnavailableCapability,
 };
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+use effective_authority::{RepositoryKind, SnapshotStatus};
 #[cfg(target_os = "windows")]
 use futures::StreamExt;
 #[cfg(target_os = "windows")]
@@ -2215,6 +2217,36 @@ fn safe_repository_display_name(root: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
+struct EffectiveAuthoritySnapshotInputs {
+    selected: bool,
+    repository_display_name: Option<String>,
+    current_repository_generation: u64,
+    captured_repository_generation: Option<u64>,
+    connection_state: ConnectionBindingState,
+    runtime_source: Option<CodexExecutableSource>,
+    captured_model_generation: Option<u64>,
+    captured_connection_generation: Option<u64>,
+    context_current: bool,
+    publication_current: bool,
+    repository_context_matches: bool,
+    registry_tool_count_matches: bool,
+    composition_present: bool,
+    allowed_permissions: Vec<PermissionLevel>,
+    effective_tools: Vec<EffectiveToolEntry>,
+    unavailable_capabilities: Vec<UnavailableCapability>,
+    configured: ConfiguredSummary,
+    configured_external_tools: Vec<ExternalToolDescriptor>,
+    branch_authority_present: bool,
+    patch_preparer_present: bool,
+    multi_file_edit_preparer_present: bool,
+    create_file_preparer_present: bool,
+    delete_file_preparer_present: bool,
+    rename_file_preparer_present: bool,
+    coordinator_state: CoordinatorState,
+    commit_authorization: CommitAuthorizationPresentation,
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn get_effective_authority_snapshot(
     state: State<'_, DesktopAppState>,
@@ -2252,7 +2284,18 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let selected = repository.is_some();
-    let (connection_binding, composition, status) = match &*connection {
+    let (
+        connection_state,
+        runtime_source,
+        captured_repository_generation,
+        captured_model_generation,
+        captured_connection_generation,
+        context_current,
+        publication_current,
+        repository_context_matches,
+        registry_tool_count_matches,
+        composition,
+    ) = match &*connection {
         ConnectionState::Connected {
             source,
             repository_generation,
@@ -2301,86 +2344,68 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
                 },
             );
             let repository_context_matches = selected || *repository_generation == 0;
-            let current = context_current
-                && publication_current
-                && repository_context_matches
-                && composition.registry.definitions().len() == composition.tools.len();
-            let status = if current {
-                SnapshotStatus::ConnectedCurrent
-            } else if context_current {
-                SnapshotStatus::Stale
-            } else {
-                SnapshotStatus::ReconnectRequired
-            };
+            let registry_tool_count_matches =
+                composition.registry.definitions().len() == composition.tools.len();
             (
-                ConnectionBinding {
-                    state: ConnectionBindingState::Connected,
-                    runtime_kind: Some("codex"),
-                    runtime_source: Some(effective_authority::source_label(*source)),
-                    captured_repository_generation: Some(*repository_generation),
-                    captured_model_generation: Some(*model_generation),
-                    captured_connection_generation: Some(*connection_generation),
-                    advertised: current,
-                },
+                ConnectionBindingState::Connected,
+                Some(*source),
+                Some(*repository_generation),
+                Some(*model_generation),
+                Some(*connection_generation),
+                context_current,
+                publication_current,
+                repository_context_matches,
+                registry_tool_count_matches,
                 Some(Arc::clone(composition)),
-                status,
             )
         }
         ConnectionState::Connecting => (
-            ConnectionBinding {
-                state: ConnectionBindingState::Connecting,
-                runtime_kind: None,
-                runtime_source: None,
-                captured_repository_generation: None,
-                captured_model_generation: None,
-                captured_connection_generation: None,
-                advertised: false,
-            },
+            ConnectionBindingState::Connecting,
             None,
-            SnapshotStatus::Connecting,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
         ),
         ConnectionState::Disconnecting => (
-            ConnectionBinding {
-                state: ConnectionBindingState::Disconnecting,
-                runtime_kind: None,
-                runtime_source: None,
-                captured_repository_generation: None,
-                captured_model_generation: None,
-                captured_connection_generation: None,
-                advertised: false,
-            },
+            ConnectionBindingState::Disconnecting,
             None,
-            SnapshotStatus::Stale,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
         ),
         ConnectionState::Error(_) => (
-            ConnectionBinding {
-                state: ConnectionBindingState::Error,
-                runtime_kind: None,
-                runtime_source: None,
-                captured_repository_generation: None,
-                captured_model_generation: None,
-                captured_connection_generation: None,
-                advertised: false,
-            },
+            ConnectionBindingState::Error,
             None,
-            SnapshotStatus::Unavailable,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
         ),
         ConnectionState::NotConnected => (
-            ConnectionBinding {
-                state: ConnectionBindingState::NotConnected,
-                runtime_kind: None,
-                runtime_source: None,
-                captured_repository_generation: None,
-                captured_model_generation: None,
-                captured_connection_generation: None,
-                advertised: false,
-            },
+            ConnectionBindingState::NotConnected,
             None,
-            if selected {
-                SnapshotStatus::Disconnected
-            } else {
-                SnapshotStatus::NoRepository
-            },
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
         ),
     };
     let allowed_permissions = match &*connection {
@@ -2390,9 +2415,8 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
         } => allowed_permissions.clone(),
         _ => Vec::new(),
     };
-    let connection_is_error = matches!(&*connection, ConnectionState::Error(_));
     drop(connection);
-    let mut effective_tools = composition
+    let effective_tools = composition
         .as_ref()
         .map_or_else(Vec::new, |value| value.tools.clone());
     let coordinator_state = {
@@ -2406,50 +2430,9 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
     let branch_authority_present = repository
         .as_ref()
         .is_some_and(|value| value.branch_creation_authority.is_some());
-    for tool in &mut effective_tools {
-        tool.advertised = connection_binding.advertised;
-        tool.host_invocation = host_descriptor_with_rename(
-            tool,
-            status == SnapshotStatus::ConnectedCurrent,
-            selected,
-            allowed_permissions.contains(&tool.permission),
-            branch_authority_present,
-            composition
-                .as_ref()
-                .is_some_and(|value| value.repository_patch_preparer.is_some()),
-            composition
-                .as_ref()
-                .is_some_and(|value| value.repository_multi_file_edit_preparer.is_some()),
-            composition
-                .as_ref()
-                .is_some_and(|value| value.repository_create_file_preparer.is_some()),
-            composition
-                .as_ref()
-                .is_some_and(|value| value.repository_delete_file_preparer.is_some()),
-            composition
-                .as_ref()
-                .is_some_and(|value| value.repository_rename_file_preparer.is_some()),
-            coordinator_state,
-        );
-    }
-    let mut unavailable_capabilities = composition
+    let unavailable_capabilities = composition
         .as_ref()
         .map_or_else(Vec::new, |value| value.unavailable.clone());
-    if composition.is_none()
-        && let Some(profile) = profile_selection.as_ref()
-    {
-        let reason = if connection_is_error {
-            effective_authority::UnavailableReason::ProviderUnavailable
-        } else {
-            effective_authority::UnavailableReason::ProviderNotEffective
-        };
-        unavailable_capabilities.extend(
-            profile
-                .external_tools()
-                .iter()
-                .map(|tool| effective_authority::external_unavailable(tool, reason)),
-        );
-    }
     let configured = profile_selection.as_ref().map_or(
         ConfiguredSummary {
             profile_source: Some(SourceKind::BuiltIn),
@@ -2462,38 +2445,46 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
             configured_capability_count: profile.presentation().expected_tool_count,
         },
     );
-    let repository_binding = RepositoryBinding {
+    let repository_display_name = repository
+        .as_deref()
+        .and_then(|value| safe_repository_display_name(&value.root));
+    let configured_external_tools = profile_selection
+        .as_ref()
+        .map_or_else(Vec::new, |profile| profile.external_tools().to_vec());
+    let preparers = composition.as_ref();
+    effective_authority::compose_effective_authority_snapshot(EffectiveAuthoritySnapshotInputs {
         selected,
-        display_name: repository
-            .as_deref()
-            .and_then(|value| safe_repository_display_name(&value.root)),
-        kind: if selected {
-            RepositoryKind::SelectedRepository
-        } else {
-            RepositoryKind::None
-        },
-        current_generation: selected.then_some(current_repository_generation),
-        captured_generation: connection_binding.captured_repository_generation,
-        identity: if !selected {
-            RepositoryIdentity::NotSelected
-        } else if connection_binding.advertised {
-            RepositoryIdentity::Current
-        } else if connection_binding.captured_repository_generation.is_some() {
-            RepositoryIdentity::Stale
-        } else {
-            RepositoryIdentity::Unknown
-        },
-    };
-    EffectiveAuthoritySnapshot {
-        schema_version: 1,
-        status,
-        repository: repository_binding,
-        connection: connection_binding,
-        configured,
+        repository_display_name,
+        current_repository_generation,
+        captured_repository_generation,
+        connection_state,
+        runtime_source,
+        captured_model_generation,
+        captured_connection_generation,
+        context_current,
+        publication_current,
+        repository_context_matches,
+        registry_tool_count_matches,
+        composition_present: composition.is_some(),
+        allowed_permissions,
         effective_tools,
         unavailable_capabilities,
-        reviewed_commit: effective_authority::reviewed_commit(workflow.authorization, selected),
-    }
+        configured,
+        configured_external_tools,
+        branch_authority_present,
+        patch_preparer_present: preparers
+            .is_some_and(|value| value.repository_patch_preparer.is_some()),
+        multi_file_edit_preparer_present: preparers
+            .is_some_and(|value| value.repository_multi_file_edit_preparer.is_some()),
+        create_file_preparer_present: preparers
+            .is_some_and(|value| value.repository_create_file_preparer.is_some()),
+        delete_file_preparer_present: preparers
+            .is_some_and(|value| value.repository_delete_file_preparer.is_some()),
+        rename_file_preparer_present: preparers
+            .is_some_and(|value| value.repository_rename_file_preparer.is_some()),
+        coordinator_state,
+        commit_authorization: workflow.authorization,
+    })
 }
 
 #[cfg(target_os = "windows")]
