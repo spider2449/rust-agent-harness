@@ -417,6 +417,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tracked_binary_file_is_listed_structurally_without_disclosing_contents() {
+        const BINARY_PATH: &str = "binary-sentinel.dat";
+        const SENTINEL: &[u8] = b"RAH_REPO_LIST_BINARY_SENTINEL";
+        let binary = [b"\0\xff".as_slice(), SENTINEL, b"\x80\0".as_slice()].concat();
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join(BINARY_PATH), &binary).unwrap();
+        fixture.commit_all();
+
+        let tracked = Command::new(native_git())
+            .args(["ls-files", "--error-unmatch", "--", BINARY_PATH])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(tracked.status.success());
+        assert_eq!(tracked.stdout, format!("{BINARY_PATH}\n").as_bytes());
+
+        let tool = RepositoryListTool::new(native_git(), &fixture.0).unwrap();
+        let output = tool
+            .execute(ToolInput(json!({})), ToolContext::default())
+            .await
+            .unwrap();
+        let response = json_output(output.clone());
+
+        assert_eq!(
+            response["entries"],
+            json!([{"path":BINARY_PATH,"kind":"file"}])
+        );
+        let response_fields = response
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            response_fields,
+            [
+                "complete",
+                "consistency",
+                "entries",
+                "omitted",
+                "path",
+                "status",
+                "truncation_reason"
+            ]
+        );
+        let entry = response["entries"][0].as_object().unwrap();
+        assert_eq!(entry.len(), 2);
+        assert!(entry.contains_key("path"));
+        assert!(entry.contains_key("kind"));
+        assert!(
+            [
+                "contents",
+                "bytes",
+                "body",
+                "preview",
+                "text",
+                "decoded_text"
+            ]
+            .iter()
+            .all(|field| !entry.contains_key(*field))
+        );
+        let omitted = response["omitted"].as_object().unwrap();
+        assert_eq!(omitted.len(), 3);
+        assert!(omitted.contains_key("non_addressable_path"));
+        assert!(omitted.contains_key("non_regular"));
+        assert!(omitted.contains_key("changed_or_missing"));
+
+        let serialized = serde_json::to_vec(&output).unwrap();
+        assert!(
+            !serialized
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL)
+        );
+        assert!(
+            !serialized
+                .windows(binary.len())
+                .any(|window| window == binary)
+        );
+        assert!(!String::from_utf8_lossy(&serialized).contains("\u{fffd}"));
+    }
+
+    #[tokio::test]
     async fn request_validation_and_target_failures_are_closed() {
         let fixture = Fixture::new();
         fs::write(fixture.0.join("file.txt"), b"file").unwrap();
