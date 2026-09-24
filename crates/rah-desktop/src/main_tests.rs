@@ -11914,6 +11914,130 @@ fn branch_effective_authority_is_host_classified_and_unavailable_paths_are_close
     assert!(!tool.advertised);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn effective_authority_snapshot_reaps_expired_preparation_without_issuing_authority() {
+    use std::time::Instant;
+
+    let (state, _repository_a, _repository_b, _member_a, _) = activation_fixture().await;
+    assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
+    let connection_generation = {
+        let mut generation = state.next_connection_generation.lock().unwrap();
+        *generation += 1;
+        *generation
+    };
+    let repository = state.repository.lock().unwrap().clone().unwrap();
+    let registry = desktop_tool_registry(Some(&repository), None)
+        .expect("active repository registry should compose");
+    let composition = desktop_tool_composition_from_registry(
+        Arc::clone(&registry),
+        Some(&repository),
+        false,
+        &[],
+    )
+    .expect("active repository composition should classify");
+    let runtime = test_codex_runtime(&repository.root, registry).await;
+    let repository_generation = *state.repository_generation.lock().unwrap();
+    let model_generation = state.model.lock().unwrap().generation;
+    let profile_generation = *state.trusted_profile_generation.lock().unwrap();
+    let identity_generation = *state.commit_identity_generation.lock().unwrap();
+    assert!(
+        publish_connected_provider_state(
+            &state,
+            PendingConnectedPublication {
+                runtime: Arc::clone(&runtime),
+                activation: None,
+                source: CodexExecutableSource::Path,
+                repository_generation,
+                model_generation,
+                profile_generation,
+                connection_generation,
+                identity_generation,
+                repository_fingerprint: Some(repository_context_fingerprint(&repository.root)),
+                composition,
+                allowed_permissions: vec![
+                    PermissionLevel::None,
+                    PermissionLevel::Read,
+                    PermissionLevel::Execute,
+                ],
+                commit_capability: None,
+            },
+        )
+        .is_ok()
+    );
+
+    let created_at = Instant::now() - super::host_invocation::BRANCH_TICKET_TTL;
+    let prepared = PreparedHostInvocation::for_test(created_at);
+    assert!(prepared.is_expired(Instant::now()));
+    state
+        .host_invocation
+        .lock()
+        .unwrap()
+        .prepare(prepared)
+        .expect("expired HostExplicit preparation is retained for cleanup evidence");
+    assert_eq!(
+        state.host_invocation.lock().unwrap().state(),
+        CoordinatorState::HostPrepared
+    );
+
+    let repository_generation_before = *state.repository_generation.lock().unwrap();
+    let profile_generation_before = *state.trusted_profile_generation.lock().unwrap();
+    let workflow_authorization_before = state.repository_workflow.lock().unwrap().authorization;
+    let provider_activation_before = state.provider_activation.lock().unwrap().is_some();
+    let trusted_profile_before = state.trusted_profile.lock().unwrap().is_some();
+    let commit_capability_before = state.commit_capability.lock().unwrap().is_some();
+    let authority = effective_authority_snapshot_for_state(&state);
+
+    assert_eq!(authority.status, SnapshotStatus::ConnectedCurrent);
+    assert_eq!(
+        state.host_invocation.lock().unwrap().state(),
+        CoordinatorState::Idle
+    );
+    let host_tool = authority
+        .effective_tools
+        .iter()
+        .find(|tool| tool.public_tool_name == "repo.status")
+        .expect("current snapshot should report repo.status HostExplicit availability");
+    assert!(host_tool.host_invocation.eligible);
+    assert_eq!(host_tool.host_invocation.unavailable_reason, None);
+    assert!(matches!(
+        state
+            .host_invocation
+            .lock()
+            .unwrap()
+            .take_prepared("test-ticket", Instant::now()),
+        Err(super::host_invocation::CoordinatorError::NotPrepared)
+    ));
+    assert_eq!(
+        *state.repository_generation.lock().unwrap(),
+        repository_generation_before
+    );
+    assert_eq!(
+        *state.trusted_profile_generation.lock().unwrap(),
+        profile_generation_before
+    );
+    assert_eq!(
+        state.repository_workflow.lock().unwrap().authorization,
+        workflow_authorization_before
+    );
+    assert_eq!(
+        state.provider_activation.lock().unwrap().is_some(),
+        provider_activation_before
+    );
+    assert_eq!(
+        state.trusted_profile.lock().unwrap().is_some(),
+        trusted_profile_before
+    );
+    assert_eq!(
+        state.commit_capability.lock().unwrap().is_some(),
+        commit_capability_before
+    );
+
+    runtime
+        .shutdown()
+        .await
+        .expect("deterministic fake runtime should shut down");
+}
+
 #[test]
 fn patch_is_the_seventh_host_tool_and_retains_its_shared_preparer() {
     let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
