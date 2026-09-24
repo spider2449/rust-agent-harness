@@ -1151,10 +1151,22 @@ separate one-shot reviewed-commit authorization where applicable. A review
 state is presentation state, not an authority token.
 
 Backend-derived stale or reconnect-required state cannot be labelled Current.
-Inspection and Refresh Authority have zero lifecycle, Tool, repository, chat,
-authority, or persistence side effects. The panel grants no authority, does
-not dynamically grant or revoke permissions, does not reload profiles or
-manage provider lifecycles, and persists/restores no authority.
+Effective Authority collection cannot grant, issue, consume, or authorize
+executable authority; the snapshot is descriptive output, never an execution
+token. Root gathering may reap a HostExplicit preparation only after its
+ticket has already expired and become unusable, clearing retained coordinator
+state before reporting availability. This bounded workflow-bookkeeping cleanup
+can change busy/availability presentation, but does not invalidate a ticket
+that has not expired or change repository, provider/runtime, or Commit
+authority. It is not a grant path and does not bypass permission, review, or
+ticket checks. The
+`effective_authority` composition step receives closed facts and remains
+deterministic and free of live-state access and expiry cleanup.
+
+Inspection and Refresh Authority do not compose or activate capabilities,
+dispatch Tools, change repository or chat state, or persist/restore authority.
+The panel does not dynamically grant or revoke permissions, reload profiles,
+or manage provider lifecycles.
 
 ## Inert Trusted Profile preference persistence
 

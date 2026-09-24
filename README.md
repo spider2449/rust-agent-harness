@@ -551,7 +551,12 @@ permission/source classifications, bounded unavailable-capability reasons, and
 reviewed-commit presentation state.
 
 The panel does not grant, revoke, edit, reload, or otherwise compose authority.
-Refresh Authority is read-only. Model Tool requests remain subject to
+Refresh Authority is observational with respect to authority decisions and
+executable capability. Root gathering may clear retained coordinator state for
+an already-expired, unusable HostExplicit preparation before reporting
+availability; this workflow-bookkeeping cleanup may change busy/availability
+presentation but cannot invalidate a ticket that has not expired or grant
+authority. Model Tool requests remain subject to
 ToolRegistry lookup, host PermissionLevel and policy checks, repository/workspace
 constraints, generation/precondition checks, and one-shot reviewed-commit
 authorization where applicable. Configured, effective, advertised, and

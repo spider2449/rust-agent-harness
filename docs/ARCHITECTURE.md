@@ -984,7 +984,7 @@ composition and lifecycle state:
 ```text
 Desktop host state
         -> sanitized EffectiveAuthoritySnapshot
-        -> read-only Tauri command
+        -> authority-observation Tauri command
         -> Effective Authority panel
 ```
 
@@ -1002,9 +1002,20 @@ checks, repository/workspace constraints, generation/preconditions, and any
 separate reviewed-commit authorization. Stale or reconnect-required inventory
 cannot become Current for a new repository or model context.
 
+Effective Authority collection is observational with respect to authority
+decisions and executable capability: it does not grant, issue, consume, or
+authorize executable authority. Root gathering observes live state and may
+reap a HostExplicit preparation whose ticket has already expired and is
+unusable, clearing its retained coordinator state before reporting
+availability. That bounded workflow-bookkeeping cleanup can change the
+reported busy/availability presentation; it does not make a valid ticket
+unusable or change repository, provider/runtime, or Commit authority. The
+`effective_authority` composition step receives closed facts and
+deterministically derives the snapshot; it does not perform expiry cleanup or
+access live owners.
 Inspection and Refresh Authority do not compose, reload, spawn, reconnect,
-execute, persist, or mutate authority. MCP and Process Plugin adapters remain
-Tool providers under the existing architecture. The v0.16 release path did not
+execute, persist, or make authority decisions. MCP and Process Plugin adapters
+remain Tool providers under the existing architecture. The v0.16 release path did not
 compose their authority-review presentation through Desktop; the v0.17
 provider-only overlay now composes admitted local providers at Connect and
 publishes their host-derived descriptors through the same observation path.
