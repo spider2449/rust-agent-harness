@@ -1,4 +1,36 @@
-# RAH v0.31.0 Security Model - released
+# RAH v0.32.0 Security Model - release preparation
+
+`repo.list` is a bounded, read-only `RepositoryObservation` Tool. It cannot
+grant repository authority or mutate repository state. The host supplies the
+selected active repository; model input cannot choose a root, worktree, member,
+Git executable, argv, cwd, environment, timeout, or result limit. HostExplicit
+remains exactly 11, and `repo.list` is not HostExplicit.
+
+## `repo.list` boundary
+
+The Tool uses the fixed tracked Git inventory and host-side direct-child
+projection. It returns only bounded structural path and file/directory kind
+metadata. It does not open or read file contents, including for tracked binary
+files. Binary evidence establishes structural non-disclosure for the tested
+fixture; it does not establish general arbitrary-byte semantics.
+
+The listing is restricted to the selected active repository and its tracked,
+currently eligible structure. It does not enumerate arbitrary filesystem
+entries, discover untracked or ignored paths, or recursively browse. Existing
+nested-repository and symlink/reparse boundary checks remain enforced, with
+closed and sanitized errors; raw host paths remain private. Windows live
+symlink certification is not claimed. Observation remains best-effort and
+does not imply a transactional snapshot, race-free TOCTOU, rollback, or replay.
+
+Staged diff observation uses one aggregate 15-second deadline across repeated
+repository-layout validation and its fixed Git child sequence. Each child is
+also subject to its existing ceiling; its effective timeout is clamped to the
+aggregate time remaining. Layout validation remains repeated before each
+observer command, and deadline exhaustion fails closed without a partial diff
+or retry. The correction preserves the existing timeout values and validation
+policy and adds no authority.
+
+## Historical RAH v0.31.0 Security Model - released
 
 The release theme is **Bounded Repository Discovery / Search**. `repo.search`
 is a narrow extension of the existing selected-repository observation boundary:

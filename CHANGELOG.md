@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.32.0 - release preparation (publication pending)
+
+The release theme is **Bounded Repository Structure Listing / Browse**.
+
+### Added
+
+- First-party `repo.list` for bounded, direct-child structural browsing of the
+  host-selected active repository. It uses a fixed tracked Git inventory,
+  synthesizes directory entries from visible tracked paths, sorts results
+  deterministically by repository-relative path, bounds results, and returns
+  sanitized closed errors. It performs structural listing only: no file
+  content reads, arbitrary filesystem enumeration, or HostExplicit expansion.
+- The closed result contains structural path and kind metadata only. It does
+  not read file contents; tracked binary files are structural entries without
+  content disclosure.
+- Missing-ancestor handling and existing symlink/reparse ancestor
+  classification were corrected and independently audited. Errors remain
+  closed and sanitized.
+
+### Authority and evidence
+
+`repo.list` remains `ReadOnly` / `RepositoryObservation` / `Execute` and is
+bound to the host-selected active repository. It adds no mutation authority,
+PermissionLevel, authority category, or HostExplicit route; HostExplicit
+remains exactly 11.
+
+Task 374 defines the v0.32 scope. Tasks 375-382 record the contract,
+implementation, audit, correction, and Windows certification history. Task 408
+found a missing binary evidence case; Task 409 closed deterministic binary
+no-content evidence at `580880f2619de4ed1e3810aec31b2ad27d6d91c3`. Task 410
+recorded four Desktop test failures from Task 409, then could not reproduce
+them: all four focused tests passed 3/3 and two consecutive full Desktop
+suites passed. Task 411 closed the committed-harness Windows binary evidence
+at certification HEAD `64467c9d8dfbb0cb465a8be72e3c312bc34c876a`; its later
+documentation closeout is `ad9e755ac6d973fb39c58ad88e905c682e6fe9ba`.
+
+Staged diff observation preserves its aggregate 15-second deadline while
+clamping Git-layout probes and HEAD child execution to the aggregate remaining
+time. The existing five-second per-child ceilings and fail-closed timeout
+behavior remain unchanged. Tasks 412-422 record the initial intermittent
+validation failure, policy clarification, bounded implementation correction,
+and separate validation evidence; the original Task 412 run did not pass.
+
+Tracked binary visibility is evidenced as structural non-disclosure only; it
+does not claim general arbitrary-byte semantics. Windows symlink live
+certification and Codex model-inference certification remain nonclaims. The
+Tauri permission-generation discrepancy (47 invoke handlers and 44 generated
+entries) remains unrelated existing debt.
+
+### Explicit nonclaims
+
+- No arbitrary filesystem enumeration, untracked/ignored discovery, or
+  recursive browse.
+- No content-reading capability, mutation authority, or HostExplicit
+  expansion.
+- No multiple-active repository support or model-selected repository.
+- No general Windows symlink certification, Codex inference certification,
+  or arbitrary-byte semantics beyond structural non-disclosure.
+
+This is release preparation only. The tag and publication are pending.
+
 ## v0.31.0 - released (2026-09-20)
 
 The release theme is **Bounded Repository Discovery / Search**.

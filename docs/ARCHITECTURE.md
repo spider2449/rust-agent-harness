@@ -1,4 +1,37 @@
-# RAH v0.31.0 Architecture - released
+# RAH v0.32.0 Architecture - release preparation
+
+The v0.32 primary capability is bounded repository structure browsing with
+the first-party `repo.list` Tool. It belongs to the existing
+`RepositoryObservation` boundary and receives the selected active repository
+from the host.
+
+```text
+host-selected active repository identity
+        |
+        v
+fixed tracked Git inventory
+        |
+        v
+host-side boundary validation and direct-child projection
+        |
+        v
+bounded repository-relative structural metadata
+```
+
+`repo.list` uses the fixed tracked inventory and host-side projection. It
+synthesizes directory entries from visible tracked paths, returns only direct
+children, and orders entries deterministically by repository-relative path.
+The bounded response contains path and file/directory kind metadata; file
+contents are not read. The result is bounded to the host-selected active
+repository and does not expose untracked or ignored filesystem entries.
+
+Its effective authority remains `ReadOnly` / `RepositoryObservation` /
+`PermissionLevel::Execute` with `repository_bound = true`. HostExplicit remains
+exactly 11; `repo.list` is not HostExplicit. No new permission, authority
+category, mutation route, or repository selector is introduced. See the
+v0.32 release gate for implementation, audit, and certification identities.
+
+## Historical RAH v0.31.0 Architecture - released
 
 The release theme is **Bounded Repository Discovery / Search**. `repo.search`
 extends the existing repository observation family without creating a parallel

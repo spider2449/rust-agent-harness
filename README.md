@@ -5,6 +5,25 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.32.0 release preparation
+
+The v0.32 primary capability is first-party `repo.list`, which provides
+bounded structural browsing of the host-selected active repository. It uses
+a fixed Git tracked-file inventory and projects only direct children of the
+repository root or a requested tracked directory. Directory entries are
+synthesized from visible tracked paths, results are ordered by
+repository-relative path, and the response is bounded.
+
+`repo.list` returns structural path and `file`/`directory` kind metadata only;
+it does not read file contents. It requires an active repository selected by
+the host and cannot select another repository through model input. It is
+distinct from `repo.search` (query-based tracked-file discovery), `fs.read`
+(known-file content), `repo.file-info` (one path's metadata), `repo.status`
+(repository changes), and `repo.diff` (change content). It does not enumerate
+arbitrary filesystem entries. See the [v0.32 release gate](docs/RAH_V0.32_RELEASE_GATE.md)
+for the evidence and preserved nonclaims. Tagging and publication remain
+pending.
+
 ## RAH v0.31.0 released
 
 The release theme is **Bounded Repository Discovery / Search**. RAH Desktop
