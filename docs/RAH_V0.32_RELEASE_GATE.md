@@ -1,6 +1,6 @@
 # RAH v0.32.0 Release Gate
 
-Status: **IN PROGRESS — REMAINING LOCAL GATES PASS; COMMIT, PUSH, AND EXACT-HEAD CI PENDING**
+Status: **STOP — EXACT-HEAD CI FAILED; NOT READY FOR PUBLICATION**
 
 This gate keeps the milestone scope, implementation, deterministic evidence,
 independent review, live Windows evidence, release preparation, and future
@@ -281,8 +281,69 @@ dependency versions/checksums, features, and workspace membership are
 unchanged. No Rust/test source or authority implementation changed;
 `repo.list` remains read-only `RepositoryObservation`, HostExplicit remains
 exactly 11, and the unrelated Tauri permission-generation debt remains out of
-scope. Release-preparation commit, push, and exact-head CI are pending; no
-publication has begun.
+scope.
+
+Task 423B created the reviewed release-preparation commit:
+
+```text
+0301a52095b1b7c3717a6497f4f2dd042b184bae
+docs: prepare RAH v0.32.0 release
+```
+
+Its first configured `origin` push attempt could not reach the internal push
+mirror. The configured GitHub fetch URL was confirmed, and the commit was
+successfully pushed to
+`https://github.com/spider2449/rust-agent-harness.git`; remote `master` equals
+the release-preparation SHA.
+
+Exact-head CI then failed:
+
+```text
+Run ID: 36275076398
+Workflow: CI
+Event: push
+Tested HEAD SHA: 0301a52095b1b7c3717a6497f4f2dd042b184bae
+Conclusion: failure
+URL: https://github.com/spider2449/rust-agent-harness/actions/runs/36275076398
+```
+
+The Ubuntu `cargo test --workspace` step exited 101 while compiling `rah-tools`
+tests. Rust reported `error[E0618]: expected function, found
+std::path::PathBuf` at `crates/rah-tools/src/repository_boundary.rs:332:24`:
+the local `root` PathBuf at line 330 shadows the `root` helper used at line
+332. Formatting and workspace check passed; workspace test failed and lint
+was skipped. No source change or CI retry was made.
+
+```text
+release-preparation verdict: STOP — NOT READY FOR PUBLICATION
+tag: NOT CREATED
+GitHub Release: NOT CREATED
+publication: NOT STARTED
+ready for Task 424: NO
+```
+
+The Task 423B record and this gate were updated after the tested commit to
+preserve the exact-head CI result without changing the SHA that CI tested. No
+follow-up commit or push was made. Source correction and subsequent
+validation require a separately authorized stabilization task.
+
+### Task 423C — Unix test compilation correction
+
+Task 423C preserves the Task 423B **STOP** verdict and the original failed
+exact-head run as historical evidence. It corrects only the Unix test fixture
+name shadowing in `crates/rah-tools/src/repository_boundary.rs`: the local
+repository root is named `root_path`, leaving the `root(...)` helper callable
+for the external fixture. No production Rust behavior or test semantics are
+changed. The corrected source still requires new exact-head Linux CI before
+release readiness can be reconsidered. No publication occurred, and Task
+424 remains reserved.
+
+Task 423C itself stopped before commit or push because its first required
+local check, `cargo fmt --check`, failed on formatting of the updated test
+assertion. The correction remains uncommitted and there is no new exact-head
+CI result. The detailed stop record is
+[`2026-09-27-task-423c-unix-repository-boundary-shadowing-fix.md`](plans/2026-09-27-task-423c-unix-repository-boundary-shadowing-fix.md).
+Release readiness remains blocked; no publication occurred.
 
 ## Publication state
 

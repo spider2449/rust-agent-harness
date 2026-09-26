@@ -327,12 +327,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn existing_symlink_ancestor_rejects_all_missing_descendant_depths() {
-        let root = root("symlink-ancestor");
-        fs::create_dir(root.join(".git")).unwrap();
+        let root_path = root("symlink-ancestor");
+        fs::create_dir(root_path.join(".git")).unwrap();
         let external = root("symlink-ancestor-target");
         fs::write(external.join("sentinel.txt"), b"outside").unwrap();
-        std::os::unix::fs::symlink(&external, root.join("a")).unwrap();
-        let policy = RepositoryNestedBoundaryPolicy::new(&root);
+        std::os::unix::fs::symlink(&external, root_path.join("a")).unwrap();
+        let policy = RepositoryNestedBoundaryPolicy::new(&root_path);
 
         for descendant in [
             "a/b/c/file.txt",
@@ -340,10 +340,14 @@ mod tests {
             "a/x/y/missing.txt",
             "a/x/y/z/missing.txt",
         ] {
-            assert!(policy.validate_existing(&root.join(descendant)).is_err());
+            assert!(
+                policy
+                    .validate_existing(&root_path.join(descendant))
+                    .is_err()
+            );
         }
 
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(root_path);
         let _ = fs::remove_dir_all(external);
     }
 
