@@ -336,8 +336,39 @@ impl RepositoryObserver {
         path: Option<&str>,
         started: Instant,
     ) -> Result<HostProcessOutput, ToolError> {
+        self.run_with_budget(command, path, started, None).await
+    }
+
+    pub(crate) async fn run_diff(
+        &self,
+        command: ObserverCommand,
+        path: Option<&str>,
+        started: Instant,
+    ) -> Result<HostProcessOutput, ToolError> {
+        let aggregate = match command {
+            ObserverCommand::Head
+            | ObserverCommand::DiffRaw(DiffBaseline::IndexVsHead)
+            | ObserverCommand::DiffNumstat(DiffBaseline::IndexVsHead)
+            | ObserverCommand::DiffPatch(DiffBaseline::IndexVsHead) => {
+                Some((started, DIFF_TIMEOUT))
+            }
+            _ => None,
+        };
+        self.run_with_budget(command, path, started, aggregate)
+            .await
+    }
+
+    async fn run_with_budget(
+        &self,
+        command: ObserverCommand,
+        path: Option<&str>,
+        started: Instant,
+        aggregate: Option<(Instant, Duration)>,
+    ) -> Result<HostProcessOutput, ToolError> {
         self.revalidate()?;
-        self.repository.validate_git(&self.git).await?;
+        self.repository
+            .validate_git_with_budget(&self.git, aggregate)
+            .await?;
         if matches!(
             command,
             ObserverCommand::Status
@@ -359,14 +390,7 @@ impl RepositoryObserver {
             | ObserverCommand::HeadTree
             | ObserverCommand::FileInfoStatus => FILE_INFO_TIMEOUT,
         };
-        let remaining = timeout
-            .checked_sub(started.elapsed())
-            .ok_or_else(|| git_error("repository observation exceeded its total timeout"))?;
-        if remaining.is_zero() {
-            return Err(git_error(
-                "repository observation exceeded its total timeout",
-            ));
-        }
+        let remaining = child_timeout(timeout, started, aggregate, Instant::now())?;
         let policy = match command {
             ObserverCommand::Index => &self.index,
             ObserverCommand::TrackedInventory => &self.tracked_inventory,
@@ -389,6 +413,26 @@ impl RepositoryObserver {
         };
         policy.execute_process(&input).await
     }
+}
+
+fn child_timeout(
+    ceiling: Duration,
+    started: Instant,
+    aggregate: Option<(Instant, Duration)>,
+    now: Instant,
+) -> Result<Duration, ToolError> {
+    let remaining = match aggregate {
+        Some((start, limit)) => {
+            ceiling.min(limit.saturating_sub(now.saturating_duration_since(start)))
+        }
+        None => ceiling.saturating_sub(now.saturating_duration_since(started)),
+    };
+    if remaining.is_zero() {
+        return Err(git_error(
+            "repository observation exceeded its total timeout",
+        ));
+    }
+    Ok(remaining)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -426,8 +470,16 @@ impl RepositoryIdentity {
     }
 
     pub(crate) async fn validate_git(&self, git: &Path) -> Result<(), ToolError> {
+        self.validate_git_with_budget(git, None).await
+    }
+
+    pub(crate) async fn validate_git_with_budget(
+        &self,
+        git: &Path,
+        aggregate: Option<(Instant, Duration)>,
+    ) -> Result<(), ToolError> {
         self.revalidate()?;
-        self.layout.validate_git(git).await?;
+        self.layout.validate_git_with_budget(git, aggregate).await?;
         self.revalidate()
     }
 
@@ -699,7 +751,69 @@ mod tests {
 
     use std::time::Instant;
 
-    use super::{ObserverCommand, RepositoryObserver};
+    use super::{
+        DIFF_TIMEOUT, FILE_INFO_TIMEOUT, ObserverCommand, RepositoryObserver, child_timeout,
+    };
+
+    #[test]
+    fn staged_head_child_timeout_composes_ceiling_with_aggregate_remainder() {
+        let started = Instant::now();
+        for (elapsed_ms, allowance_ms) in [
+            (0, 5_000),
+            (2_000, 5_000),
+            (4_000, 5_000),
+            (4_900, 5_000),
+            (5_000, 5_000),
+            (6_000, 5_000),
+            (10_000, 5_000),
+            (12_000, 3_000),
+            (14_900, 100),
+        ] {
+            assert_eq!(
+                child_timeout(
+                    FILE_INFO_TIMEOUT,
+                    started,
+                    Some((started, DIFF_TIMEOUT)),
+                    started + Duration::from_millis(elapsed_ms),
+                )
+                .unwrap(),
+                Duration::from_millis(allowance_ms),
+                "staged elapsed {elapsed_ms}ms",
+            );
+        }
+    }
+
+    #[test]
+    fn staged_child_timeout_uses_aggregate_remainder_for_diff_commands() {
+        let started = Instant::now();
+        assert_eq!(
+            child_timeout(
+                DIFF_TIMEOUT,
+                started,
+                Some((started, DIFF_TIMEOUT)),
+                started + Duration::from_secs(6),
+            )
+            .unwrap(),
+            Duration::from_secs(9),
+        );
+    }
+
+    #[test]
+    fn exhausted_staged_budget_rejects_child_before_spawn() {
+        let started = Instant::now();
+        let error = child_timeout(
+            FILE_INFO_TIMEOUT,
+            started,
+            Some((started, DIFF_TIMEOUT)),
+            started + DIFF_TIMEOUT,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repository observation exceeded its total timeout")
+        );
+    }
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 

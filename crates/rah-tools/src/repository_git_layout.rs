@@ -4,7 +4,7 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use rah_sandbox::{HostProcessOutput, OutputLimits};
@@ -356,6 +356,14 @@ impl RepositoryGitLayout {
 
     /// Runs fixed, bounded Git semantic probes and proves they agree with this layout.
     pub(crate) async fn validate_git(&self, git: &Path) -> Result<(), ToolError> {
+        self.validate_git_with_budget(git, None).await
+    }
+
+    pub(crate) async fn validate_git_with_budget(
+        &self,
+        git: &Path,
+        aggregate: Option<(Instant, Duration)>,
+    ) -> Result<(), ToolError> {
         let supplied_git = ExecutableEvidence::capture(git)
             .map_err(|_| git_error("configured executable identity changed"))?;
         if !self.git_executable.same_current_object(&supplied_git) {
@@ -367,6 +375,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--show-toplevel"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let private = probe(
@@ -374,6 +383,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let common = probe(
@@ -381,6 +391,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let bare = probe(
@@ -388,6 +399,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--is-bare-repository"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let superproject = probe(
@@ -395,6 +407,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--show-superproject-working-tree"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let index = probe(
@@ -402,6 +415,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--path-format=absolute", "--git-path", "index"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let head = probe(
@@ -409,6 +423,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["rev-parse", "--path-format=absolute", "--git-path", "HEAD"],
             REV_PARSE_LIMIT,
+            aggregate,
         )
         .await?;
         let worktrees = probe(
@@ -416,6 +431,7 @@ impl RepositoryGitLayout {
             &self.root,
             &["worktree", "list", "--porcelain", "-z"],
             WORKTREE_LIST_LIMIT,
+            aggregate,
         )
         .await?;
         if canonical_probe_path(&top)? != self.root
@@ -572,6 +588,7 @@ async fn probe(
     root: &Path,
     arguments: &[&str],
     stdout_limit: usize,
+    aggregate: Option<(Instant, Duration)>,
 ) -> Result<Vec<u8>, ToolError> {
     let policy = HostExecutionPolicy::new(
         git,
@@ -580,14 +597,81 @@ async fn probe(
         ".",
     )?
     .with_environment(repository_observer_environment(root)?)?
-    .with_timeout(PROBE_TIMEOUT)?
     .with_output_limits(OutputLimits {
         stdout_bytes: stdout_limit,
         stderr_bytes: PROBE_STDERR_LIMIT,
         combined_bytes: stdout_limit.saturating_add(PROBE_STDERR_LIMIT),
-    })?;
+    })?
+    .with_timeout(probe_timeout(aggregate, Instant::now())?)?;
     let output = policy.execute_process(&ToolInput(json!({}))).await?;
+    if output.timed_out
+        && matches!(aggregate, Some((started, limit)) if limit.saturating_sub(Instant::now().saturating_duration_since(started)).is_zero())
+    {
+        return Err(git_error(
+            "repository observation exceeded its total timeout",
+        ));
+    }
     successful_output(output, stdout_limit)
+}
+
+fn probe_timeout(
+    aggregate: Option<(Instant, Duration)>,
+    now: Instant,
+) -> Result<Duration, ToolError> {
+    let Some((started, limit)) = aggregate else {
+        return Ok(PROBE_TIMEOUT);
+    };
+    let remaining = limit.saturating_sub(now.saturating_duration_since(started));
+    if remaining.is_zero() {
+        return Err(git_error(
+            "repository observation exceeded its total timeout",
+        ));
+    }
+    Ok(PROBE_TIMEOUT.min(remaining))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{PROBE_TIMEOUT, probe_timeout};
+
+    #[test]
+    fn probe_uses_five_second_ceiling_with_full_aggregate_budget() {
+        let started = Instant::now();
+        assert_eq!(
+            probe_timeout(Some((started, Duration::from_secs(15))), started).unwrap(),
+            PROBE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn probe_uses_shared_aggregate_remainder_below_ceiling() {
+        let started = Instant::now();
+        assert_eq!(
+            probe_timeout(
+                Some((started, Duration::from_secs(15))),
+                started + Duration::from_secs(12)
+            )
+            .unwrap(),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn exhausted_aggregate_budget_rejects_probe_before_spawn() {
+        let started = Instant::now();
+        let error = probe_timeout(
+            Some((started, Duration::from_secs(15))),
+            started + Duration::from_secs(15),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repository observation exceeded its total timeout")
+        );
+    }
 }
 
 fn successful_output(output: HostProcessOutput, limit: usize) -> Result<Vec<u8>, ToolError> {

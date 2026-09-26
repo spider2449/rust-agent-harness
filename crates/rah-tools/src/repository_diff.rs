@@ -106,19 +106,19 @@ pub(crate) async fn execute_fixed_diff_while_leased(
     };
     let raw = successful_output(
         observer
-            .run(ObserverCommand::DiffRaw(baseline), None, started)
+            .run_diff(ObserverCommand::DiffRaw(baseline), None, started)
             .await?,
         "raw",
     )?;
     let numstat = successful_output(
         observer
-            .run(ObserverCommand::DiffNumstat(baseline), None, started)
+            .run_diff(ObserverCommand::DiffNumstat(baseline), None, started)
             .await?,
         "numstat",
     )?;
     let patch = successful_output(
         observer
-            .run(ObserverCommand::DiffPatch(baseline), None, started)
+            .run_diff(ObserverCommand::DiffPatch(baseline), None, started)
             .await?,
         "patch",
     )?;
@@ -181,7 +181,9 @@ async fn observe_head(
     observer: &RepositoryObserver,
     started: Instant,
 ) -> Result<Option<String>, ToolError> {
-    let output = observer.run(ObserverCommand::Head, None, started).await?;
+    let output = observer
+        .run_diff(ObserverCommand::Head, None, started)
+        .await?;
     if output.exit_code == Some(1)
         && !output.timed_out
         && output.overflow.is_none()
