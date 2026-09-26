@@ -351,3 +351,32 @@ No `v0.32.0` tag, tag push, GitHub Release, or release artifact publication
 has been performed. Task 424 remains reserved for publication and may start
 only after Task 423B has a validated release-preparation commit pushed to
 `origin/master` with passing CI for that exact commit SHA.
+
+### Task 423C2 — repository-list Git discovery portability
+
+Task 423C1 committed the Unix repository-boundary fixture correction at
+`756377e4a2f664a67d4d8e48b3393400b00b199e`. Its new exact-head Linux CI run
+`36276645054` passed formatting, workspace check, and the corrected Unix
+repository-boundary test, but workspace tests failed with 334 passed and 7
+failed; lint was skipped. All seven failures were in
+`repository_list::tests` and occurred at `repository_list.rs:312:72` with
+`NotFound`. The test-only `native_git()` helper unconditionally invoked
+Windows-only `where.exe`, so fixture setup failed before repository-list
+behavior was exercised. This remains a test-fixture portability disposition,
+not evidence of a production `repo.list`, Git-layout, timeout, authority, or
+repository-observation defect. The historical run is not rerun.
+
+The narrow Task 423C2 correction changes only the test `native_git()` helper
+in `crates/rah-tools/src/repository_list.rs` to match the existing
+cross-platform helper in `repository_search.rs`: `where.exe git.exe` on
+Windows, `which git` elsewhere, success required, first output path selected,
+and the path canonicalized. Production behavior, test cases, assertions,
+repository-list semantics, command vectors, timeout policy, dependencies,
+authority, and Cargo metadata are unchanged. The correction requires a new
+exact-head Linux CI result before any release-readiness reconsideration.
+Task 423D and Task 424 remain unstarted; no publication has occurred.
+
+See
+[`2026-09-27-task-423c2-repository-list-git-discovery-portability.md`](plans/2026-09-27-task-423c2-repository-list-git-discovery-portability.md)
+for the detailed source audit, local validation, commit, push, and exact-head
+CI disposition.

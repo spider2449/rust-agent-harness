@@ -309,14 +309,19 @@ mod tests {
     }
 
     fn native_git() -> PathBuf {
+        #[cfg(windows)]
         let output = Command::new("where.exe").arg("git.exe").output().unwrap();
+        #[cfg(not(windows))]
+        let output = Command::new("which").arg("git").output().unwrap();
         assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .next()
-            .map(PathBuf::from)
-            .unwrap()
+        fs::canonicalize(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     fn git(root: &Path, args: &[&str]) {

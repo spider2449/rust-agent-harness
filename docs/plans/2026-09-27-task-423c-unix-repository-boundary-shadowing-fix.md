@@ -166,3 +166,69 @@ exact-head Linux CI remains required.
 At the end of local validation, no files were staged and no commit, push, or
 new CI run had been started. Those steps are recorded in the final task
 closeout; the original Task 423C formatting stop remains preserved above.
+
+## Task 423C2 continuation — repository-list Git discovery portability
+
+Task 423C2 continues this stabilization chain without changing the earlier
+Task 423C formatting STOP or Task 423C1 validation evidence. The starting
+checkpoint was clean at `756377e4a2f664a67d4d8e48b3393400b00b199e`, equal to
+`origin/master`; the index was empty.
+
+Task 423C1's new exact-head Linux CI run `36276645054` tested that SHA on
+Ubuntu 24.04. Formatting, workspace check, and the corrected Unix
+repository-boundary test passed. Workspace tests failed (334 passed, 7
+failed, 0 ignored), so lint was skipped and the workflow failed. The exact
+failing tests were:
+
+- `repository_list::tests::deep_tracked_path_lists_in_ordinary_and_linked_worktrees`
+- `repository_list::tests::definition_is_closed_and_execute_bound`
+- `repository_list::tests::direct_child_saturation_is_deterministic`
+- `repository_list::tests::nested_repository_fails_without_partial_entries_and_observation_does_not_mutate`
+- `repository_list::tests::request_validation_and_target_failures_are_closed`
+- `repository_list::tests::root_nested_direct_projection_and_visibility_are_bounded`
+- `repository_list::tests::tracked_binary_file_is_listed_structurally_without_disclosing_contents`
+
+All seven failed at `crates/rah-tools/src/repository_list.rs:312:72` with
+`Os { code: 2, kind: NotFound, message: "No such file or directory" }`.
+The unconditional test-helper invocation of `where.exe git.exe` is the
+bounded root cause: `where.exe` is unavailable on Ubuntu, so fixture
+construction failed before repository-list behavior was exercised. This is
+not evidence of a production runtime, Git-layout, timeout, authority, or
+repository-observation semantic defect. Run `36276645054` remains historical
+evidence and was not rerun.
+
+`crates/rah-tools/src/repository_search.rs` already used the required
+cross-platform `native_git()` precedent: Windows `where.exe git.exe`,
+non-Windows `which git`, successful exit required, first returned path, and
+canonicalization. Task 423C2 made only `repository_list.rs`'s test helper
+match that code. No production Rust, test cases/assertions, enabled-test
+attributes, Git command vectors, authority, timeout, dependency, or Cargo
+metadata changed. All seven CI-failing tests remain enabled without ignore
+or platform cfg attributes; the existing boundary test remains enabled on
+Unix.
+
+### Task 423C2 local validation
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS, exit 0. |
+| `cargo check --workspace` | PASS, exit 0. |
+| `cargo test -p rah-tools repository_list::tests:: -- --test-threads=1` | PASS, 8 passed, 0 failed, 0 ignored, 338 filtered. |
+| `cargo test -p rah-tools --lib -- --test-threads=1` | PASS, 346 passed, 0 failed, 0 ignored. |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS, exit 0. |
+| `cargo metadata --no-deps --format-version 1` | PASS; 13 packages and members, version `0.32.0`, edition `2024`. |
+| `git diff --check` | PASS, exit 0. |
+
+Invariant audit found no manifest or lockfile diff: 13 packages and members,
+all version `0.32.0`, edition `2024`; dependency/checksum, feature, and
+workspace membership remain unchanged. The Rust diff is restricted to the
+test helper. Production `RepositoryListTool` and `RepositoryObserver`,
+read-only `RepositoryObservation` classification, `HostExplicit` count of
+11, authority, timeout policy, listing bounds, path validation, and command
+vectors are unchanged. No Tauri permission work was included. Windows local
+validation cannot establish the `which git` branch; exact-head Linux CI is
+mandatory.
+
+Commit, push, new exact-head Linux CI, and publication state are appended
+after their completion below. Task 423D and Task 424 must not start from this
+continuation alone.
