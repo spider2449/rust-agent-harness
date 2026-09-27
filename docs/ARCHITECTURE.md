@@ -1,4 +1,4 @@
-# RAH v0.32.0 Architecture - release preparation
+# RAH v0.32.0 Architecture - released
 
 The v0.32 primary capability is bounded repository structure browsing with
 the first-party `repo.list` Tool. It belongs to the existing

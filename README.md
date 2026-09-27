@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.32.0 release preparation
+## RAH v0.32.0 released
 
 The v0.32 primary capability is first-party `repo.list`, which provides
 bounded structural browsing of the host-selected active repository. It uses
@@ -21,8 +21,7 @@ distinct from `repo.search` (query-based tracked-file discovery), `fs.read`
 (known-file content), `repo.file-info` (one path's metadata), `repo.status`
 (repository changes), and `repo.diff` (change content). It does not enumerate
 arbitrary filesystem entries. See the [v0.32 release gate](docs/RAH_V0.32_RELEASE_GATE.md)
-for the evidence and preserved nonclaims. Tagging and publication remain
-pending.
+for the immutable publication record, evidence, and preserved nonclaims.
 
 ## RAH v0.31.0 released
 

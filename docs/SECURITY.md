@@ -1,4 +1,4 @@
-# RAH v0.32.0 Security Model - release preparation
+# RAH v0.32.0 Security Model - released
 
 `repo.list` is a bounded, read-only `RepositoryObservation` Tool. It cannot
 grant repository authority or mutate repository state. The host supplies the

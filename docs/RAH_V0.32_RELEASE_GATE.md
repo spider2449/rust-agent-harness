@@ -1,11 +1,11 @@
 # RAH v0.32.0 Release Gate
 
-Status: **STOP — EXACT-HEAD CI FAILED; NOT READY FOR PUBLICATION**
+Status: **RELEASED — RAH v0.32.0**
 
-This gate keeps the milestone scope, implementation, deterministic evidence,
-independent review, live Windows evidence, release preparation, and future
-publication as distinct records. No tag or GitHub Release is created by Task
-412.
+This gate preserves the milestone scope, implementation, deterministic
+evidence, independent review, live Windows evidence, release preparation,
+publication, and later cleanup as distinct records. Task-specific STOP
+checkpoints below remain historical records of the state at their completion.
 
 ## Milestone scope
 
@@ -416,4 +416,29 @@ The authority/security audit remains unchanged: `repo.list` is read-only `Reposi
 
 The final Task 423D change is documentation-only and is restricted to the release gate and the three dated plan records. The pre-commit checkpoint is `LOCAL RELEASE RECORDS RECONCILED`; release readiness requires this final documentation commit to be pushed and pass new exact-head CI. Run `36284890321` is evidence for its own tested SHA only and cannot satisfy that final gate. The final commit SHA, push relationship, clean-worktree result, and new exact-head CI run are recorded in the Task 423D completion report.
 
-Until that exact-head CI passes, the release verdict remains **STOP**. No `v0.32.0` tag, GitHub Release, release asset, or other publication has been created. Task 424 remains reserved for publication and must not start before Task 423D establishes `READY_FOR_RELEASE`.
+At Task 423D completion, its recorded release verdict was **STOP** pending
+final exact-head CI; no tag or GitHub Release existed at that historical
+checkpoint. The later corrected release-readiness checkpoint and Task 424
+publication are recorded below. The Task 423D plan remains unchanged.
+
+## Immutable publication record
+
+Task 423D established `READY_FOR_RELEASE` at immutable source
+`30d42f88aeac685f6e9ffcc6a9da7310f972e53c`. The corrected release-readiness
+checkpoint and publication are:
+
+- Release source: `30d42f88aeac685f6e9ffcc6a9da7310f972e53c`.
+- Release-readiness CI: `36285833929` - PASS.
+- Annotated tag: `v0.32.0`; annotation: `RAH v0.32.0`.
+- Tag object: `c3c895f0ceb96da68d7919d389a1521a717db5d9`.
+- Peeled target: `30d42f88aeac685f6e9ffcc6a9da7310f972e53c`.
+- Tag CI: `36286173085` - PASS.
+- GitHub Release ID: `397465640`; name: `RAH v0.32.0`.
+- Published: `2026-09-27T01:41:32Z`; `draft=false`; `prerelease=false`;
+  assets=`0`.
+
+Task 424 published v0.32.0 from immutable source
+`30d42f88aeac685f6e9ffcc6a9da7310f972e53c` without a repository commit.
+Task 425 is a later docs-only cleanup and does not modify release identity.
+The failed intermediate validation checkpoints and their recorded causes
+above remain unchanged.

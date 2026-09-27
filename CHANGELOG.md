@@ -1,6 +1,22 @@
 # Changelog
 
-## v0.32.0 - release preparation (publication pending)
+## v0.32.0 - released (2026-09-27)
+
+### Immutable publication record
+
+- Release source: `30d42f88aeac685f6e9ffcc6a9da7310f972e53c`.
+- Annotated tag: `v0.32.0`; annotation: `RAH v0.32.0`.
+- Tag object: `c3c895f0ceb96da68d7919d389a1521a717db5d9`.
+- Peeled target: `30d42f88aeac685f6e9ffcc6a9da7310f972e53c`.
+- Release-readiness CI: `36285833929` - PASS.
+- Tag CI: `36286173085` - PASS.
+- GitHub Release ID: `397465640`; name: `RAH v0.32.0`.
+- Published: `2026-09-27T01:41:32Z`; `draft=false`; `prerelease=false`;
+  assets=`0`.
+
+Tasks 412-423D prepared and stabilized the release. Task 424 published the
+immutable source without a repository commit. Task 425 is later
+documentation-only cleanup and is not the v0.32.0 release source.
 
 The release theme is **Bounded Repository Structure Listing / Browse**.
 
@@ -59,7 +75,8 @@ entries) remains unrelated existing debt.
 - No general Windows symlink certification, Codex inference certification,
   or arbitrary-byte semantics beyond structural non-disclosure.
 
-This is release preparation only. The tag and publication are pending.
+The immutable v0.32.0 source is released as recorded above. Publication does
+not expand the capability, authority, evidence, or claims described here.
 
 ## v0.31.0 - released (2026-09-20)
 
