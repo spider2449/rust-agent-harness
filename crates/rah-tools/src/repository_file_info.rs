@@ -73,19 +73,19 @@ impl Tool for RepositoryFileInfoTool {
 
         let index = required_output(
             self.observer
-                .run(ObserverCommand::Index, Some(&request.path), started)
+                .run_file_info(ObserverCommand::Index, Some(&request.path), started)
                 .await?,
             "index",
         )?;
         let head_output = self
             .observer
-            .run(ObserverCommand::Head, None, started)
+            .run_file_info(ObserverCommand::Head, None, started)
             .await?;
         let head = parse_head_result(head_output)?;
         let tree = if head.is_some() {
             required_output(
                 self.observer
-                    .run(ObserverCommand::HeadTree, Some(&request.path), started)
+                    .run_file_info(ObserverCommand::HeadTree, Some(&request.path), started)
                     .await?,
                 "HEAD tree",
             )?
@@ -94,7 +94,7 @@ impl Tool for RepositoryFileInfoTool {
         };
         let status = required_output(
             self.observer
-                .run(
+                .run_file_info(
                     ObserverCommand::FileInfoStatus,
                     Some(&request.path),
                     started,

@@ -635,6 +635,20 @@ mod timeout_tests {
     use std::time::{Duration, Instant};
 
     use super::{PROBE_TIMEOUT, probe_timeout};
+    use crate::repository_observer::file_info_budget;
+
+    #[test]
+    fn file_info_semantic_probes_share_operation_budget_and_keep_five_second_ceiling() {
+        let started = Instant::now();
+        let aggregate = Some(file_info_budget(started));
+        assert_eq!(probe_timeout(aggregate, started).unwrap(), PROBE_TIMEOUT);
+        assert_eq!(PROBE_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            probe_timeout(aggregate, started + Duration::from_secs(18)).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert!(probe_timeout(aggregate, started + Duration::from_secs(20)).is_err());
+    }
 
     #[test]
     fn probe_uses_five_second_ceiling_with_full_aggregate_budget() {

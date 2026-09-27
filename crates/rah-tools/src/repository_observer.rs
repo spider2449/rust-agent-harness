@@ -26,7 +26,10 @@ use crate::{
     repository_git_layout::RepositoryGitLayout,
 };
 
-const FILE_INFO_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const FILE_INFO_CHILD_TIMEOUT: Duration = Duration::from_secs(5);
+const FILE_INFO_MAX_OBSERVATION_STAGES: u32 = 4;
+pub(crate) const FILE_INFO_TOTAL_TIMEOUT: Duration =
+    FILE_INFO_CHILD_TIMEOUT.saturating_mul(FILE_INFO_MAX_OBSERVATION_STAGES);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const DIFF_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -84,7 +87,7 @@ impl RepositoryObserver {
                 ".",
             )?
             .with_environment(environment.clone())?
-            .with_timeout(FILE_INFO_TIMEOUT)?
+            .with_timeout(FILE_INFO_CHILD_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
@@ -102,7 +105,7 @@ impl RepositoryObserver {
                 ".",
             )?
             .with_environment(environment.clone())?
-            .with_timeout(FILE_INFO_TIMEOUT)?
+            .with_timeout(FILE_INFO_CHILD_TIMEOUT)?
             .with_output_limits(OutputLimits {
                 stdout_bytes: OBSERVER_STDOUT_LIMIT,
                 stderr_bytes: OBSERVER_STDERR_LIMIT,
@@ -358,6 +361,25 @@ impl RepositoryObserver {
             .await
     }
 
+    /// File-info has Index, Head, optional HeadTree, and FileInfoStatus stages.
+    /// Each stage revalidates Git against the same bounded logical operation.
+    pub(crate) async fn run_file_info(
+        &self,
+        command: ObserverCommand,
+        path: Option<&str>,
+        started: Instant,
+    ) -> Result<HostProcessOutput, ToolError> {
+        debug_assert!(matches!(
+            command,
+            ObserverCommand::Index
+                | ObserverCommand::Head
+                | ObserverCommand::HeadTree
+                | ObserverCommand::FileInfoStatus
+        ));
+        self.run_with_budget(command, path, started, Some(file_info_budget(started)))
+            .await
+    }
+
     async fn run_with_budget(
         &self,
         command: ObserverCommand,
@@ -388,7 +410,7 @@ impl RepositoryObserver {
             ObserverCommand::Index
             | ObserverCommand::Head
             | ObserverCommand::HeadTree
-            | ObserverCommand::FileInfoStatus => FILE_INFO_TIMEOUT,
+            | ObserverCommand::FileInfoStatus => FILE_INFO_CHILD_TIMEOUT,
         };
         let remaining = child_timeout(timeout, started, aggregate, Instant::now())?;
         let policy = match command {
@@ -413,6 +435,10 @@ impl RepositoryObserver {
         };
         policy.execute_process(&input).await
     }
+}
+
+pub(crate) fn file_info_budget(started: Instant) -> (Instant, Duration) {
+    (started, FILE_INFO_TOTAL_TIMEOUT)
 }
 
 fn child_timeout(
@@ -752,7 +778,8 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        DIFF_TIMEOUT, FILE_INFO_TIMEOUT, ObserverCommand, RepositoryObserver, child_timeout,
+        DIFF_TIMEOUT, FILE_INFO_CHILD_TIMEOUT, FILE_INFO_TOTAL_TIMEOUT, ObserverCommand,
+        RepositoryObserver, child_timeout, file_info_budget,
     };
 
     #[test]
@@ -771,7 +798,7 @@ mod tests {
         ] {
             assert_eq!(
                 child_timeout(
-                    FILE_INFO_TIMEOUT,
+                    FILE_INFO_CHILD_TIMEOUT,
                     started,
                     Some((started, DIFF_TIMEOUT)),
                     started + Duration::from_millis(elapsed_ms),
@@ -802,7 +829,7 @@ mod tests {
     fn exhausted_staged_budget_rejects_child_before_spawn() {
         let started = Instant::now();
         let error = child_timeout(
-            FILE_INFO_TIMEOUT,
+            FILE_INFO_CHILD_TIMEOUT,
             started,
             Some((started, DIFF_TIMEOUT)),
             started + DIFF_TIMEOUT,
@@ -813,6 +840,45 @@ mod tests {
                 .to_string()
                 .contains("repository observation exceeded its total timeout")
         );
+    }
+
+    #[test]
+    fn file_info_stages_share_twenty_second_budget_and_five_second_child_ceiling() {
+        let started = Instant::now();
+        assert_eq!(FILE_INFO_TOTAL_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(FILE_INFO_CHILD_TIMEOUT, Duration::from_secs(5));
+        for (command, elapsed, expected) in [
+            (ObserverCommand::Index, 0, 5),
+            (ObserverCommand::Head, 6, 5),
+            (ObserverCommand::HeadTree, 12, 5),
+            (ObserverCommand::FileInfoStatus, 18, 2),
+        ] {
+            assert!(matches!(
+                command,
+                ObserverCommand::Index
+                    | ObserverCommand::Head
+                    | ObserverCommand::HeadTree
+                    | ObserverCommand::FileInfoStatus
+            ));
+            assert_eq!(
+                child_timeout(
+                    FILE_INFO_CHILD_TIMEOUT,
+                    started,
+                    Some(file_info_budget(started)),
+                    started + Duration::from_secs(elapsed),
+                )
+                .unwrap(),
+                Duration::from_secs(expected),
+            );
+        }
+        let error = child_timeout(
+            FILE_INFO_CHILD_TIMEOUT,
+            started,
+            Some(file_info_budget(started)),
+            started + FILE_INFO_TOTAL_TIMEOUT,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeded its total timeout"));
     }
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
