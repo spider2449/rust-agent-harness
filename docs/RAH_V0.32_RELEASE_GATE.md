@@ -372,11 +372,48 @@ cross-platform helper in `repository_search.rs`: `where.exe git.exe` on
 Windows, `which git` elsewhere, success required, first output path selected,
 and the path canonicalized. Production behavior, test cases, assertions,
 repository-list semantics, command vectors, timeout policy, dependencies,
-authority, and Cargo metadata are unchanged. The correction requires a new
-exact-head Linux CI result before any release-readiness reconsideration.
-Task 423D and Task 424 remain unstarted; no publication has occurred.
+authority, and Cargo metadata are unchanged. The exact-head Linux CI result
+is recorded below. Task 423D is next; Task 424 remains unstarted and no
+publication has occurred.
 
 See
 [`2026-09-27-task-423c2-repository-list-git-discovery-portability.md`](plans/2026-09-27-task-423c2-repository-list-git-discovery-portability.md)
 for the detailed source audit, local validation, commit, push, and exact-head
 CI disposition.
+
+Task 423C2 local validation passed and commit
+`e970660f0d9800e9a6435ccb23b81c7a0224e165` was created. Its initial push
+attempt failed authentication at the configured private HTTP push endpoint;
+that failure remains historical. Recovery pushed the exact existing commit
+directly to the confirmed GitHub repository as a normal fast-forward, without
+changing remote configuration. A post-push fetch verified `HEAD` and GitHub
+`master` both at `e970660f0d9800e9a6435ccb23b81c7a0224e165`.
+
+Exact-head GitHub Linux CI run `36284890321` (workflow `CI`, event `push`)
+tested that exact SHA. Formatting, workspace check, workspace tests, lint, and
+overall CI all passed. The seven previously failing `repository_list::tests`
+passed, as did the corrected Unix test
+`repository_boundary::tests::existing_symlink_ancestor_rejects_all_missing_descendant_depths`.
+Task 423C2 technical stabilization is complete. No tag, GitHub Release, or
+publication occurred. Task 424 has not started. Next: Task 423D - Finalize
+v0.32.0 Release Readiness After CI Corrections.
+
+## Task 423D — final release-readiness reconciliation
+
+The exact-head CI history is immutable and remains part of the release record:
+
+| Tested commit | CI run | Result |
+| --- | --- | --- |
+| `0301a52095b1b7c3717a6497f4f2dd042b184bae` | `36275076398` | **FAIL** — Unix test compile error `E0618`; a local `PathBuf` shadowed the `root(...)` fixture helper in `repository_boundary.rs`. |
+| `756377e4a2f664a67d4d8e48b3393400b00b199e` | `36276645054` | **FAIL** — 334 passed and 7 `repository_list` fixture tests failed on Ubuntu because `where.exe git.exe` was unavailable; lint was skipped. The corrected Unix boundary test passed. |
+| `e970660f0d9800e9a6435ccb23b81c7a0224e165` | `36284890321` | **PASS** — formatting, workspace check, workspace tests, and lint passed on the exact pushed SHA. The seven previously failing `repository_list` tests and corrected Unix boundary test passed. |
+
+These failures are not erased or rewritten as uninterrupted success. The corrections are the Unix fixture rename/formatting in commit `756377e4a2f664a67d4d8e48b3393400b00b199e` and cross-platform Git discovery in commit `e970660f0d9800e9a6435ccb23b81c7a0224e165`. Task 423C2's initial configured push authentication failure and successful normal GitHub recovery also remain recorded above.
+
+Task 423D verifies, without repeating expensive test matrices, that committed metadata is still 13 packages and 13 workspace members, all version `0.32.0`, edition `2024`. No manifest or lockfile changed after the release preparation commit, so external dependency versions/checksums, features, and workspace membership have no post-preparation drift. The only post-release-preparation `.rs` changes are the two test-only portability corrections named above; no production Rust behavior changed.
+
+The authority/security audit remains unchanged: `repo.list` is read-only `RepositoryObservation`, HostExplicit remains exactly 11, and there is no permission expansion, timeout-architecture change after the audited `83c5c30446a2f566be7b660d45e6d70b98a8d344` correction, arbitrary filesystem enumeration, or content-reading expansion. The unrelated Tauri permission-generation debt remains unchanged and out of scope.
+
+The final Task 423D change is documentation-only and is restricted to the release gate and the three dated plan records. The pre-commit checkpoint is `LOCAL RELEASE RECORDS RECONCILED`; release readiness requires this final documentation commit to be pushed and pass new exact-head CI. Run `36284890321` is evidence for its own tested SHA only and cannot satisfy that final gate. The final commit SHA, push relationship, clean-worktree result, and new exact-head CI run are recorded in the Task 423D completion report.
+
+Until that exact-head CI passes, the release verdict remains **STOP**. No `v0.32.0` tag, GitHub Release, release asset, or other publication has been created. Task 424 remains reserved for publication and must not start before Task 423D establishes `READY_FOR_RELEASE`.

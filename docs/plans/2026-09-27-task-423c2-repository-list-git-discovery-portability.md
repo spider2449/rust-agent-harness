@@ -1,7 +1,7 @@
 # Task 423C2 — Repository List Git Discovery Portability
 
 Date: 2026-09-27
-Status: **LOCAL VALIDATION PASS — COMMIT/PUSH/EXACT-HEAD CI PENDING**
+Status: **PASS - PUSH AND EXACT-HEAD CI PASSED**
 Task type: minimal test-fixture portability correction; no publication
 
 ## Starting checkpoint and preserved CI failure
@@ -89,14 +89,62 @@ CI is required.
 
 ## Commit, push, and exact-head CI
 
-Pending. Record the intentional paths, exact commit SHA and subject, fetched
-remote ancestry check, fast-forward push result, and new CI run ID/workflow/
-event/tested SHA and job conclusions here. Do not rerun historical run
-`36276645054`. If push or new exact-head CI fails, preserve it and stop.
+Commit: `e970660f0d9800e9a6435ccb23b81c7a0224e165`
+Subject: `test: make repository list Git discovery portable`
+Files: the four intentional paths listed in the staged-content audit above.
+
+The initial configured push attempt failed authentication at the private HTTP
+push endpoint. The original output was:
+
+```text
+remote: Failed to authenticate user
+fatal: Authentication failed for 'http://192.168.1.253:4000/spider2449/rust-agent-harness.git/'
+```
+
+This remains historical evidence. The GitHub CLI was already
+authenticated as `spider2449`; the configured GitHub fetch URL identified
+`spider2449/rust-agent-harness`, and `origin/master` was the expected parent.
+Without changing remote configuration, the existing commit was pushed directly
+to `https://github.com/spider2449/rust-agent-harness.git` as a normal
+fast-forward. The recovery push succeeded for exactly
+`e970660f0d9800e9a6435ccb23b81c7a0224e165`. A subsequent fetch verified both
+local `HEAD` and GitHub `master` at that SHA.
+
+Exact-head GitHub Linux CI:
+
+```text
+Run:      36284890321
+Workflow: CI
+Event:    push
+SHA:      e970660f0d9800e9a6435ccb23b81c7a0224e165
+Format:   PASS
+Check:    PASS
+Tests:    PASS
+Lint:     PASS
+Overall:  PASS
+```
+
+The workspace test log confirms all seven previously failing
+`repository_list::tests` passed. The corrected Unix test
+`repository_boundary::tests::existing_symlink_ancestor_rejects_all_missing_descendant_depths`
+also passed. The initial authentication failure remains recorded above; the
+recovery push and this exact-head CI run establish Task 423C2 stabilization.
 
 ## Publication and next task
 
-No tag, GitHub Release, or publication is authorized in Task 423C2. Task 423D
-and Task 424 have not started. Task 423D must reconcile the entire release
-evidence chain and establish a fresh `READY_FOR_RELEASE` checkpoint before
-Task 424 can begin.
+No tag, GitHub Release, or publication occurred. Task 423D and Task 424 have
+not started. Task 423C2 technical stabilization is complete; Task 423D is the
+next task and will finalize v0.32.0 release readiness after the CI corrections.
+
+## Task 423D final-readiness reconciliation
+
+Task 423D retained both failed historical exact-head checkpoints:
+
+- `0301a52095b1b7c3717a6497f4f2dd042b184bae` / CI `36275076398` failed at Unix test compilation because the fixture's local `PathBuf` shadowed `root(...)`.
+- `756377e4a2f664a67d4d8e48b3393400b00b199e` / CI `36276645054` passed the corrected Unix boundary test but failed seven Linux `repository_list` fixtures due to Windows-only Git discovery; 334 tests passed and 7 failed.
+
+The completed correction checkpoint is `e970660f0d9800e9a6435ccb23b81c7a0224e165` / CI `36284890321` (push), with formatting, workspace check, tests, lint, and overall all passing. The seven previously failing repository-list tests and Unix boundary test passed. These results do not transfer to the later Task 423D documentation commit; new exact-head CI is required for that commit.
+
+Task 423D's metadata/source audit found 13 packages and members, version `0.32.0`, edition `2024`, no Cargo manifest or lockfile drift since release preparation, and only the two documented test-only `.rs` portability fixes since that preparation commit. The audit found no production behavior, authority, permission, or timeout-policy change. `repo.list` remains read-only `RepositoryObservation`; HostExplicit remains exactly 11; the unrelated Tauri permission-generation debt remains out of scope.
+
+The Task 423D pre-commit status is `LOCAL RELEASE RECORDS RECONCILED`. Final readiness depends on the documentation-only commit being pushed and passing its own exact-head CI. Its SHA and CI result are given in the Task 423D completion report. No tag, GitHub Release, or publication occurred; Task 424 remains reserved until readiness is established.

@@ -1,7 +1,7 @@
 # Task 423C — Unix Repository Boundary Test Shadowing Fix
 
 Date: 2026-09-27
-Status: **LOCAL VALIDATION PASS — NEW EXACT-HEAD LINUX CI PENDING**
+Status: **Task 423C1 CI failure retained; Task 423C2 follow-up PASS**
 Task type: minimal test-source compiler correction; no publication
 
 ## Starting state and preserved evidence
@@ -229,6 +229,34 @@ vectors are unchanged. No Tauri permission work was included. Windows local
 validation cannot establish the `which git` branch; exact-head Linux CI is
 mandatory.
 
-Commit, push, new exact-head Linux CI, and publication state are appended
-after their completion below. Task 423D and Task 424 must not start from this
-continuation alone.
+Task 423C2's initial push attempt failed authentication at the configured
+private HTTP push endpoint; this remains historical evidence. Recovery pushed
+`e970660f0d9800e9a6435ccb23b81c7a0224e165` directly to the confirmed GitHub
+repository without changing remote configuration. Exact-head Linux CI run
+`36284890321` (workflow `CI`, event `push`) tested that SHA and passed
+formatting, workspace check, workspace tests, lint, and overall. The corrected
+Unix test `repository_boundary::tests::existing_symlink_ancestor_rejects_all_missing_descendant_depths`
+passed, and all seven previously failing `repository_list::tests` passed.
+Task 423C2 stabilization is complete; Task 423D is next. No publication
+occurred and Task 424 has not started.
+
+### Task 423C2 initial push attempt — historical authentication failure
+
+The initial attempt to push commit `e970660f0d9800e9a6435ccb23b81c7a0224e165`
+used the configured private HTTP push endpoint and failed with:
+
+```text
+remote: Failed to authenticate user
+fatal: Authentication failed for 'http://192.168.1.253:4000/spider2449/rust-agent-harness.git/'
+```
+
+This failure was recovered by a direct normal fast-forward push to the
+confirmed canonical GitHub URL. The exact-head GitHub CI run and its results
+are recorded above; the initial failure is retained here as historical
+transport evidence, not the current task status.
+
+## Task 423D reconciliation
+
+Task 423D preserves this task's formatting STOP and the later Task 423C1 continuation evidence. Exact-head CI `36276645054` tested `756377e4a2f664a67d4d8e48b3393400b00b199e`: the corrected Unix boundary test passed, but workspace tests failed because seven `repository_list` fixtures invoked Windows-only `where.exe git.exe` on Ubuntu. This historical failure was corrected only in Task 423C2's test Git-discovery helper. Exact-head CI `36284890321` then passed formatting, workspace check, workspace tests, and lint for `e970660f0d9800e9a6435ccb23b81c7a0224e165`; the Unix boundary test and all seven repository-list tests passed. Neither failed run was retried or removed from the record.
+
+Task 423D makes documentation-only release-record changes. It does not alter the source correction, test scope, timeout policy, authority, or permissions. The readiness commit and its own exact-head CI are a separate final gate; the Task 423D completion report records their resulting SHA and run. No tag or publication is part of Task 423D.
