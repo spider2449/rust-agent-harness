@@ -47,6 +47,9 @@
     "allow-host-invoke-read",
     "allow-host-prepare-repo-create-branch",
     "allow-host-prepare-repo-patch",
+    "allow-host-prepare-repo-edit-files",
+    "allow-host-prepare-repo-create-file",
+    "allow-host-prepare-repo-delete-file",
     "allow-host-prepare-repo-rename-file",
     "allow-host-confirm-tool-invocation",
     "allow-host-cancel-tool-invocation"

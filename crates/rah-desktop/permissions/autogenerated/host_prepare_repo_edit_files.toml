@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-host-prepare-repo-edit-files"
+description = "Enables the host_prepare_repo_edit_files command without any pre-configured scope."
+commands.allow = ["host_prepare_repo_edit_files"]
+
+[[permission]]
+identifier = "deny-host-prepare-repo-edit-files"
+description = "Denies the host_prepare_repo_edit_files command without any pre-configured scope."
+commands.deny = ["host_prepare_repo_edit_files"]

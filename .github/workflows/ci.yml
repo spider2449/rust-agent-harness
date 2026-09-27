@@ -30,3 +30,6 @@ jobs:
 
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check Desktop Tauri permissions
+        run: node crates/rah-desktop/tauri_permission_test.js
