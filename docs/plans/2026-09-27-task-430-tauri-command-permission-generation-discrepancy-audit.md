@@ -1,0 +1,450 @@
+# Task 430 — Tauri Command Permission-Generation Discrepancy Audit
+
+## Scope and starting checkpoint
+
+This is a research-only audit at the published Task 429 checkpoint. No Rust,
+frontend, capability, generated permission, dependency, version, ADR, release,
+tag, or GitHub Release files were changed.
+
+| Gate | Evidence |
+|---|---|
+| Repository | `F:\coding\otherPrj\rust-agent-harness` |
+| Required `HEAD` | `1f7b0520fa89ee65f3bbf35ef86c635977c0df2b` |
+| Required `origin/master` | `1f7b0520fa89ee65f3bbf35ef86c635977c0df2b` |
+| `origin/master...HEAD` | `0 0` |
+| `git merge-base --is-ancestor origin/master HEAD` | pass |
+| Starting worktree/index | clean |
+
+Task 429 exact-head CI run `36289685702` is a `push` run on
+`1f7b0520fa89ee65f3bbf35ef86c635977c0df2b`. GitHub reports the `CI` workflow
+and `deterministic-validation` job as successful. Its formatting, workspace
+check, workspace tests, and lint steps all passed.
+
+## Exact dependency and workspace versions
+
+The Windows-target lockfile records `tauri 2.11.5` and `tauri-build 2.6.3`.
+The `rah-desktop` manifest uses major-version constraints `2`; these lockfile
+records are the resolved versions audited here. `cargo metadata --no-deps
+--format-version 1` reports 13 packages, 13 workspace members, workspace
+version `0.32.0`, and Rust edition `2024` for all workspace members. The
+application config's product version is separately `0.9.0`.
+
+## A. Runtime invoke inventory
+
+The inventory was extracted from the `tauri::generate_handler![...]` body in
+`crates/rah-desktop/src/main.rs` and normalized by stripping module paths.
+There are **47 commands and no duplicates**:
+
+```text
+app_status
+trusted_profile_selection
+choose_trusted_profile
+restore_trusted_profile
+forget_trusted_profile
+clear_trusted_profile
+model_configuration
+commit_identity
+desktop_preferences_warning
+set_model_configuration
+set_commit_identity
+reset_model_preferences
+test_llama_cpp_endpoint
+choose_repository
+remembered_workspace_catalog
+reveal_remembered_workspace_location
+remember_workspace_candidate
+update_remembered_workspace_candidate
+delete_remembered_workspace_candidate
+reorder_remembered_workspace_candidates
+admit_remembered_workspace_candidate
+repository_membership
+remove_repository_member
+activate_repository_member
+close_repository
+connect_codex
+disconnect_codex
+repository_snapshot
+repository_authorize_commit_review
+repository_stage_action
+repository_unstage_action
+send_chat
+cancel_chat
+new_conversation
+clear_conversation_history
+resume_previous_conversation
+conversation_transcript
+get_effective_authority_snapshot
+host_invoke_read
+host_prepare_repo_create_branch
+host_prepare_repo_patch
+host_prepare_repo_edit_files
+host_prepare_repo_create_file
+host_prepare_repo_delete_file
+host_prepare_repo_rename_file
+host_confirm_tool_invocation
+host_cancel_tool_invocation
+```
+
+## B. Build-time application manifest
+
+`crates/rah-desktop/build.rs` passes this **44-command** list to
+`tauri_build::AppManifest::new().commands(&[...])`. The extracted list has no
+duplicates:
+
+```text
+app_status
+trusted_profile_selection
+choose_trusted_profile
+restore_trusted_profile
+forget_trusted_profile
+clear_trusted_profile
+model_configuration
+set_model_configuration
+reset_model_preferences
+commit_identity
+set_commit_identity
+desktop_preferences_warning
+test_llama_cpp_endpoint
+choose_repository
+remembered_workspace_catalog
+reveal_remembered_workspace_location
+remember_workspace_candidate
+update_remembered_workspace_candidate
+delete_remembered_workspace_candidate
+reorder_remembered_workspace_candidates
+admit_remembered_workspace_candidate
+repository_membership
+remove_repository_member
+activate_repository_member
+close_repository
+connect_codex
+disconnect_codex
+repository_snapshot
+repository_authorize_commit_review
+repository_stage_action
+repository_unstage_action
+send_chat
+cancel_chat
+new_conversation
+clear_conversation_history
+resume_previous_conversation
+conversation_transcript
+get_effective_authority_snapshot
+host_invoke_read
+host_prepare_repo_create_branch
+host_prepare_repo_patch
+host_prepare_repo_rename_file
+host_confirm_tool_invocation
+host_cancel_tool_invocation
+```
+
+| Set comparison | Result |
+|---|---|
+| Runtime handlers absent from manifest | `host_prepare_repo_edit_files`, `host_prepare_repo_create_file`, `host_prepare_repo_delete_file` |
+| Manifest commands absent from runtime handlers | none |
+
+In pinned `tauri-build 2.6.3`, `AppManifest::commands` defines the application
+command names for which Tauri generates `allow-$command` and `deny-$command`
+permission definitions. Its build code invokes command permission generation
+for this explicit slice, then loads the permission files into the app ACL
+manifest. It does not discover or synchronize this list from the Rust
+`generate_handler!` registration.
+
+## C. Generated application permissions
+
+The 44 manifest names correspond exactly to 44 files under
+`crates/rah-desktop/permissions/autogenerated/`. For every row below, the
+source command is the `build.rs` manifest item, the generated file is
+`<command>.toml`, it contains `allow-<command with underscores replaced by
+hyphens>` and its paired `deny-...` permission, and the default capability
+contains the allow permission for window `main`.
+
+| Manifest command | Generated permission file | Allow enabled for `main` |
+|---|---|---|
+| `app_status` | `app_status.toml` | yes |
+| `trusted_profile_selection` | `trusted_profile_selection.toml` | yes |
+| `choose_trusted_profile` | `choose_trusted_profile.toml` | yes |
+| `restore_trusted_profile` | `restore_trusted_profile.toml` | yes |
+| `forget_trusted_profile` | `forget_trusted_profile.toml` | yes |
+| `clear_trusted_profile` | `clear_trusted_profile.toml` | yes |
+| `model_configuration` | `model_configuration.toml` | yes |
+| `set_model_configuration` | `set_model_configuration.toml` | yes |
+| `reset_model_preferences` | `reset_model_preferences.toml` | yes |
+| `commit_identity` | `commit_identity.toml` | yes |
+| `set_commit_identity` | `set_commit_identity.toml` | yes |
+| `desktop_preferences_warning` | `desktop_preferences_warning.toml` | yes |
+| `test_llama_cpp_endpoint` | `test_llama_cpp_endpoint.toml` | yes |
+| `choose_repository` | `choose_repository.toml` | yes |
+| `remembered_workspace_catalog` | `remembered_workspace_catalog.toml` | yes |
+| `reveal_remembered_workspace_location` | `reveal_remembered_workspace_location.toml` | yes |
+| `remember_workspace_candidate` | `remember_workspace_candidate.toml` | yes |
+| `update_remembered_workspace_candidate` | `update_remembered_workspace_candidate.toml` | yes |
+| `delete_remembered_workspace_candidate` | `delete_remembered_workspace_candidate.toml` | yes |
+| `reorder_remembered_workspace_candidates` | `reorder_remembered_workspace_candidates.toml` | yes |
+| `admit_remembered_workspace_candidate` | `admit_remembered_workspace_candidate.toml` | yes |
+| `repository_membership` | `repository_membership.toml` | yes |
+| `remove_repository_member` | `remove_repository_member.toml` | yes |
+| `activate_repository_member` | `activate_repository_member.toml` | yes |
+| `close_repository` | `close_repository.toml` | yes |
+| `connect_codex` | `connect_codex.toml` | yes |
+| `disconnect_codex` | `disconnect_codex.toml` | yes |
+| `repository_snapshot` | `repository_snapshot.toml` | yes |
+| `repository_authorize_commit_review` | `repository_authorize_commit_review.toml` | yes |
+| `repository_stage_action` | `repository_stage_action.toml` | yes |
+| `repository_unstage_action` | `repository_unstage_action.toml` | yes |
+| `send_chat` | `send_chat.toml` | yes |
+| `cancel_chat` | `cancel_chat.toml` | yes |
+| `new_conversation` | `new_conversation.toml` | yes |
+| `clear_conversation_history` | `clear_conversation_history.toml` | yes |
+| `resume_previous_conversation` | `resume_previous_conversation.toml` | yes |
+| `conversation_transcript` | `conversation_transcript.toml` | yes |
+| `get_effective_authority_snapshot` | `get_effective_authority_snapshot.toml` | yes |
+| `host_invoke_read` | `host_invoke_read.toml` | yes |
+| `host_prepare_repo_create_branch` | `host_prepare_repo_create_branch.toml` | yes |
+| `host_prepare_repo_patch` | `host_prepare_repo_patch.toml` | yes |
+| `host_prepare_repo_rename_file` | `host_prepare_repo_rename_file.toml` | yes |
+| `host_confirm_tool_invocation` | `host_confirm_tool_invocation.toml` | yes |
+| `host_cancel_tool_invocation` | `host_cancel_tool_invocation.toml` | yes |
+
+The three runtime-only commands have no corresponding generated TOML files.
+Adjacent `host_prepare_repo_patch`, `host_prepare_repo_rename_file`, and
+`host_prepare_repo_create_branch` each have both generated allow/deny
+definitions; their allow permissions are present in the default capability.
+The generated inventory is **current and consistent with `build.rs`**. It is
+not stale relative to that manifest.
+
+## D. Default capability
+
+`crates/rah-desktop/capabilities/default.json` is identified as `default` and
+targets `windows: ["main"]`. It contains **44 application-level `allow-*`
+entries**. Normalizing hyphens to underscores maps those entries one-to-one to
+the 44 manifest names and generated files above. There are no surplus app
+allows and no manifest command without a matching allow. Two additional
+entries, `core:event:allow-listen` and `core:event:allow-unlisten`, are core
+plugin permissions and are excluded from the app-level count.
+
+All generated application command allow permissions are enabled for `main`.
+The three runtime-only handlers have no generated permission and no capability
+allow. No other runtime handler lacks a corresponding enabled app capability
+permission.
+
+## E. Production frontend call-site matrix
+
+`status.js` renders a Host action form when an effective tool reports
+`host.eligible === true` and a `host.kind`. The submit button dispatches through
+`submitHostForm`; these are production paths, not test-only references.
+
+| Effective Host kind | UI control | Production invoke | Reachability |
+|---|---|---|---|
+| `repo_edit_files` | Multi-file replacement form, target controls, Prepare submit | `host_prepare_repo_edit_files` | Reachable when the effective tool is HostExplicit-eligible and the form is submitted; Tauri rejects the IPC under the current capability |
+| `repo_create_file` | Relative-path/content form, Prepare submit | `host_prepare_repo_create_file` | Reachable when the effective tool is HostExplicit-eligible and the form is submitted; Tauri rejects the IPC under the current capability |
+| `repo_delete_file` | Relative-path form, Prepare submit | `host_prepare_repo_delete_file` | Reachable when the effective tool is HostExplicit-eligible and the form is submitted; Tauri rejects the IPC under the current capability |
+
+The paths are explicitly `repo_edit_files -> host_prepare_repo_edit_files`,
+`repo_create_file -> host_prepare_repo_create_file`, and
+`repo_delete_file -> host_prepare_repo_delete_file`. They are not dead code and
+not test-only code. Production UI can attempt all three calls, but the promise
+is rejected at the Tauri IPC authority layer before their Rust handlers run.
+
+## F. Tauri generation and IPC authority mechanics
+
+In the locked `tauri-build 2.6.3` source, `AppManifest::commands` feeds
+`autogenerate_command_permissions`, which writes allow and deny permission
+files for each supplied command. The pinned source then defines the app ACL
+from those generated files and the `permissions/` directory. Separately,
+capability resolution uses permissions named in enabled capability files.
+
+The default capability applies to `main`. `tauri.conf.json` does not name an
+explicit capability subset; Tauri 2 defaults to enabling all capability files
+in the capabilities directory. There is only this one capability file here.
+The capability's 44 app allows therefore govern the app's local WebView.
+
+The pinned `tauri 2.11.5` WebView IPC path resolves access for the command,
+window, WebView, and origin. When the app ACL manifest exists, a request with
+no resolved access is rejected before `manager.run_invoke_handler(invoke)`.
+Because the app manifest exists and the three names are neither defined in its
+generated permission manifest nor granted by the active capability, the local
+frontend calls are denied before Rust handler entry. `generate_handler!` makes
+the Rust command routable only after the IPC authority check; it does not
+override the capability.
+
+Tauri documents capabilities as assigning permissions to windows/WebViews and
+documents the application command manifest mechanism in its [capabilities
+guide](https://v2.tauri.app/security/capabilities/). The implementation
+references are pinned crate sources: `tauri-build-2.6.3/src/acl.rs`,
+`tauri-utils-2.9.3/src/acl/build.rs`,
+`tauri-utils-2.9.3/src/acl/resolved.rs`, and
+`tauri-2.11.5/src/webview/mod.rs` / `src/ipc/authority.rs` under the local
+Cargo registry. This establishes a Tauri IPC reachability denial; it does not
+establish a RAH authorization bypass or a vulnerability.
+
+## G. HostExplicit backend authorization
+
+The backend's `host_kind` exact allowlist contains **11** entries, including
+`repo.edit-files`, `repo.create-file`, and `repo.delete-file`. The Tauri
+permission inventory is a separate outer IPC gate. Assuming the Rust prepare
+handler were entered, each of the three routes retains its backend flow:
+
+```text
+Tauri IPC permission for the command
+  -> Rust Prepare handler
+  -> begin HostExplicit preparation / current host composition
+  -> expected ToolDefinition for the exact ToolName
+  -> current registered ToolRegistry and current allowed PermissionLevel set
+  -> authorize_tool_dispatch preflight
+  -> capability-specific bounded preparer and preparation review
+  -> process-local prepared ticket bound to definition, registry, permissions,
+     generations, repository identity, composition identity, and preparer
+  -> later explicit host_confirm_tool_invocation(ticket_id)
+  -> current composition and ticket/currentness checks, same registry and
+     permission checks, preparer revalidation, authorized_tool_dispatch (D2)
+  -> ordinary ToolRegistry authority/effect
+```
+
+`host_prepare_repo_edit_files` derives the `repo.edit-files` ToolName and
+definition, checks current composition, preflights through
+`authorize_tool_dispatch`, then invokes the multi-file preparer and stores the
+ticket. `host_prepare_repo_create_file` does the equivalent for
+`repo.create-file`. Delete delegates to its current-composition helper for
+`repo.delete-file`. Confirm validates generations, identities, registry,
+definition, permission set, preparer identity and revalidation, then again
+authorizes dispatch before the ordinary Tool effect.
+
+The discrepancy does not bypass or weaken any of these checks. It prevents the
+current frontend from reaching Prepare, which in turn prevents use of these
+routes through the production WebView. HostExplicit remains exactly 11.
+
+## H. Historical introduction
+
+The first backend commits that introduce/register these commands are:
+
+| Route | Backend commit | Added to runtime handler | Changed `build.rs` | Changed default capability | Added generated command permission |
+|---|---|---|---|---|---|
+| multi-file edit | `ff58bc5b36939ab9cc395c33bf2dc677c30e9489` — `feat: add reviewed multi-file HostExplicit backend` | yes, `host_prepare_repo_edit_files` | no | no | no |
+| create file | `38170b72e94a89155a81a5e3dd7b46a1b65f0fbd` — `feat: add reviewed new-file HostExplicit backend` | yes, `host_prepare_repo_create_file` | no | no | no |
+| delete file | `76f1298ba4a865b40f096ba7cfdf950516e9ad74` — `feat: add reviewed deletion HostExplicit backend` | yes, `host_prepare_repo_delete_file` | no | no | no |
+
+Each of the three backend commits changed `main.rs` (where the command
+registration lives), but none changed the build manifest or capability; none
+added a generated permission. Later live-certification and milestone commits
+did not repair this inventory. The checked-in allowlist/generation scheme is
+explicit and narrow, but the history provides no evidence that these three
+production HostExplicit routes were intentionally declared ineligible at the
+Tauri layer. Their UI, backend HostExplicit eligibility and live backend
+certification establish intended product reachability. Classify the mismatch
+as **integration drift**, not deliberate ineligibility.
+
+## I. Existing Windows live-certification scope
+
+The ignored Windows scenarios for multi-file edit, create-file and delete-file
+build a Tauri `App` for host state and then directly call the Rust functions
+`host_prepare_repo_edit_files`, `host_prepare_repo_create_file`, and
+`host_prepare_repo_delete_file` from test code. They do not call
+`WebviewWindow::eval`, the frontend `invoke`, or a Tauri IPC request through
+`generate_handler!`; the test builder does not install this production invoke
+handler. The corresponding live records document direct production Rust
+handler calls, ticket-only Confirm, D2/currentness, authorized dispatch and
+Tool effects.
+
+Those PASS results remain valid evidence for the backend HostExplicit route,
+including its preparation/review/ticket/currentness/authorization/effect
+behavior. They do **not** certify production WebView -> Tauri invoke ->
+capability/runtime authority reachability, so they do not contradict this
+finding.
+
+## J. Current Windows application outcome
+
+Given the checked-in build manifest, generated app ACL, and sole default
+capability, a Windows app built from this source denies all three frontend
+invokes before the Rust handlers are entered. The allow permission files are
+not present, their IDs are not in `default.json`, and the resolved runtime
+authority has no grant for those app command names on `main`. This is a source
+and pinned-runtime-semantics conclusion; Task 430 did not launch the production
+application or mutate permissions to test a hypothetical correction.
+
+## K. Deterministic/build-check gap
+
+`validate_task120_capability()` checks only four historical commands:
+`test_llama_cpp_endpoint`, `cancel_chat`, `reset_model_preferences`, and
+`desktop_preferences_warning`. It does not compare inventories.
+
+`tauri_permission_test.js` contains a fixed expected 44-entry capability list
+and selected spot checks for manifest/generated/capability examples. It checks
+only selected runtime registration examples and does not extract and compare
+the complete runtime, manifest, generated, capability and frontend invoke
+sets. `status_authority_test.js` checks selected frontend behavior but does
+not reconcile that set with Tauri permission sources. No structural invariant
+currently compares all five inventories. Since each edit added the new command
+to the runtime registration while leaving the three explicit permission
+inventories untouched, the existing checks continued to pass.
+
+The smallest later deterministic guard should parse/derive and compare:
+
+1. normalized `generate_handler!` command names and `AppManifest::commands`;
+2. app manifest names and generated permission command names/allow-deny IDs;
+3. generated allow permission IDs and app-level `default.json` allows; and
+4. production frontend command invokes and the intended registered command
+   set (with an explicit allowlist for any deliberately non-UI handler).
+
+The guard should fail on missing, surplus or duplicate names and be part of an
+existing deterministic CI path. Task 430 does not implement it.
+
+## Impact and required classification
+
+**Security impact:** Tauri's command capability layer denies the three
+unlisted invokes before Rust handler entry. No IPC bypass was found. The
+backend's HostExplicit currentness, registry, permission-membership,
+preparation, ticket, revalidation, D2 and ordinary Tool authority checks
+remain intact. Do not classify this as an authorization bypass or
+vulnerability.
+
+**Functional/product impact:** The production frontend advertises eligible
+multi-file edit, create-file and delete-file Prepare controls and attempts the
+matching invokes, but Tauri rejects each request. These three routes are
+unavailable through the current Windows production WebView configuration.
+This is an IPC integration/configuration defect.
+
+**Final verdict:**
+
+```text
+C — TAURI IPC CONFIGURATION DEFECT — FRONTEND ROUTES ARE BLOCKED, BACKEND AUTHORIZATION REMAINS INTACT
+```
+
+This is a functional runtime configuration defect supported by the source and
+pinned Tauri authority path. The evidence does not establish exploitability,
+unauthorized backend execution, or an authorization bypass.
+
+## Recommended next task and non-goals
+
+Recommend a separate bounded correction task to add the three commands to
+`AppManifest::commands`, regenerate their allow/deny TOML files, add the three
+allow IDs to the `main` capability, and add the deterministic inventory guard.
+That task should include focused build/frontend validation and decide whether
+Windows production IPC certification is required. It must preserve HostExplicit
+as exactly 11 and retain all backend gates; enabling Tauri reachability does
+not authorize repository mutation.
+
+Task 430 does not implement any of those changes, alter permissions or
+generated files, modify production sources/dependencies/versions/ADRs/release
+artifacts, launch the production application, run Windows live certification,
+or claim any new backend certification. The only repository change is this
+research artifact.
+
+## Validation and changed path
+
+Focused static extraction confirmed: runtime `47` / no duplicates; manifest
+`44` / no duplicates; generated permissions `44`; app capability allows
+`44`; all 44 map one-to-one; and exactly three runtime-only names. `cargo metadata
+--no-deps --format-version 1` completed successfully and reported 13 packages,
+13 workspace members, version `0.32.0`, edition `2024`.
+
+Validation executed: `git diff --check` passed; `cargo metadata --no-deps
+--format-version 1` passed and reported the package/member/version/edition
+counts above. No test suite was run or required for this documentation-only
+task.
+
+Exact changed path:
+
+```text
+docs/plans/2026-09-27-task-430-tauri-command-permission-generation-discrepancy-audit.md
+```
