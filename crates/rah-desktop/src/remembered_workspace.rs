@@ -84,7 +84,7 @@ fn test_state() -> &'static Mutex<TestState> {
 }
 
 #[cfg(test)]
-fn test_lock() -> &'static Mutex<()> {
+pub(crate) fn test_lock() -> &'static Mutex<()> {
     TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
@@ -1484,7 +1484,6 @@ mod tests {
 
     impl Drop for TestDirectory {
         fn drop(&mut self) {
-            clear_test_state();
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -1740,6 +1739,7 @@ mod tests {
 
     #[test]
     fn reparse_ancestor_rejection_has_no_catalog_or_coordination_mutation() {
+        let _lock = test_lock().lock().unwrap();
         let directory = TestDirectory::new();
         let storage = directory.0.join("ordinary-ancestor").join("storage");
         fs::create_dir_all(&storage).unwrap();

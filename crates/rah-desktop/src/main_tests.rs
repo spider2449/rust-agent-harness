@@ -36,7 +36,7 @@ use super::{
     RejectedProviderPublication, RememberedWorkspaceStartupState, RepositoryIndexActionKind,
     RepositoryIndexEffectReservation, RepositoryMemberRemovalOutcomePresentation,
     RepositoryObservationStage, RepositoryRefreshReason, ResumePair, SendChatResult, SourceKind,
-    StagedReviewPresentation, StartupActivationCounters, TerminalOwnership,
+    StagedReviewPresentation, StartupActivationCounters, TerminalOwnership, TestPublicationGate,
     WorkflowRefreshTestHook, activate_admitted_member, activate_repository_member_selector,
     activity_event, activity_event_with_composition, admit_remembered_candidate, admit_repository,
     admit_repository_with_semantic_validation, apply_model_selection,
@@ -8915,30 +8915,73 @@ async fn task_343_windows_host_driven_inactive_member_removal_live_certification
     Ok(())
 }
 
-fn install_activation_barrier(
-    state: &DesktopAppState,
-    parties: usize,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+struct ReachedPublicationGate {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<()>,
+    release: Arc<TestPublicationGate>,
+}
+
+impl ReachedPublicationGate {
+    async fn recv(&mut self) -> Option<()> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for ReachedPublicationGate {
+    fn drop(&mut self) {
+        // Also releases a worker when an assertion unwinds the parent test.
+        self.release.release();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn publication_gate_releases_worker_when_parent_panics() {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
+    let mut reached = ReachedPublicationGate {
+        receiver,
+        release: Arc::clone(&release),
+    };
+    let worker = thread::spawn(move || {
+        sender.send(()).unwrap();
+        release.wait();
+    });
+    reached
+        .recv()
+        .await
+        .expect("worker reached publication gate");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _reached = reached;
+        panic!("parent assertion failed");
+    }));
+    assert!(result.is_err());
+    worker
+        .join()
+        .expect("blocked worker was released on unwind");
+}
+
+fn install_activation_barrier(state: &DesktopAppState, _parties: usize) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.activation_test_hook.lock().unwrap() = Some(Arc::new(ActivationTestHook {
         reached,
-        release: Arc::new(std::sync::Barrier::new(parties)),
+        release: Arc::clone(&release),
         target_member: None,
     }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn install_activation_member_barrier(
     state: &DesktopAppState,
     target_member: RepositoryMemberId,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.activation_test_hook.lock().unwrap() = Some(Arc::new(ActivationTestHook {
         reached,
-        release: Arc::new(std::sync::Barrier::new(2)),
+        release: Arc::clone(&release),
         target_member: Some(target_member),
     }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn release_activation_barrier(state: &DesktopAppState) {
@@ -8950,18 +8993,17 @@ fn release_activation_barrier(state: &DesktopAppState) {
         .unwrap()
         .release
         .clone();
-    release.wait();
+    release.release();
 }
 
-fn install_authorization_barrier(
-    state: &DesktopAppState,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+fn install_authorization_barrier(state: &DesktopAppState) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.authorization_test_hook.lock().unwrap() = Some(Arc::new(AuthorizationTestHook {
         reached,
-        release: Arc::new(std::sync::Barrier::new(2)),
+        release: Arc::clone(&release),
     }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn release_authorization_barrier(state: &DesktopAppState) {
@@ -8973,19 +9015,18 @@ fn release_authorization_barrier(state: &DesktopAppState) {
         .unwrap()
         .release
         .clone();
-    release.wait();
+    release.release();
 }
 
-fn install_connect_publication_barrier(
-    state: &DesktopAppState,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+fn install_connect_publication_barrier(state: &DesktopAppState) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.connect_publication_test_hook.lock().unwrap() =
         Some(Arc::new(ConnectPublicationTestHook {
             reached,
-            release: Arc::new(std::sync::Barrier::new(2)),
+            release: Arc::clone(&release),
         }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn release_connect_publication_barrier(state: &DesktopAppState) {
@@ -8997,19 +9038,18 @@ fn release_connect_publication_barrier(state: &DesktopAppState) {
         .unwrap()
         .release
         .clone();
-    release.wait();
+    release.release();
     *state.connect_publication_test_hook.lock().unwrap() = None;
 }
 
-fn install_index_effect_barrier(
-    state: &DesktopAppState,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+fn install_index_effect_barrier(state: &DesktopAppState) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.index_effect_test_hook.lock().unwrap() = Some(Arc::new(IndexEffectTestHook {
         reached,
-        release: Arc::new(std::sync::Barrier::new(2)),
+        release: Arc::clone(&release),
     }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn release_index_effect_barrier(state: &DesktopAppState) {
@@ -9021,7 +9061,7 @@ fn release_index_effect_barrier(state: &DesktopAppState) {
         .unwrap()
         .release
         .clone();
-    release.wait();
+    release.release();
     *state.index_effect_test_hook.lock().unwrap() = None;
 }
 
@@ -9577,15 +9617,14 @@ fn storage_file_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-fn install_workflow_refresh_barrier(
-    state: &DesktopAppState,
-) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+fn install_workflow_refresh_barrier(state: &DesktopAppState) -> ReachedPublicationGate {
     let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
     *state.workflow_refresh_test_hook.lock().unwrap() = Some(Arc::new(WorkflowRefreshTestHook {
         reached,
-        release: Arc::new(std::sync::Barrier::new(2)),
+        release: Arc::clone(&release),
     }));
-    receiver
+    ReachedPublicationGate { receiver, release }
 }
 
 fn release_workflow_refresh_barrier(state: &DesktopAppState) {
@@ -9597,7 +9636,7 @@ fn release_workflow_refresh_barrier(state: &DesktopAppState) {
         .unwrap()
         .release
         .clone();
-    release.wait();
+    release.release();
     *state.workflow_refresh_test_hook.lock().unwrap() = None;
 }
 
@@ -10482,8 +10521,12 @@ async fn task349_close_prevents_late_host_prepare_publication() {
             .expect("HostExplicit async preparation should reserve its owner");
     }
 
-    let (reached, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
-    let release = Arc::new(std::sync::Barrier::new(2));
+    let (reached, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(TestPublicationGate::default());
+    let mut reached_rx = ReachedPublicationGate {
+        receiver,
+        release: Arc::clone(&release),
+    };
     let release_prepare = Arc::clone(&release);
     let prepare_state = Arc::clone(&state);
     let publication = tokio::task::spawn_blocking(move || {
@@ -10504,7 +10547,7 @@ async fn task349_close_prevents_late_host_prepare_publication() {
 
     super::close_repository_transition(&state, close_request(member_a, generation))
         .expect("Close clears the safe in-progress preparation owner");
-    release.wait();
+    release.release();
     assert_eq!(
         publication.await.unwrap(),
         Err(super::host_invocation::CoordinatorError::Busy)
@@ -17422,6 +17465,7 @@ fn task_333_catalog_actions_are_durable_ordered_and_privacy_safe() {
 
 #[test]
 fn task_333_failed_catalog_save_preserves_published_and_durable_state() {
+    let _lock = super::remembered_workspace::test_lock().lock().unwrap();
     let storage = TestRepository::new();
     let state = DesktopAppState::new(storage.0.clone());
     let first = add_remembered_candidate(&state, "Before", None);

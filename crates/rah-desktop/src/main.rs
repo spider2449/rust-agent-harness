@@ -451,7 +451,7 @@ struct DesktopAppState {
 #[cfg(test)]
 struct ActivationTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<std::sync::Barrier>,
+    release: Arc<TestPublicationGate>,
     target_member: Option<RepositoryMemberId>,
 }
 
@@ -459,28 +459,57 @@ struct ActivationTestHook {
 #[cfg(test)]
 struct AuthorizationTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<std::sync::Barrier>,
+    release: Arc<TestPublicationGate>,
 }
 
 #[cfg(target_os = "windows")]
 #[cfg(test)]
 struct ConnectPublicationTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<std::sync::Barrier>,
+    release: Arc<TestPublicationGate>,
 }
 
 #[cfg(target_os = "windows")]
 #[cfg(test)]
 struct IndexEffectTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<std::sync::Barrier>,
+    release: Arc<TestPublicationGate>,
 }
 
 #[cfg(target_os = "windows")]
 #[cfg(test)]
 struct WorkflowRefreshTestHook {
     reached: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<std::sync::Barrier>,
+    release: Arc<TestPublicationGate>,
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[derive(Default)]
+struct TestPublicationGate {
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(all(test, target_os = "windows"))]
+impl TestPublicationGate {
+    fn wait(&self) {
+        let released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _released = self
+            .wake
+            .wait_while(released, |released| !*released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
+    fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.wake.notify_all();
+    }
 }
 
 #[cfg(target_os = "windows")]
