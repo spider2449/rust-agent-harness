@@ -168,7 +168,10 @@ Documentation-only close validation:
 - `git diff --check` — PASS.
 - `cargo metadata --no-deps --format-version 1` — PASS: 13 packages, 13 workspace members, version `0.32.0`, edition `2024`.
 - RAH production source change: none.
-- Commit/push/exact-head CI: pending.
+- Documentation commit `862731d9e7792f242595c6bf44c2c783ec81616f` was pushed to
+  `origin/master`; exact-head push CI `36302936176` passed all required jobs:
+  formatting, workspace check, workspace tests, Clippy lint, and Desktop
+  Tauri permission check.
 
 ## 15. Final outcome
 
