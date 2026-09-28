@@ -7228,7 +7228,7 @@ fn duplicate_connect_while_connecting_does_not_start_another_runtime() {
 fn connecting_repository_selection_is_rejected_deterministically() {
     assert_eq!(
         repository_selection_allowed_for_connection(&ConnectionState::Connecting),
-        Err(FrontendError::RepositoryBusy)
+        Err(FrontendError::RepositorySelectionRequiresDisconnect)
     );
     assert_eq!(
         repository_selection_allowed_for_connection(&ConnectionState::NotConnected),
@@ -9505,6 +9505,103 @@ async fn activation_fixture() -> (
     (state, repository_a, repository_b, member_a, member_b)
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn connected_repository_selection_rejects_direct_activation_without_changing_authority() {
+    let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
+    let generation = *state.repository_generation.lock().unwrap();
+    let repository_before = state.repository.lock().unwrap().clone().unwrap();
+    let registry = desktop_tool_registry(Some(&repository_before), None)
+        .expect("A repository registry should compose before Connect");
+    let composition = desktop_tool_composition_from_registry(
+        Arc::clone(&registry),
+        Some(&repository_before),
+        false,
+        &[],
+    )
+    .expect("A authority should be classified");
+    let runtime = test_codex_runtime(&repository_before.root, registry).await;
+    let model_generation = state.model.lock().unwrap().generation;
+    let profile_generation = *state.trusted_profile_generation.lock().unwrap();
+    let identity_generation = *state.commit_identity_generation.lock().unwrap();
+    *state.connection.lock().unwrap() = ConnectionState::Connected {
+        runtime,
+        source: CodexExecutableSource::Path,
+        repository_generation: generation,
+        model_generation,
+        profile_generation,
+        connection_generation: 1,
+        identity_generation,
+        repository_fingerprint: Some(repository_context_fingerprint(&repository_before.root)),
+        composition,
+        allowed_permissions: vec![
+            PermissionLevel::None,
+            PermissionLevel::Read,
+            PermissionLevel::Execute,
+        ],
+    };
+    let composition_before = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { composition, .. } => Arc::clone(composition),
+        _ => unreachable!("test state is connected"),
+    };
+
+    assert_eq!(
+        activate_repository_member_selector(&state, &member_b.selector())
+            .await
+            .unwrap_err(),
+        FrontendError::RepositorySelectionRequiresDisconnect,
+        "direct repository-selection invocation reports the connected lifecycle requirement"
+    );
+    assert_eq!(
+        serde_json::to_string(&FrontendError::RepositorySelectionRequiresDisconnect)
+            .expect("lifecycle error serializes"),
+        "\"repository_selection_requires_disconnect\""
+    );
+    assert_eq!(
+        state.workspace_membership.lock().unwrap().active_member(),
+        Some(member_a)
+    );
+    assert!(Arc::ptr_eq(
+        &repository_before,
+        state.repository.lock().unwrap().as_ref().unwrap(),
+    ));
+    assert_eq!(*state.repository_generation.lock().unwrap(), generation);
+    match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { composition, .. } => {
+            assert!(
+                Arc::ptr_eq(&composition_before, composition),
+                "rejected selection leaves the connected composition untouched"
+            );
+            assert!(
+                Arc::ptr_eq(&composition_before.registry, &composition.registry),
+                "rejected selection creates no new ToolRegistry authority"
+            );
+        }
+        _ => panic!("rejected selection must preserve the connected state"),
+    }
+
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => Arc::clone(runtime),
+        _ => unreachable!("test state is connected"),
+    };
+    runtime
+        .shutdown()
+        .await
+        .expect("fake runtime should shut down at the explicit Disconnect boundary");
+    *state.connection.lock().unwrap() = ConnectionState::NotConnected;
+    assert!(matches!(
+        *state.connection.lock().unwrap(),
+        ConnectionState::NotConnected
+    ));
+    activate_repository_member_selector(&state, &member_b.selector())
+        .await
+        .expect("switching remains available after Disconnect");
+    assert_eq!(
+        state.workspace_membership.lock().unwrap().active_member(),
+        Some(member_b)
+    );
+    assert_eq!(*state.repository_generation.lock().unwrap(), generation + 1);
+}
+
 async fn close_activation_fixture(
     repository_a_state: GitRepositoryState,
 ) -> (
@@ -11000,7 +11097,7 @@ async fn activation_connection_transition_wins_before_publication() {
     release_activation_barrier(&state);
     assert_eq!(
         activation.await.unwrap(),
-        Err(FrontendError::RepositoryBusy)
+        Err(FrontendError::RepositorySelectionRequiresDisconnect)
     );
     assert_eq!(
         state.workspace_membership.lock().unwrap().active_member(),
@@ -19855,7 +19952,8 @@ async fn task_324_c_windows_host_driven_two_repository_live_certification() -> R
         return Err("A connected active-only composition or HostExplicit set was wrong".to_owned());
     }
     let generation_before_connected_switch = *state.inner().repository_generation.lock().unwrap();
-    if activate_admitted_member(state.inner(), member_b).await != Err(FrontendError::RepositoryBusy)
+    if activate_admitted_member(state.inner(), member_b).await
+        != Err(FrontendError::RepositorySelectionRequiresDisconnect)
         || state
             .inner()
             .workspace_membership

@@ -121,9 +121,10 @@
             </dialog>
           </section>
           <div class="repository-actions">
-            <button id="choose-repository" type="button">Choose Repository</button>
+            <button id="choose-repository" type="button" disabled>Choose Repository</button>
             <button id="refresh-repository" type="button">Refresh</button>
           </div>
+          <p id="repository-selection-hint" class="model-hint" aria-live="polite"></p>
           <p id="repository-path">No repository selected</p>
           <h3>Status</h3>
           <div id="repository-status-entries" class="repository-entries"></div>

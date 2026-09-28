@@ -1479,6 +1479,7 @@ pub(crate) enum FrontendError {
     RepositoryUnavailable,
     RepositoryDialogFailed,
     RepositoryBusy,
+    RepositorySelectionRequiresDisconnect,
     RepositoryActionInvalid,
     RepositoryActionStale,
     RememberedCatalogUnavailable,
@@ -8733,7 +8734,9 @@ fn repository_selection_allowed_for_connection(
         ConnectionState::NotConnected | ConnectionState::Error(_) => Ok(()),
         ConnectionState::Connecting
         | ConnectionState::Connected { .. }
-        | ConnectionState::Disconnecting => Err(FrontendError::RepositoryBusy),
+        | ConnectionState::Disconnecting => {
+            Err(FrontendError::RepositorySelectionRequiresDisconnect)
+        }
     }
 }
 

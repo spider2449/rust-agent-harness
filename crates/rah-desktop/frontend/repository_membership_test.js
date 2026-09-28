@@ -8,6 +8,7 @@ const source = fs.readFileSync(`${__dirname}/status.js`, "utf8");
 const html = fs.readFileSync(`${__dirname}/index.html`, "utf8");
 
 assert.match(html, /id="repository-member-selector"/);
+assert.match(html, /id="repository-selection-hint"/);
 assert.match(html, /id="activate-repository-member"/);
 assert.match(html, /id="remove-repository-member"/);
 assert.match(html, /id="repository-member-removal-confirmation"/);
@@ -149,6 +150,10 @@ class FakeElement {
 
   append(...children) {
     this.children.push(...children);
+  }
+
+  querySelectorAll() {
+    return [];
   }
 }
 
@@ -410,7 +415,49 @@ assert.equal(noActiveFrontend.elements.get("#repository-membership-status").text
 assert.equal(noActiveFrontend.elements.get("#repository-path").textContent, "No repository is active.");
 }
 
-testCloseSuccessAndErrors().then(() => {
+async function testRepositorySelectionLifecycle() {
+  const frontend = createFrontend();
+  frontend.run("renderRows = () => {}; updateRepositoryCloseControls = () => {}");
+  frontend.context.testMembership = membership("A");
+  frontend.run("renderRepositoryMembership(testMembership); document.querySelector('#repository-member-selector').value = 'B'; updateRepositoryMembershipControls()");
+  async function publish(codexStatus, chatRunning = false) {
+    frontend.context.testChatRunning = chatRunning;
+    frontend.run("chatRunning = testChatRunning");
+    frontend.context.testAppStatus = {
+      codexStatus,
+      repositoryToolsStatus: "inactive",
+      modelConfigurationStatus: "unchanged",
+      profileStatus: "not loaded",
+    };
+    await frontend.run("loadStatus(async () => testAppStatus)");
+  }
+
+  await publish("not connected");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, false, "disconnected chooser is actionable");
+  assert.equal(frontend.elements.get("#repository-selection-hint").hidden, true);
+  await publish("connecting");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, true, "connecting blocks repository selection");
+  assert.equal(frontend.elements.get("#repository-selection-hint").textContent, "Wait for the runtime to disconnect before changing repositories.");
+  await publish("connected");
+  assert.equal(frontend.elements.get("#chat-hint").textContent, "Chat ready", "the Task 458 ready state stays distinct from repository availability");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, true, "connected-ready blocks repository selection");
+  assert.equal(frontend.elements.get("#activate-repository-member").disabled, true, "connected-ready blocks active-member switching");
+  assert.equal(frontend.elements.get("#repository-selection-hint").textContent, "Disconnect before changing repositories.");
+  await publish("connected", true);
+  assert.equal(frontend.elements.get("#choose-repository").disabled, true, "a running turn blocks repository selection");
+  assert.equal(frontend.elements.get("#repository-selection-hint").textContent, "Wait for the current chat turn to finish, then disconnect before changing repositories.");
+  await publish("disconnecting");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, true, "disconnecting blocks repository selection");
+  assert.equal(frontend.elements.get("#activate-repository-member").disabled, true, "disconnecting blocks active-member switching");
+  await publish("not connected");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, false, "chooser is restored after Disconnect reaches disconnected");
+  assert.equal(frontend.elements.get("#activate-repository-member").disabled, false, "active-member switching is restored after Disconnect");
+  await publish("error");
+  assert.equal(frontend.elements.get("#choose-repository").disabled, false, "host Error state matches the backend's nonconnected selection allowance");
+  assert.equal(frontend.run('errorMessage("repository_selection_requires_disconnect")'), "Disconnect before changing repositories.");
+}
+
+testRepositorySelectionLifecycle().then(() => testCloseSuccessAndErrors()).then(() => {
   console.log("repository membership frontend tests passed");
 }).catch((error) => {
   console.error(error);

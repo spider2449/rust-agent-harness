@@ -25,7 +25,7 @@ let renderedTrustedProfileSelection = null;
 let renderedRepositoryMembership = null;
 let renderedEffectiveAuthority = null;
 let renderedCodexStatus = null;
-let repositorySwitchBlocked = false;
+let repositorySwitchBlocked = true;
 let activePreparedHostReview = null;
 let rememberedCatalog = null;
 let rememberedCatalogMutationBusy = false;
@@ -162,6 +162,7 @@ function errorMessage(error) {
     repository_observation_failed: "Repository observation failed",
     repository_dialog_failed: "Repository picker failed",
     repository_busy: "Repository selection is unavailable while chat is running",
+    repository_selection_requires_disconnect: "Disconnect before changing repositories.",
     repository_member_selector_invalid: "That repository selection is invalid",
     repository_member_not_found: "That repository is no longer admitted",
     repository_member_active: "This repository is active. Switch to another repository before removing it.",
@@ -1412,6 +1413,31 @@ function updateRepositoryMembershipControls() {
   updateRepositoryCloseControls();
 }
 
+function updateRepositorySelectionControls() {
+  const chooseButton = document.querySelector("#choose-repository");
+  const selectionHint = document.querySelector("#repository-selection-hint");
+  const disconnected = ["not connected", "error"].includes(renderedCodexStatus);
+  const lifecycleBusy = ["connecting", "connected", "disconnecting"].includes(renderedCodexStatus);
+  const statusUnavailable = renderedCodexStatus == null || (!disconnected && !lifecycleBusy);
+  repositorySwitchBlocked = statusUnavailable || lifecycleBusy || chatRunning;
+  chooseButton.disabled = repositorySwitchBlocked;
+  if (lifecycleBusy) {
+    selectionHint.textContent = renderedCodexStatus === "connected"
+      ? (chatRunning
+        ? "Wait for the current chat turn to finish, then disconnect before changing repositories."
+        : "Disconnect before changing repositories.")
+      : "Wait for the runtime to disconnect before changing repositories.";
+  } else if (statusUnavailable) {
+    selectionHint.textContent = "Runtime status is unavailable. Refresh before changing repositories.";
+  } else if (chatRunning) {
+    selectionHint.textContent = "Wait for the current chat turn to finish before changing repositories.";
+  } else {
+    selectionHint.textContent = "";
+  }
+  selectionHint.hidden = selectionHint.textContent.length === 0;
+  updateRepositoryMembershipControls();
+}
+
 function repositoryCloseGuard() {
   const activeMemberId = renderedRepositoryMembership?.activeMemberId;
   const activeMember = renderedRepositoryMembership?.members?.find((member) =>
@@ -2027,7 +2053,7 @@ function appendActivity(payload) {
 
 function showBackendError() {
   renderedCodexStatus = null;
-  updateRepositoryMembershipControls();
+  updateRepositorySelectionControls();
   const error = document.querySelector("#backend-error");
   error.textContent = "Desktop backend unavailable";
   error.hidden = false;
@@ -2084,9 +2110,7 @@ async function loadStatus(invoke) {
     || status.profileStatus === "reconnect required"
     || resumeUsed;
   document.querySelector("#clear-conversation-history").disabled = chatRunning;
-  document.querySelector("#choose-repository").disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
-  repositorySwitchBlocked = status.codexStatus === "connecting" || status.codexStatus === "connected" || status.codexStatus === "disconnecting" || chatRunning;
-  updateRepositoryMembershipControls();
+  updateRepositorySelectionControls();
   const profileSelectionAllowed = ["not connected", "error"].includes(status.codexStatus) && !chatRunning;
   document.querySelector("#choose-trusted-profile").disabled = !profileSelectionAllowed;
   document.querySelector("#restore-trusted-profile").disabled = !profileSelectionAllowed || !renderedTrustedProfileSelection?.remembered;
