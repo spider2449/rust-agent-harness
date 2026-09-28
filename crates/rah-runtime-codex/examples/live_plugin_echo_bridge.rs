@@ -14,7 +14,7 @@ use rah_protocol::{
     RequestId, ToolName,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{ExternalToolIdentity, ExternalToolPermissionPolicy, ToolRegistry};
 use rah_tools_plugin::{PLUGIN_PROTOCOL_VERSION, PluginAdapter, PluginConfig};
 use serde_json::{Value, json};
@@ -85,7 +85,7 @@ async fn run() -> Result<(), String> {
     }
 
     println!("CODEX_EXECUTABLE {}", codex_executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("PLUGIN_PROTOCOL_VERSION {PLUGIN_PROTOCOL_VERSION}");
     println!("PLUGIN_EXECUTABLE {}", plugin_executable.display());
     println!("CONFIGURED_PLUGIN_ID test");

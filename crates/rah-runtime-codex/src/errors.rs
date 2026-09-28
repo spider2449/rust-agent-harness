@@ -27,10 +27,10 @@ pub enum CodexAdapterError {
         #[source]
         source: io::Error,
     },
-    /// The installed CLI is not the exact version supported by the adapter.
-    #[error("unsupported Codex version: expected `{expected}`, found `{actual}`")]
+    /// The installed CLI is absent from the exact current certified set.
+    #[error("unsupported Codex version: current preferred `{expected}`, found `{actual}`")]
     VersionMismatch {
-        /// Adapter-supported version.
+        /// Preferred version from the current certified set.
         expected: &'static str,
         /// Version reported by the executable.
         actual: String,

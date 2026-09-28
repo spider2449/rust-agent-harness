@@ -21,7 +21,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolDefinition, ToolInput, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{FsReadTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
@@ -106,7 +106,7 @@ async fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to register fs.read: {error}"))?;
 
     println!("CODEX_EXECUTABLE {}", executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("WORKSPACE_ROOT {}", workspace.display());
     println!("FS_READ_MAX_BYTES {MAX_BYTES}");
     println!("EXPERIMENTAL_API true");

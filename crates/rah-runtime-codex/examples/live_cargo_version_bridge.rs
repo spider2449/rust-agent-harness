@@ -18,7 +18,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolName,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{CARGO_VERSION_TOOL_NAME, CargoVersionTool, Tool, ToolRegistry};
 use serde_json::{Value, json};
 
@@ -109,7 +109,7 @@ async fn run() -> Result<(), String> {
     }
 
     println!("CODEX_EXECUTABLE {}", codex_executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("RAH_TOOL_NAME {CARGO_VERSION_TOOL_NAME}");
     println!("CODEX_ALIAS {CODEX_ALIAS}");
     println!("PRIVATE_ALIAS_MAPPING {CODEX_ALIAS} -> {CARGO_VERSION_TOOL_NAME}");

@@ -26,7 +26,7 @@ use rah_protocol::{
 use rah_runtime::AgentRuntime;
 use rah_runtime_codex::{
     CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider, CodexModelSelection, CodexRuntime,
-    SUPPORTED_CODEX_VERSION,
+    PREFERRED_CURRENT_CODEX_VERSION,
 };
 use rah_tools::{EchoTool, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
@@ -110,7 +110,7 @@ async fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to register echo: {error}"))?;
 
     println!("CODEX_EXECUTABLE {}", executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("EXPERIMENTAL_API true");
     println!("ALLOWED_PERMISSIONS {:?}", [PermissionLevel::None]);
     println!(

@@ -76,7 +76,7 @@ use rah_runtime::AgentRuntime;
 #[cfg(target_os = "windows")]
 use rah_runtime_codex::{
     CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
-    CodexModelSelection, CodexRuntime, SUPPORTED_CODEX_VERSION,
+    CodexModelSelection, CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION,
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
@@ -1950,7 +1950,7 @@ fn current_app_status(
         ConnectionState::Connected { source, .. } => (
             "connected",
             "connected",
-            Some(SUPPORTED_CODEX_VERSION),
+            Some(PREFERRED_CURRENT_CODEX_VERSION),
             Some((*source).into()),
             None,
         ),
@@ -8000,7 +8000,7 @@ impl ConnectionResult {
     fn connected() -> Self {
         Self {
             status: "connected",
-            version: Some(SUPPORTED_CODEX_VERSION),
+            version: Some(PREFERRED_CURRENT_CODEX_VERSION),
         }
     }
 

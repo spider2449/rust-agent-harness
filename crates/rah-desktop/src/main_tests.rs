@@ -73,7 +73,7 @@ use super::{
     uncertain_repository_effect_pending, uncertain_repository_effect_requires_refresh,
     validate_host_confirmation_ticket, validate_prompt,
 };
-use super::{SUPPORTED_CODEX_VERSION, current_host_composition};
+use super::{PREFERRED_CURRENT_CODEX_VERSION, current_host_composition};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rah_protocol::{
@@ -3750,7 +3750,7 @@ async fn windows_live_desktop_hostexplicit_rename_file() -> Result<(), String> {
         &fs::read(&codex_executable)
             .map_err(|error| format!("Codex executable read failed: {error}"))?,
     );
-    if codex_version != SUPPORTED_CODEX_VERSION {
+    if codex_version != PREFERRED_CURRENT_CODEX_VERSION {
         return Err(format!("certified Codex version mismatch: {codex_version}"));
     }
 
@@ -9185,7 +9185,7 @@ use std::{env, fs, io::{self, BufRead, Write}, path::PathBuf};
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("codex-cli 0.149.0");
+        println!("codex-cli 0.157.1");
         return;
     }
     if args.get(1).map(String::as_str) == Some("app-server")
@@ -19363,7 +19363,7 @@ async fn task_324_d_windows_codex_app_server_ownership_evidence() -> Result<(), 
     .trim()
     .to_owned();
     let codex_sha256 = GetFileHash::sha256(&codex_executable)?;
-    if codex_version != SUPPORTED_CODEX_VERSION
+    if codex_version != PREFERRED_CURRENT_CODEX_VERSION
         || codex_sha256 != "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00"
     {
         return Err("certified Codex baseline version or SHA-256 mismatch".to_owned());
@@ -19566,7 +19566,7 @@ async fn task_324_c_windows_host_driven_two_repository_live_certification() -> R
     .trim()
     .to_owned();
     let codex_sha256 = (GetFileHash::sha256(&codex_executable))?;
-    if codex_version != SUPPORTED_CODEX_VERSION
+    if codex_version != PREFERRED_CURRENT_CODEX_VERSION
         || codex_sha256 != "14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00"
     {
         return Err("certified Codex baseline version or SHA-256 mismatch".to_owned());
@@ -25505,5 +25505,677 @@ async fn task_361_windows_linked_worktree_live_certification() -> Result<(), Str
     );
     println!("RAH_V030_FIXTURE_ROOT_REMOVED=1");
     println!("RAH_V030_LINKED_WORKTREE_LIVE_OK");
+    Ok(())
+}
+#[derive(Clone, Debug, Deserialize)]
+struct Task452ProcessRow {
+    pid: u32,
+    parent_pid: u32,
+    process_name: String,
+    app_server: bool,
+    stdio: bool,
+    path_match: bool,
+    hash_match: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Task452EvidenceRow {
+    pid: u32,
+    parent_pid: u32,
+    process_name: String,
+    first_seen: usize,
+    last_seen: usize,
+    alive_at_final_sample: bool,
+    ownership: &'static str,
+    path_match: bool,
+    hash_match: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Task452CensusEvidence {
+    pre_existing_candidate_count: usize,
+    new_candidate_count: usize,
+    desktop_owned_candidate_count: usize,
+    path_match_count: usize,
+    hash_match_count: usize,
+    rows: Vec<Task452EvidenceRow>,
+}
+
+fn task452_process_census(executable: &Path) -> Result<Vec<Task452ProcessRow>, String> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+$expected = (Get-Item -LiteralPath $env:RAH_TASK452_EXECUTABLE -ErrorAction Stop).FullName
+$rows = @(foreach ($p in Get-CimInstance Win32_Process) {
+    $line = [string]$p.CommandLine
+    $name = [string]$p.Name
+    $appServer = $line -match '(?i)(^|\s)app-server(?=\s|$)'
+    $stdio = $line -match '(?i)(^|\s)--stdio(?=\s|$)'
+    $pathMatch = $false
+    $hashMatch = $false
+    if ($appServer -and $stdio -and $name -match '(?i)^codex(?:-[^.]+)?\.exe$' -and $p.ExecutablePath) {
+        try {
+            $actual = (Get-Item -LiteralPath $p.ExecutablePath -ErrorAction Stop).FullName
+            $pathMatch = [StringComparer]::OrdinalIgnoreCase.Equals($actual, $expected)
+            $hashMatch = (Get-FileHash -LiteralPath $actual -Algorithm SHA256 -ErrorAction Stop).Hash -eq '8CB0E69E99FF2A158C54815DB82D0F2E524D8F301BC30184722CFD1AE5973574'
+        } catch { }
+    }
+    [pscustomobject]@{
+        pid = [uint32]$p.ProcessId
+        parent_pid = [uint32]$p.ParentProcessId
+        process_name = $name
+        app_server = [bool]$appServer
+        stdio = [bool]$stdio
+        path_match = [bool]$pathMatch
+        hash_match = [bool]$hashMatch
+    }
+})
+ConvertTo-Json -InputObject $rows -Compress -Depth 3
+"#])
+        .env("RAH_TASK452_EXECUTABLE", executable)
+        .output()
+        .map_err(|error| format!("sanitized process census launch failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sanitized process census failed with status {}",
+            output.status
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("sanitized process census parse failed: {error}"))
+}
+
+#[derive(Debug, Serialize)]
+struct Task453FileEvidence {
+    basename: String,
+    raw_path_redacted: String,
+    canonical_path_redacted: String,
+    file_size: u64,
+    sha256: String,
+    volume_serial: u32,
+    file_index: u64,
+}
+
+fn task453_redact_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    let (prefix_marker, comparison_text) = if let Some(rest) = text.strip_prefix(r"\\?\") {
+        (r"\\?\", rest)
+    } else {
+        ("", text.as_str())
+    };
+    for (key, marker) in [
+        ("LOCALAPPDATA", "%LOCALAPPDATA%"),
+        ("USERPROFILE", "%USERPROFILE%"),
+    ] {
+        if let Some(prefix) = std::env::var_os(key) {
+            let prefix = prefix.to_string_lossy();
+            if comparison_text.len() >= prefix.len()
+                && comparison_text[..prefix.len()].eq_ignore_ascii_case(&prefix)
+            {
+                return format!(
+                    "{prefix_marker}{marker}{}",
+                    &comparison_text[prefix.len()..]
+                );
+            }
+        }
+    }
+    text
+}
+
+fn task453_file_evidence(path: &Path) -> Result<Task453FileEvidence, String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|error| format!("canonicalize failed: {error}"))?;
+    let file = fs::File::open(path).map_err(|error| format!("open failed: {error}"))?;
+    let (volume_serial, file_index) = live_handle_identity(&file)?;
+    Ok(Task453FileEvidence {
+        basename: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        raw_path_redacted: task453_redact_path(path),
+        canonical_path_redacted: task453_redact_path(&canonical),
+        file_size: file.metadata().map_err(|error| error.to_string())?.len(),
+        sha256: GetFileHash::sha256(path)?,
+        volume_serial,
+        file_index,
+    })
+}
+
+fn task453_process_image_path(pid: u32) -> Result<PathBuf, String> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+$p = Get-CimInstance Win32_Process -Filter "ProcessId=$env:RAH_TASK453_PID" -ErrorAction Stop
+if (!$p -or !$p.ExecutablePath) { exit 2 }
+[Console]::Out.Write([string]$p.ExecutablePath)
+"#,
+        ])
+        .env("RAH_TASK453_PID", pid.to_string())
+        .output()
+        .map_err(|error| format!("process image query failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("process image query exited {}", output.status));
+    }
+    let path = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    if path.is_empty() {
+        return Err("process image path was empty".to_owned());
+    }
+    Ok(PathBuf::from(path))
+}
+
+#[test]
+fn task453_file_identity_distinguishes_spelling_and_identical_copies() {
+    let root = TestRepository::new();
+    let first = root.0.join("IdentityCase.exe");
+    let second = root.0.join("copy.exe");
+    fs::write(&first, b"identical bytes").unwrap();
+    fs::write(&second, b"identical bytes").unwrap();
+    let a = task453_file_evidence(&first).unwrap();
+    let same = task453_file_evidence(&first).unwrap();
+    assert_eq!(
+        (a.volume_serial, a.file_index),
+        (same.volume_serial, same.file_index)
+    );
+    assert_eq!(a.raw_path_redacted, same.raw_path_redacted);
+    let case = task453_file_evidence(&root.0.join("identitycase.EXE")).unwrap();
+    assert_eq!(
+        (a.volume_serial, a.file_index),
+        (case.volume_serial, case.file_index)
+    );
+    let dotted = task453_file_evidence(&root.0.join(".").join("IdentityCase.exe")).unwrap();
+    assert_eq!(
+        (a.volume_serial, a.file_index),
+        (dotted.volume_serial, dotted.file_index)
+    );
+    let copy = task453_file_evidence(&second).unwrap();
+    assert_eq!(a.sha256, copy.sha256);
+    assert_ne!(
+        (a.volume_serial, a.file_index),
+        (copy.volume_serial, copy.file_index)
+    );
+}
+
+fn task452_classify_census(
+    before: &[Task452ProcessRow],
+    samples: &[Vec<Task452ProcessRow>],
+    desktop_pid: u32,
+) -> Task452CensusEvidence {
+    let preexisting = before.iter().map(|row| row.pid).collect::<BTreeSet<_>>();
+    let is_candidate = |row: &Task452ProcessRow| {
+        task_324_d_is_codex_basename(&row.process_name) && row.app_server && row.stdio
+    };
+    let mut rows = Vec::<Task452EvidenceRow>::new();
+    for (sample_number, sample) in samples.iter().enumerate() {
+        for row in sample
+            .iter()
+            .filter(|row| is_candidate(row) && !preexisting.contains(&row.pid))
+        {
+            if let Some(existing) = rows.iter_mut().find(|existing| existing.pid == row.pid) {
+                existing.last_seen = sample_number;
+                existing.alive_at_final_sample = sample_number + 1 == samples.len();
+                continue;
+            }
+            let mut parent = row.parent_pid;
+            let mut visited = BTreeSet::new();
+            let mut owned = false;
+            while parent != 0 && visited.insert(parent) {
+                if parent == desktop_pid {
+                    owned = true;
+                    break;
+                }
+                let Some(ancestor) = sample.iter().find(|ancestor| ancestor.pid == parent) else {
+                    break;
+                };
+                parent = ancestor.parent_pid;
+            }
+            rows.push(Task452EvidenceRow {
+                pid: row.pid,
+                parent_pid: row.parent_pid,
+                process_name: row.process_name.clone(),
+                first_seen: sample_number,
+                last_seen: sample_number,
+                alive_at_final_sample: sample_number + 1 == samples.len(),
+                ownership: if owned {
+                    "desktop_owned"
+                } else {
+                    "unrelated_new"
+                },
+                path_match: row.path_match,
+                hash_match: row.hash_match,
+            });
+        }
+    }
+    let owned = rows
+        .iter()
+        .filter(|row| row.ownership == "desktop_owned")
+        .collect::<Vec<_>>();
+    Task452CensusEvidence {
+        pre_existing_candidate_count: before.iter().filter(|row| is_candidate(row)).count(),
+        new_candidate_count: rows.len(),
+        desktop_owned_candidate_count: owned.len(),
+        path_match_count: owned.iter().filter(|row| row.path_match).count(),
+        hash_match_count: owned.iter().filter(|row| row.hash_match).count(),
+        rows,
+    }
+}
+
+#[test]
+fn task452_census_classifies_preexisting_identity_and_ownership_independently() {
+    let row = |pid, parent_pid, app_server, path_match, hash_match| Task452ProcessRow {
+        pid,
+        parent_pid,
+        process_name: "codex.exe".to_owned(),
+        app_server,
+        stdio: app_server,
+        path_match,
+        hash_match,
+    };
+    let before = vec![row(10, 99, true, false, false)];
+    let good = row(20, 1, true, true, true);
+    let pass = task452_classify_census(&before, &[vec![before[0].clone(), good.clone()]], 1);
+    assert_eq!(pass.pre_existing_candidate_count, 1);
+    assert_eq!(pass.new_candidate_count, 1);
+    assert_eq!(pass.desktop_owned_candidate_count, 1);
+    assert_eq!(pass.path_match_count, 1);
+    assert_eq!(pass.hash_match_count, 1);
+    let wrong = task452_classify_census(&[], &[vec![row(20, 1, true, false, false)]], 1);
+    assert_eq!(wrong.desktop_owned_candidate_count, 1);
+    assert_eq!(wrong.path_match_count, 0);
+    assert_eq!(wrong.hash_match_count, 0);
+    let multiple =
+        task452_classify_census(&[], &[vec![good.clone(), row(21, 1, true, true, true)]], 1);
+    assert_eq!(multiple.desktop_owned_candidate_count, 2);
+    let unrelated = task452_classify_census(&[], &[vec![row(20, 99, true, true, true)]], 1);
+    assert_eq!(unrelated.new_candidate_count, 1);
+    assert_eq!(unrelated.desktop_owned_candidate_count, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "one production Desktop Connect for Task 453"]
+async fn task453_desktop_executable_file_identity() -> Result<(), String> {
+    let storage = TestRepository::new();
+    let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+    let selection = resolve_codex_executable()
+        .map_err(|error| format!("saved baseline resolution failed: {error:?}"))?;
+    if selection.source != CodexExecutableSource::CertifiedBaseline {
+        return Err("saved baseline was not selected".to_owned());
+    }
+    let executable = PathBuf::from(&selection.executable);
+    let expected = task453_file_evidence(&executable)?;
+    if expected.sha256 != "8cb0e69e99ff2a158c54815db82d0f2e524d8f301bc30184722cfd1ae5973574" {
+        return Err("saved baseline hash changed".to_owned());
+    }
+    let before = task452_process_census(&executable)?;
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .map_err(|error| format!("Desktop app construction failed: {error}"))?;
+    let pre_connect = task452_process_census(&executable)?;
+    let desktop_pid = std::process::id();
+    replace_selected_repository(
+        app.state::<DesktopAppState>().inner(),
+        DesktopRepository::new(&TestRepository::native_git(), &fixture.0)
+            .map_err(|error| format!("fixture repository selection failed: {error:?}"))?,
+    );
+    super::set_model_configuration(
+        app.handle().clone(),
+        app.state(),
+        DesktopModelProvider::OpenAi,
+        Some("gpt-6-luna".to_owned()),
+        None,
+    )
+    .map_err(|error| format!("model selection failed: {error:?}"))?;
+    connect_codex(app.state())
+        .await
+        .map_err(|error| format!("production Connect failed: {error:?}"))?;
+    let first = task452_process_census(&executable)?;
+    let first_census =
+        task452_classify_census(&pre_connect, std::slice::from_ref(&first), desktop_pid);
+    let first_owned = first_census
+        .rows
+        .iter()
+        .filter(|row| row.ownership == "desktop_owned")
+        .collect::<Vec<_>>();
+    if first_owned.len() != 1 {
+        return Err(format!(
+            "first post-Connect owned candidate count was {}; census={first_census:?}",
+            first_owned.len()
+        ));
+    }
+    let actual_path = task453_process_image_path(first_owned[0].pid)?;
+    let actual = task453_file_evidence(&actual_path)?;
+    let mut samples = vec![first];
+    for _ in 1..5 {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        samples.push(task452_process_census(&executable)?);
+    }
+    let census = task452_classify_census(&pre_connect, &samples, desktop_pid);
+    let owned = census
+        .rows
+        .iter()
+        .filter(|row| row.ownership == "desktop_owned")
+        .collect::<Vec<_>>();
+    if owned.len() != 1 {
+        return Err(format!(
+            "owned candidate count was {}; pre-launch rows {}; pre-Connect rows {}; census={census:?}",
+            owned.len(),
+            before.len(),
+            pre_connect.len()
+        ));
+    }
+    let expected_canonical =
+        fs::canonicalize(&selection.executable).map_err(|error| error.to_string())?;
+    let actual_canonical = fs::canonicalize(&actual_path).map_err(|error| error.to_string())?;
+    let raw_path_equal = selection.executable == actual_path;
+    let canonical_path_equal = expected_canonical == actual_canonical;
+    let windows_path_equivalent = expected_canonical
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&actual_canonical.to_string_lossy());
+    let file_object_equal =
+        (expected.volume_serial, expected.file_index) == (actual.volume_serial, actual.file_index);
+    println!(
+        "RAH453_EVIDENCE={}",
+        serde_json::json!({
+            "desktop_pid": desktop_pid, "pre_launch_candidates": before.iter().filter(|r| r.app_server && r.stdio).count(),
+            "pre_connect_candidates": pre_connect.iter().filter(|r| r.app_server && r.stdio).count(),
+            "census": census, "expected": expected, "actual": actual,
+            "raw_path_equal": raw_path_equal, "canonical_path_equal": canonical_path_equal,
+            "windows_path_equivalent": windows_path_equivalent, "file_object_equal": file_object_equal,
+            "size_equal": expected.file_size == actual.file_size, "sha256_equal": expected.sha256 == actual.sha256,
+        })
+    );
+    if !owned[0].alive_at_final_sample {
+        return Err("owned child not alive at final sample".to_owned());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires exact saved Codex 0.157.1 and live gpt-6-luna access"]
+async fn task_450_current_codex_desktop_neutral_chat() -> Result<(), String> {
+    const MARKER: &str = "RAH450_DESKTOP_01571_OK";
+    let storage = TestRepository::new();
+    let fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+    let evidence_path = std::env::var("RAH_LIVE_EVIDENCE_PATH")
+        .map_err(|_| "set RAH_LIVE_EVIDENCE_PATH to a fresh disposable JSONL file".to_owned())?;
+    if Path::new(&evidence_path).exists() {
+        return Err("live evidence path must be a fresh file".to_owned());
+    }
+    let selection = resolve_codex_executable()
+        .map_err(|error| format!("Desktop executable resolution failed: {error:?}"))?;
+    if selection.source != CodexExecutableSource::CertifiedBaseline {
+        return Err("Desktop did not select the saved preferred baseline".to_owned());
+    }
+    let executable = fs::canonicalize(&selection.executable)
+        .map_err(|error| format!("saved executable canonicalization failed: {error}"))?;
+    if GetFileHash::sha256(&executable)?
+        != "8cb0e69e99ff2a158c54815db82d0f2e524d8f301bc30184722cfd1ae5973574"
+    {
+        return Err("saved executable SHA-256 mismatch".to_owned());
+    }
+    let before = task452_process_census(&executable)?;
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .map_err(|error| format!("Desktop app construction failed: {error}"))?;
+    let pre_connect = task452_process_census(&executable)?;
+    println!(
+        "RAH452_PRE_LAUNCH_CANDIDATES={}",
+        before
+            .iter()
+            .filter(|row| task_324_d_is_codex_basename(&row.process_name)
+                && row.app_server
+                && row.stdio)
+            .count()
+    );
+    println!(
+        "RAH452_PRE_CONNECT_CANDIDATES={}",
+        pre_connect
+            .iter()
+            .filter(|row| task_324_d_is_codex_basename(&row.process_name)
+                && row.app_server
+                && row.stdio)
+            .count()
+    );
+    let chat_events = listen_for_test_event(app.handle(), "chat_event");
+    let activity_events = listen_for_test_event(app.handle(), "host_activity_event");
+    let model_activity = listen_for_test_event(app.handle(), "activity_event");
+    replace_selected_repository(
+        app.state::<DesktopAppState>().inner(),
+        DesktopRepository::new(&TestRepository::native_git(), &fixture.0)
+            .map_err(|error| format!("fixture repository selection failed: {error:?}"))?,
+    );
+    super::set_model_configuration(
+        app.handle().clone(),
+        app.state(),
+        DesktopModelProvider::OpenAi,
+        Some("gpt-6-luna".to_owned()),
+        None,
+    )
+    .map_err(|error| format!("Desktop model selection failed: {error:?}"))?;
+    connect_codex(app.state())
+        .await
+        .map_err(|error| format!("Desktop production Connect failed: {error:?}"))?;
+    let status = app.state::<DesktopAppState>().status();
+    if status.runtime_status != "connected"
+        || status.codex_version != Some(PREFERRED_CURRENT_CODEX_VERSION)
+    {
+        return Err("Desktop did not report connected exact current Codex".to_owned());
+    }
+    let desktop_pid = std::process::id();
+    let mut samples = Vec::new();
+    for sample in 0..5 {
+        samples.push(task452_process_census(&executable)?);
+        if sample < 4 {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+    }
+    let evidence = task452_classify_census(&pre_connect, &samples, desktop_pid);
+    println!(
+        "RAH452_CENSUS={}",
+        serde_json::to_string(&evidence).map_err(|error| error.to_string())?
+    );
+    if evidence.desktop_owned_candidate_count != 1 {
+        return Err(format!(
+            "A — CONNECT OWNERSHIP FAILURE: owned={}, rows={:?}",
+            evidence.desktop_owned_candidate_count, evidence.rows
+        ));
+    }
+    let owned = evidence
+        .rows
+        .iter()
+        .find(|row| row.ownership == "desktop_owned")
+        .ok_or_else(|| "A — CONNECT OWNERSHIP FAILURE: owned row missing".to_owned())?;
+    let owned_image_path = task453_process_image_path(owned.pid)?;
+    let expected_identity = task453_file_evidence(Path::new(&selection.executable))?;
+    let owned_identity = task453_file_evidence(&owned_image_path)?;
+    if (
+        expected_identity.volume_serial,
+        expected_identity.file_index,
+    ) != (owned_identity.volume_serial, owned_identity.file_index)
+    {
+        return Err(format!(
+            "B — WRONG SAVED EXECUTABLE IDENTITY: file object differs, row={owned:?}"
+        ));
+    }
+    if !owned.hash_match {
+        return Err(format!(
+            "B — WRONG SAVED EXECUTABLE IDENTITY: hash_match=false, row={owned:?}"
+        ));
+    }
+    if !owned.alive_at_final_sample {
+        return Err(format!(
+            "A — CONNECT OWNERSHIP FAILURE: owned child not alive at final sample, row={owned:?}"
+        ));
+    }
+    super::send_chat(
+        format!("Reply with exactly {MARKER}. Do not request a Tool."),
+        app.handle().clone(),
+        app.state(),
+    )
+    .await
+    .map_err(|error| format!("Desktop Send failed: {error:?}"))?;
+    let result = tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            let captured = chat_events.0.lock().unwrap().clone();
+            let parsed = captured
+                .iter()
+                .map(|raw| serde_json::from_str::<Value>(raw).map_err(|error| error.to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(terminal) = parsed.iter().find(|event| {
+                matches!(
+                    event.get("kind").and_then(Value::as_str),
+                    Some("completed" | "failed" | "cancelled")
+                )
+            }) {
+                if terminal.get("kind").and_then(Value::as_str) != Some("completed") {
+                    return Err(format!("Desktop chat terminal was {terminal}"));
+                }
+                if parsed
+                    .first()
+                    .and_then(|event| event.get("kind"))
+                    .and_then(Value::as_str)
+                    != Some("started")
+                {
+                    return Err("Desktop chat completed without Started".to_owned());
+                }
+                let response = parsed
+                    .iter()
+                    .filter(|event| event.get("kind").and_then(Value::as_str) == Some("delta"))
+                    .filter_map(|event| event.get("text").and_then(Value::as_str))
+                    .collect::<String>();
+                if response.trim() != MARKER {
+                    return Err("Desktop completed with unexpected response".to_owned());
+                }
+                if !activity_events.0.lock().unwrap().is_empty() {
+                    return Err("neutral Desktop chat emitted a Tool activity".to_owned());
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| "Desktop neutral chat timed out".to_owned())?;
+    result?;
+    println!("RAH452_NEUTRAL_STARTED_COMPLETED=1");
+    let neutral_child = task452_process_census(&executable)?;
+    if !neutral_child
+        .iter()
+        .any(|row| row.pid == owned.pid && row.hash_match)
+    {
+        return Err("C — NEUTRAL CHAT LIFECYCLE FAILURE: saved child absent after turn".to_owned());
+    }
+    let chat_offset = chat_events.0.lock().unwrap().len();
+    let activity_offset = model_activity.0.lock().unwrap().len();
+    super::send_chat(
+        "Use repo.file-info exactly once on tracked.txt in the active repository. Report whether it is tracked, present in HEAD, clean against the index, and present in the worktree.".to_owned(),
+        app.handle().clone(), app.state(),
+    ).await.map_err(|error| format!("D — TOOL REQUEST NOT OBSERVED: production Send failed: {error:?}"))?;
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            let terminal = {
+                let events = chat_events.0.lock().unwrap();
+                events[chat_offset..]
+                    .iter()
+                    .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .find(|event| {
+                        matches!(
+                            event.get("kind").and_then(Value::as_str),
+                            Some("completed" | "failed" | "cancelled")
+                        )
+                    })
+            };
+            if let Some(terminal) = terminal {
+                if terminal.get("kind").and_then(Value::as_str) != Some("completed") {
+                    return Err(format!(
+                        "H — POST-TOOL TURN COMPLETION FAILURE: terminal kind={:?}",
+                        terminal.get("kind")
+                    ));
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| "H — POST-TOOL TURN COMPLETION FAILURE: timed out".to_owned())??;
+    let activities = model_activity.0.lock().unwrap()[activity_offset..]
+        .iter()
+        .map(|raw| serde_json::from_str::<Value>(raw).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = |kind: &str| {
+        activities
+            .iter()
+            .filter(|event| event["kind"] == kind && event["tool"] == "repo.file-info")
+            .count()
+    };
+    println!(
+        "RAH452_TOOL_LIFECYCLE=requested:{},started:{},finished:{}",
+        count("tool_requested"),
+        count("tool_started"),
+        count("tool_finished")
+    );
+    if count("tool_requested") == 0 {
+        return Err("D — TOOL REQUEST NOT OBSERVED".to_owned());
+    }
+    if count("tool_started") > 1 || count("tool_finished") > 1 {
+        return Err("F — DUPLICATE TOOL EXECUTION".to_owned());
+    }
+    if count("tool_requested") != 1 || count("tool_started") != 1 || count("tool_finished") != 1 {
+        return Err("E — TOOL EXECUTION FAILURE: incomplete Tool lifecycle".to_owned());
+    }
+    let evidence_text = fs::read_to_string(&evidence_path)
+        .map_err(|error| format!("E — TOOL EXECUTION FAILURE: evidence unavailable: {error}"))?;
+    let bridge_events = evidence_text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bridge_starts = bridge_events
+        .iter()
+        .filter(|event| {
+            event["event"] == "tool_started" && event["public_tool"] == "repo.file-info"
+        })
+        .count();
+    println!("RAH452_INNER_TOOL_EXECUTIONS={bridge_starts}");
+    if bridge_starts != 1 {
+        return Err("F — DUPLICATE TOOL EXECUTION or missing inner execution".to_owned());
+    }
+    let result = bridge_events
+        .iter()
+        .find(|event| event["event"] == "tool_finished" && event["public_tool"] == "repo.file-info")
+        .ok_or_else(|| "E — TOOL EXECUTION FAILURE: bridge result missing".to_owned())?;
+    let output = &result["result"];
+    if result["is_error"] != false
+        || output["status"] != "ok"
+        || output["path"]["value"] != "tracked.txt"
+        || output["index"]["tracked"] != true
+        || output["head"]["present"] != true
+        || output["worktree"]["present"] != true
+        || output["staged_vs_head"] != false
+        || output["worktree_modified_vs_index"] != false
+    {
+        return Err(format!(
+            "G — TOOL RESULT MISMATCH: structural facts={}",
+            serde_json::json!({
+                "status": output["status"], "path": output["path"], "index_tracked": output["index"]["tracked"],
+                "head_present": output["head"]["present"], "worktree_present": output["worktree"]["present"],
+                "staged_vs_head": output["staged_vs_head"], "worktree_modified_vs_index": output["worktree_modified_vs_index"]
+            })
+        ));
+    }
+    println!("RAH452_TOOL_RESULT_MATCH=1");
+    shutdown_live_state(app.state::<DesktopAppState>().inner()).await;
+    app.unlisten(chat_events.1);
+    app.unlisten(activity_events.1);
+    app.unlisten(model_activity.1);
+    println!("RAH450_DESKTOP_CURRENT_BASELINE=0.157.1");
+    println!("RAH450_DESKTOP_SPAWNED_SAVED_APP_SERVER=1");
+    println!("RAH450_DESKTOP_NEUTRAL_CHAT_COMPLETED=1");
     Ok(())
 }

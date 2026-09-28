@@ -8,7 +8,7 @@ use rah_runtime::{AgentHandle, AgentRuntime};
 use serde_json::{Value, json};
 
 use crate::{
-    CodexAdapterError, SUPPORTED_CODEX_VERSION,
+    CodexAdapterError, PREFERRED_CURRENT_CODEX_VERSION,
     process::{check_version, validate_captured_contract},
     runtime::CodexRuntime,
     test_support::{FakePeer, fake_transport},
@@ -16,7 +16,7 @@ use crate::{
 
 #[tokio::test]
 async fn restricted_codex_end_to_end_covers_compatibility_resume_and_cancel() {
-    check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).expect("pinned version");
+    check_version(true, PREFERRED_CURRENT_CODEX_VERSION.to_owned()).expect("pinned version");
     validate_captured_contract().expect("captured schema contract");
     let (runtime, mut peer) = connected_runtime().await;
 

@@ -23,7 +23,7 @@ use rah_protocol::{
     RequestId, ToolCallId, ToolContent, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{
     REPOSITORY_DIFF_STAGED_TOOL_NAME, REPOSITORY_DIFF_TOOL_NAME, REPOSITORY_FILE_INFO_TOOL_NAME,
     REPOSITORY_STATUS_TOOL_NAME, TrustedStaticProfile,
@@ -112,7 +112,7 @@ async fn run() -> Result<(), String> {
     fixture.assert_unchanged(&git)?;
     audit_outputs(&outcome, &fixture.root)?;
 
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("CODEX_EXECUTABLE_IDENTITY native_discovery_and_exact_version_verified=true");
     println!("PROFILE_SOURCE_VALIDATION succeeded");
     println!("EFFECTIVE_COMPOSITION succeeded trusted_source=true real_composer=true");

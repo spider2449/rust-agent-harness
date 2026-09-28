@@ -17,10 +17,13 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{CodexAdapterError, SUPPORTED_CODEX_VERSION, transport::AppServerTransport};
+use crate::{
+    CodexAdapterError, PREFERRED_CURRENT_CODEX_VERSION, is_current_certified_codex_version,
+    transport::AppServerTransport,
+};
 
 const STDERR_LIMIT: usize = 64 * 1024;
-const CONTRACT_JSON: &str = include_str!("../fixtures/schema_contract_0_149_0.json");
+const CONTRACT_JSON: &str = include_str!("../fixtures/schema_contract_0_157_1.json");
 static SCHEMA_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Deserialize)]
@@ -303,11 +306,11 @@ async fn verify_version(executable: &Path) -> Result<(), CodexAdapterError> {
 }
 
 pub(crate) fn check_version(success: bool, actual: String) -> Result<(), CodexAdapterError> {
-    if success && actual == SUPPORTED_CODEX_VERSION {
+    if success && is_current_certified_codex_version(&actual) {
         Ok(())
     } else {
         Err(CodexAdapterError::VersionMismatch {
-            expected: SUPPORTED_CODEX_VERSION,
+            expected: PREFERRED_CURRENT_CODEX_VERSION,
             actual,
         })
     }
@@ -315,7 +318,7 @@ pub(crate) fn check_version(success: bool, actual: String) -> Result<(), CodexAd
 
 pub(crate) fn validate_captured_contract() -> Result<(), CodexAdapterError> {
     let contract: SchemaContract = serde_json::from_str(CONTRACT_JSON).map_err(schema_error)?;
-    if contract.codex_version != SUPPORTED_CODEX_VERSION {
+    if !is_current_certified_codex_version(&contract.codex_version) {
         return Err(schema_error(
             "captured contract version does not match adapter pin",
         ));
@@ -438,7 +441,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::{CodexAdapterError, SUPPORTED_CODEX_VERSION};
+    use crate::{CodexAdapterError, PREFERRED_CURRENT_CODEX_VERSION};
 
     use super::{ProcessTransport, SchemaFile, check_version, collect_missing_fields};
 
@@ -447,11 +450,25 @@ mod tests {
 
     #[test]
     fn exact_version_is_required() {
-        assert!(check_version(true, SUPPORTED_CODEX_VERSION.to_owned()).is_ok());
-        assert!(matches!(
-            check_version(true, "codex-cli 0.148.0".to_owned()),
-            Err(CodexAdapterError::VersionMismatch { .. })
-        ));
+        assert!(check_version(true, PREFERRED_CURRENT_CODEX_VERSION.to_owned()).is_ok());
+        for version in [
+            "codex-cli 0.149.0", // Historical release certification is not current admission.
+            "codex-cli 0.148.0",
+            "codex-cli 0.157.2",
+            "codex-cli 99.0.0",
+            "codex-cli 0.157",
+            "0.157.1",
+            "codex-cli 0.157.1 extra",
+        ] {
+            assert!(
+                matches!(
+                    check_version(true, version.to_owned()),
+                    Err(CodexAdapterError::VersionMismatch { .. })
+                ),
+                "{version}"
+            );
+        }
+        assert!(check_version(false, PREFERRED_CURRENT_CODEX_VERSION.to_owned()).is_err());
     }
 
     #[test]

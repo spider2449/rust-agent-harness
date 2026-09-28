@@ -10,7 +10,7 @@ use rah_protocol::{
     AgentEvent, AgentInput, AgentOptions, AgentRequest, Message, MessageRole, RequestId,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 
 const LONG_TEXT_ONLY_PROMPT: &str = "Write 500 numbered paragraphs explaining the history of mathematics from ancient counting systems through modern abstract algebra. Each paragraph must contain at least four complete sentences. Produce text only from your existing knowledge. Do not use shell commands, file operations, MCP, web search, images, apps, or any other tools.";
 const TERMINAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -46,7 +46,7 @@ async fn run() -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("codex"));
 
     println!("CODEX_EXECUTABLE {}", executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!(
         "PROMPT {}",
         serde_json::to_string(LONG_TEXT_ONLY_PROMPT).map_err(|error| error.to_string())?

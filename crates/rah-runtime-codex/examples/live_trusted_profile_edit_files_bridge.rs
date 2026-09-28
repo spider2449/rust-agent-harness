@@ -21,7 +21,7 @@ use rah_protocol::{
     RequestId, ToolCallId, ToolContent, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{REPOSITORY_EDIT_FILES_TOOL_NAME, TrustedStaticProfile};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -118,7 +118,7 @@ async fn run() -> Result<(), String> {
             "repo.edit-files structured output was not the host-certified result: {output}"
         ));
     }
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("CODEX_EXECUTABLE_IDENTITY native_discovery_and_exact_version_verified=true");
     println!("TRUSTED_PROFILE_PATH source=true effective_compose=true fresh_registry=true");
     for (tool, alias) in aliases {

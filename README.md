@@ -770,12 +770,15 @@ Profiles configure existing authority. A model request remains non-authoritative
 ## Generic Codex Tool Bridge
 
 Codex is an optional adapter, not RAH's architecture. `CodexRuntime` implements
-`AgentRuntime` and communicates with an exactly version-pinned `codex app-server`
+`AgentRuntime` and communicates with an exact-version-certified `codex app-server`
 subprocess over newline-delimited stdio JSON-RPC. It does not depend on Codex Rust
 crates.
 
-The sole supported Codex baseline is exactly `codex-cli 0.149.0`; RAH does not
-claim multi-version Codex compatibility.
+The preferred current baseline is exactly `codex-cli 0.157.1`. Current runtime
+admission uses an explicit exact-version set, presently containing only 0.157.1.
+Historical RAH v0.32.0 certification with 0.149.0 remains release evidence;
+it does not admit 0.149.0 to the current runtime. Baseline-store presence and
+PATH contents do not grant runtime admission.
 
 In explicitly enabled bridge mode, the Generic Codex Tool Bridge snapshots the
 host-supplied `ToolRegistry`, translates definitions to private Codex dynamic-tool

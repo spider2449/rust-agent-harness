@@ -3,7 +3,7 @@
 //! This module deliberately owns only host configuration validation and executable
 //! selection. It neither starts Codex nor grants model or tool authority.
 
-use rah_runtime_codex::SUPPORTED_CODEX_VERSION;
+use rah_runtime_codex::PREFERRED_CURRENT_CODEX_VERSION;
 use serde_json::Value;
 use std::{
     ffi::{OsStr, OsString, c_void},
@@ -40,7 +40,7 @@ pub(super) enum BaselineError {
     Invalid,
 }
 
-/// Resolves the explicit host override, then the one certified baseline, then PATH.
+/// Resolves the host override, preferred current baseline, then PATH.
 pub(super) fn resolve() -> Result<CodexExecutableSelection, BaselineError> {
     let override_executable =
         std::env::var_os("RAH_CODEX_EXECUTABLE").filter(|value| !value.is_empty());
@@ -117,7 +117,7 @@ where
         || code_mode_host != CODE_MODE_HOST_NAME
         || manifest.get("manifest_version").and_then(Value::as_u64) != Some(2)
         || required_string(&manifest, "version")? != baseline_version
-        || required_string(&manifest, "reported_version")? != SUPPORTED_CODEX_VERSION
+        || required_string(&manifest, "reported_version")? != PREFERRED_CURRENT_CODEX_VERSION
         || required_string(&manifest, "platform")? != "windows-x86_64"
         || required_string(&manifest, "architecture")? != "x86_64"
     {
@@ -148,7 +148,7 @@ where
     if bytes.get(..2) != Some(b"MZ") || sha256_hex(&bytes)? != expected_hash {
         return Err(BaselineError::Invalid);
     }
-    if version_reader(&executable)? != SUPPORTED_CODEX_VERSION {
+    if version_reader(&executable)? != PREFERRED_CURRENT_CODEX_VERSION {
         return Err(BaselineError::Invalid);
     }
     verify_sibling_executable(directory, code_mode_host, expected_code_mode_host_hash)?;
@@ -182,10 +182,9 @@ fn verify_sibling_executable(
     Ok(canonical)
 }
 
-/// Converts the adapter's fixed reported-version pin into the one permitted
-/// baseline-store directory/manifest version. Any unfamiliar pin fails closed.
+/// Converts the preferred current version into its exact baseline-store layout.
 fn supported_baseline_version() -> Result<&'static str, BaselineError> {
-    let version = SUPPORTED_CODEX_VERSION
+    let version = PREFERRED_CURRENT_CODEX_VERSION
         .strip_prefix(REPORTED_VERSION_PREFIX)
         .ok_or(BaselineError::Invalid)?;
     let mut components = version.split('.');
@@ -247,7 +246,7 @@ mod tests {
     use super::{
         BaselineError, CodexExecutableSource, resolve_with, sha256_hex, supported_baseline_version,
     };
-    use rah_runtime_codex::SUPPORTED_CODEX_VERSION;
+    use rah_runtime_codex::PREFERRED_CURRENT_CODEX_VERSION;
     use serde_json::{Map, Value, json};
     use std::{
         ffi::OsString,
@@ -303,7 +302,7 @@ mod tests {
                 serde_json::to_vec(&json!({
                     "manifest_version": 2,
                     "version": supported_baseline_version().unwrap(),
-                    "reported_version": SUPPORTED_CODEX_VERSION,
+                    "reported_version": PREFERRED_CURRENT_CODEX_VERSION,
                     "sha256": hash,
                     "platform": "windows-x86_64",
                     "architecture": "x86_64",
@@ -335,7 +334,7 @@ mod tests {
     }
 
     fn exact_version(_: &Path) -> Result<String, BaselineError> {
-        Ok(SUPPORTED_CODEX_VERSION.to_owned())
+        Ok(PREFERRED_CURRENT_CODEX_VERSION.to_owned())
     }
     fn wrong_version(_: &Path) -> Result<String, BaselineError> {
         Ok("codex-cli 9.9.9".to_owned())
@@ -361,21 +360,26 @@ mod tests {
     }
 
     #[test]
-    fn real_adapter_pin_maps_to_the_semantic_baseline_layout_only() {
+    fn preferred_current_version_wins_over_legacy_and_unknown_baselines() {
         let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("0.149.0")).unwrap();
         fs::create_dir_all(fixture.0.join("9.9.9")).unwrap();
         let selected = resolve(&fixture).unwrap();
         assert_eq!(selected.source, CodexExecutableSource::CertifiedBaseline);
         assert_eq!(
             selected.executable,
-            fs::canonicalize(fixture.0.join("0.149.0").join("codex.exe"))
+            fs::canonicalize(fixture.0.join("0.157.1").join("codex.exe"))
                 .unwrap()
                 .into_os_string()
         );
         assert_ne!(selected.executable, OsString::from("codex"));
-        assert!(!fixture.0.join(SUPPORTED_CODEX_VERSION).exists());
+        assert!(!fixture.0.join(PREFERRED_CURRENT_CODEX_VERSION).exists());
 
-        fs::rename(fixture.directory(), fixture.0.join(SUPPORTED_CODEX_VERSION)).unwrap();
+        fs::rename(
+            fixture.directory(),
+            fixture.0.join(PREFERRED_CURRENT_CODEX_VERSION),
+        )
+        .unwrap();
         assert_eq!(
             resolve(&fixture).unwrap().source,
             CodexExecutableSource::Path,

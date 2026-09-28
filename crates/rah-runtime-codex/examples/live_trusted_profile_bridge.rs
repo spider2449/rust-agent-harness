@@ -19,7 +19,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolName,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::TrustedStaticProfile;
 use serde_json::json;
 
@@ -100,7 +100,7 @@ async fn run() -> Result<(), String> {
     fixture.assert_clean_shutdown().await?;
     turn_result?;
 
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("PROFILE_ID {PROFILE_ID}");
     println!("PROVIDER kind=process_plugin id={PROVIDER_ID}");
     println!("TOOL name={EXPECTED_TOOL} permission=None");

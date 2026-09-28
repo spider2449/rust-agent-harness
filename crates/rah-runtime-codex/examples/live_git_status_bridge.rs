@@ -19,7 +19,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolName,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{GIT_STATUS_TOOL_NAME, GitStatusTool, Tool, ToolRegistry};
 use serde_json::{Value, json};
 
@@ -115,7 +115,7 @@ async fn run() -> Result<(), String> {
     }
 
     println!("CODEX_EXECUTABLE {}", codex_executable.display());
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("RAH_TOOL_NAME {GIT_STATUS_TOOL_NAME}");
     println!("CODEX_ALIAS {CODEX_ALIAS}");
     println!("PRIVATE_ALIAS_MAPPING {CODEX_ALIAS} -> {GIT_STATUS_TOOL_NAME}");

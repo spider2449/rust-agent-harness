@@ -18,7 +18,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolName, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{GIT_UNSTAGE_TOOL_NAME, GitUnstageTool, Tool, ToolRegistry};
 use serde_json::json;
 
@@ -121,7 +121,7 @@ async fn run() -> Result<(), String> {
         return Err("the bridge must expose exactly one model-visible tool".to_owned());
     }
 
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("RAH_TOOL_NAME {GIT_UNSTAGE_TOOL_NAME}");
     println!("PRIVATE_ALIAS_MAPPING {CODEX_ALIAS} -> {GIT_UNSTAGE_TOOL_NAME}");
     println!(

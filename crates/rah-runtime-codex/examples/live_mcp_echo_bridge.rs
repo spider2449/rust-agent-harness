@@ -12,7 +12,7 @@ use rah_protocol::{
     RequestId, ToolName,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::ToolRegistry;
 use rah_tools_mcp::{MCP_PROTOCOL_VERSION, McpAdapter, McpServerConfig};
 use serde_json::{Value, json};
@@ -72,7 +72,7 @@ async fn run() -> Result<(), String> {
     let mcp_executable = fixture.executable().to_owned();
 
     println!("CODEX_EXECUTABLE {}", codex_executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("MCP_PROTOCOL_VERSION {MCP_PROTOCOL_VERSION}");
     println!("MCP_SERVER_COMMAND {}", mcp_executable.display());
     println!("MCP_TRANSPORT stdio");

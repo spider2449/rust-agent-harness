@@ -1344,8 +1344,9 @@ CodexRuntime
  -> owned codex app-server child
 ```
 
-The executable must report `codex-cli 0.149.0`. The adapter generates the
-installed app-server schema locally and verifies the required lifecycle fields;
+The executable must report a version in the current exact certified set,
+presently only `codex-cli 0.157.1`. The preferred current baseline is 0.157.1.
+The adapter generates the installed app-server schema locally and verifies the required lifecycle fields;
 bridge mode additionally verifies the version-pinned experimental dynamic-tool
 contract.
 

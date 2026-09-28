@@ -19,7 +19,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolDefinition, ToolName, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::{
     REPOSITORY_WORKTREE_PATCH_TOOL_NAME, TrustedStaticProfile, live_test_replacement_attempts,
     reset_live_test_replacement_attempts,
@@ -124,7 +124,7 @@ async fn run() -> Result<(), String> {
     }
     audit_model_visible_output(&outcome.tool_output, &outcome.final_text, &fixture.root)?;
 
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("CODEX_EXECUTABLE_IDENTITY native_discovery_and_exact_version_verified=true");
     println!("PROFILE_ID {PROFILE_ID}");
     println!(

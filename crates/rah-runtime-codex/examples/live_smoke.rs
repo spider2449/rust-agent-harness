@@ -12,7 +12,7 @@ use rah_protocol::{
 use rah_runtime::AgentRuntime;
 use rah_runtime_codex::{
     CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider, CodexModelSelection, CodexRuntime,
-    SUPPORTED_CODEX_VERSION,
+    PREFERRED_CURRENT_CODEX_VERSION,
 };
 
 const DEFAULT_PROMPT: &str = "Reply with exactly: RAH_CODEX_SMOKE_OK";
@@ -63,7 +63,7 @@ async fn run() -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("codex"));
 
     println!("CODEX_EXECUTABLE {}", executable.display());
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!(
         "PROMPT {}",
         serde_json::to_string(&prompt).map_err(|error| error.to_string())?

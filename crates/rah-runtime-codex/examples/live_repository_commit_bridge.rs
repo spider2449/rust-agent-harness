@@ -19,7 +19,7 @@ use rah_protocol::{
     RequestId, ToolContent, ToolDefinition, ToolName, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
-use rah_runtime_codex::{CodexRuntime, SUPPORTED_CODEX_VERSION};
+use rah_runtime_codex::{CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION};
 use rah_tools::TrustedStaticProfile;
 use serde_json::{Value, json};
 
@@ -103,8 +103,8 @@ async fn run() -> Result<(), String> {
     println!(
         "RESTRICTED_CODEX_CAPABILITIES shell=false file=false generic_git=false branch_ref=false network_git=false mcp=false web=false image=false apps=false process=false approvals=false"
     );
-    println!("CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
-    println!("REQUIRED_CODEX_VERSION {SUPPORTED_CODEX_VERSION}");
+    println!("CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
+    println!("REQUIRED_CODEX_VERSION {PREFERRED_CURRENT_CODEX_VERSION}");
     println!("CODEX_EXECUTABLE_IDENTITY native_discovery_and_exact_version_verified=true");
     println!("GIT_EXECUTABLE_CANONICAL {}", git.display());
     println!("HOST_REVIEW staged_snapshot_verified=true");

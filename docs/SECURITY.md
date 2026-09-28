@@ -1,5 +1,15 @@
 # RAH v0.32.0 Security Model - released
 
+## Current Codex runtime certification policy
+
+Current source admits only exact `codex-cli 0.157.1` through the private
+app-server adapter and prefers its verified Windows baseline. Host override
+and PATH selection still pass adapter version and schema validation. Stored
+0.149.0 artifacts and historical release certification do not grant current
+runtime admission. Neither Codex version admission nor model/provider input
+grants Tool or repository authority. This current-source policy does not
+rewrite the historical v0.32.0 evidence below.
+
 `repo.list` is a bounded, read-only `RepositoryObservation` Tool. It cannot
 grant repository authority or mutate repository state. The host supplies the
 selected active repository; model input cannot choose a root, worktree, member,

@@ -23,5 +23,13 @@ pub use model_config::{
 };
 pub use runtime::CodexRuntime;
 
-/// Exact Codex CLI version supported by this adapter release.
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.149.0";
+/// Exact Codex CLI versions certified for the current adapter source.
+pub const CURRENT_CERTIFIED_CODEX_VERSIONS: &[&str] = &["codex-cli 0.157.1"];
+
+/// Deterministic default from the current certified set.
+pub const PREFERRED_CURRENT_CODEX_VERSION: &str = "codex-cli 0.157.1";
+
+/// Checks exact current admission; baseline storage and release history grant no admission.
+pub fn is_current_certified_codex_version(version: &str) -> bool {
+    CURRENT_CERTIFIED_CODEX_VERSIONS.contains(&version)
+}
