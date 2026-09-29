@@ -79,8 +79,10 @@ assert.ok(Array.isArray(capability.permissions), "default capability permissions
 const permissions = unique(capability.permissions, "default capability permissions");
 assert.equal([...permissions].some((permission) => permission.includes("*")), false, "wildcard permission is forbidden");
 assert.equal([...permissions].some((permission) => /(^|:|-)fs($|:|-)/i.test(permission)), false, "filesystem plugin permission is forbidden");
-const core = new Set([...permissions].filter((permission) => permission.includes(":")));
+const core = new Set([...permissions].filter((permission) => permission.startsWith("core:")));
 equalSets(core, new Set(["core:event:allow-listen", "core:event:allow-unlisten"]), "core event permissions");
+const dialog = new Set([...permissions].filter((permission) => permission.startsWith("dialog:")));
+equalSets(dialog, new Set(["dialog:allow-open"]), "dialog plugin permissions");
 const appAllows = new Set([...permissions].filter((permission) => !permission.includes(":")));
 equalSets(appAllows, new Set([...manifest].map(allowId)), "default application allows versus AppManifest");
 

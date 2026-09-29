@@ -383,3 +383,29 @@ dialog form {
   justify-content: end;
   gap: 0.75rem;
 }
+
+.remembered-editor {
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+}
+
+.remembered-editor form {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.remembered-editor input[type="text"] {
+  min-width: 0;
+}
+
+.remembered-editor input[type="checkbox"] {
+  width: auto;
+}
+
+.remembered-editor button {
+  justify-self: start;
+  max-width: 100%;
+  white-space: normal;
+}

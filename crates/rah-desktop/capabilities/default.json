@@ -6,6 +6,7 @@
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "dialog:allow-open",
     "allow-app-status",
     "allow-trusted-profile-selection",
     "allow-choose-trusted-profile",

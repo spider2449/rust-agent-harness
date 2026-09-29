@@ -5,10 +5,19 @@ const fs = require("node:fs");
 
 const source = fs.readFileSync(`${__dirname}/status.js`, "utf8");
 const html = fs.readFileSync(`${__dirname}/index.html`, "utf8");
+const styles = fs.readFileSync(`${__dirname}/styles.css`, "utf8");
 const buildManifest = fs.readFileSync(`${__dirname}/../build.rs`, "utf8");
 const capability = JSON.parse(fs.readFileSync(`${__dirname}/../capabilities/default.json`, "utf8"));
 
 assert.match(html, /Remembered Workspaces/);
+// The editor contains labels, a location picker, status, and actions. They must
+// not inherit the single-row layout used by confirmation dialogs.
+assert.match(source, /editor\.className = "remembered-editor"/);
+assert.match(styles, /\.remembered-editor\s*\{[^}]*width:\s*min\(28rem, calc\(100vw - 2rem\)\)/s);
+assert.match(styles, /\.remembered-editor\s*\{[^}]*max-height:\s*calc\(100dvh - 2rem\);[^}]*overflow-y:\s*auto/s);
+assert.match(styles, /\.remembered-editor form\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+assert.match(styles, /\.remembered-editor input\[type="checkbox"\]\s*\{[^}]*width:\s*auto/s);
+assert.match(styles, /\.remembered-editor button\s*\{[^}]*max-width:\s*100%/s);
 assert.match(html, /id="remembered-add-form"/);
 assert.match(html, /id="remembered-catalog"/);
 assert.match(html, /id="remembered-delete-confirmation"/);

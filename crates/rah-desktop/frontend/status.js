@@ -1796,6 +1796,7 @@ async function runRememberedMutation(invoke, mutation) {
 
 function openRememberedEditor(invoke, dialog, candidate) {
   const editor = document.createElement("dialog");
+  editor.className = "remembered-editor";
   const title = document.createElement("h3");
   const form = document.createElement("form");
   const label = document.createElement("label");
