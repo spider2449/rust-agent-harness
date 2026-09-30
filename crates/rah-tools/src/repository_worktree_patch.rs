@@ -3664,7 +3664,8 @@ mod tests {
             .engine
             .test_hook
             .install(TestPhase::BeforeReplacement, |target, _| {
-                fs::remove_file(target).unwrap();
+                let retained_original = target.with_extension("retained-original");
+                fs::rename(target, retained_original).unwrap();
                 fs::write(target, b"old\n").unwrap();
             });
         let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
