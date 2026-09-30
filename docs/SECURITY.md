@@ -398,6 +398,16 @@ repo.delete-file
 repo.rename-file
 ```
 
+ADR 0031's `repo.edit-untracked-file` is an ordinary, repository-bound
+content-mutation Tool and is outside this exact HostExplicit allowlist. It
+accepts only one existing regular non-ignored untracked UTF-8 target under the
+active admitted repository, with whole-file digest/length and exact literal
+replacement preconditions. The selected member's HEAD and all index stages
+must lack the target; path, identity, Git state, content, and temporary are
+rechecked before one native replacement attempt. It preserves the untracked
+state and grants no staging, commit, generic filesystem, or repository-selection
+authority.
+
 `repo.create-directory`, `repo.commit`, MCP Tools, Process Plugin Tools,
 fixtures/diagnostics, and unknown/provider-defined Tools remain ineligible.
 

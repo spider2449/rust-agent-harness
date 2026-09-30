@@ -2873,6 +2873,7 @@ dependencies = [
  "rah-tools-mcp",
  "rah-tools-plugin",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

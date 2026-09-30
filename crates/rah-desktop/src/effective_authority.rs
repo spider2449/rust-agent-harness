@@ -298,7 +298,7 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
             AuthorityCategory::RepositoryObservation,
             true,
         ),
-        "repo.patch" | "repo.edit-files" => (
+        "repo.patch" | "repo.edit-files" | "repo.edit-untracked-file" => (
             EffectClass::RepositoryMutation,
             AuthorityCategory::RepositoryContentMutation,
             true,
@@ -527,6 +527,7 @@ pub(crate) fn compose(
             "repo.search",
             "repo.list",
             "repo.patch",
+            "repo.edit-untracked-file",
             "repo.edit-files",
             "repo.create-file",
             "repo.create-directory",

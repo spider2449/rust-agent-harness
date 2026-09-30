@@ -145,11 +145,11 @@ pub use repository_rename_file::{
 pub use repository_search::{REPOSITORY_SEARCH_TOOL_NAME, RepositorySearchTool};
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{
-    REPOSITORY_WORKTREE_PATCH_TOOL_NAME, RepositoryPatchBomState, RepositoryPatchChangedRange,
-    RepositoryPatchEofState, RepositoryPatchPreparation, RepositoryPatchPreparationError,
-    RepositoryPatchPreparationRequest, RepositoryPatchPreparer,
-    RepositoryPatchResultClassification, RepositoryPatchReview, RepositoryWorktreePatchTool,
-    classify_repository_patch_output,
+    REPOSITORY_EDIT_UNTRACKED_FILE_TOOL_NAME, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
+    RepositoryPatchBomState, RepositoryPatchChangedRange, RepositoryPatchEofState,
+    RepositoryPatchPreparation, RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
+    RepositoryPatchPreparer, RepositoryPatchResultClassification, RepositoryPatchReview,
+    RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool, classify_repository_patch_output,
 };
 #[cfg(feature = "live-test-support")]
 pub use repository_worktree_patch::{

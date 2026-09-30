@@ -11,4 +11,5 @@ rah-tools-plugin = { path = "../rah-tools-plugin" }
 [dev-dependencies]
 rah-protocol = { path = "../rah-protocol" }
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

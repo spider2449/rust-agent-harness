@@ -9,7 +9,8 @@ use rah_tools::{
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
     RepositoryListTool, RepositoryMultiFileEditTool, RepositorySearchTool, RepositoryStatusTool,
-    RepositoryWorktreePatchTool, ToolRegistry, TrustedStaticProfile,
+    RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool, ToolRegistry,
+    TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -117,11 +118,19 @@ async fn compose_with_repository_file_authorities(
         let repository = profile
             .repository_resource(patch.repository())
             .map_err(|_| ProfileError::ConstructionFailed)?;
-        registry
-            .register(Arc::new(
+        let tool: Arc<dyn rah_tools::Tool> = match patch.capability_id() {
+            "repo.patch" => Arc::new(
                 RepositoryWorktreePatchTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
-            ))
+            ),
+            "repo.edit-untracked-file" => Arc::new(
+                RepositoryUntrackedFileEditTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
+            _ => return Err(ProfileError::ConstructionFailed),
+        };
+        registry
+            .register(tool)
             .map_err(|_| ProfileError::DuplicateRegistration)?;
     }
 
@@ -432,8 +441,9 @@ mod tests {
     };
 
     use rah_protocol::{PermissionLevel, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName};
-    use rah_tools::{ToolContext, TrustedStaticProfile};
+    use rah_tools::{ToolContext, TrustedStaticProfile, authorized_tool_dispatch};
     use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     use super::compose;
 
@@ -649,6 +659,120 @@ mod tests {
             name: ToolName::new(name),
             input: ToolInput(input),
         }
+    }
+
+    #[tokio::test]
+    async fn composed_untracked_correction_uses_authorized_registry_dispatch() {
+        let fixture = FixtureDirectory::new("untracked-correction");
+        let git = git_executable();
+        for args in [
+            &["config", "user.name", "RAH Test"][..],
+            &["config", "user.email", "rah@example.invalid"][..],
+        ] {
+            assert!(
+                Command::new(&git)
+                    .args(args)
+                    .current_dir(&fixture.0)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(fixture.0.join("sentinel.txt"), "unchanged\n").unwrap();
+        for args in [
+            &["add", "sentinel.txt"][..],
+            &["commit", "--quiet", "-m", "base"][..],
+        ] {
+            assert!(
+                Command::new(&git)
+                    .args(args)
+                    .current_dir(&fixture.0)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::create_dir_all(fixture.0.join("docs")).unwrap();
+        fs::write(fixture.0.join("docs/local-setup.txt"), "worker_count=44\n").unwrap();
+        let before_status = Command::new(&git)
+            .args(["status", "--porcelain", "--", "docs/local-setup.txt"])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(before_status, b"?? docs/local-setup.txt\n");
+        let before_index = fs::read(fixture.0.join(".git/index")).unwrap();
+        let before_head = Command::new(&git)
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap()
+            .stdout;
+        let profile_path = fixture.0.join("untracked-profile.json");
+        fs::write(&profile_path, serde_json::to_vec(&json!({
+            "profile_version":1, "profile_id":"untracked-correction",
+            "resources":{"executables":{"git":{"path":git,"kind":"native"}},"repositories":{"workspace":{"path":fixture.0}}},
+            "capabilities":[{"name":"repo.edit-untracked-file","enabled":true,"permission":"execute","executable":"git","repository":"workspace"}]
+        })).unwrap()).unwrap();
+        let composition = compose(TrustedStaticProfile::load(&profile_path).unwrap())
+            .await
+            .unwrap();
+        let definition = composition
+            .registry()
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "repo.edit-untracked-file")
+            .unwrap();
+        let old = b"worker_count=44\n";
+        let output = authorized_tool_dispatch(composition.registry(), &definition, &[PermissionLevel::Execute], call("repo.edit-untracked-file", json!({
+            "path":"docs/local-setup.txt", "expected_file_sha256":format!("{:x}", Sha256::digest(old)),
+            "expected_file_byte_length":old.len(), "expected_old_text":"worker_count=44", "replacement_text":"worker_count=4"
+        })), ToolContext::default()).await.unwrap();
+        assert_eq!(
+            output.content,
+            vec![ToolContent::Json(
+                json!({"status":"ok","changed":true,"uncertain":false,"reason":"none","path":"docs/local-setup.txt"})
+            )]
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("docs/local-setup.txt")).unwrap(),
+            "worker_count=4\n"
+        );
+        let after_status = Command::new(&git)
+            .args(["status", "--porcelain", "--", "docs/local-setup.txt"])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(after_status, before_status);
+        assert_eq!(
+            fs::read(fixture.0.join(".git/index")).unwrap(),
+            before_index
+        );
+        assert_eq!(
+            Command::new(&git)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap()
+                .stdout,
+            before_head
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("sentinel.txt")).unwrap(),
+            "unchanged\n"
+        );
+        assert_eq!(fs::read_dir(fixture.0.join("docs")).unwrap().count(), 1);
+        assert!(
+            !composition
+                .registry()
+                .definitions()
+                .iter()
+                .any(
+                    |definition| definition.name.as_str() == "repo.edit-untracked-file"
+                        && definition.permission != PermissionLevel::Execute
+                )
+        );
     }
 
     #[tokio::test]

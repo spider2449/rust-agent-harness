@@ -714,6 +714,14 @@ rollback or replay. The capability is composed through Trusted Profile v1 and
 the Generic Tool Bridge; certified Windows live validation using exactly
 `codex-cli 0.149.0` emitted `RAH_REPO_EDIT_FILES_LIVE_OK`.
 
+The selected first v0.33 capability, `repo.edit-untracked-file`, corrects one
+existing, non-ignored untracked UTF-8 file in the active admitted repository.
+It requires a complete-file SHA-256 and byte-length precondition plus unique
+exact literal replacement text. It keeps the file untracked, never stages or
+commits, and is an ordinary Tool rather than a HostExplicit action. ADR 0031
+defines its separate target class; the tracked-only and create-only contracts
+above remain unchanged. RAH remains version 0.32.0 during Task 484.
+
 ```text
 Built-in Tool -----------\
 MCP-backed RAH Tool ------+-> Tool -> ToolRegistry -> host permission -> execution

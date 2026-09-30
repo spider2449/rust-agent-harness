@@ -137,6 +137,77 @@ pub struct RepositoryWorktreePatchTool {
     policy: RepositoryWorktreeMutationPolicy,
 }
 
+/// Ordinary one-file correction capability for a current untracked text file.
+pub struct RepositoryUntrackedFileEditTool {
+    policy: RepositoryUntrackedFileMutationPolicy,
+}
+
+/// Separate host policy that fixes the untracked target class at construction.
+struct RepositoryUntrackedFileMutationPolicy {
+    engine: RepositoryWorktreeMutationPolicy,
+}
+
+impl RepositoryUntrackedFileMutationPolicy {
+    fn new(git: &Path, root: &Path) -> Result<Self, ToolError> {
+        Ok(Self {
+            engine: RepositoryWorktreeMutationPolicy::new_with_target_class(
+                git,
+                root,
+                PatchLimits::default(),
+                TargetClass::Untracked,
+            )?,
+        })
+    }
+}
+
+impl RepositoryUntrackedFileEditTool {
+    /// Binds this Tool to one host-selected repository and Git executable.
+    pub fn new(
+        git_executable: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            policy: RepositoryUntrackedFileMutationPolicy::new(
+                git_executable.as_ref(),
+                repository_root.as_ref(),
+            )?,
+        })
+    }
+}
+
+/// Stable name for bounded correction of an existing untracked file.
+pub const REPOSITORY_EDIT_UNTRACKED_FILE_TOOL_NAME: &str = "repo.edit-untracked-file";
+
+#[async_trait]
+impl Tool for RepositoryUntrackedFileEditTool {
+    fn definition(&self) -> ToolDefinition {
+        let mut definition = patch_tool_definition();
+        definition.name = ToolName::new(REPOSITORY_EDIT_UNTRACKED_FILE_TOOL_NAME);
+        definition.description = "Applies exact conditional text replacements to one existing, non-ignored untracked file in the active repository.".to_owned();
+        definition
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = PatchRequest::parse(&input, self.policy.engine.limits)?;
+        let logical_path = request.logical_path.clone();
+        let _lease = self.policy.engine.acquire_lease().await;
+        let mut output = self
+            .policy
+            .engine
+            .execute_once(request)
+            .await
+            .into_tool_output();
+        if let [ToolContent::Json(Value::Object(value))] = output.content.as_mut_slice() {
+            value.insert("path".to_owned(), Value::String(logical_path));
+        }
+        Ok(output)
+    }
+}
+
 impl RepositoryWorktreePatchTool {
     /// Creates a `repo.patch` tool for one trusted non-bare repository root.
     pub fn new(
@@ -605,7 +676,23 @@ impl RepositoryPatchPreparer {
 #[async_trait]
 impl Tool for RepositoryWorktreePatchTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+        patch_tool_definition()
+    }
+
+    async fn execute(
+        &self,
+        input: ToolInput,
+        _context: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = PatchRequest::parse(&input, self.policy.limits)?;
+        let _lease = self.policy.acquire_lease().await;
+        let outcome = self.policy.execute_once(request).await;
+        Ok(outcome.into_tool_output())
+    }
+}
+
+fn patch_tool_definition() -> ToolDefinition {
+    ToolDefinition {
             name: ToolName::new(REPOSITORY_WORKTREE_PATCH_TOOL_NAME),
             description: "Replaces one or more uniquely matched literal text fragments in one clean tracked worktree file."
                 .to_owned(),
@@ -646,18 +733,6 @@ impl Tool for RepositoryWorktreePatchTool {
             }),
             permission: PermissionLevel::Execute,
         }
-    }
-
-    async fn execute(
-        &self,
-        input: ToolInput,
-        _context: ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let request = PatchRequest::parse(&input, self.policy.limits)?;
-        let _lease = self.policy.acquire_lease().await;
-        let outcome = self.policy.execute_once(request).await;
-        Ok(outcome.into_tool_output())
-    }
 }
 
 /// Private, host-owned authority for one complete conditional worktree replacement.
@@ -675,12 +750,28 @@ struct RepositoryWorktreeMutationPolicy {
     boundary: RepositoryNestedBoundaryPolicy,
     lease: std::sync::Arc<AsyncMutex<()>>,
     limits: PatchLimits,
+    target_class: TargetClass,
     #[cfg(test)]
     test_hook: TestHook,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TargetClass {
+    Tracked,
+    Untracked,
+}
+
 impl RepositoryWorktreeMutationPolicy {
     fn new(git: &Path, root: &Path, limits: PatchLimits) -> Result<Self, ToolError> {
+        Self::new_with_target_class(git, root, limits, TargetClass::Tracked)
+    }
+
+    fn new_with_target_class(
+        git: &Path,
+        root: &Path,
+        limits: PatchLimits,
+        target_class: TargetClass,
+    ) -> Result<Self, ToolError> {
         if !root.is_absolute() {
             return Err(policy_error("repository root must be an absolute path"));
         }
@@ -701,6 +792,7 @@ impl RepositoryWorktreeMutationPolicy {
             lease: crate::git_stage::repository_lease(&root),
             root,
             limits,
+            target_class,
             #[cfg(test)]
             test_hook: TestHook::default(),
         })
@@ -715,6 +807,44 @@ impl RepositoryWorktreeMutationPolicy {
             Ok(pre) => pre,
             Err(reason) => return MutationOutcome::Refused { reason },
         };
+
+        if self.target_class == TargetClass::Untracked
+            && request.replacements.len() == 1
+            && request
+                .replacements
+                .iter()
+                .all(|replacement| replacement.old == replacement.new)
+        {
+            let text = match std::str::from_utf8(&pre.bytes) {
+                Ok(text) => text.strip_prefix('\u{feff}').unwrap_or(text),
+                Err(_) => {
+                    return MutationOutcome::Refused {
+                        reason: RefusalReason::Precondition("target is not strict UTF-8"),
+                    };
+                }
+            };
+            if request
+                .replacements
+                .iter()
+                .any(|replacement| text.matches(&replacement.old).count() != 1)
+            {
+                return MutationOutcome::Refused {
+                    reason: RefusalReason::Precondition("expected old text is not unique"),
+                };
+            }
+            return match self.capture_candidate(&request.path).await {
+                Ok(current)
+                    if current.bytes == pre.bytes
+                        && current.git == pre.git
+                        && current.target.identity == pre.target.identity =>
+                {
+                    MutationOutcome::NoOp
+                }
+                _ => MutationOutcome::Refused {
+                    reason: RefusalReason::Precondition("target changed before no-op verification"),
+                },
+            };
+        }
 
         let postimage = match build_postimage(&pre, &request, self.limits) {
             Ok(postimage) => postimage,
@@ -770,6 +900,13 @@ impl RepositoryWorktreeMutationPolicy {
                 temporary,
                 &postimage,
             );
+        }
+        if self.target_class == TargetClass::Untracked
+            && let Err(reason) = self
+                .revalidate_before_commit(&pre, &temporary, &postimage)
+                .await
+        {
+            return self.refuse_after_temp(reason, temporary, &postimage);
         }
         #[cfg(test)]
         self.test_hook
@@ -855,8 +992,17 @@ impl RepositoryWorktreeMutationPolicy {
 
     async fn capture_preimage(&self, request: &PatchRequest) -> Result<Preimage, RefusalReason> {
         let pre = self.capture_candidate(&request.path).await?;
-        validate_preconditions(&pre.bytes, request, self.limits)
-            .map_err(RefusalReason::Precondition)?;
+        validate_preconditions(&pre.bytes, request, self.limits).map_err(|reason| {
+            if self.target_class == TargetClass::Untracked
+                && (reason.contains("NUL")
+                    || reason.contains("UTF-8")
+                    || reason.contains("size limit"))
+            {
+                RefusalReason::UnsupportedText
+            } else {
+                RefusalReason::Precondition(reason)
+            }
+        })?;
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterPreimageValidation, &pre.target.path, None);
@@ -866,20 +1012,25 @@ impl RepositoryWorktreeMutationPolicy {
     async fn capture_candidate(&self, path: &Path) -> Result<Preimage, RefusalReason> {
         self.revalidate_repository()
             .map_err(RefusalReason::Repository)?;
-        let target = Target::capture(&self.root, path).map_err(RefusalReason::Path)?;
+        let target = Target::capture(&self.root, path).map_err(|error| {
+            if self.target_class == TargetClass::Untracked {
+                classify_untracked_target_path_error(&self.root, path, error)
+            } else {
+                RefusalReason::Path(error)
+            }
+        })?;
         self.boundary
             .validate_existing(&target.path)
             .map_err(RefusalReason::Path)?;
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterInitialPathValidation, &target.path, None);
-        let git = self
-            .git_state(&target)
-            .await
-            .map_err(RefusalReason::Repository)?;
-        self.git_worktree_clean(&target)
-            .await
-            .map_err(RefusalReason::Repository)?;
+        let git = self.git_state(&target).await.map_err(git_refusal)?;
+        if self.target_class == TargetClass::Tracked {
+            self.git_worktree_clean(&target)
+                .await
+                .map_err(RefusalReason::Repository)?;
+        }
         #[cfg(test)]
         self.test_hook
             .run(TestPhase::AfterGitValidation, &target.path, None);
@@ -916,18 +1067,17 @@ impl RepositoryWorktreeMutationPolicy {
         self.boundary
             .validate_existing(&pre.target.path)
             .map_err(RefusalReason::Path)?;
-        let git = self
-            .git_state(&pre.target)
-            .await
-            .map_err(RefusalReason::Repository)?;
+        let git = self.git_state(&pre.target).await.map_err(git_refusal)?;
         if git != pre.git {
             return Err(RefusalReason::Repository(policy_error(
                 "repository state changed before replacement",
             )));
         }
-        self.git_worktree_clean(&pre.target)
-            .await
-            .map_err(RefusalReason::Repository)?;
+        if self.target_class == TargetClass::Tracked {
+            self.git_worktree_clean(&pre.target)
+                .await
+                .map_err(RefusalReason::Repository)?;
+        }
         let current = read_bounded(&pre.target.path, self.limits.max_file_bytes)
             .map_err(|_| RefusalReason::Precondition("could not reread bounded target preimage"))?;
         if current != pre.bytes {
@@ -954,10 +1104,7 @@ impl RepositoryWorktreeMutationPolicy {
         self.boundary
             .validate_existing(&pre.target.path)
             .map_err(RefusalReason::Path)?;
-        let git = self
-            .git_state(&pre.target)
-            .await
-            .map_err(RefusalReason::Repository)?;
+        let git = self.git_state(&pre.target).await.map_err(git_refusal)?;
         if git != pre.git {
             return Err(RefusalReason::Repository(policy_error(
                 "repository state changed during replacement",
@@ -1118,6 +1265,52 @@ impl RepositoryWorktreeMutationPolicy {
                 &target.git_path,
             ])
             .await?;
+        if self.target_class == TargetClass::Untracked {
+            if !head_entry.is_empty() || !index_entry.is_empty() {
+                return Err(git_error("target exists in current HEAD or index"));
+            }
+            let ignored = self
+                .git_process(vec![
+                    "check-ignore",
+                    "--no-index",
+                    "--quiet",
+                    "--",
+                    &target.git_path,
+                ])
+                .await?;
+            match ignored.exit_code {
+                Some(0) => {
+                    return Err(ToolError::InvalidInput {
+                        message: "ignored_target".to_owned(),
+                    });
+                }
+                Some(1) => (),
+                _ => return Err(git_error("Git ignore observation did not complete")),
+            }
+            let others = self
+                .git_output(vec![
+                    "--literal-pathspecs",
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                    &target.git_path,
+                ])
+                .await?;
+            let mut expected = target.git_path.as_bytes().to_vec();
+            expected.push(0);
+            if others != expected {
+                return Err(git_error("target is not one exact untracked path"));
+            }
+            return Ok(GitState {
+                head,
+                head_entry: GitEntry {
+                    mode: Vec::new(),
+                    object: Vec::new(),
+                },
+            });
+        }
         let tag = self
             .git_output(vec![
                 "--literal-pathspecs",
@@ -1573,6 +1766,10 @@ struct GitEntry {
 enum RefusalReason {
     Path(ToolError),
     Repository(ToolError),
+    Ignored,
+    Missing,
+    NonRegular,
+    UnsupportedText,
     Precondition(&'static str),
     Temporary(String),
     TemporaryCleanup(String),
@@ -1583,6 +1780,10 @@ impl std::fmt::Display for RefusalReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Path(error) | Self::Repository(error) => error.fmt(formatter),
+            Self::Ignored => formatter.write_str("target is ignored"),
+            Self::Missing => formatter.write_str("target is missing"),
+            Self::NonRegular => formatter.write_str("target is not a regular file"),
+            Self::UnsupportedText => formatter.write_str("target is not supported text"),
             Self::Precondition(message) | Self::PostObservation(message) => {
                 formatter.write_str(message)
             }
@@ -1600,6 +1801,7 @@ enum MutationOutcome {
     Success {
         evidence: MutationEvidence,
     },
+    NoOp,
     KnownReplacementFailure {
         evidence: MutationEvidence,
     },
@@ -1621,6 +1823,7 @@ impl MutationOutcome {
                 redacted_refusal_reason(&reason),
             ),
             Self::Success { evidence } => ("ok", true, false, false, Some(evidence), "none"),
+            Self::NoOp => ("ok", false, false, false, None, "none"),
             Self::KnownReplacementFailure { evidence } => (
                 "replacement_failed_known",
                 false,
@@ -1983,6 +2186,14 @@ fn preparation_error(reason: RefusalReason) -> RepositoryPatchPreparationError {
         RefusalReason::Repository(_) => RepositoryPatchPreparationError::Unsupported {
             reason: "repository_state",
         },
+        RefusalReason::Ignored => RepositoryPatchPreparationError::Unsupported {
+            reason: "repository_state",
+        },
+        RefusalReason::Missing | RefusalReason::NonRegular | RefusalReason::UnsupportedText => {
+            RepositoryPatchPreparationError::Unsupported {
+                reason: "path_or_filesystem",
+            }
+        }
         RefusalReason::Precondition(message) => {
             RepositoryPatchPreparationError::PreconditionFailed {
                 reason: redacted_preparation_precondition_reason(message),
@@ -2399,9 +2610,49 @@ fn redacted_refusal_reason(reason: &RefusalReason) -> &'static str {
     match reason {
         RefusalReason::Path(_) => "path_or_filesystem",
         RefusalReason::Repository(_) => "repository_state",
+        RefusalReason::Ignored => "ignored_target",
+        RefusalReason::Missing => "missing_target",
+        RefusalReason::NonRegular => "non_regular_target",
+        RefusalReason::UnsupportedText => "unsupported_text",
         RefusalReason::Temporary(_) | RefusalReason::TemporaryCleanup(_) => "temporary",
         RefusalReason::PostObservation(_) => "replacement",
         RefusalReason::Precondition(message) => redacted_precondition_reason(message),
+    }
+}
+
+fn git_refusal(error: ToolError) -> RefusalReason {
+    match &error {
+        ToolError::InvalidInput { message } if message == "ignored_target" => {
+            RefusalReason::Ignored
+        }
+        _ => RefusalReason::Repository(error),
+    }
+}
+
+fn classify_untracked_target_path_error(
+    root: &Path,
+    path: &Path,
+    error: ToolError,
+) -> RefusalReason {
+    // Classification must not follow a parent link outside the admitted root.
+    let mut parent = root.to_path_buf();
+    if let Some(relative_parent) = path.parent() {
+        for component in relative_parent.components() {
+            let Component::Normal(component) = component else {
+                return RefusalReason::Path(error);
+            };
+            parent.push(component);
+            if reject_link_or_reparse(&parent, "target parent").is_err() {
+                return RefusalReason::Path(error);
+            }
+        }
+    }
+    match fs::symlink_metadata(root.join(path)) {
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => RefusalReason::Missing,
+        Ok(metadata) if !metadata.is_file() && !metadata.file_type().is_symlink() => {
+            RefusalReason::NonRegular
+        }
+        _ => RefusalReason::Path(error),
     }
 }
 
@@ -2691,8 +2942,9 @@ mod tests {
         MAX_FILE_BYTES, PatchLimits, PatchRequest, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,
         RepositoryPatchBomState, RepositoryPatchEofState, RepositoryPatchPreparationError,
         RepositoryPatchPreparationRequest, RepositoryPatchPreparer,
-        RepositoryPatchResultClassification, RepositoryWorktreeMutationPolicy,
-        RepositoryWorktreePatchTool, TestPhase, classify_repository_patch_output, sha256_hex,
+        RepositoryPatchResultClassification, RepositoryUntrackedFileEditTool,
+        RepositoryWorktreeMutationPolicy, RepositoryWorktreePatchTool, TestPhase,
+        classify_repository_patch_output, sha256_hex,
     };
     use crate::{Tool, ToolContext};
 
@@ -3295,6 +3547,138 @@ mod tests {
             tool.definition().name.as_str(),
             REPOSITORY_WORKTREE_PATCH_TOOL_NAME
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untracked_target_staged_after_preparation_fails_before_replacement() {
+        let base = TestDirectory::new("untracked-stage-race");
+        let root = base.repository();
+        fs::write(root.join("new.txt"), b"old\n").unwrap();
+        let tool = RepositoryUntrackedFileEditTool::new(git_executable(), &root).unwrap();
+        let root_for_hook = root.clone();
+        tool.policy
+            .engine
+            .test_hook
+            .install(TestPhase::AfterTemporaryWrite, move |_, _| {
+                git(&root_for_hook, &["add", "--", "new.txt"]);
+            });
+        let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(content(&output)["reason"], "repository_state");
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"old\n");
+        assert_eq!(
+            tool.policy
+                .engine
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untracked_replacement_failure_has_known_no_effect_and_cleans_temporary() {
+        let base = TestDirectory::new("untracked-native-failure");
+        let root = base.repository();
+        fs::write(root.join("new.txt"), b"old\n").unwrap();
+        let tool = RepositoryUntrackedFileEditTool::new(git_executable(), &root).unwrap();
+        tool.policy
+            .engine
+            .test_hook
+            .force_replacement_failure
+            .store(true, AtomicOrdering::Relaxed);
+        let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
+        assert_eq!(content(&output)["status"], "replacement_failed_known");
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"old\n");
+        assert_eq!(
+            tool.policy
+                .engine
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untracked_target_staged_at_replacement_boundary_fails_closed() {
+        let base = TestDirectory::new("untracked-final-race");
+        let root = base.repository();
+        fs::write(root.join("new.txt"), b"old\n").unwrap();
+        let tool = RepositoryUntrackedFileEditTool::new(git_executable(), &root).unwrap();
+        let root_for_hook = root.clone();
+        tool.policy
+            .engine
+            .test_hook
+            .install(TestPhase::BeforeReplacement, move |_, _| {
+                git(&root_for_hook, &["add", "--", "new.txt"]);
+            });
+        let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
+        assert_eq!(content(&output)["reason"], "repository_state");
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"old\n");
+        assert_eq!(
+            tool.policy
+                .engine
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untracked_lost_post_observation_reports_uncertain_without_retry() {
+        let base = TestDirectory::new("untracked-uncertain");
+        let root = base.repository();
+        fs::write(root.join("new.txt"), b"old\n").unwrap();
+        let tool = RepositoryUntrackedFileEditTool::new(git_executable(), &root).unwrap();
+        tool.policy
+            .engine
+            .test_hook
+            .fail_at(TestPhase::BeforePostVerification);
+        let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
+        assert_eq!(content(&output)["status"], "uncertain");
+        assert_eq!(content(&output)["uncertain"], true);
+        assert_eq!(
+            tool.policy
+                .engine
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"new\n");
+        assert_no_patch_temporary(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untracked_target_identity_change_at_replacement_boundary_fails_closed() {
+        let base = TestDirectory::new("untracked-identity-race");
+        let root = base.repository();
+        fs::write(root.join("new.txt"), b"old\n").unwrap();
+        let tool = RepositoryUntrackedFileEditTool::new(git_executable(), &root).unwrap();
+        tool.policy
+            .engine
+            .test_hook
+            .install(TestPhase::BeforeReplacement, |target, _| {
+                fs::remove_file(target).unwrap();
+                fs::write(target, b"old\n").unwrap();
+            });
+        let output = run(&tool, request("new.txt", b"old\n", "old", "new")).await;
+        assert_eq!(content(&output)["status"], "precondition_failed");
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"old\n");
+        assert_eq!(
+            tool.policy
+                .engine
+                .test_hook
+                .replacement_attempts
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_no_patch_temporary(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4260,7 +4644,7 @@ mod tests {
         })
     }
 
-    async fn run(tool: &RepositoryWorktreePatchTool, input: Value) -> crate::ToolOutput {
+    async fn run(tool: &impl Tool, input: Value) -> crate::ToolOutput {
         tool.execute(ToolInput(input), ToolContext::default())
             .await
             .expect("well-formed patch request should return a bounded outcome")

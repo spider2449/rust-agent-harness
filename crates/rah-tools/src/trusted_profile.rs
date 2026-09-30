@@ -495,6 +495,7 @@ struct Capability {
 /// effective composer after resource resolution.
 #[derive(Clone, Debug)]
 pub struct RepositoryWorktreePatchProfile {
+    capability_id: String,
     executable: String,
     repository: String,
 }
@@ -603,6 +604,10 @@ impl RepositoryObserverProfile {
 
 impl RepositoryWorktreePatchProfile {
     #[must_use]
+    pub fn capability_id(&self) -> &str {
+        &self.capability_id
+    }
+    #[must_use]
     pub fn executable(&self) -> &str {
         &self.executable
     }
@@ -686,7 +691,10 @@ fn build_capability(
         ));
     }
 
-    if capability.name == "repo.patch" {
+    if matches!(
+        capability.name.as_str(),
+        "repo.patch" | "repo.edit-untracked-file"
+    ) {
         let binding = repository_worktree_patch_binding(capability)?;
         // Static validation resolves only the closed symbolic resource shape.
         // It must not construct the tool, inspect Git, or touch the worktree.
@@ -1039,9 +1047,19 @@ fn capability_contract(
             .cloned()
             .collect(),
         ),
-        "repo.patch" | "repo.create-file" | "repo.edit-files" | "repo.commit"
-        | "repo.delete-file" | "repo.rename-file" | "repo.file-info" | "repo.status"
-        | "repo.diff" | "repo.diff-staged" | "repo.search" | "repo.list" => (
+        "repo.patch"
+        | "repo.edit-untracked-file"
+        | "repo.create-file"
+        | "repo.edit-files"
+        | "repo.commit"
+        | "repo.delete-file"
+        | "repo.rename-file"
+        | "repo.file-info"
+        | "repo.status"
+        | "repo.diff"
+        | "repo.diff-staged"
+        | "repo.search"
+        | "repo.list" => (
             PermissionLevel::Execute,
             [
                 capability.executable.as_ref(),
@@ -1098,6 +1116,7 @@ fn repository_worktree_patch_binding(
     validate_identifier(executable).map_err(|_| ProfileError::UnavailableResource)?;
     validate_identifier(repository).map_err(|_| ProfileError::UnavailableResource)?;
     Ok(RepositoryWorktreePatchProfile {
+        capability_id: capability.name.clone(),
         executable: executable.clone(),
         repository: repository.clone(),
     })

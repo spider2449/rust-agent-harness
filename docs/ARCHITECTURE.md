@@ -1113,6 +1113,15 @@ constructing it; effective composition constructs and publishes it through a
 fresh registry on complete success. Generic Tool Bridge dispatch remains
 capability-agnostic. Codex live certification remains deferred.
 
+ADR 0031 adds ordinary `repo.edit-untracked-file` for one existing,
+non-ignored current-HEAD/index-absent UTF-8 file in the active admitted
+repository. It reuses the bounded one-file preparation, temporary replacement,
+identity, and shared lease machinery behind a distinct untracked target class.
+Trusted profile composition binds the fixed Git executable and active root;
+ToolRegistry and Execute dispatch remain the only runtime path. The Tool does
+not enter HostExplicit and does not stage, commit, or alter the tracked-only
+contracts of ADRs 0012 and 0014 or the create-only contract of ADR 0013.
+
 ADR 0015 adds one Desktop-private, human/host-selected initial `llama_cpp`
 endpoint. Rust validates the closed endpoint structure and synthesizes the
 fixed `/v1` base URL; it is not a Tool, generic network surface, credential

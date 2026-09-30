@@ -688,12 +688,14 @@ mod tests {
             "repo.delete-file",
             "repo.rename-file",
         ];
+        assert_eq!(supported.len(), 11);
         for name in supported {
             assert!(host_kind(name).is_some());
         }
         for name in [
             "repo.commit",
             "repo.create-directory",
+            "repo.edit-untracked-file",
             "repo.search",
             "repo.list",
             "echo",
