@@ -1,4 +1,15 @@
-# RAH v0.32.0 Security Model - released
+# RAH v0.33.0 Security Model - release preparation
+
+ADR 0031's `repo.edit-untracked-file` is an ordinary repository-bound Tool.
+Its target must be an existing, regular, non-ignored UTF-8 file in the active
+admitted repository, absent from HEAD and every index stage including
+intent-to-add. Exact whole-file SHA-256 and byte-length preconditions and
+bounded exact literal replacements constrain the request. Repository state is
+revalidated immediately before one prepared replacement attempt; uncertainty
+is reported conservatively. It does not stage, commit, edit tracked or ignored
+files, switch repositories, or grant arbitrary filesystem writes. HostExplicit
+remains exactly 11. ADRs 0012–0014 retain their tracked-file and creation
+scopes. Publication of v0.33.0 is pending.
 
 ## Current Codex runtime certification policy
 

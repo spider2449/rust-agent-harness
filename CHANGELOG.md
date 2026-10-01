@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.33.0 - release preparation (unpublished)
+
+### Added
+
+- `repo.edit-untracked-file` corrects one existing eligible untracked UTF-8
+  file inside the host-selected active admitted repository. It requires exact
+  whole-file SHA-256 and byte-length preconditions, bounded exact literal
+  replacements, and immediate repository-state revalidation before one
+  prepared replacement attempt. Uncertain effects are reported conservatively.
+  The file stays untracked.
+
+### Maintenance
+
+- Remembered Workspaces location controls now fit the viewport and remain
+  usable in narrow windows. Native folder-picker permission is corrected, and
+  repository switching preserves the disconnected lifecycle.
+- Corrected Tauri command permission coverage and strengthened Desktop and
+  Windows validation reliability. The certified Codex baseline is 0.157.1.
+
+### Authority and publication
+
+The new Tool uses ordinary repository-bounded authority. It does not stage,
+commit, edit tracked or ignored files, or grant arbitrary filesystem writes.
+The existing tracked-file mutation Tools retain their scopes. HostExplicit
+remains exactly 11. The v0.33.0 tag and GitHub Release are pending.
+
 ## v0.32.0 - released (2026-09-27)
 
 ### Immutable publication record

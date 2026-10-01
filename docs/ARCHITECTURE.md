@@ -1,4 +1,17 @@
-# RAH v0.32.0 Architecture - released
+# RAH v0.33.0 Architecture - release preparation
+
+ADR 0031 defines ordinary `repo.edit-untracked-file` for one existing eligible
+untracked UTF-8 file inside the host-selected active admitted repository. It
+requires exact whole-file SHA-256 and byte-length preconditions, bounded exact
+literal replacements, and repository-state revalidation immediately before one
+prepared replacement attempt. It reports uncertain effects conservatively.
+The target remains untracked; the Tool does not stage, commit, edit tracked or
+ignored files, switch repositories, or enter HostExplicit. The existing
+tracked-file Tools retain their scopes under ADRs 0012–0014. HostExplicit
+remains exactly 11. The v0.33 release gate records preparation evidence;
+publication is pending.
+
+## Historical RAH v0.32.0 Architecture - released
 
 The v0.32 primary capability is bounded repository structure browsing with
 the first-party `repo.list` Tool. It belongs to the existing

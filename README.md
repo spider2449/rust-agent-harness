@@ -5,6 +5,24 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## RAH v0.33.0 release preparation
+
+The v0.33 capability is `repo.edit-untracked-file`: bounded correction of one
+existing, regular, non-ignored UTF-8 file in the host-selected active admitted
+repository. The file must be absent from HEAD and every index stage, including
+intent-to-add. Exact whole-file SHA-256 and byte-length preconditions and
+bounded literal replacements guard the edit; repository state is revalidated
+immediately before one prepared replacement attempt. An uncertain result must
+be inspected before another edit. The Tool leaves the file untracked and does
+not stage, commit, edit tracked or ignored files, or grant general filesystem
+authority. It is an ordinary repository Tool; HostExplicit remains 11.
+
+Remembered Workspaces maintenance also makes location controls fit the
+viewport, supports narrow windows, corrects native folder-picker permission,
+and preserves the disconnected repository-switching lifecycle. See the
+[v0.33 release-preparation gate](docs/RAH_V0.33_RELEASE_GATE.md). The v0.33
+tag and GitHub Release are pending.
+
 ## RAH v0.32.0 released
 
 The v0.32 primary capability is first-party `repo.list`, which provides
@@ -720,7 +738,8 @@ It requires a complete-file SHA-256 and byte-length precondition plus unique
 exact literal replacement text. It keeps the file untracked, never stages or
 commits, and is an ordinary Tool rather than a HostExplicit action. ADR 0031
 defines its separate target class; the tracked-only and create-only contracts
-above remain unchanged. RAH remains version 0.32.0 during Task 484.
+above remain unchanged. Task 484 introduced the Tool at version 0.32.0;
+Task 486 prepares the v0.33.0 release metadata.
 
 ```text
 Built-in Tool -----------\
