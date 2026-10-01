@@ -57,7 +57,6 @@ impl AgentHandle {
     }
 
     /// Consumes the handle and returns its event stream.
-    #[must_use]
     pub fn into_events(self) -> AgentEventStream {
         self.events
     }
