@@ -5,7 +5,7 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
-## RAH v0.33.0 release preparation
+## RAH v0.33.0 released
 
 The v0.33 capability is `repo.edit-untracked-file`: bounded correction of one
 existing, regular, non-ignored UTF-8 file in the host-selected active admitted
@@ -20,8 +20,8 @@ authority. It is an ordinary repository Tool; HostExplicit remains 11.
 Remembered Workspaces maintenance also makes location controls fit the
 viewport, supports narrow windows, corrects native folder-picker permission,
 and preserves the disconnected repository-switching lifecycle. See the
-[v0.33 release-preparation gate](docs/RAH_V0.33_RELEASE_GATE.md). The v0.33
-tag and GitHub Release are pending.
+[v0.33 release gate](docs/RAH_V0.33_RELEASE_GATE.md) for the immutable
+publication record and preserved validation evidence.
 
 ## RAH v0.32.0 released
 

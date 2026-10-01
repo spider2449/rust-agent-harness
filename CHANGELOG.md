@@ -1,6 +1,19 @@
 # Changelog
 
-## v0.33.0 - release preparation (unpublished)
+## v0.33.0 - released (2026-10-01)
+
+### Immutable publication record
+
+- Release source and peeled tag target: `ad25355c81ed0a39499cd75e5b240a7594f3e7a5`.
+- Annotated tag: `v0.33.0`; annotation: `RAH v0.33.0`.
+- Tag object: `2a187c6e634b330cea4d45f457497f165c6f84f2`.
+- Tag CI: `36862035589` - PASS.
+- GitHub Release ID: `400948501`; published `2026-10-01T12:31:40Z`;
+  `draft=false`; `prerelease=false`.
+
+Task 486 prepared the release. Task 487 published the immutable source without
+source-code changes or a repository commit. Task 488 is later documentation
+cleanup and does not change the release source or tag target.
 
 ### Added
 
@@ -24,7 +37,7 @@
 The new Tool uses ordinary repository-bounded authority. It does not stage,
 commit, edit tracked or ignored files, or grant arbitrary filesystem writes.
 The existing tracked-file mutation Tools retain their scopes. HostExplicit
-remains exactly 11. The v0.33.0 tag and GitHub Release are pending.
+remains exactly 11. The v0.33.0 tag and GitHub Release are published.
 
 ## v0.32.0 - released (2026-09-27)
 

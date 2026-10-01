@@ -1,4 +1,4 @@
-# RAH v0.33.0 Architecture - release preparation
+# RAH v0.33.0 Architecture - released
 
 ADR 0031 defines ordinary `repo.edit-untracked-file` for one existing eligible
 untracked UTF-8 file inside the host-selected active admitted repository. It
@@ -8,8 +8,8 @@ prepared replacement attempt. It reports uncertain effects conservatively.
 The target remains untracked; the Tool does not stage, commit, edit tracked or
 ignored files, switch repositories, or enter HostExplicit. The existing
 tracked-file Tools retain their scopes under ADRs 0012–0014. HostExplicit
-remains exactly 11. The v0.33 release gate records preparation evidence;
-publication is pending.
+remains exactly 11. The v0.33 release gate records immutable publication and
+preserved preparation evidence.
 
 ## Historical RAH v0.32.0 Architecture - released
 
