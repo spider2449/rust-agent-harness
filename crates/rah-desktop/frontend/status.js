@@ -127,7 +127,9 @@ function errorMessage(error) {
     codex_not_found: "Codex executable not found",
     codex_baseline_invalid: "Certified Codex baseline is invalid",
     codex_host_unsupported: "Certified Codex baseline requires Windows x64",
-    unsupported_codex_version: "Unsupported Codex version",
+    unsupported_codex_version: "Runtime uncertified: this Codex version is not admitted",
+    model_not_advertised: "The selected model is not advertised by the current certified Codex runtime. Choose an advertised model, or separately certify a newer Codex runtime.",
+    model_catalog_unavailable: "The current Codex model catalog could not be obtained. Connection stopped; model availability is unknown.",
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",
     codex_connection_failed: "Codex connection failed",
@@ -2086,6 +2088,7 @@ async function loadStatus(invoke) {
   renderedCodexStatus = status.codexStatus;
   renderRows(document.querySelector("#application-status"), applicationRows, status);
   renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
+  renderModelPreflight(status.modelPreflight);
   const button = document.querySelector("#codex-connection");
   const connectionError = document.querySelector("#connection-error");
   button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
@@ -2204,9 +2207,44 @@ async function replaceTranscript(invoke) {
   renderTranscript(await invoke("conversation_transcript"));
 }
 
-function showChatError(code) {
+function diagnosticText(diagnostic) {
+  const operations = { connection: "connection", model_discovery: "model catalog", session_start: "session start", session_resume: "session resume", turn: "chat turn", cancellation: "cancellation", shutdown: "shutdown" };
+  const kinds = { incompatible_runtime: "runtime incompatible or uncertified", provider_rejection: "runtime or provider request failed", protocol: "protocol failure", transport: "transport failure", unavailable: "runtime operation unavailable", invalid_configuration: "invalid configuration", operation: "runtime operation failed" };
+  if (!diagnostic || !Object.hasOwn(operations, diagnostic.operation) || !Object.hasOwn(kinds, diagnostic.kind)) return "";
+  let text = ` ${kinds[diagnostic.kind]} at ${operations[diagnostic.operation]}.`;
+  if (Number.isSafeInteger(diagnostic.rpcCode)) text += ` RPC code: ${diagnostic.rpcCode}.`;
+  return text;
+}
+
+function renderModelPreflight(view) {
+  const hint = document.querySelector("#model-preflight");
+  const alternatives = document.querySelector("#advertised-models");
+  alternatives.replaceChildren();
+  hint.hidden = true;
+  if (!view) return;
+  const outcomes = {
+    model_advertised: "Selected model is advertised by the current Codex runtime. Catalog membership does not prove entitlement or inference success.",
+    model_not_advertised: errorMessage("model_not_advertised"),
+    model_catalog_unavailable: errorMessage("model_catalog_unavailable"),
+    not_checked: "Selected model was not checked against a catalog. Inherit and other providers retain their configured selection.",
+  };
+  if (!Object.hasOwn(outcomes, view.outcome)) return;
+  const models = Array.isArray(view.advertisedModels) ? view.advertisedModels.slice(0, 100).filter(model => typeof model === "string" && model.length <= 256 && /^[A-Za-z0-9._\/-]+$/.test(model)) : [];
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model;
+    alternatives.append(option);
+  }
+  hint.textContent = outcomes[view.outcome];
+  if (typeof view.selectedModel === "string") hint.textContent += ` Selected model: ${view.selectedModel.slice(0, 256)}.`;
+  if (models.length) hint.textContent += ` Advertised alternatives: ${models.join(", ")}.`;
+  hint.textContent += diagnosticText(view.diagnostic);
+  hint.hidden = false;
+}
+
+function showChatError(code, diagnostic) {
   const error = document.querySelector("#chat-error");
-  error.textContent = errorMessage(code);
+  error.textContent = errorMessage(code) + diagnosticText(diagnostic);
   error.hidden = false;
 }
 
@@ -2218,7 +2256,7 @@ function handleChatEvent(invoke, event) {
   } else if (payload.kind === "delta" && activeAssistant) {
     activeAssistant.textContent += payload.text;
   } else if (payload.kind === "failed" || payload.kind === "cancelled") {
-    showChatError(payload.code);
+    showChatError(payload.code, payload.diagnostic);
   }
   if (["completed", "failed", "cancelled"].includes(payload.kind)) {
     chatRunning = false;

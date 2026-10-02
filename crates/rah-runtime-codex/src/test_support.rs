@@ -77,6 +77,13 @@ impl FakePeer {
             .expect("fake incoming channel");
     }
 
+    pub(crate) fn assert_no_outbound_request(&mut self) {
+        assert!(
+            self.sent.try_recv().is_err(),
+            "unexpected catalog/inference request"
+        );
+    }
+
     pub(crate) async fn next_sent(&mut self) -> Value {
         self.sent.recv().await.expect("outbound message")
     }

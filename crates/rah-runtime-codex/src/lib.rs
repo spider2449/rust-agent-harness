@@ -1,6 +1,7 @@
 //! Optional, process-isolated Codex runtime adapter for RAH.
 
 mod bridge;
+mod catalog;
 mod connection;
 mod errors;
 mod model_config;

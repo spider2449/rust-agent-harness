@@ -19,6 +19,8 @@ mod git_discovery;
 #[cfg(target_os = "windows")]
 mod host_invocation;
 #[cfg(target_os = "windows")]
+mod model_preflight;
+#[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
 mod remembered_workspace;
@@ -221,6 +223,9 @@ fn startup_activation_snapshot() -> StartupActivationCounters {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppStatus {
+    #[cfg(target_os = "windows")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_preflight: Option<model_preflight::ModelPreflightPresentation>,
     app_name: &'static str,
     app_version: &'static str,
     platform: &'static str,
@@ -393,6 +398,7 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 
 #[cfg(target_os = "windows")]
 struct DesktopAppState {
+    model_preflight: Mutex<Option<(u64, u64, model_preflight::ModelPreflightState)>>,
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
     active_chat: Mutex<Option<ActiveChat>>,
@@ -568,6 +574,7 @@ impl DesktopAppState {
         persistence.select_namespace("neutral-v1".to_owned());
         Self {
             connection: Mutex::new(ConnectionState::NotConnected),
+            model_preflight: Mutex::new(None),
             chat: Mutex::new(ChatState::Idle),
             active_chat: Mutex::new(None),
             next_chat_generation: Mutex::new(0),
@@ -1125,6 +1132,24 @@ impl DesktopAppState {
             repository_generation,
             model_generation,
         );
+        let connection_generation = *self
+            .next_connection_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.model_preflight = self
+            .model_preflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|(captured_connection, captured_model, _)| {
+                *captured_connection == connection_generation
+                    && *captured_model == model_generation
+                    && matches!(
+                        *connection,
+                        ConnectionState::Connected { .. } | ConnectionState::Error(_)
+                    )
+            })
+            .map(|(_, _, view)| view.presentation.clone());
         let current_profile_generation = *self
             .trusted_profile_generation
             .lock()
@@ -1438,6 +1463,8 @@ pub(crate) enum FrontendError {
     CodexBaselineInvalid,
     CodexHostUnsupported,
     UnsupportedCodexVersion,
+    ModelNotAdvertised,
+    ModelCatalogUnavailable,
     CodexSchemaIncompatible,
     CodexStartFailed,
     CodexConnectionFailed,
@@ -1815,10 +1842,18 @@ impl From<&ProviderEndpoint> for ProviderEndpointPresentation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
     Started,
-    Delta { text: String },
+    Delta {
+        text: String,
+    },
     Completed,
-    Failed { code: FrontendError },
-    Cancelled { code: FrontendError },
+    Failed {
+        code: FrontendError,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<rah_protocol::RuntimeDiagnostic>,
+    },
+    Cancelled {
+        code: FrontendError,
+    },
 }
 
 #[cfg(target_os = "windows")]
@@ -1912,6 +1947,7 @@ struct HostActivityEvent {
 #[cfg(target_os = "windows")]
 fn frontend_error(error: &CodexAdapterError) -> FrontendError {
     match error {
+        CodexAdapterError::CatalogDeadline => FrontendError::ModelCatalogUnavailable,
         CodexAdapterError::WorkspaceContext { .. }
         | CodexAdapterError::InvalidModelProviderConfig { .. } => {
             FrontendError::CodexConnectionFailed
@@ -1961,6 +1997,7 @@ fn current_app_status(
         ConnectionState::Disconnecting => ("connected", "disconnecting", None, None, None),
     };
     AppStatus {
+        model_preflight: None,
         app_name: "RAH",
         app_version: env!("CARGO_PKG_VERSION"),
         platform: "windows",
@@ -8414,6 +8451,11 @@ async fn connect_codex(
         .as_ref()
         .map(|value| repository_context_fingerprint(&value.root));
     let connection_repository_fingerprint = repository_fingerprint.clone();
+    let selected_model = match &model_config {
+        CodexModelConfig::Explicit(selection) => Some(selection.model().to_owned()),
+        CodexModelConfig::Inherit => None,
+    };
+    let preflight_state = state.inner();
     let selected_profile = profile_selection.is_some();
     match resolve_prepare_and_connect_codex(
         resolve_codex_executable,
@@ -8440,7 +8482,7 @@ async fn connect_codex(
                     .is_some_and(|value| value.branch_creation_authority.is_some()),
                 "bridge_enabled": true,
             }));
-            CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
+            let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
                 prepared.executable,
                 registry,
                 allowed_permissions,
@@ -8457,7 +8499,30 @@ async fn connect_codex(
             .map_err(|error| {
                 tracing::warn!(error = %error, "Codex desktop connection failed");
                 frontend_error(&error)
-            })
+            })?;
+            let (presentation, gate) = model_preflight::present(
+                selected_model,
+                runtime.preflight_selected_model().await,
+            );
+            append_live_evidence(serde_json::json!({
+                "event": "model_preflight",
+                "connection_generation": connection_generation,
+                "model_generation": model_generation,
+                "observation": presentation.presentation,
+            }));
+            if let Some(failure) = &presentation.failure {
+                tracing::warn!(failure = ?failure, "model catalog observation failed");
+            }
+            *preflight_state.model_preflight.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((connection_generation, model_generation, presentation));
+            if let Err(error) = gate {
+                if let Err(shutdown_error) = runtime.shutdown().await {
+                    tracing::warn!(failure = ?shutdown_error.into_runtime_failure(rah_protocol::RuntimeOperation::Shutdown), "preflight-rejected runtime shutdown failed");
+                }
+                return Err(error);
+            }
+            Ok(runtime)
         },
     )
     .await
@@ -9206,6 +9271,7 @@ async fn run_chat(
             emit_chat_event(
                 &app,
                 ChatEvent::Failed {
+                    diagnostic: None,
                     code: FrontendError::CodexReconnectRequired,
                 },
             );
@@ -9233,6 +9299,12 @@ async fn run_chat(
                 emit_chat_event(
                     &app,
                     ChatEvent::Failed {
+                        diagnostic: match &error {
+                            rah_runtime::AgentError::Failure { failure } => {
+                                Some(failure.diagnostic().clone())
+                            }
+                            _ => None,
+                        },
                         code: FrontendError::ChatStartFailed,
                     },
                 );
@@ -9265,8 +9337,12 @@ async fn run_chat(
     let mut terminal = false;
     let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
-    let mut events = handle.into_events();
-    while let Some(event) = events.next().await {
+    let mut events = handle.into_runtime_events();
+    while let Some(local_event) = events.next().await {
+        let diagnostic = local_event
+            .failure()
+            .map(|failure| failure.diagnostic().clone());
+        let event = local_event.event().clone();
         if let Some(outcome) = activity_event_with_composition(
             &event,
             &mut tool_calls,
@@ -9349,6 +9425,7 @@ async fn run_chat(
                     emit_chat_event(
                         &app,
                         ChatEvent::Failed {
+                            diagnostic: None,
                             code: FrontendError::ChatRuntimeFailed,
                         },
                     );
@@ -9396,6 +9473,7 @@ async fn run_chat(
                 emit_chat_event(
                     &app,
                     ChatEvent::Failed {
+                        diagnostic,
                         code: FrontendError::ChatRuntimeFailed,
                     },
                 );
@@ -9454,6 +9532,7 @@ async fn run_chat(
         emit_chat_event(
             &app,
             ChatEvent::Failed {
+                diagnostic: None,
                 code: FrontendError::ChatRuntimeFailed,
             },
         );
@@ -9623,6 +9702,7 @@ async fn cancel_chat(
             emit_chat_event(
                 &app,
                 ChatEvent::Failed {
+                    diagnostic: None,
                     code: FrontendError::ChatRuntimeFailed,
                 },
             );

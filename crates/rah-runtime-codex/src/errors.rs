@@ -7,6 +7,9 @@ use thiserror::Error;
 /// Typed failures produced by the private Codex app-server adapter.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// A bounded catalog observation exceeded its deadline.
+    #[error("model catalog observation exceeded its 5 second deadline")]
+    CatalogDeadline,
     /// Shared original failure retained by the connection actor for fanout.
     #[error("{failure}")]
     SharedFailure {
@@ -131,6 +134,7 @@ impl CodexAdapterError {
             }
             Self::JsonRpc { .. } | Self::TurnFailed { .. } => RuntimeFailureKind::ProviderRejection,
             Self::Transport { .. } => RuntimeFailureKind::Transport,
+            Self::CatalogDeadline => RuntimeFailureKind::Unavailable,
             Self::SharedFailure { .. } => unreachable!(),
         };
         let rpc_code = match &self {

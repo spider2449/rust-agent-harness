@@ -78,6 +78,34 @@ pub struct CodexRuntime {
 }
 
 impl CodexRuntime {
+    /// One bounded catalog observation, without a thread or inference probe.
+    /// Call after certified initialization and before publishing a usable Desktop
+    /// connection. Default catalog metadata cannot validate a custom provider.
+    pub async fn preflight_selected_model(
+        &self,
+    ) -> Result<rah_runtime::ModelPreflight, rah_runtime::RuntimeFailure> {
+        let CodexModelConfig::Explicit(selection) = &self.model_config else {
+            return Ok(rah_runtime::ModelPreflight::NotChecked);
+        };
+        if selection.provider() != &CodexModelProvider::OpenAi {
+            return Ok(rah_runtime::ModelPreflight::NotChecked);
+        }
+        let catalog = crate::catalog::discover(&self.connection)
+            .await
+            .map_err(|error| {
+                error.into_runtime_failure(rah_protocol::RuntimeOperation::ModelDiscovery)
+            })?;
+        if catalog
+            .models
+            .iter()
+            .any(|model| model == selection.model())
+        {
+            Ok(rah_runtime::ModelPreflight::Advertised(catalog))
+        } else {
+            Ok(rah_runtime::ModelPreflight::NotAdvertised(catalog))
+        }
+    }
+
     /// Starts and initializes a compatible Codex app-server executable.
     pub async fn connect(executable: impl AsRef<Path>) -> Result<Self, CodexAdapterError> {
         let transport = ProcessTransport::start(executable.as_ref(), false).await?;

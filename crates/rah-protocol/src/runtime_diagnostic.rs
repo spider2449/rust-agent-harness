@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub enum RuntimeOperation {
     /// Runtime creation or connection.
     Connection,
+    /// Observing the current advertised model catalog, without inference.
+    ModelDiscovery,
     /// Session creation and initial request submission.
     SessionStart,
     /// Resuming a session.

@@ -9,6 +9,9 @@ use thiserror::Error;
 
 mod failure;
 mod minimal;
+mod model_discovery;
+
+pub use model_discovery::{ModelCatalog, ModelPreflight};
 
 pub use failure::{RuntimeEvent, RuntimeFailure};
 
