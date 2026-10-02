@@ -191,9 +191,8 @@ async fn dropping_unpolled_handle_releases_session() {
         .cancel(session_id.clone())
         .await
         .expect_err("dropped session should not remain active");
-    assert_eq!(
-        error,
-        rah_runtime::AgentError::SessionNotFound { session_id }
+    assert!(
+        matches!(error, rah_runtime::AgentError::SessionNotFound { session_id: actual } if actual == session_id)
     );
 }
 

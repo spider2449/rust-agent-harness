@@ -270,7 +270,7 @@ async fn failed_and_interrupted_turns_map_to_terminal_rah_events() {
         let events = handle.into_events().collect::<Vec<_>>().await;
         match (expected, events.last()) {
             ("failed", Some(AgentEvent::Failed { message, .. })) => {
-                assert_eq!(message, "fixture failure");
+                assert!(!message.contains("fixture failure"));
             }
             ("cancelled", Some(AgentEvent::Cancelled { .. })) => {}
             _ => panic!("unexpected terminal event for {status}: {events:?}"),
@@ -315,7 +315,11 @@ async fn cancellation_reports_when_completion_wins_the_race() {
         .await
         .expect("cancel task")
         .expect_err("completion should win");
-    assert!(error.to_string().contains("before cancellation"));
+    assert!(
+        adapter_source(&error)
+            .to_string()
+            .contains("before cancellation")
+    );
     let events = handle.into_events().collect::<Vec<_>>().await;
     assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
     runtime.shutdown().await.expect("shutdown");
@@ -450,7 +454,9 @@ async fn malformed_response_and_unexpected_exit_are_typed_failures() {
         Ok(_) => panic!("malformed correlation must fail"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("response ID must be"));
+    assert!(
+        matches!(adapter_source(&error), CodexAdapterError::ProtocolViolation { message } if message.contains("response ID must be"))
+    );
     assert!(peer.stopped.load(std::sync::atomic::Ordering::SeqCst));
 
     let (runtime, mut peer) = connected_runtime().await;
@@ -465,7 +471,9 @@ async fn malformed_response_and_unexpected_exit_are_typed_failures() {
         Ok(_) => panic!("unexpected exit must fail"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("captured stderr"));
+    assert!(
+        matches!(adapter_source(&error), CodexAdapterError::ProcessExited { status, stderr } if status.code() == Some(7) && stderr == "captured stderr")
+    );
     assert!(peer.stopped.load(std::sync::atomic::Ordering::SeqCst));
 }
 
@@ -483,5 +491,218 @@ fn process_exit_error(stderr: &str) -> CodexAdapterError {
     CodexAdapterError::ProcessExited {
         status,
         stderr: stderr.to_owned(),
+    }
+}
+
+pub(crate) fn adapter_source<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> &'a CodexAdapterError {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if let Some(typed) = cause.downcast_ref::<CodexAdapterError>() {
+            return typed;
+        }
+        current = cause.source();
+    }
+    panic!("original adapter source missing");
+}
+
+#[tokio::test]
+async fn local_turn_failure_retains_source_and_redacts_projection() {
+    let (runtime, mut peer) = connected_runtime().await;
+    let handle = start_turn(&runtime, &mut peer).await;
+    peer.fail(process_exit_error("SECRET_STDERR_498A"));
+    let events = handle.into_runtime_events().collect::<Vec<_>>().await;
+    let failures: Vec<_> = events.iter().filter_map(|event| event.failure()).collect();
+    assert_eq!(failures.len(), 1);
+    let failure = failures[0].clone();
+    assert!(
+        matches!(adapter_source(&failure), CodexAdapterError::ProcessExited { status, stderr }
+        if status.code() == Some(7) && stderr == "SECRET_STDERR_498A")
+    );
+    assert!(!format!("{events:?}").contains("SECRET_STDERR_498A"));
+    let projected: Vec<_> = events
+        .into_iter()
+        .map(rah_runtime::RuntimeEvent::into_event)
+        .collect();
+    assert!(
+        !serde_json::to_string(&projected)
+            .unwrap()
+            .contains("SECRET_STDERR_498A")
+    );
+    drop(runtime);
+    assert!(matches!(
+        adapter_source(&failure),
+        CodexAdapterError::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn terminal_provider_failure_is_local_typed_data() {
+    let (runtime, mut peer) = connected_runtime().await;
+    let handle = start_turn(&runtime, &mut peer).await;
+    let mut params = terminal("failed");
+    params["turn"]["error"]["message"] = json!("SECRET_PROVIDER_BODY_498A");
+    peer.notify("turn/completed", params);
+    let events = handle.into_runtime_events().collect::<Vec<_>>().await;
+    let failure = events.last().unwrap().failure().unwrap();
+    assert!(
+        matches!(adapter_source(failure), CodexAdapterError::TurnFailed { message }
+        if message == "SECRET_PROVIDER_BODY_498A")
+    );
+    assert!(
+        !serde_json::to_string(events.last().unwrap().event())
+            .unwrap()
+            .contains("SECRET_PROVIDER_BODY_498A")
+    );
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn connection_fault_fanout_shares_original_for_all_pending_requests() {
+    use crate::connection::{AppServerConnection, ConnectionEvent};
+    use std::error::Error;
+    let (transport, mut peer) = fake_transport();
+    let starting = tokio::spawn(AppServerConnection::initialize(transport, false));
+    peer.respond("initialize", json!({})).await;
+    peer.expect_notification("initialized").await;
+    let connection = Arc::new(starting.await.unwrap().unwrap());
+    let mut subscriber = connection.subscribe();
+    let first = {
+        let connection = Arc::clone(&connection);
+        tokio::spawn(async move { connection.request("first", json!({})).await })
+    };
+    peer.next_sent().await;
+    let second = {
+        let connection = Arc::clone(&connection);
+        tokio::spawn(async move { connection.request("second", json!({})).await })
+    };
+    peer.next_sent().await;
+    peer.fail(process_exit_error("SECRET_FANOUT_498A"));
+    let first = first.await.unwrap().unwrap_err();
+    let second = second.await.unwrap().unwrap_err();
+    let ConnectionEvent::Fault { failure } = subscriber.recv().await.unwrap() else {
+        panic!("fault expected")
+    };
+    let original = failure
+        .source()
+        .unwrap()
+        .downcast_ref::<CodexAdapterError>()
+        .unwrap();
+    assert!(std::ptr::eq(
+        original,
+        adapter_source(first.source().unwrap())
+    ));
+    assert!(std::ptr::eq(
+        original,
+        adapter_source(second.source().unwrap())
+    ));
+    assert!(
+        matches!(original, CodexAdapterError::ProcessExited { status, stderr }
+        if status.code() == Some(7) && stderr == "SECRET_FANOUT_498A")
+    );
+}
+
+#[test]
+fn model_and_provider_mismatches_recover_original_fields() {
+    use crate::model_config::{CodexModelConfig, CodexModelProvider};
+    let config = CodexModelConfig::Explicit(
+        crate::model_config::CodexModelSelection::new("selected", CodexModelProvider::OpenAi)
+            .unwrap(),
+    );
+    for (model, provider) in [("fallback", "openai"), ("selected", "other-provider")] {
+        let error = crate::runtime::verify_effective_model_config(
+            &json!({
+                "model": model, "modelProvider": provider
+            }),
+            &config,
+        )
+        .unwrap_err();
+        let outer = rah_runtime::AgentError::Failure {
+            failure: error.into_runtime_failure(rah_protocol::RuntimeOperation::SessionStart),
+        };
+        assert!(
+            matches!(adapter_source(&outer), CodexAdapterError::ProtocolViolation { message }
+            if message.contains("explicit model/provider mismatch") && message.contains(model) && message.contains(provider))
+        );
+        assert!(!outer.to_string().contains("fallback"));
+        assert!(!outer.to_string().contains("other-provider"));
+    }
+}
+
+#[tokio::test]
+async fn explicit_shutdown_retains_transport_error() {
+    let (mut transport, mut peer) = fake_transport();
+    transport.shutdown_error = Some(CodexAdapterError::Transport {
+        source: std::io::Error::other("SECRET_SHUTDOWN_498A"),
+    });
+    let connecting = tokio::spawn(CodexRuntime::from_transport(transport));
+    peer.respond("initialize", json!({})).await;
+    peer.expect_notification("initialized").await;
+    let runtime = connecting.await.unwrap().unwrap();
+    let failure = runtime
+        .shutdown()
+        .await
+        .unwrap_err()
+        .into_runtime_failure(rah_protocol::RuntimeOperation::Shutdown);
+    assert!(
+        matches!(adapter_source(&failure), CodexAdapterError::Transport { source }
+        if source.to_string() == "SECRET_SHUTDOWN_498A")
+    );
+    assert!(!failure.to_string().contains("SECRET_SHUTDOWN_498A"));
+    assert!(peer.stopped.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn resume_and_cancellation_rejections_preserve_typed_sources() {
+    for cancel in [false, true] {
+        let (runtime, mut peer) = connected_runtime().await;
+        let handle = start_turn(&runtime, &mut peer).await;
+        let id = handle.session_id().clone();
+        let acting = {
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                if cancel {
+                    runtime.cancel(id).await
+                } else {
+                    runtime.resume(id).await.map(|_| ())
+                }
+            })
+        };
+        let request = peer.next_sent().await;
+        assert_eq!(
+            request["method"],
+            if cancel {
+                "turn/interrupt"
+            } else {
+                "thread/resume"
+            }
+        );
+        peer.send(json!({ "id": request["id"], "error": { "code": -32600, "message": "SECRET_RPC_498A" }}));
+        let error = acting.await.unwrap().unwrap_err();
+        assert!(
+            matches!(adapter_source(&error), CodexAdapterError::JsonRpc { code: -32600, message }
+            if message == "SECRET_RPC_498A")
+        );
+        let rah_runtime::AgentError::Failure { failure } = error else {
+            panic!("envelope expected")
+        };
+        assert_eq!(failure.diagnostic().rpc_code, Some(-32600));
+        assert_eq!(
+            failure.diagnostic().operation,
+            if cancel {
+                rah_protocol::RuntimeOperation::Cancellation
+            } else {
+                rah_protocol::RuntimeOperation::SessionResume
+            }
+        );
+        assert!(
+            !serde_json::to_string(failure.diagnostic())
+                .unwrap()
+                .contains("SECRET_RPC_498A")
+        );
+        peer.notify("turn/completed", terminal("completed"));
+        handle.into_events().collect::<Vec<_>>().await;
+        runtime.shutdown().await.unwrap();
     }
 }

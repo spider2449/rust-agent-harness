@@ -27,7 +27,7 @@ pub(crate) enum ConnectionEvent {
         method: String,
     },
     Fault {
-        message: String,
+        failure: rah_runtime::RuntimeFailure,
     },
 }
 
@@ -52,7 +52,7 @@ enum Command {
         message: Value,
     },
     Shutdown {
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), CodexAdapterError>>,
     },
 }
 
@@ -182,7 +182,7 @@ impl AppServerConnection {
         self.commands
             .send(Command::Shutdown { reply })
             .map_err(|_| disconnected())?;
-        response.await.map_err(|_| disconnected())?;
+        let result = response.await.map_err(|_| disconnected())?;
         let task = self
             .task
             .lock()
@@ -194,7 +194,7 @@ impl AppServerConnection {
                     message: format!("connection task failed: {error}"),
                 })?;
         }
-        Ok(())
+        result
     }
 }
 
@@ -220,6 +220,7 @@ async fn run_connection(
 ) {
     let mut next_id = 1_u64;
     let mut pending = HashMap::new();
+    let mut terminal_failure = None;
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -227,26 +228,28 @@ async fn run_connection(
                     let id = next_id;
                     next_id += 1;
                     if let Err(error) = transport.send(protocol::request(id, &method, params)).await {
-                        let _ = reply.send(Err(error));
+                        let failure = broadcast_fault(&events, error);
+                        let _ = reply.send(Err(CodexAdapterError::SharedFailure { failure: failure.clone() }));
+                        terminal_failure = Some(failure);
                         break;
                     }
                     pending.insert(id, reply);
                 }
                 Some(Command::Notify { method, params }) => {
                     if let Err(error) = transport.send(protocol::notification(&method, params)).await {
-                        broadcast_fault(&events, &error);
+                        terminal_failure = Some(broadcast_fault(&events, error));
                         break;
                     }
                 }
                 Some(Command::Respond { message }) => {
                     if let Err(error) = transport.send(message).await {
-                        broadcast_fault(&events, &error);
+                        terminal_failure = Some(broadcast_fault(&events, error));
                         break;
                     }
                 }
                 Some(Command::Shutdown { reply }) => {
-                    let _ = transport.shutdown().await;
-                    let _ = reply.send(());
+                    let result = transport.shutdown().await;
+                    let _ = reply.send(result);
                     return;
                 }
                 None => break,
@@ -256,9 +259,9 @@ async fn run_connection(
                     if let Some(reply) = pending.remove(&id) {
                         let _ = reply.send(Ok(result));
                     } else {
-                        let _ = events.send(ConnectionEvent::Fault {
+                        terminal_failure = Some(broadcast_fault(&events, CodexAdapterError::ProtocolViolation {
                             message: format!("response ID {id} has no pending request"),
-                        });
+                        }));
                         break;
                     }
                 }
@@ -266,9 +269,9 @@ async fn run_connection(
                     if let Some(reply) = pending.remove(&id) {
                         let _ = reply.send(Err(CodexAdapterError::JsonRpc { code, message }));
                     } else {
-                        let _ = events.send(ConnectionEvent::Fault {
+                        terminal_failure = Some(broadcast_fault(&events, CodexAdapterError::ProtocolViolation {
                             message: format!("error response ID {id} has no pending request"),
-                        });
+                        }));
                         break;
                     }
                 }
@@ -294,12 +297,7 @@ async fn run_connection(
                     }
                 }
                 Err(error) => {
-                    broadcast_fault(&events, &error);
-                    if let Some(id) = pending.keys().next().copied()
-                        && let Some(reply) = pending.remove(&id)
-                    {
-                        let _ = reply.send(Err(error));
-                    }
+                    terminal_failure = Some(broadcast_fault(&events, error));
                     break;
                 }
             }
@@ -307,14 +305,24 @@ async fn run_connection(
     }
     let _ = transport.shutdown().await;
     for (_, reply) in pending {
-        let _ = reply.send(Err(disconnected()));
+        let error = terminal_failure
+            .as_ref()
+            .map_or_else(disconnected, |failure| CodexAdapterError::SharedFailure {
+                failure: failure.clone(),
+            });
+        let _ = reply.send(Err(error));
     }
 }
 
-fn broadcast_fault(events: &broadcast::Sender<ConnectionEvent>, error: &CodexAdapterError) {
+fn broadcast_fault(
+    events: &broadcast::Sender<ConnectionEvent>,
+    error: CodexAdapterError,
+) -> rah_runtime::RuntimeFailure {
+    let failure = error.into_runtime_failure(rah_protocol::RuntimeOperation::Connection);
     let _ = events.send(ConnectionEvent::Fault {
-        message: error.to_string(),
+        failure: failure.clone(),
     });
+    failure
 }
 
 fn disconnected() -> CodexAdapterError {

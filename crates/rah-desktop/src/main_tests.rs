@@ -7178,6 +7178,26 @@ fn codex_source_presentation_is_closed_and_never_contains_host_details() {
 }
 
 #[test]
+fn local_runtime_failures_project_closed_frontend_codes() {
+    const SECRET: &str = "SECRET_FRONTEND_SOURCE_498A";
+    let original = CodexAdapterError::ProtocolViolation {
+        message: SECRET.to_owned(),
+    };
+    for error in [
+        CodexAdapterError::SharedFailure {
+            failure: original.into_runtime_failure(rah_protocol::RuntimeOperation::Connection),
+        },
+        CodexAdapterError::TurnFailed {
+            message: SECRET.to_owned(),
+        },
+    ] {
+        let frontend = frontend_error(&error);
+        assert_eq!(frontend, FrontendError::CodexConnectionFailed);
+        assert!(!serde_json::to_string(&frontend).unwrap().contains(SECRET));
+    }
+}
+
+#[test]
 fn repository_status_is_dynamic_without_exposing_repository_details() {
     let status = current_app_status(&ConnectionState::NotConnected, true, 1, 0);
     assert_eq!(status.repository_status, "selected");

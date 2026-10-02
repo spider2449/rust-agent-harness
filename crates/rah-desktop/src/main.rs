@@ -1925,6 +1925,8 @@ fn frontend_error(error: &CodexAdapterError) -> FrontendError {
         CodexAdapterError::ProcessExited { .. }
         | CodexAdapterError::MalformedFraming { .. }
         | CodexAdapterError::JsonRpc { .. }
+        | CodexAdapterError::SharedFailure { .. }
+        | CodexAdapterError::TurnFailed { .. }
         | CodexAdapterError::ProtocolViolation { .. }
         | CodexAdapterError::Transport { .. } => FrontendError::CodexConnectionFailed,
     }

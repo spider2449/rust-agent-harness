@@ -1,10 +1,19 @@
 use std::{io, path::PathBuf, process::ExitStatus};
 
+use rah_protocol::{RuntimeDiagnostic, RuntimeFailureKind, RuntimeOperation};
+use rah_runtime::RuntimeFailure;
 use thiserror::Error;
 
 /// Typed failures produced by the private Codex app-server adapter.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// Shared original failure retained by the connection actor for fanout.
+    #[error("{failure}")]
+    SharedFailure {
+        /// Neutral envelope; its source is the original adapter error.
+        #[source]
+        failure: RuntimeFailure,
+    },
     /// The host-selected workspace context could not be canonicalized.
     #[error("invalid host-selected Codex workspace context: {source}")]
     WorkspaceContext {
@@ -78,6 +87,12 @@ pub enum CodexAdapterError {
         /// JSON-RPC error message.
         message: String,
     },
+    /// A terminal turn was rejected by the provider.
+    #[error("Codex turn failed: {message}")]
+    TurnFailed {
+        /// Private provider detail, never projected to IPC.
+        message: String,
+    },
     /// A well-formed message violated required adapter semantics.
     #[error("Codex app-server protocol violation: {message}")]
     ProtocolViolation {
@@ -91,4 +106,44 @@ pub enum CodexAdapterError {
         #[source]
         source: io::Error,
     },
+}
+
+impl CodexAdapterError {
+    /// Converts an adapter error to the neutral boundary without formatting private data.
+    /// The returned source remains process-local, including any original IO source chain.
+    #[must_use]
+    pub fn into_runtime_failure(self, operation: RuntimeOperation) -> RuntimeFailure {
+        if let Self::SharedFailure { failure } = self {
+            return failure.at_operation(operation);
+        }
+        let kind = match &self {
+            Self::WorkspaceContext { .. } | Self::InvalidModelProviderConfig { .. } => {
+                RuntimeFailureKind::InvalidConfiguration
+            }
+            Self::VersionMismatch { .. }
+            | Self::SchemaInspection { .. }
+            | Self::SchemaMismatch { .. } => RuntimeFailureKind::IncompatibleRuntime,
+            Self::ExecutableDiscovery { .. }
+            | Self::ProcessStartup { .. }
+            | Self::ProcessExited { .. } => RuntimeFailureKind::Unavailable,
+            Self::MalformedFraming { .. } | Self::ProtocolViolation { .. } => {
+                RuntimeFailureKind::Protocol
+            }
+            Self::JsonRpc { .. } | Self::TurnFailed { .. } => RuntimeFailureKind::ProviderRejection,
+            Self::Transport { .. } => RuntimeFailureKind::Transport,
+            Self::SharedFailure { .. } => unreachable!(),
+        };
+        let rpc_code = match &self {
+            Self::JsonRpc { code, .. } => Some(*code),
+            _ => None,
+        };
+        RuntimeFailure::new(
+            RuntimeDiagnostic {
+                operation,
+                kind,
+                rpc_code,
+            },
+            self,
+        )
+    }
 }

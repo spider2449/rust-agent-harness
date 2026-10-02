@@ -13,7 +13,9 @@ use rah_protocol::{
 use rah_tools::{ToolContext, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
-use crate::{AgentError, AgentEventStream, AgentHandle, AgentRuntime};
+use crate::{
+    AgentError, AgentHandle, AgentRuntime, RuntimeEvent, RuntimeEventStream, RuntimeFailure,
+};
 
 type ActiveSessions = Arc<Mutex<HashMap<SessionId, CancellationToken>>>;
 
@@ -57,7 +59,7 @@ impl MinimalTestRuntime {
         request: AgentRequest,
         session_id: SessionId,
         cancellation: CancellationToken,
-    ) -> AgentEventStream {
+    ) -> RuntimeEventStream {
         let backend = Arc::clone(&self.backend);
         let tools = Arc::clone(&self.tools);
         let allowed_permissions = self.allowed_permissions.clone();
@@ -76,14 +78,14 @@ impl MinimalTestRuntime {
                 request_id = %request_id,
                 "agent session started"
             );
-            yield AgentEvent::Started {
+            yield RuntimeEvent::from(AgentEvent::Started {
                 session_id: session_id.clone(),
                 request_id: request_id.clone(),
-            };
+            });
 
             'agent: loop {
                 if cancellation.is_cancelled() {
-                    yield cancelled(&session_id, &request_id);
+                    yield RuntimeEvent::from(cancelled(&session_id, &request_id));
                     return;
                 }
 
@@ -95,10 +97,10 @@ impl MinimalTestRuntime {
                     model_request_id = %model_request_id,
                     "model request started"
                 );
-                yield AgentEvent::ModelRequestStarted {
+                yield RuntimeEvent::from(AgentEvent::ModelRequestStarted {
                     session_id: session_id.clone(),
                     model_request_id: model_request_id.clone(),
-                };
+                });
                 let model_request = ModelRequest {
                     id: model_request_id.clone(),
                     messages: messages.clone(),
@@ -108,7 +110,7 @@ impl MinimalTestRuntime {
                 let model_result = tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        yield cancelled(&session_id, &request_id);
+                        yield RuntimeEvent::from(cancelled(&session_id, &request_id));
                         return;
                     }
                     result = backend.complete(model_request) => result,
@@ -121,13 +123,12 @@ impl MinimalTestRuntime {
                             session_id = %session_id,
                             request_id = %request_id,
                             model_request_id = %model_request_id,
-                            error = %error,
                             "model request failed"
                         );
                         yield failed(
                             &session_id,
                             AgentErrorCode::Model,
-                            error.to_string(),
+                            error,
                         );
                         return;
                     }
@@ -139,7 +140,7 @@ impl MinimalTestRuntime {
                     let next_event = tokio::select! {
                         biased;
                         () = cancellation.cancelled() => {
-                            yield cancelled(&session_id, &request_id);
+                            yield RuntimeEvent::from(cancelled(&session_id, &request_id));
                             return;
                         }
                         event = model_stream.next() => event,
@@ -155,13 +156,12 @@ impl MinimalTestRuntime {
                                 session_id = %session_id,
                                 request_id = %request_id,
                                 model_request_id = %model_request_id,
-                                error = %error,
-                                "model event stream failed"
+                                    "model event stream failed"
                             );
                             yield failed(
                                 &session_id,
                                 AgentErrorCode::Model,
-                                error.to_string(),
+                                error,
                             );
                             return;
                         }
@@ -178,11 +178,11 @@ impl MinimalTestRuntime {
                                 "model text received"
                             );
                             final_text.push_str(&text);
-                            yield AgentEvent::ModelDelta {
+                            yield RuntimeEvent::from(AgentEvent::ModelDelta {
                                 session_id: session_id.clone(),
                                 model_request_id: model_request_id.clone(),
                                 delta: text,
-                            };
+                            });
                         }
                         ModelEvent::ToolCall { call } => {
                             requested_tool = true;
@@ -195,10 +195,10 @@ impl MinimalTestRuntime {
                                 tool_name = %call.name,
                                 "tool requested"
                             );
-                            yield AgentEvent::ToolRequested {
+                            yield RuntimeEvent::from(AgentEvent::ToolRequested {
                                 session_id: session_id.clone(),
                                 tool_call: call.clone(),
-                            };
+                            });
                             let Some(tool) = tools.get(&call.name) else {
                                 tracing::error!(
                                     target: "rah",
@@ -212,7 +212,7 @@ impl MinimalTestRuntime {
                                 yield failed(
                                     &session_id,
                                     AgentErrorCode::Tool,
-                                    format!("tool `{}` is not registered", call.name),
+                                    LocalFailure(format!("tool `{}` is not registered", call.name)),
                                 );
                                 return;
                             };
@@ -229,10 +229,7 @@ impl MinimalTestRuntime {
                                 yield failed(
                                     &session_id,
                                     AgentErrorCode::PermissionDenied,
-                                    format!(
-                                        "minimal test runtime cannot authorize tool `{}`",
-                                        call.name
-                                    ),
+                                    LocalFailure(format!("minimal test runtime cannot authorize tool {}", call.name)),
                                 );
                                 return;
                             }
@@ -246,14 +243,14 @@ impl MinimalTestRuntime {
                                 tool_name = %call.name,
                                 "tool execution started"
                             );
-                            yield AgentEvent::ToolStarted {
+                            yield RuntimeEvent::from(AgentEvent::ToolStarted {
                                 session_id: session_id.clone(),
                                 tool_call_id: call.id.clone(),
-                            };
+                            });
                             let tool_result = tokio::select! {
                                 biased;
                                 () = cancellation.cancelled() => {
-                                    yield cancelled(&session_id, &request_id);
+                                    yield RuntimeEvent::from(cancelled(&session_id, &request_id));
                                     return;
                                 }
                                 result = tools.execute(call.clone(), ToolContext::default()) => result,
@@ -268,13 +265,12 @@ impl MinimalTestRuntime {
                                         model_request_id = %model_request_id,
                                         tool_call_id = %call.id,
                                         tool_name = %call.name,
-                                        error = %error,
-                                        "tool execution failed"
+                                                    "tool execution failed"
                                     );
                                     yield failed(
                                         &session_id,
                                         AgentErrorCode::Tool,
-                                        error.to_string(),
+                                        error,
                                     );
                                     return;
                                 }
@@ -289,11 +285,11 @@ impl MinimalTestRuntime {
                                 is_error = output.is_error,
                                 "tool execution finished"
                             );
-                            yield AgentEvent::ToolFinished {
+                            yield RuntimeEvent::from(AgentEvent::ToolFinished {
                                 session_id: session_id.clone(),
                                 tool_call_id: call.id,
                                 output: output.clone(),
-                            };
+                            });
                             messages.push(Message {
                                 role: MessageRole::Tool,
                                 content: tool_output_text(&output),
@@ -307,7 +303,7 @@ impl MinimalTestRuntime {
                     continue 'agent;
                 }
                 if cancellation.is_cancelled() {
-                    yield cancelled(&session_id, &request_id);
+                    yield RuntimeEvent::from(cancelled(&session_id, &request_id));
                     return;
                 }
 
@@ -317,7 +313,7 @@ impl MinimalTestRuntime {
                     request_id = %request_id,
                     "agent session completed"
                 );
-                yield AgentEvent::Completed {
+                yield RuntimeEvent::from(AgentEvent::Completed {
                     session_id: session_id.clone(),
                     output: AgentOutput {
                         message: Message {
@@ -325,7 +321,7 @@ impl MinimalTestRuntime {
                             content: final_text,
                         },
                     },
-                };
+                });
                 return;
             }
         })
@@ -340,7 +336,7 @@ impl AgentRuntime for MinimalTestRuntime {
         self.active_sessions()
             .insert(session_id.clone(), cancellation.clone());
         let events = self.event_stream(request, session_id.clone(), cancellation);
-        Ok(AgentHandle::new(session_id, events))
+        Ok(AgentHandle::with_runtime_events(session_id, events))
     }
 
     async fn resume(&self, session_id: SessionId) -> Result<AgentHandle, AgentError> {
@@ -388,12 +384,27 @@ fn cancelled(session_id: &SessionId, request_id: &rah_protocol::RequestId) -> Ag
     }
 }
 
-fn failed(session_id: &SessionId, code: AgentErrorCode, message: String) -> AgentEvent {
-    AgentEvent::Failed {
-        session_id: session_id.clone(),
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct LocalFailure(String);
+
+fn failed(
+    session_id: &SessionId,
+    code: AgentErrorCode,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> RuntimeEvent {
+    RuntimeEvent::failed(
+        session_id.clone(),
         code,
-        message,
-    }
+        RuntimeFailure::new(
+            rah_protocol::RuntimeDiagnostic {
+                operation: rah_protocol::RuntimeOperation::Turn,
+                kind: rah_protocol::RuntimeFailureKind::Operation,
+                rpc_code: None,
+            },
+            error,
+        ),
+    )
 }
 
 fn tool_output_text(output: &ToolOutput) -> String {

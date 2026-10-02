@@ -10,7 +10,9 @@ use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentOutput, AgentRequest, Message, MessageRole, ModelRequestId,
     PermissionLevel, SessionId, ToolName,
 };
-use rah_runtime::{AgentError, AgentEventStream, AgentHandle, AgentRuntime};
+use rah_runtime::{
+    AgentError, AgentHandle, AgentRuntime, RuntimeEvent, RuntimeEventStream, RuntimeFailure,
+};
 use rah_tools::ToolRegistry;
 use serde_json::{Value, json};
 use std::{
@@ -354,7 +356,7 @@ impl AgentRuntime for CodexRuntime {
             request,
             self.bridge.as_ref().map(|bridge| bridge.controls.clone()),
         );
-        Ok(AgentHandle::new(session_id, events))
+        Ok(AgentHandle::with_runtime_events(session_id, events))
     }
 
     async fn resume(&self, session_id: SessionId) -> Result<AgentHandle, AgentError> {
@@ -367,9 +369,9 @@ impl AgentRuntime for CodexRuntime {
         self.connection
             .request("thread/resume", json!({ "threadId": record.thread_id }))
             .await
-            .map_err(agent_error)?;
+            .map_err(|error| agent_error(error, rah_protocol::RuntimeOperation::SessionResume))?;
         let events = passive_stream(receiver, session_id.clone(), record.thread_id);
-        Ok(AgentHandle::new(session_id, events))
+        Ok(AgentHandle::with_runtime_events(session_id, events))
     }
 
     async fn cancel(&self, session_id: SessionId) -> Result<(), AgentError> {
@@ -378,8 +380,13 @@ impl AgentRuntime for CodexRuntime {
                 session_id: session_id.clone(),
             }
         })?;
-        let turn_id = record.active_turn.ok_or_else(|| AgentError::Runtime {
-            message: format!("session `{session_id}` has no active Codex turn"),
+        let turn_id = record.active_turn.ok_or_else(|| {
+            agent_error(
+                CodexAdapterError::ProtocolViolation {
+                    message: format!("session {session_id} has no active turn"),
+                },
+                rah_protocol::RuntimeOperation::Cancellation,
+            )
         })?;
         if let Some(bridge) = &self.bridge {
             let _ = bridge.controls.send(BridgeControl::Cancel {
@@ -394,7 +401,7 @@ impl AgentRuntime for CodexRuntime {
                 json!({ "threadId": record.thread_id, "turnId": turn_id }),
             )
             .await
-            .map_err(agent_error)?;
+            .map_err(|error| agent_error(error, rah_protocol::RuntimeOperation::Cancellation))?;
         loop {
             match receiver.recv().await.map_err(broadcast_error)? {
                 ConnectionEvent::Notification { method, params }
@@ -406,15 +413,20 @@ impl AgentRuntime for CodexRuntime {
                         clear_active_turn(&self.sessions, &session_id, &turn_id);
                         return Ok(());
                     }
-                    return Err(AgentError::Runtime {
-                        message: format!(
-                            "Codex turn completed with status `{}` before cancellation",
-                            status.unwrap_or("unknown")
-                        ),
-                    });
+                    return Err(agent_error(
+                        CodexAdapterError::ProtocolViolation {
+                            message: format!(
+                                "turn completed with status {} before cancellation",
+                                status.unwrap_or("unknown")
+                            ),
+                        },
+                        rah_protocol::RuntimeOperation::Cancellation,
+                    ));
                 }
-                ConnectionEvent::Fault { message } => {
-                    return Err(AgentError::Runtime { message });
+                ConnectionEvent::Fault { failure } => {
+                    return Err(AgentError::Failure {
+                        failure: failure.at_operation(rah_protocol::RuntimeOperation::Cancellation),
+                    });
                 }
                 _ => {}
             }
@@ -510,7 +522,7 @@ fn verify_effective_workspace_context(
     Ok(())
 }
 
-fn verify_effective_model_config(
+pub(crate) fn verify_effective_model_config(
     response: &Value,
     model_config: &CodexModelConfig,
 ) -> Result<(), CodexAdapterError> {
@@ -561,7 +573,7 @@ fn event_stream(
     route: TurnRoute,
     request: AgentRequest,
     bridge_controls: Option<mpsc::UnboundedSender<BridgeControl>>,
-) -> AgentEventStream {
+) -> RuntimeEventStream {
     let TurnRoute {
         session_id,
         thread_id,
@@ -575,17 +587,17 @@ fn event_stream(
     let stream_turn_id = turn_id.clone();
     let stream_bridge_controls = bridge_controls.clone();
     let bridge_enabled = bridge_controls.is_some();
-    let inner: AgentEventStream = Box::pin(async_stream::stream! {
+    let inner: RuntimeEventStream = Box::pin(async_stream::stream! {
         let model_request_id = ModelRequestId::new();
         let mut final_text = String::new();
-        yield AgentEvent::Started {
+        yield RuntimeEvent::from(AgentEvent::Started {
             session_id: session_id.clone(),
             request_id: request.request_id,
-        };
-        yield AgentEvent::ModelRequestStarted {
+        });
+        yield RuntimeEvent::from(AgentEvent::ModelRequestStarted {
             session_id: session_id.clone(),
             model_request_id: model_request_id.clone(),
-        };
+        });
         loop {
             match receiver.recv().await {
                 Ok(ConnectionEvent::Notification { method, params })
@@ -598,11 +610,11 @@ fn event_stream(
                         break;
                     };
                     final_text.push_str(delta);
-                    yield AgentEvent::ModelDelta {
+                    yield RuntimeEvent::from(AgentEvent::ModelDelta {
                         session_id: session_id.clone(),
                         model_request_id: model_request_id.clone(),
                         delta: delta.to_owned(),
-                    };
+                    });
                 }
                 Ok(ConnectionEvent::Notification { method, params })
                     if method == "turn/completed" && belongs_to(&params, &thread_id, &turn_id) =>
@@ -616,7 +628,7 @@ fn event_stream(
                     clear_active_turn(&sessions, &session_id, &turn_id);
                     stream_terminal.store(true, Ordering::SeqCst);
                     match params.pointer("/turn/status").and_then(Value::as_str) {
-                        Some("completed") => yield AgentEvent::Completed {
+                        Some("completed") => yield RuntimeEvent::from(AgentEvent::Completed {
                             session_id: session_id.clone(),
                             output: AgentOutput {
                                 message: Message {
@@ -624,16 +636,18 @@ fn event_stream(
                                     content: final_text,
                                 },
                             },
-                        },
-                        Some("interrupted") => yield AgentEvent::Cancelled {
+                        }),
+                        Some("interrupted") => yield RuntimeEvent::from(AgentEvent::Cancelled {
                             session_id: session_id.clone(),
-                        },
+                        }),
                         Some("failed") => {
                             let message = params.pointer("/turn/error/message")
                                 .and_then(Value::as_str)
                                 .unwrap_or("Codex turn failed");
                             tracing::warn!(stage = "post-start runtime/event failure", "Codex turn completed as failed");
-                            yield failed(&session_id, message);
+                            yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::Internal,
+    CodexAdapterError::TurnFailed { message: message.to_owned() }
+        .into_runtime_failure(rah_protocol::RuntimeOperation::Turn));
                         }
                         status => {
                             tracing::warn!(stage = "post-start runtime/event failure", "Codex turn completed with an unknown status");
@@ -660,7 +674,7 @@ fn event_stream(
                     if event_thread == thread_id && event_turn == turn_id =>
                 {
                     let terminal = matches!(event, AgentEvent::Failed { .. });
-                    yield event;
+                    yield RuntimeEvent::from(event);
                     if terminal {
                         break;
                     }
@@ -668,21 +682,21 @@ fn event_stream(
                 Ok(ConnectionEvent::RahEvent { .. }) => {}
                 Ok(ConnectionEvent::UnsupportedRequest { method }) => {
                     tracing::warn!(stage = "dynamic tool bridge failure", codex_method = %method, "unsupported Codex server request was denied");
-                    yield AgentEvent::Failed {
-                        session_id: session_id.clone(),
-                        code: AgentErrorCode::PermissionDenied,
-                        message: format!("unsupported Codex server request `{method}` was denied"),
-                    };
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::PermissionDenied,
+    CodexAdapterError::ProtocolViolation { message: format!("unsupported server request {method}") }
+        .into_runtime_failure(rah_protocol::RuntimeOperation::Turn));
                     break;
                 }
-                Ok(ConnectionEvent::Fault { message }) => {
+                Ok(ConnectionEvent::Fault { failure }) => {
                     tracing::warn!(stage = "post-start runtime/event failure", "Codex connection fault after turn start");
-                    yield failed(&session_id, &message);
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::Internal, failure.at_operation(rah_protocol::RuntimeOperation::Turn));
                     break;
                 }
                 Err(error) => {
                     tracing::warn!(stage = "post-start runtime/event failure", "Codex event receiver failed");
-                    yield failed(&session_id, &format!("Codex event stream failed: {error}"));
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::Internal, RuntimeFailure::new(
+    rah_protocol::RuntimeDiagnostic { operation: rah_protocol::RuntimeOperation::Turn,
+        kind: rah_protocol::RuntimeFailureKind::Transport, rpc_code: None }, error));
                     break;
                 }
             }
@@ -703,12 +717,12 @@ fn event_stream(
 }
 
 struct OwnedTurnStream {
-    inner: AgentEventStream,
+    inner: RuntimeEventStream,
     _guard: TurnGuard,
 }
 
 impl Stream for OwnedTurnStream {
-    type Item = AgentEvent;
+    type Item = RuntimeEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inner.as_mut().poll_next(context)
@@ -745,7 +759,7 @@ fn passive_stream(
     mut receiver: broadcast::Receiver<ConnectionEvent>,
     session_id: SessionId,
     thread_id: String,
-) -> AgentEventStream {
+) -> RuntimeEventStream {
     Box::pin(async_stream::stream! {
         loop {
             match receiver.recv().await {
@@ -761,19 +775,19 @@ fn passive_stream(
                 }
                 Ok(ConnectionEvent::RahEvent { .. }) => {}
                 Ok(ConnectionEvent::UnsupportedRequest { method }) => {
-                    yield AgentEvent::Failed {
-                        session_id: session_id.clone(),
-                        code: AgentErrorCode::PermissionDenied,
-                        message: format!("unsupported Codex server request `{method}` was denied"),
-                    };
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::PermissionDenied,
+    CodexAdapterError::ProtocolViolation { message: format!("unsupported server request {method}") }
+        .into_runtime_failure(rah_protocol::RuntimeOperation::Turn));
                     break;
                 }
-                Ok(ConnectionEvent::Fault { message }) => {
-                    yield failed(&session_id, &message);
+                Ok(ConnectionEvent::Fault { failure }) => {
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::Internal, failure.at_operation(rah_protocol::RuntimeOperation::Turn));
                     break;
                 }
                 Err(error) => {
-                    yield failed(&session_id, &format!("Codex event stream failed: {error}"));
+                    yield RuntimeEvent::failed(session_id.clone(), AgentErrorCode::Internal, RuntimeFailure::new(
+    rah_protocol::RuntimeDiagnostic { operation: rah_protocol::RuntimeOperation::Turn,
+        kind: rah_protocol::RuntimeFailureKind::Transport, rpc_code: None }, error));
                     break;
                 }
             }
@@ -830,32 +844,38 @@ fn clear_active_turn(
     }
 }
 
-fn failed(session_id: &SessionId, message: &str) -> AgentEvent {
-    AgentEvent::Failed {
-        session_id: session_id.clone(),
-        code: AgentErrorCode::Internal,
-        message: message.to_owned(),
+fn failed(session_id: &SessionId, message: &str) -> RuntimeEvent {
+    RuntimeEvent::failed(
+        session_id.clone(),
+        AgentErrorCode::Internal,
+        CodexAdapterError::ProtocolViolation {
+            message: message.to_owned(),
+        }
+        .into_runtime_failure(rah_protocol::RuntimeOperation::Turn),
+    )
+}
+
+fn agent_error(error: CodexAdapterError, operation: rah_protocol::RuntimeOperation) -> AgentError {
+    AgentError::Failure {
+        failure: error.into_runtime_failure(operation),
     }
 }
 
-fn agent_error(error: CodexAdapterError) -> AgentError {
-    AgentError::Runtime {
-        message: error.to_string(),
-    }
-}
-
-/// Adds a private, stable diagnostic stage to an otherwise RAH-owned runtime error.
-/// Desktop logs this error but deliberately maps it to a sanitized frontend code.
 fn agent_start_error(stage: &'static str, error: CodexAdapterError) -> AgentError {
-    tracing::warn!(stage, category = ?std::mem::discriminant(&error), error = %error, "Codex runtime start failed");
-    AgentError::Runtime {
-        message: format!("Codex runtime start failed at {stage}: {error}"),
-    }
+    tracing::warn!(stage, "Codex runtime start failed");
+    agent_error(error, rah_protocol::RuntimeOperation::SessionStart)
 }
 
 fn broadcast_error(error: broadcast::error::RecvError) -> AgentError {
-    AgentError::Runtime {
-        message: format!("Codex event stream failed: {error}"),
+    AgentError::Failure {
+        failure: RuntimeFailure::new(
+            rah_protocol::RuntimeDiagnostic {
+                operation: rah_protocol::RuntimeOperation::Cancellation,
+                kind: rah_protocol::RuntimeFailureKind::Transport,
+                rpc_code: None,
+            },
+            error,
+        ),
     }
 }
 
@@ -1168,7 +1188,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            error
+            crate::runtime_tests::adapter_source(&error)
                 .to_string()
                 .contains("explicit model/provider mismatch")
         );

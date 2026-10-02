@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use crate::{CodexAdapterError, transport::AppServerTransport};
 
 pub(crate) struct FakeTransport {
+    pub(crate) shutdown_error: Option<CodexAdapterError>,
     incoming: mpsc::UnboundedReceiver<Result<Value, CodexAdapterError>>,
     sent: mpsc::UnboundedSender<Value>,
     stopped: Arc<AtomicBool>,
@@ -27,6 +28,7 @@ pub(crate) fn fake_transport() -> (FakeTransport, FakePeer) {
     let stopped = Arc::new(AtomicBool::new(false));
     (
         FakeTransport {
+            shutdown_error: None,
             incoming,
             sent,
             stopped: Arc::clone(&stopped),
@@ -95,7 +97,7 @@ impl AppServerTransport for FakeTransport {
 
     async fn shutdown(&mut self) -> Result<(), CodexAdapterError> {
         self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
+        self.shutdown_error.take().map_or(Ok(()), Err)
     }
 }
 

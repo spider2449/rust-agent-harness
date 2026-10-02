@@ -3,17 +3,27 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use rah_protocol::{AgentEvent, AgentRequest, SessionId};
 use thiserror::Error;
 
+mod failure;
 mod minimal;
+
+pub use failure::{RuntimeEvent, RuntimeFailure};
 
 pub use minimal::MinimalTestRuntime;
 
 /// Error returned by an agent runtime operation.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Debug, Error)]
 pub enum AgentError {
+    /// Runtime failure retaining a private typed source.
+    #[error("{failure}")]
+    Failure {
+        /// Neutral diagnostic and process-local cause.
+        #[source]
+        failure: RuntimeFailure,
+    },
     /// The requested session does not exist.
     #[error("session `{session_id}` was not found")]
     SessionNotFound {
@@ -37,16 +47,25 @@ pub enum AgentError {
 /// Asynchronous event stream exposed to runtime consumers.
 pub type AgentEventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
+/// Process-local stream retaining typed failures until explicit presentation.
+pub type RuntimeEventStream = Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>>;
+
 /// Owned session identity and event stream returned by a runtime.
 pub struct AgentHandle {
     session_id: SessionId,
-    events: AgentEventStream,
+    events: RuntimeEventStream,
 }
 
 impl AgentHandle {
     /// Creates a handle from a RAH session ID and event stream.
     #[must_use]
     pub fn new(session_id: SessionId, events: AgentEventStream) -> Self {
+        Self::with_runtime_events(session_id, Box::pin(events.map(RuntimeEvent::from)))
+    }
+
+    /// Creates a handle with process-local failure retention.
+    #[must_use]
+    pub fn with_runtime_events(session_id: SessionId, events: RuntimeEventStream) -> Self {
         Self { session_id, events }
     }
 
@@ -58,6 +77,11 @@ impl AgentHandle {
 
     /// Consumes the handle and returns its event stream.
     pub fn into_events(self) -> AgentEventStream {
+        Box::pin(self.events.map(RuntimeEvent::into_event))
+    }
+
+    /// Consumes the handle without discarding process-local typed causes.
+    pub fn into_runtime_events(self) -> RuntimeEventStream {
         self.events
     }
 }
