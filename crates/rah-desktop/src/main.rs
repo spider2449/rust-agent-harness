@@ -96,8 +96,9 @@ use rah_tools::{
     RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
     RepositoryPatchResultClassification, RepositoryRenameFilePreparationError,
     RepositoryRenameFilePreparationRequest, RepositoryRenameFileProof, RepositorySearchTool,
-    RepositoryStatusTool, RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
-    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
+    RepositoryStatusTool, RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool, Tool,
+    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
+    classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use remembered_workspace::{
@@ -8047,6 +8048,8 @@ fn desktop_tool_registry(
         let search = RepositorySearchTool::new(&repository.git_executable, &repository.root)?;
         let list = RepositoryListTool::new(&repository.git_executable, &repository.root)?;
         let patch = RepositoryWorktreePatchTool::new(&repository.git_executable, &repository.root)?;
+        let edit_untracked_file =
+            RepositoryUntrackedFileEditTool::new(&repository.git_executable, &repository.root)?;
         let create_file =
             RepositoryFileCreationTool::new(&repository.git_executable, &repository.root)?;
         let edit_files =
@@ -8059,6 +8062,7 @@ fn desktop_tool_registry(
         registry.register(Arc::new(search))?;
         registry.register(Arc::new(list))?;
         registry.register(Arc::new(patch))?;
+        registry.register(Arc::new(edit_untracked_file))?;
         registry.register(Arc::new(create_file))?;
         if let Some(authority) = &repository.directory_creation_authority {
             registry.register(Arc::new(RepositoryDirectoryCreationTool::from_authority(

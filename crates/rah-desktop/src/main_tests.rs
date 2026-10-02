@@ -15149,6 +15149,7 @@ async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
             "repo.diff",
             "repo.diff-staged",
             "repo.edit-files",
+            "repo.edit-untracked-file",
             "repo.file-info",
             "repo.list",
             "repo.patch",
@@ -15182,8 +15183,29 @@ async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
             .iter()
             .filter(|&&permission| permission == PermissionLevel::Execute)
             .count(),
-        9
+        10
     );
+    let untracked = definitions
+        .iter()
+        .find(|definition| definition.name.as_str() == "repo.edit-untracked-file")
+        .expect("selected repository must register the untracked correction Tool");
+    assert_eq!(untracked.permission, PermissionLevel::Execute);
+    let composition = desktop_tool_composition_from_registry(
+        Arc::clone(&registry),
+        Some(&repository),
+        false,
+        &[],
+    )
+    .expect("selected repository Tool composition should build");
+    let untracked = composition
+        .tools
+        .iter()
+        .find(|entry| entry.public_tool_name == "repo.edit-untracked-file")
+        .expect("untracked correction Tool must appear in Desktop composition");
+    assert_eq!(untracked.source_kind, SourceKind::RepositoryHost);
+    assert_eq!(untracked.permission, PermissionLevel::Execute);
+    assert!(untracked.repository_bound);
+    assert_eq!(untracked.host_invocation.kind, None);
     let output = registry
         .execute(
             ToolCall {
