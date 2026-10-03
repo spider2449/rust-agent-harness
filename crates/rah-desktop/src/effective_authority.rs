@@ -12,8 +12,8 @@ use crate::host_invocation::{
     CoordinatorState, HostInvocationDescriptor, host_descriptor_with_rename,
 };
 use crate::{
-    CodexExecutableSource, CommitAuthorizationPresentation, DesktopRepository,
-    EffectiveAuthoritySnapshotInputs,
+    CommitAuthorizationPresentation, DesktopRepository, EffectiveAuthoritySnapshotInputs,
+    RuntimeArtifactSource,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -598,11 +598,11 @@ pub(crate) fn external_unavailable(
     }
 }
 
-pub(crate) fn source_label(source: CodexExecutableSource) -> &'static str {
+pub(crate) fn source_label(source: RuntimeArtifactSource) -> &'static str {
     match source {
-        CodexExecutableSource::CertifiedBaseline => "certified_side_by_side",
-        CodexExecutableSource::Override => "configured_runtime",
-        CodexExecutableSource::Path => "resolved_host_binary",
+        RuntimeArtifactSource::CertifiedBaseline => "certified_side_by_side",
+        RuntimeArtifactSource::Override => "configured_runtime",
+        RuntimeArtifactSource::Path => "resolved_host_binary",
     }
 }
 
@@ -747,7 +747,7 @@ mod tests {
             current_repository_generation: 7,
             captured_repository_generation: Some(7),
             connection_state: ConnectionBindingState::Connected,
-            runtime_source: Some(CodexExecutableSource::CertifiedBaseline),
+            runtime_source: Some(RuntimeArtifactSource::CertifiedBaseline),
             captured_model_generation: Some(3),
             captured_connection_generation: Some(9),
             context_current: true,
@@ -1136,15 +1136,15 @@ mod tests {
     #[test]
     fn source_mapping_never_serializes_an_executable_path() {
         assert_eq!(
-            source_label(CodexExecutableSource::CertifiedBaseline),
+            source_label(RuntimeArtifactSource::CertifiedBaseline),
             "certified_side_by_side"
         );
         assert_eq!(
-            source_label(CodexExecutableSource::Override),
+            source_label(RuntimeArtifactSource::Override),
             "configured_runtime"
         );
         assert_eq!(
-            source_label(CodexExecutableSource::Path),
+            source_label(RuntimeArtifactSource::Path),
             "resolved_host_binary"
         );
     }

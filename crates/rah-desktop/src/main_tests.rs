@@ -1,4 +1,6 @@
+#[cfg(feature = "provider-codex")]
 use super::codex_baseline::{BaselineError, CodexExecutableSelection, CodexExecutableSource};
+use super::current_host_composition;
 use super::effective_authority::{
     AuthorityCategory, EffectClass, EffectiveToolEntry, RepositoryIdentity, SnapshotStatus,
 };
@@ -45,35 +47,33 @@ use super::{
     branch_result_classification, classify_repository_delete_file_result,
     classify_repository_multi_file_output, clear_conversation_allowed,
     clear_trusted_profile_selection, close_repository_transition, commit_activity_presentation,
-    complete_repository_index_effect, connect_codex, connect_prepared_codex,
-    connection_activation_publication_is_current, connection_publication_is_current,
-    current_app_status, current_host_generation_tuple, delete_file_host_terminal_state,
-    desktop_repository_snapshot, desktop_repository_snapshot_with_review,
-    desktop_tool_composition_from_registry, desktop_tool_registry, disconnect_codex,
-    effective_authority_snapshot_for_state, emit_host_activity, empty_composition_metadata,
-    forget_trusted_profile_preference, frontend_error, get_effective_authority_snapshot, host_call,
-    host_cancel_tool_invocation, host_confirm_tool_invocation, host_invoke_read, host_kind,
-    host_prepare_repo_create_branch, host_prepare_repo_create_file, host_prepare_repo_delete_file,
-    host_prepare_repo_edit_files, host_prepare_repo_patch, host_prepare_repo_rename_file,
-    install_repository_workflow, invalidate_repository_commit_review, model_configuration_status,
-    patch_host_terminal_state, prepare_codex_connection, prepare_repo_delete_file_with_current,
-    prepare_repo_rename_file_with_current, prepared_host_activity,
-    publish_connected_provider_state, publish_readiness_result, publish_trusted_profile_selection,
-    refresh_repository_workflow, remembered_catalog_presentation,
-    remove_repository_member_selector, replace_selected_repository,
-    repository_authorize_commit_review, repository_context_fingerprint, repository_index_action,
-    repository_index_effect_is_active, repository_membership_presentation,
-    repository_selection_allowed, repository_selection_allowed_for_connection, repository_snapshot,
-    repository_stage_action, repository_tool_authority, repository_unstage_action,
-    repository_workflow_has_state, request_connect, reset_startup_activation_counters,
-    resolve_codex_executable, resolve_prepare_and_connect_codex, restore_trusted_profile_selection,
+    complete_repository_index_effect, connect_codex, connection_activation_publication_is_current,
+    connection_publication_is_current, current_app_status, current_host_generation_tuple,
+    delete_file_host_terminal_state, desktop_repository_snapshot,
+    desktop_repository_snapshot_with_review, desktop_tool_composition_from_registry,
+    desktop_tool_registry, disconnect_codex, effective_authority_snapshot_for_state,
+    emit_host_activity, empty_composition_metadata, forget_trusted_profile_preference,
+    get_effective_authority_snapshot, host_call, host_cancel_tool_invocation,
+    host_confirm_tool_invocation, host_invoke_read, host_kind, host_prepare_repo_create_branch,
+    host_prepare_repo_create_file, host_prepare_repo_delete_file, host_prepare_repo_edit_files,
+    host_prepare_repo_patch, host_prepare_repo_rename_file, install_repository_workflow,
+    invalidate_repository_commit_review, model_configuration_status, patch_host_terminal_state,
+    prepare_repo_delete_file_with_current, prepare_repo_rename_file_with_current,
+    prepared_host_activity, publish_connected_provider_state, publish_readiness_result,
+    publish_trusted_profile_selection, refresh_repository_workflow,
+    remembered_catalog_presentation, remove_repository_member_selector,
+    replace_selected_repository, repository_authorize_commit_review,
+    repository_context_fingerprint, repository_index_action, repository_index_effect_is_active,
+    repository_membership_presentation, repository_selection_allowed,
+    repository_selection_allowed_for_connection, repository_snapshot, repository_stage_action,
+    repository_tool_authority, repository_unstage_action, repository_workflow_has_state,
+    request_connect, reset_startup_activation_counters, restore_trusted_profile_selection,
     reveal_remembered_location, revoke_repository_commit_context, run_host_tool,
     safe_delete_file_activity_result, same_arc, save_trusted_profile_preference,
     selected_git_executable, set_commit_identity, startup_activation_snapshot,
     uncertain_repository_effect_pending, uncertain_repository_effect_requires_refresh,
     validate_host_confirmation_ticket, validate_prompt,
 };
-use super::{PREFERRED_CURRENT_CODEX_VERSION, current_host_composition};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rah_protocol::{
@@ -81,6 +81,7 @@ use rah_protocol::{
     RequestId, SessionId, ToolCall, ToolCallId, ToolContent, ToolInput, ToolName, ToolOutput,
 };
 use rah_runtime::AgentRuntime;
+#[cfg(feature = "provider-codex")]
 use rah_runtime_codex::{
     CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider, CodexRuntime,
 };
@@ -303,6 +304,7 @@ fn message(role: MessageRole, content: &str) -> Message {
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 static FAKE_CODEX_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn desktop_connect_preparation_keeps_equivalent_auto_and_override_inputs_identical() {
     #[derive(Debug, PartialEq, Eq)]
@@ -370,6 +372,7 @@ fn desktop_connect_preparation_keeps_equivalent_auto_and_override_inputs_identic
     assert_eq!(observed[0].connection_mode, "tool_bridge");
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn desktop_connect_preparation_preserves_path_fallback_input() {
     let prepared = prepare_codex_connection(
@@ -386,6 +389,7 @@ fn desktop_connect_preparation_preserves_path_fallback_input() {
     assert_eq!(prepared.source, CodexExecutableSource::Path);
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn desktop_connect_does_not_invoke_the_runtime_factory_for_invalid_baseline() {
     let invoked = Arc::new(AtomicBool::new(false));
@@ -3400,6 +3404,7 @@ fn status_reflects_connection_transitions_without_exposing_runtime_details() {
     );
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn adapter_errors_are_sanitized_for_the_frontend() {
     let error = CodexAdapterError::ExecutableDiscovery {
@@ -3414,6 +3419,7 @@ fn adapter_errors_are_sanitized_for_the_frontend() {
     assert!(!serialized.contains("codex.exe"));
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test]
 #[ignore = "host-only Task 126 live runtime.start probe; requires the pinned Codex 0.149.0 executable and inherited Codex configuration"]
 async fn task_126_host_probe_uses_desktop_repository_runtime_construction() {
@@ -3723,6 +3729,7 @@ fn live_handle_identity(file: &fs::File) -> Result<(u32, u64), String> {
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the certified Windows Codex live gate"]
 async fn windows_live_desktop_hostexplicit_rename_file() -> Result<(), String> {
@@ -6197,6 +6204,7 @@ async fn windows_live_desktop_hostexplicit_multi_file_edit() -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires certified Codex live gate and authentication"]
 async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
@@ -6312,7 +6320,7 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
     let prepared = prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
         .map_err(|error| format!("certified Codex preparation failed: {error:?}"))?;
     let source = prepared.source;
-    let (factory, model) = super::runtime_composition::configured_codex_factory(
+    let (factory, model) = super::codex_composition::configured_codex_factory(
         PathBuf::from(prepared.executable),
         prepared.model_config,
         &fixture.0,
@@ -6701,6 +6709,7 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Windows host-driven live certification environment"]
 async fn windows_live_desktop_repo_create_branch_host_driven() -> Result<(), String> {
@@ -6809,7 +6818,7 @@ async fn windows_live_desktop_repo_create_branch_host_driven() -> Result<(), Str
     let prepared = prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
         .map_err(|error| format!("certified Codex preparation failed: {error:?}"))?;
     let source = prepared.source;
-    let (factory, model) = super::runtime_composition::configured_codex_factory(
+    let (factory, model) = super::codex_composition::configured_codex_factory(
         PathBuf::from(prepared.executable),
         prepared.model_config,
         &fixture.0,
@@ -7158,6 +7167,7 @@ async fn windows_live_desktop_repo_create_branch_host_driven() -> Result<(), Str
     Ok(())
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn unsupported_codex_version_frontend_error_has_one_adapter_origin() {
     let mismatch = CodexAdapterError::VersionMismatch {
@@ -7194,6 +7204,7 @@ fn codex_source_presentation_is_closed_and_never_contains_host_details() {
     }
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn local_runtime_failures_project_closed_frontend_codes() {
     const SECRET: &str = "SECRET_FRONTEND_SOURCE_498A";
@@ -9293,11 +9304,12 @@ fn main() {
             .clone()
 }
 
+#[cfg(feature = "provider-codex")]
 async fn test_codex_runtime(
     workspace: &Path,
     registry: Arc<ToolRegistry>,
 ) -> Arc<super::DesktopRuntime> {
-    let (factory, model) = super::runtime_composition::configured_codex_factory(
+    let (factory, model) = super::codex_composition::configured_codex_factory(
         fake_codex_executable(),
         CodexModelConfig::Inherit,
         workspace,
@@ -9393,6 +9405,7 @@ async fn task_321_i_real_unstage_reservation_rejects_connect_admission() {
     assert_eq!(begin_connect(&state), Ok(ConnectRequest::Start));
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 async fn task_321_i_real_stage_reservation_rejects_real_connect_publication() {
     let (state, repository_fixture, _member, _action_id, initial_reservation, _action) =
@@ -9557,6 +9570,7 @@ async fn activation_fixture() -> (
     (state, repository_a, repository_b, member_a, member_b)
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 async fn connected_repository_selection_rejects_direct_activation_without_changing_authority() {
     let (state, _repository_a, _repository_b, member_a, member_b) = activation_fixture().await;
@@ -10261,6 +10275,7 @@ async fn task351_close_fails_closed_on_poisoned_final_mutation_lock() {
     );
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 async fn task351_close_waits_for_chat_terminal_publication_to_finish() {
     let (state, storage, repository_a, _repository_b, member_a, _) =
@@ -10468,6 +10483,7 @@ async fn task349_close_for_a_never_closes_a_newly_active_b() {
     assert_eq!(*state.repository_generation.lock().unwrap(), generation_b);
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 async fn task349_close_and_connect_currentness_follow_lifecycle_order() {
     let (connect_first, _repository_a, _repository_b, member_a, _) = activation_fixture().await;
@@ -12106,6 +12122,7 @@ fn branch_effective_authority_is_host_classified_and_unavailable_paths_are_close
     assert!(!tool.advertised);
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 async fn effective_authority_snapshot_reaps_expired_preparation_without_issuing_authority() {
     use std::time::Instant;
@@ -16205,6 +16222,7 @@ fn provider_endpoint_accepts_normalizes_and_serializes_only_the_closed_authority
     assert!(lan_http.insecure_transport());
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn llama_adapter_handoff_uses_the_synthesized_endpoint_without_credentials() {
     let selection = DesktopModelSelection {
@@ -16278,6 +16296,7 @@ fn provider_endpoint_rejects_non_authority_syntax_and_malformed_hosts() {
     );
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn endpoint_normalization_controls_generation_and_llama_only_closure() {
     let mut state = DesktopModelState::default();
@@ -16577,6 +16596,7 @@ fn readiness_probe_has_no_configuration_or_runtime_effect() {
     assert!(state.repository.lock().expect("repository lock").is_none());
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn desktop_model_selection_maps_only_closed_provider_choices() {
     let inherit = DesktopModelSelection::default().codex_model_config();
@@ -16609,6 +16629,7 @@ fn desktop_model_selection_maps_only_closed_provider_choices() {
     }
 }
 
+#[cfg(feature = "provider-codex")]
 #[test]
 fn desktop_model_selection_rejects_invalid_or_inherit_model_values() {
     for selection in [
@@ -19505,6 +19526,7 @@ fn task_324_d_classifier_rejects_non_app_server_codex_process() {
     assert!(!observation.command_line_matches_old_task_324_regex);
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires explicit RAH_RUN_V026_CODEX_OWNERSHIP_TRIAGE=1 and certified Windows Codex live gate"]
 async fn task_324_d_windows_codex_app_server_ownership_evidence() -> Result<(), String> {
@@ -19688,6 +19710,7 @@ async fn task_324_d_windows_codex_app_server_ownership_evidence() -> Result<(), 
     diagnostic
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires explicit RAH_RUN_V026_HOST_DRIVEN_MULTI_REPO_LIVE=1 and certified Windows Codex live gate"]
 async fn task_324_c_windows_host_driven_two_repository_live_certification() -> Result<(), String> {
@@ -21012,6 +21035,7 @@ impl Drop for Task352LiveFixture {
     }
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires explicit RAH_RUN_V029_ACTIVE_REPOSITORY_CLOSE_LIVE=1"]
 async fn task_352_windows_active_repository_close_live_certification() -> Result<(), String> {
@@ -25965,6 +25989,7 @@ fn task452_census_classifies_preexisting_identity_and_ownership_independently() 
     assert_eq!(unrelated.desktop_owned_candidate_count, 0);
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "one production Desktop Connect for Task 453"]
 async fn task453_desktop_executable_file_identity() -> Result<(), String> {
@@ -26066,6 +26091,7 @@ async fn task453_desktop_executable_file_identity() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "provider-codex")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires exact saved Codex 0.157.1 and live gpt-6-luna access"]
 async fn task_450_current_codex_desktop_neutral_chat() -> Result<(), String> {
@@ -26351,3 +26377,12 @@ async fn task_450_current_codex_desktop_neutral_chat() -> Result<(), String> {
     println!("RAH450_DESKTOP_NEUTRAL_CHAT_COMPLETED=1");
     Ok(())
 }
+
+#[cfg(feature = "provider-codex")]
+use super::{
+    connect_prepared_codex, frontend_error, prepare_codex_connection, resolve_codex_executable,
+    resolve_prepare_and_connect_codex,
+};
+
+#[cfg(feature = "provider-codex")]
+use rah_runtime_codex::PREFERRED_CURRENT_CODEX_VERSION;

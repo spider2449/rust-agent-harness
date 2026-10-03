@@ -21,12 +21,7 @@ const CODE_MODE_HOST_NAME: &str = "codex-code-mode-host.exe";
 const REPORTED_VERSION_PREFIX: &str = "codex-cli ";
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CodexExecutableSource {
-    Override,
-    CertifiedBaseline,
-    Path,
-}
+pub(super) use crate::runtime_selection::RuntimeArtifactSource as CodexExecutableSource;
 
 #[derive(Debug)]
 pub(super) struct CodexExecutableSelection {

@@ -8,7 +8,6 @@ use rah_runtime::{
     },
     experimental_host::HostToolScope,
 };
-use rah_runtime_codex::{CodexModelConfig, CodexModelProvider, experimental::CodexFactory};
 use rah_tools::ToolRegistry;
 use std::sync::{Arc, Mutex};
 
@@ -72,25 +71,6 @@ impl Drop for DesktopRuntime {
     fn drop(&mut self) {
         self.revoke();
     }
-}
-
-/// Adapter configuration is confined to the production composition root.
-pub(crate) fn configured_codex_factory(
-    executable: std::path::PathBuf,
-    config: CodexModelConfig,
-    workspace: &std::path::Path,
-) -> Result<(CodexFactory, ModelSelection), RuntimeFailure> {
-    let (provider, model) = match config {
-        CodexModelConfig::Inherit => (CodexModelProvider::OpenAi, ModelSelection::RuntimeDefault),
-        CodexModelConfig::Explicit(selection) => (
-            selection.provider().clone(),
-            ModelSelection::Explicit(selection.model().to_owned()),
-        ),
-    };
-    Ok((
-        CodexFactory::new(executable, provider).with_workspace(workspace)?,
-        model,
-    ))
 }
 
 /// Discovery only: no conversation or inference is opened before this gate.
@@ -183,10 +163,9 @@ mod tests {
         AgentEvent, AgentInput, AgentOptions, Message, MessageRole, RequestId, ToolInput, ToolName,
     };
     use rah_runtime::experimental::{Capabilities, HostToolPort, ModelDescriptor, ToolRequest};
-    use std::{
-        error::Error,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    #[cfg(feature = "provider-codex")]
+    use std::error::Error;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Fixture {
         alive: AtomicBool,
@@ -317,6 +296,7 @@ mod tests {
         }
         async fn discover_models(&self) -> Result<ModelDiscovery, RuntimeFailure> {
             self.discoveries.fetch_add(1, Ordering::SeqCst);
+            #[cfg(feature = "provider-codex")]
             if self.fault.load(Ordering::SeqCst) {
                 return Err(rah_runtime_codex::CodexAdapterError::JsonRpc {
                     code: -32001,
@@ -476,6 +456,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(feature = "provider-codex")]
     async fn task504_neutral_discovery_retains_typed_codex_failure() {
         let fixture = Fixture::new();
         fixture.fault.store(true, Ordering::SeqCst);
@@ -528,7 +509,7 @@ mod tests {
         );
         *state.connection.lock().unwrap() = crate::ConnectionState::Connected {
             runtime: runtime.clone(),
-            source: crate::CodexExecutableSource::Path,
+            source: crate::runtime_selection::RuntimeArtifactSource::Path,
             repository_generation: 0,
             model_generation: 0,
             profile_generation: 0,

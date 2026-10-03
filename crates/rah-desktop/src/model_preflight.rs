@@ -63,6 +63,7 @@ pub(crate) struct ModelPreflightState {
 mod tests {
     use super::*;
     use rah_runtime::ModelCatalog;
+    #[cfg(feature = "provider-codex")]
     use rah_runtime_codex::CodexAdapterError;
 
     #[test]
@@ -87,6 +88,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "provider-codex")]
     fn inherit_does_not_claim_validation_and_catalog_failure_is_neutral() {
         let (view, gate) = present(None, Ok(ModelPreflight::NotChecked));
         assert!(gate.is_ok());
@@ -117,6 +119,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[cfg(feature = "provider-codex")]
     async fn preflight_gates_connection_factory_before_publication() {
         for (outcome, expected) in [
             (
@@ -133,7 +136,7 @@ mod tests {
             ),
             (ModelPreflight::NotChecked, Ok(())),
         ] {
-            let prepared = crate::PreparedCodexConnection {
+            let prepared = crate::codex_composition::PreparedCodexConnection {
                 executable: "unused-fake-executable".into(),
                 model_config: rah_runtime_codex::CodexModelConfig::Inherit,
                 source: crate::codex_baseline::CodexExecutableSource::Override,
@@ -152,6 +155,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "provider-codex")]
     fn status_hides_stale_observations_and_preserves_local_catalog_failure() {
         let directory = std::env::temp_dir().join(format!(
             "rah-task499-preflight-{}",
