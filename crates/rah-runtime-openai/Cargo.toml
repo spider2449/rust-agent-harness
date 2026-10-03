@@ -1,0 +1,20 @@
+[package]
+name = "rah-runtime-openai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+rah-protocol = { path = "../rah-protocol" }
+rah-runtime = { path = "../rah-runtime" }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread"] }
+rah-tools = { path = "../rah-tools" }

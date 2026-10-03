@@ -8,6 +8,7 @@ members = [
     "crates/rah-protocol",
     "crates/rah-runtime",
     "crates/rah-runtime-codex",
+    "crates/rah-runtime-openai",
     "crates/rah-sandbox",
     "crates/rah-session",
     "crates/rah-tools",

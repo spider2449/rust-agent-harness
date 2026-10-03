@@ -2927,6 +2927,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rah-runtime-openai"
+version = "0.33.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "rah-protocol",
+ "rah-runtime",
+ "rah-tools",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rah-sandbox"
 version = "0.33.0"
 dependencies = [
