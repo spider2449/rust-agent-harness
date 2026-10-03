@@ -10,6 +10,8 @@ use codex_composition::{
     resolve_prepare_and_connect_codex,
 };
 #[cfg(target_os = "windows")]
+mod production_composition;
+#[cfg(target_os = "windows")]
 mod runtime_selection;
 #[cfg(target_os = "windows")]
 use runtime_selection::RuntimeArtifactSource;
@@ -406,6 +408,7 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 
 #[cfg(target_os = "windows")]
 struct DesktopAppState {
+    runtime_adapter: Option<runtime_selection::ProductionAdapter>,
     model_preflight: Mutex<Option<(u64, u64, model_preflight::ModelPreflightState)>>,
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
@@ -581,6 +584,7 @@ impl DesktopAppState {
         // remain preserved but never become visible in this namespace.
         persistence.select_namespace("neutral-v1".to_owned());
         Self {
+            runtime_adapter: runtime_selection::selected_adapter(),
             connection: Mutex::new(ConnectionState::NotConnected),
             model_preflight: Mutex::new(None),
             chat: Mutex::new(ChatState::Idle),
@@ -1478,6 +1482,7 @@ enum CommitAuthorizationPresentation {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FrontendError {
     RuntimeAdapterUnavailable,
+    RuntimeConnectionFailed,
     CodexNotFound,
     CodexBaselineInvalid,
     CodexHostUnsupported,
@@ -1561,6 +1566,7 @@ enum CodexExecutableSourcePresentation {
     Override,
     CertifiedBaseline,
     Path,
+    Native,
 }
 
 #[cfg(target_os = "windows")]
@@ -1570,6 +1576,7 @@ impl From<RuntimeArtifactSource> for CodexExecutableSourcePresentation {
             RuntimeArtifactSource::Override => Self::Override,
             RuntimeArtifactSource::CertifiedBaseline => Self::CertifiedBaseline,
             RuntimeArtifactSource::Path => Self::Path,
+            RuntimeArtifactSource::Native => Self::Native,
         }
     }
 }
@@ -1951,8 +1958,16 @@ fn current_app_status(
         ConnectionState::Connected { source, .. } => (
             "connected",
             "connected",
-            runtime_selection::configured_version(),
-            Some((*source).into()),
+            if *source == RuntimeArtifactSource::Native {
+                None
+            } else {
+                runtime_selection::configured_version()
+            },
+            if *source == RuntimeArtifactSource::Native {
+                None
+            } else {
+                Some((*source).into())
+            },
             None,
         ),
         ConnectionState::Disconnecting => ("connected", "disconnecting", None, None, None),
@@ -9472,11 +9487,25 @@ mod tests;
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
-    match runtime_selection::selected_adapter() {
+    match state.runtime_adapter {
         #[cfg(feature = "provider-codex")]
         Some(runtime_selection::ProductionAdapter::Codex) => {
-            codex_composition::connect_selected(state).await
+            production_composition::connect_selected(
+                state.inner(),
+                runtime_selection::ProductionAdapter::Codex,
+            )
+            .await
+        }
+        #[cfg(feature = "provider-openai")]
+        Some(runtime_selection::ProductionAdapter::OpenAi) => {
+            production_composition::connect_selected(
+                state.inner(),
+                runtime_selection::ProductionAdapter::OpenAi,
+            )
+            .await
         }
         None => runtime_selection::connect_unavailable(state.inner()),
+        #[cfg(not(any(feature = "provider-codex", feature = "provider-openai")))]
+        Some(_) => runtime_selection::connect_unavailable(state.inner()),
     }
 }

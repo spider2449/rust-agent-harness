@@ -20,6 +20,10 @@ pub(crate) struct DesktopRuntime {
     control: Mutex<Option<(SessionId, Arc<dyn TurnControl>)>>,
 }
 impl DesktopRuntime {
+    #[cfg(all(test, feature = "openai-fixture"))]
+    pub(crate) fn retained_port(&self) -> Arc<dyn rah_runtime::experimental::HostToolPort> {
+        self.scope.port()
+    }
     pub async fn start(&self, request: AgentRequest) -> Result<TurnHandle, RuntimeFailure> {
         let handle = self
             .conversation

@@ -603,6 +603,7 @@ pub(crate) fn source_label(source: RuntimeArtifactSource) -> &'static str {
         RuntimeArtifactSource::CertifiedBaseline => "certified_side_by_side",
         RuntimeArtifactSource::Override => "configured_runtime",
         RuntimeArtifactSource::Path => "resolved_host_binary",
+        RuntimeArtifactSource::Native => "native_openai",
     }
 }
 

@@ -125,6 +125,7 @@ function renderRows(element, rows, status) {
 function errorMessage(error) {
   const messages = {
     runtime_adapter_unavailable: "No runtime adapter is configured in this build",
+    runtime_connection_failed: "Runtime connection failed; check backend configuration",
     codex_not_found: "Codex executable not found",
     codex_baseline_invalid: "Certified Codex baseline is invalid",
     codex_host_unsupported: "Certified Codex baseline requires Windows x64",

@@ -37,7 +37,7 @@ const MAX_EVENTS: usize = 32_768;
 /// Backend-only configuration: intentionally no serde, Clone or credential accessor.
 pub struct OpenAiFactory {
     key: String,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixture-support"))]
     endpoint: Option<String>,
 }
 impl fmt::Debug for OpenAiFactory {
@@ -46,10 +46,22 @@ impl fmt::Debug for OpenAiFactory {
     }
 }
 impl OpenAiFactory {
+    /// Deterministic local integration seam. Loopback only, fixed fake credential.
+    /// Ordinary production builds do not include this constructor.
+    #[cfg(feature = "fixture-support")]
+    pub fn local_fixture(address: std::net::SocketAddr) -> Result<Self, RuntimeFailure> {
+        if !address.ip().is_loopback() {
+            return Err(E::Configuration.into_runtime_failure(RuntimeOperation::Connection));
+        }
+        Ok(Self {
+            key: "RAH-LOCAL-FIXTURE-FAKE-KEY".into(),
+            endpoint: Some(format!("http://{address}/v1/responses")),
+        })
+    }
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             key: api_key.into(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fixture-support"))]
             endpoint: None,
         }
     }
@@ -67,7 +79,7 @@ impl ConfiguredRuntimeFactory for OpenAiFactory {
     async fn create(&self) -> Result<Arc<dyn RuntimeInstance>, RuntimeFailure> {
         self.validate()?;
         let endpoint = ORIGIN.to_owned();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "fixture-support"))]
         let endpoint = self.endpoint.clone().unwrap_or(endpoint);
         let client = reqwest::Client::builder()
             .https_only(endpoint == ORIGIN)

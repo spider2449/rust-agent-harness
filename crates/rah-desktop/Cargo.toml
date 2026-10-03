@@ -7,6 +7,8 @@ build = "build.rs"
 [features]
 default = ["provider-codex"]
 provider-codex = ["dep:rah-runtime-codex"]
+provider-openai = ["dep:rah-runtime-openai"]
+openai-fixture = ["provider-openai", "rah-runtime-openai/fixture-support"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 tauri-build = { version = "2" }
@@ -17,6 +19,7 @@ rah-profile-composition = { path = "../rah-profile-composition" }
 rah-protocol = { path = "../rah-protocol" }
 rah-runtime = { path = "../rah-runtime" }
 rah-runtime-codex = { path = "../rah-runtime-codex", optional = true }
+rah-runtime-openai = { path = "../rah-runtime-openai", optional = true }
 rah-tools = { path = "../rah-tools" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
@@ -30,5 +33,6 @@ tracing.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Registry"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
 async-trait.workspace = true
 rah-tools = { path = "../rah-tools", features = ["live-test-support"] }

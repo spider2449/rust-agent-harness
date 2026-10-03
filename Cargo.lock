@@ -2840,6 +2840,7 @@ dependencies = [
  "rah-protocol",
  "rah-runtime",
  "rah-runtime-codex",
+ "rah-runtime-openai",
  "rah-tools",
  "reqwest",
  "rusqlite",

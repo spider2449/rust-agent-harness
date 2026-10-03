@@ -4447,6 +4447,7 @@ async fn windows_live_desktop_hostexplicit_rename_file() -> Result<(), String> {
         CodexExecutableSource::CertifiedBaseline => "certified_baseline",
         CodexExecutableSource::Override => "certified_baseline_override",
         CodexExecutableSource::Path => "path",
+        CodexExecutableSource::Native => panic!("Codex admission returned a native source"),
     };
     println!("RAH_RENAME_FILE_HOSTEXPLICIT_CODEX_SOURCE={codex_source}");
     println!("RAH_RENAME_FILE_HOSTEXPLICIT_CODEX_VERSION={codex_version}");
@@ -26386,3 +26387,270 @@ use super::{
 
 #[cfg(feature = "provider-codex")]
 use rah_runtime_codex::PREFERRED_CURRENT_CODEX_VERSION;
+
+#[cfg(feature = "openai-fixture")]
+#[tokio::test(flavor = "current_thread")]
+async fn task508_production_openai_connect_turn_tool_disconnect_repository_authority() {
+    use super::runtime_selection::{ProductionAdapter, RuntimeArtifactSource};
+    use rah_runtime::experimental::{ModelSelection, ToolRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let storage = TestRepository::new();
+    let first = TestRepository::git_repository(GitRepositoryState::Clean);
+    let second = TestRepository::git_repository(GitRepositoryState::Clean);
+    fs::write(
+        second.0.join("TASK508-INACTIVE-REPOSITORY.txt"),
+        b"inactive repository marker",
+    )
+    .unwrap();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    let git = TestRepository::native_git();
+    let member_a = super::admit_repository_with_semantic_validation(state.inner(), &git, &first.0)
+        .await
+        .unwrap();
+    let member_b = super::admit_repository_with_semantic_validation(state.inner(), &git, &second.0)
+        .await
+        .unwrap();
+    activate_admitted_member(state.inner(), member_a)
+        .await
+        .unwrap();
+    let repository_generation = *state.repository_generation.lock().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let factory =
+        rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap()).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let requests = captured.clone();
+    let text = |value: &str| {
+        vec![
+            serde_json::json!({"type":"response.output_text.delta","delta":value}),
+            serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":value}]}]}}),
+        ]
+    };
+    let item = serde_json::json!({"type":"function_call","id":"fixture-fc","call_id":"fixture-call","name":"repo.status","arguments":"{}"});
+    let scripts = vec![
+        text("ordinary text"),
+        vec![
+            serde_json::json!({"type":"response.output_item.added","output_index":0,"item":item}),
+            serde_json::json!({"type":"response.function_call_arguments.done","output_index":0,"item_id":"fixture-fc","arguments":"{}"}),
+            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[item]}}),
+        ],
+        text("Tool completed"),
+        text("Desktop chat completed"),
+    ];
+    let server = tokio::spawn(async move {
+        for events in scripts {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut buffer = [0; 4096];
+                let n = socket.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+            assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer rah-local-fixture-fake-key")
+            );
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(|v| v.parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + length {
+                let mut buffer = [0; 4096];
+                let n = socket.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            requests
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap());
+            let body = events
+                .into_iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+            for chunk in body.as_bytes().chunks(7) {
+                socket.write_all(chunk).await.unwrap();
+            }
+        }
+    });
+    reset_startup_activation_counters();
+    super::production_composition::connect_with_configuration(
+        state.inner(),
+        ProductionAdapter::OpenAi,
+        Some((
+            Box::new(factory),
+            ModelSelection::Explicit("fixture-model".into()),
+            RuntimeArtifactSource::Native,
+        )),
+    )
+    .await
+    .unwrap();
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected {
+            runtime, source, ..
+        } => {
+            assert_eq!(*source, RuntimeArtifactSource::Native);
+            runtime.clone()
+        }
+        _ => panic!("production connection not published"),
+    };
+    let port = runtime.retained_port();
+    assert!(runtime.is_alive());
+    assert_eq!(state.status().codex_version, None);
+    assert_eq!(
+        activate_admitted_member(state.inner(), member_b).await,
+        Err(FrontendError::RepositorySelectionRequiresDisconnect)
+    );
+    let request = || rah_protocol::AgentRequest {
+        request_id: rah_protocol::RequestId::new(),
+        input: rah_protocol::AgentInput {
+            messages: vec![rah_protocol::Message {
+                role: rah_protocol::MessageRole::User,
+                content: "fixture".into(),
+            }],
+        },
+        options: rah_protocol::AgentOptions::default(),
+    };
+    let mut ordinary = runtime.start(request()).await.unwrap().events;
+    let mut deltas = String::new();
+    let mut completions = 0;
+    while let Some(event) = ordinary.next().await {
+        assert!(event.failure().is_none());
+        match event.event() {
+            AgentEvent::ModelDelta { delta, .. } => deltas.push_str(delta),
+            AgentEvent::Completed { .. } => completions += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(deltas, "ordinary text");
+    assert_eq!(completions, 1);
+    let mut tool_turn = runtime.start(request()).await.unwrap().events;
+    let mut tool_started = 0;
+    let mut tool_finished = 0;
+    let mut completed = 0;
+    while let Some(event) = tool_turn.next().await {
+        assert!(event.failure().is_none(), "{event:?}");
+        match event.event() {
+            AgentEvent::ToolStarted { .. } => tool_started += 1,
+            AgentEvent::ToolFinished { output, .. } => {
+                assert!(!output.is_error);
+                let [ToolContent::Json(status)] = output.content.as_slice() else {
+                    panic!("repo.status did not return JSON")
+                };
+                assert!(status["entries"].as_array().unwrap().is_empty());
+                tool_finished += 1;
+            }
+            AgentEvent::Completed { .. } => completed += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((tool_started, tool_finished, completed), (1, 1, 1));
+    super::send_chat(
+        "production lifecycle".into(),
+        app.handle().clone(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if *state.chat.lock().unwrap() == ChatState::Idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+    {
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["model"] == "fixture-model")
+        );
+        let outputs = requests[2]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["type"] == "function_call_output")
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["call_id"], "fixture-call");
+        assert!(!outputs[0]["output"].as_str().unwrap().is_empty());
+        assert!(
+            !outputs[0]["output"]
+                .as_str()
+                .unwrap()
+                .contains("TASK508-INACTIVE-REPOSITORY")
+        );
+    }
+    let history = serde_json::to_value(&state.conversation.lock().unwrap().history).unwrap();
+    assert!(!history.as_array().unwrap().is_empty());
+    disconnect_codex(state.clone()).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&state.conversation.lock().unwrap().history).unwrap(),
+        history
+    );
+    assert!(!runtime.is_alive());
+    assert!(runtime.start(request()).await.is_err());
+    assert!(
+        port.request_live(ToolRequest {
+            session_id: SessionId::new(),
+            name: ToolName::new("repo.status"),
+            input: ToolInput(serde_json::json!({}))
+        })
+        .await
+        .is_err()
+    );
+    assert!(matches!(
+        *state.connection.lock().unwrap(),
+        ConnectionState::NotConnected
+    ));
+    assert_eq!(
+        *state.repository_generation.lock().unwrap(),
+        repository_generation
+    );
+    assert_eq!(
+        state.workspace_membership.lock().unwrap().active_member(),
+        Some(member_a)
+    );
+    activate_admitted_member(state.inner(), member_b)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.workspace_membership.lock().unwrap().active_member(),
+        Some(member_b)
+    );
+    assert!(
+        port.request_live(ToolRequest {
+            session_id: SessionId::new(),
+            name: ToolName::new("repo.status"),
+            input: ToolInput(serde_json::json!({}))
+        })
+        .await
+        .is_err()
+    );
+    let counters = startup_activation_snapshot();
+    assert_eq!(counters.codex_resolver, 0);
+    assert_eq!(counters.codex_runtime_construction, 0);
+}

@@ -3,6 +3,9 @@ name = "rah-runtime-openai"
 version.workspace = true
 edition.workspace = true
 
+[features]
+fixture-support = []
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
