@@ -527,7 +527,7 @@ pub(crate) fn restricted_thread_params(
     params
 }
 
-fn verify_effective_workspace_context(
+pub(crate) fn verify_effective_workspace_context(
     response: &Value,
     workspace_context: Option<&Path>,
 ) -> Result<(), CodexAdapterError> {

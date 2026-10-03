@@ -74,11 +74,11 @@ use rah_protocol::{
     ToolInput, ToolName, ToolOutput,
 };
 #[cfg(target_os = "windows")]
-use rah_runtime::AgentRuntime;
+mod runtime_composition;
 #[cfg(target_os = "windows")]
 use rah_runtime_codex::{
     CodexAdapterError, CodexLlamaCppProvider, CodexModelConfig, CodexModelProvider,
-    CodexModelSelection, CodexRuntime, PREFERRED_CURRENT_CODEX_VERSION,
+    CodexModelSelection, PREFERRED_CURRENT_CODEX_VERSION,
 };
 #[cfg(target_os = "windows")]
 use rah_tools::{
@@ -112,6 +112,8 @@ use repository_membership::{
     InertRepositoryMember, RepositoryMemberId, WorkspaceMembershipDeactivation,
     WorkspaceMembershipRemoval, WorkspaceMembershipState,
 };
+#[cfg(target_os = "windows")]
+use runtime_composition::DesktopRuntime;
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -249,7 +251,7 @@ enum ConnectionState {
     NotConnected,
     Connecting,
     Connected {
-        runtime: Arc<CodexRuntime>,
+        runtime: Arc<DesktopRuntime>,
         source: CodexExecutableSource,
         repository_generation: u64,
         model_generation: u64,
@@ -877,7 +879,7 @@ impl DesktopAppState {
     fn register_chat_session(
         &self,
         generation: u64,
-        runtime: Arc<CodexRuntime>,
+        runtime: Arc<DesktopRuntime>,
         session_id: SessionId,
     ) -> bool {
         let mut active = self
@@ -898,7 +900,7 @@ impl DesktopAppState {
         true
     }
 
-    fn active_chat(&self) -> Result<(u64, Arc<CodexRuntime>, SessionId), FrontendError> {
+    fn active_chat(&self) -> Result<(u64, Arc<DesktopRuntime>, SessionId), FrontendError> {
         let active = self
             .active_chat
             .lock()
@@ -920,7 +922,7 @@ impl DesktopAppState {
     fn request_cancel(
         &self,
         generation: u64,
-        runtime: &Arc<CodexRuntime>,
+        runtime: &Arc<DesktopRuntime>,
         session_id: &SessionId,
     ) -> bool {
         let _lifecycle_coordination = self
@@ -952,7 +954,7 @@ impl DesktopAppState {
     fn claim_terminal(
         &self,
         generation: u64,
-        runtime: &Arc<CodexRuntime>,
+        runtime: &Arc<DesktopRuntime>,
         session_id: &SessionId,
     ) -> bool {
         let _lifecycle_coordination = self
@@ -1009,7 +1011,7 @@ impl DesktopAppState {
     fn is_current_chat(
         &self,
         generation: u64,
-        runtime: &Arc<CodexRuntime>,
+        runtime: &Arc<DesktopRuntime>,
         session_id: &SessionId,
     ) -> bool {
         self.active_chat
@@ -1085,7 +1087,7 @@ impl DesktopAppState {
 #[cfg(target_os = "windows")]
 struct ActiveChat {
     generation: u64,
-    runtime: Option<Arc<CodexRuntime>>,
+    runtime: Option<Arc<DesktopRuntime>>,
     session_id: Option<SessionId>,
     terminal: TerminalOwnership,
 }
@@ -1098,10 +1100,16 @@ fn same_arc<T>(left: &Arc<T>, right: &Arc<T>) -> bool {
 #[cfg(target_os = "windows")]
 impl DesktopAppState {
     fn status(&self) -> AppStatus {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let ConnectionState::Connected { runtime, .. } = &*connection
+            && !runtime.is_alive()
+        {
+            runtime.revoke();
+            *connection = ConnectionState::Error(FrontendError::CodexConnectionFailed);
+        }
         let repository_selected = self
             .repository
             .lock()
@@ -1186,6 +1194,9 @@ impl DesktopAppState {
                 .connection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let ConnectionState::Connected { runtime, .. } = &*connection {
+                runtime.revoke();
+            }
             match std::mem::replace(&mut *connection, ConnectionState::Disconnecting) {
                 ConnectionState::Connected { runtime, .. } => Some(runtime),
                 state => {
@@ -1213,7 +1224,7 @@ impl DesktopAppState {
         }
     }
 
-    fn begin_hard_recovery(&self, runtime: &Arc<CodexRuntime>) -> bool {
+    fn begin_hard_recovery(&self, runtime: &Arc<DesktopRuntime>) -> bool {
         let _lifecycle_coordination = self
             .lifecycle_coordination
             .lock()
@@ -1224,6 +1235,7 @@ impl DesktopAppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let matches = matches!(&*connection, ConnectionState::Connected { runtime: current, .. } if same_arc(current, runtime));
         if matches {
+            runtime.revoke();
             *connection = ConnectionState::Disconnecting;
         }
         matches
@@ -1969,6 +1981,16 @@ fn frontend_error(error: &CodexAdapterError) -> FrontendError {
 }
 
 #[cfg(target_os = "windows")]
+fn runtime_frontend_error(error: &rah_runtime::RuntimeFailure) -> FrontendError {
+    use std::error::Error;
+    error
+        .source()
+        .and_then(|source| source.downcast_ref::<CodexAdapterError>())
+        .map(frontend_error)
+        .unwrap_or(FrontendError::CodexConnectionFailed)
+}
+
+#[cfg(target_os = "windows")]
 fn neutral_workspace(storage_directory: &Path) -> Option<PathBuf> {
     let workspace = storage_directory.join(NEUTRAL_WORKSPACE_DIRECTORY);
     std::fs::create_dir_all(&workspace).ok()?;
@@ -2120,7 +2142,7 @@ enum ProviderPublicationRejectionReason {
 
 #[cfg(target_os = "windows")]
 struct PendingConnectedPublication {
-    runtime: Arc<CodexRuntime>,
+    runtime: Arc<DesktopRuntime>,
     activation: Option<DesktopProviderActivation>,
     source: CodexExecutableSource,
     repository_generation: u64,
@@ -2136,7 +2158,7 @@ struct PendingConnectedPublication {
 
 #[cfg(target_os = "windows")]
 struct RejectedProviderPublication {
-    runtime: Arc<CodexRuntime>,
+    runtime: Arc<DesktopRuntime>,
     activation: Option<DesktopProviderActivation>,
     reason: ProviderPublicationRejectionReason,
 }
@@ -8482,28 +8504,17 @@ async fn connect_codex(
                     .is_some_and(|value| value.branch_creation_authority.is_some()),
                 "bridge_enabled": true,
             }));
-            let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
-                prepared.executable,
-                registry,
-                allowed_permissions,
-                prepared.model_config,
-                if let Some(repository) = repository.as_deref() {
-                    repository.root.as_path()
-                } else {
-                    neutral_workspace
-                        .as_deref()
-                        .ok_or(FrontendError::CodexConnectionFailed)?
-                },
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, "Codex desktop connection failed");
-                frontend_error(&error)
-            })?;
-            let (presentation, gate) = model_preflight::present(
-                selected_model,
-                runtime.preflight_selected_model().await,
-            );
+            let workspace = if let Some(repository) = repository.as_deref() {
+                repository.root.as_path()
+            } else {
+                neutral_workspace.as_deref().ok_or(FrontendError::CodexConnectionFailed)?
+            };
+            let (factory, model) = runtime_composition::configured_codex_factory(
+                PathBuf::from(prepared.executable), prepared.model_config, workspace,
+            ).map_err(|error| runtime_frontend_error(&error))?;
+            let (instance, preflight) = runtime_composition::create_and_preflight(&factory, &model)
+                .await.map_err(|error| runtime_frontend_error(&error))?;
+            let (presentation, gate) = model_preflight::present(selected_model, preflight);
             append_live_evidence(serde_json::json!({
                 "event": "model_preflight",
                 "connection_generation": connection_generation,
@@ -8517,12 +8528,13 @@ async fn connect_codex(
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some((connection_generation, model_generation, presentation));
             if let Err(error) = gate {
-                if let Err(shutdown_error) = runtime.shutdown().await {
-                    tracing::warn!(failure = ?shutdown_error.into_runtime_failure(rah_protocol::RuntimeOperation::Shutdown), "preflight-rejected runtime shutdown failed");
+                if let Err(shutdown_error) = instance.shutdown().await {
+                    tracing::warn!(failure = ?shutdown_error, "preflight-rejected runtime shutdown failed");
                 }
                 return Err(error);
             }
-            Ok(runtime)
+            runtime_composition::bind_conversation(instance, model, registry, allowed_permissions)
+                .await.map_err(|error| runtime_frontend_error(&error))
         },
     )
     .await
@@ -8719,6 +8731,9 @@ async fn disconnect_codex(
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let ConnectionState::Connected { runtime, .. } = &*connection {
+            runtime.revoke();
+        }
         match std::mem::replace(&mut *connection, ConnectionState::Disconnecting) {
             ConnectionState::Connected { runtime, .. } => Some(runtime),
             previous => {
@@ -8747,7 +8762,7 @@ async fn disconnect_codex(
     }
     if let Err(error) = runtime_result {
         tracing::warn!(error = %error, "Codex desktop disconnection failed");
-        let frontend_error = frontend_error(&error);
+        let frontend_error = runtime_frontend_error(&error);
         let mut connection = state
             .connection
             .lock()
@@ -9196,7 +9211,7 @@ fn emit_repository_refresh(app: &AppHandle) {
 #[cfg(target_os = "windows")]
 async fn run_chat(
     app: AppHandle,
-    runtime: Arc<CodexRuntime>,
+    runtime: Arc<DesktopRuntime>,
     request: AgentRequest,
     prompt: String,
     conversation_epoch: u64,
@@ -9299,12 +9314,7 @@ async fn run_chat(
                 emit_chat_event(
                     &app,
                     ChatEvent::Failed {
-                        diagnostic: match &error {
-                            rah_runtime::AgentError::Failure { failure } => {
-                                Some(failure.diagnostic().clone())
-                            }
-                            _ => None,
-                        },
+                        diagnostic: Some(error.diagnostic().clone()),
                         code: FrontendError::ChatStartFailed,
                     },
                 );
@@ -9325,19 +9335,19 @@ async fn run_chat(
     if !app.state::<DesktopAppState>().register_chat_session(
         chat_generation,
         Arc::clone(&runtime),
-        handle.session_id().clone(),
+        handle.session_id.clone(),
     ) {
         tracing::warn!("desktop chat session was no longer current before streaming began");
         app.state::<DesktopAppState>().finish_chat(chat_generation);
         return;
     }
 
-    let session_id = handle.session_id().clone();
+    let session_id = handle.session_id.clone();
     emit_chat_event(&app, ChatEvent::Started);
     let mut terminal = false;
     let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
-    let mut events = handle.into_runtime_events();
+    let mut events = handle.events;
     while let Some(local_event) = events.next().await {
         let diagnostic = local_event
             .failure()

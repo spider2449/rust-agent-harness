@@ -6312,19 +6312,27 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
     let prepared = prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
         .map_err(|error| format!("certified Codex preparation failed: {error:?}"))?;
     let source = prepared.source;
-    let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
-        prepared.executable,
+    let (factory, model) = super::runtime_composition::configured_codex_factory(
+        PathBuf::from(prepared.executable),
+        prepared.model_config,
+        &fixture.0,
+    )
+    .map_err(|error| format!("Desktop configuration failed: {error}"))?;
+    let (instance, _) = super::runtime_composition::create_and_preflight(&factory, &model)
+        .await
+        .map_err(|error| format!("Desktop connection failed: {error}"))?;
+    let runtime = super::runtime_composition::bind_conversation(
+        instance,
+        model,
         Arc::clone(&composed_registry),
         vec![
             PermissionLevel::None,
             PermissionLevel::Read,
             PermissionLevel::Execute,
         ],
-        prepared.model_config,
-        &fixture.0,
     )
     .await
-    .map_err(|error| format!("Desktop Codex connection failed: {error}"))?;
+    .map_err(|error| format!("Desktop conversation failed: {error}"))?;
     let composition = desktop_tool_composition_from_registry(
         Arc::clone(&composed_registry),
         Some(&selected),
@@ -6487,11 +6495,12 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
     let mut other_effectful_started = 0_usize;
     let mut final_text = None;
     let mut terminal_failure = None;
-    let mut events = handle.into_events();
+    let mut events = handle.events;
     let event_result = tokio::time::timeout(Duration::from_secs(180), async {
-        while let Some(event) = events.next().await {
+        while let Some(local_event) = events.next().await {
+            let event = local_event.event();
             if let Some(activity) =
-                activity_event_with_composition(&event, &mut tool_calls, &composition, true)
+                activity_event_with_composition(event, &mut tool_calls, &composition, true)
                 && (activity.invalidate_review || activity.refresh_reason.is_some())
             {
                 return Err(
@@ -6499,7 +6508,7 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
                         .to_owned(),
                 );
             }
-            match &event {
+            match event {
                 AgentEvent::ToolRequested { tool_call, .. } => {
                     let name = tool_call.name.as_str().to_owned();
                     call_names.insert(tool_call.id.clone(), name.clone());
@@ -6800,19 +6809,27 @@ async fn windows_live_desktop_repo_create_branch_host_driven() -> Result<(), Str
     let prepared = prepare_codex_connection(resolve_codex_executable, CodexModelConfig::Inherit)
         .map_err(|error| format!("certified Codex preparation failed: {error:?}"))?;
     let source = prepared.source;
-    let runtime = CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
-        prepared.executable,
+    let (factory, model) = super::runtime_composition::configured_codex_factory(
+        PathBuf::from(prepared.executable),
+        prepared.model_config,
+        &fixture.0,
+    )
+    .map_err(|error| format!("Desktop configuration failed: {error}"))?;
+    let (instance, _) = super::runtime_composition::create_and_preflight(&factory, &model)
+        .await
+        .map_err(|error| format!("Desktop connection failed: {error}"))?;
+    let runtime = super::runtime_composition::bind_conversation(
+        instance,
+        model,
         Arc::clone(&composed_registry),
         vec![
             PermissionLevel::None,
             PermissionLevel::Read,
             PermissionLevel::Execute,
         ],
-        prepared.model_config,
-        &fixture.0,
     )
     .await
-    .map_err(|error| format!("Desktop Codex connection failed: {error}"))?;
+    .map_err(|error| format!("Desktop conversation failed: {error}"))?;
     let composition = desktop_tool_composition_from_registry(
         Arc::clone(&composed_registry),
         Some(&selected),
@@ -9276,21 +9293,36 @@ fn main() {
             .clone()
 }
 
-async fn test_codex_runtime(workspace: &Path, registry: Arc<ToolRegistry>) -> Arc<CodexRuntime> {
+async fn test_codex_runtime(
+    workspace: &Path,
+    registry: Arc<ToolRegistry>,
+) -> Arc<super::DesktopRuntime> {
+    let (factory, model) = super::runtime_composition::configured_codex_factory(
+        fake_codex_executable(),
+        CodexModelConfig::Inherit,
+        workspace,
+    )
+    .unwrap();
+    let (instance, preflight) = super::runtime_composition::create_and_preflight(&factory, &model)
+        .await
+        .unwrap();
+    assert!(matches!(
+        preflight.unwrap(),
+        rah_runtime::ModelPreflight::NotChecked
+    ));
     Arc::new(
-        CodexRuntime::connect_tool_bridge_with_model_config_and_workspace(
-            fake_codex_executable(),
+        super::runtime_composition::bind_conversation(
+            instance,
+            model,
             registry,
             vec![
                 PermissionLevel::None,
                 PermissionLevel::Read,
                 PermissionLevel::Execute,
             ],
-            CodexModelConfig::Inherit,
-            workspace,
         )
         .await
-        .expect("deterministic fake Codex runtime should connect"),
+        .unwrap(),
     )
 }
 

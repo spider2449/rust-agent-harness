@@ -1,4 +1,4 @@
-//! Experimental neutral runtime seam. These contracts are not used by Desktop.
+//! Experimental neutral runtime seam. Desktop consumes these experimental contracts.
 //! Provider identities and continuation data remain private to adapters. A
 //! `ConversationId` is RAH routing identity; `SessionId` identifies one turn.
 

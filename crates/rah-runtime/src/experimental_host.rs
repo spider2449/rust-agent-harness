@@ -1,4 +1,4 @@
-//! Experimental host-owned, connection-bound Tool composition. Unused by Desktop.
+//! Experimental host-owned, connection-bound Tool composition. Used by Desktop production composition.
 //! Retained ports hold only a weak host reference. Revocation and dispatch
 //! reservation share one lock; effects admitted before revocation are awaited,
 //! never replayed or described as rolled back.

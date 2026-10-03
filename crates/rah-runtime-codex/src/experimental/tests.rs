@@ -210,7 +210,7 @@ async fn concurrent_tool_round_trip_duplicate_correlation_and_live_events() {
         );
         wait_stopped(peer).await;
     });
-    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi)
+    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi, None)
         .await
         .unwrap();
     let (scope, effects) = host(2);
@@ -266,7 +266,7 @@ async fn cancellation_and_retained_shutdown_handles_are_inert() {
         );
         wait_stopped(peer).await;
     });
-    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi)
+    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi, None)
         .await
         .unwrap();
     let (scope, effects) = host(1);
@@ -326,7 +326,7 @@ async fn unexpected_exit_and_malformed_response_retain_typed_sanitized_errors() 
             }
             wait_stopped(peer).await;
         });
-        let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi)
+        let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi, None)
             .await
             .unwrap();
         let (scope, _) = host(1);
@@ -401,7 +401,7 @@ async fn retained_conversation_and_turn_cannot_dispatch_after_host_teardown() {
         );
         wait_stopped(peer).await;
     });
-    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi)
+    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi, None)
         .await
         .unwrap();
     let (scope, effects) = host(1);
@@ -472,7 +472,7 @@ async fn cancellation_preserves_completed_uncertain_tool_result_without_replay()
         }
         wait_stopped(peer).await;
     });
-    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi)
+    let runtime = Instance::from_transport(transport, CodexModelProvider::OpenAi, None)
         .await
         .unwrap();
     let (scope, effects) = host(1);

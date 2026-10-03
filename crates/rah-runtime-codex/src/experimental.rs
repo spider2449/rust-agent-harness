@@ -1,5 +1,4 @@
-//! Experimental neutral Codex composition, entirely separate from Desktop's
-//! legacy CodexRuntime and authority-bearing bridge.
+//! Experimental neutral Codex composition, using adapter-owned artifact and workspace configuration.
 use crate::{
     CodexAdapterError, CodexModelConfig, CodexModelProvider, CodexModelSelection,
     bridge::{output_response, snapshot_definitions},
@@ -31,6 +30,7 @@ use tokio::{
 pub struct CodexFactory {
     executable: PathBuf,
     provider: CodexModelProvider,
+    workspace: Option<PathBuf>,
     #[cfg(test)]
     fixture: Mutex<Option<crate::test_support::FakeTransport>>,
 }
@@ -39,9 +39,21 @@ impl CodexFactory {
         Self {
             executable,
             provider,
+            workspace: None,
             #[cfg(test)]
             fixture: Mutex::new(None),
         }
+    }
+    /// Host-selected workspace, never derived from a model request.
+    pub fn with_workspace(
+        mut self,
+        workspace: impl AsRef<std::path::Path>,
+    ) -> Result<Self, RuntimeFailure> {
+        self.workspace = Some(workspace.as_ref().canonicalize().map_err(|source| {
+            CodexAdapterError::WorkspaceContext { source }
+                .into_runtime_failure(RuntimeOperation::Connection)
+        })?);
+        Ok(self)
     }
 }
 fn failure(message: &str, operation: RuntimeOperation) -> RuntimeFailure {
@@ -82,13 +94,21 @@ impl ConfiguredRuntimeFactory for CodexFactory {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             if let Some(transport) = fixture {
-                return Ok(Instance::from_transport(transport, self.provider.clone()).await?);
+                return Ok(Instance::from_transport(
+                    transport,
+                    self.provider.clone(),
+                    self.workspace.clone(),
+                )
+                .await?);
             }
         }
         let transport = ProcessTransport::start(&self.executable, true)
             .await
             .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
-        Ok(Instance::from_transport(transport, self.provider.clone()).await?)
+        Ok(
+            Instance::from_transport(transport, self.provider.clone(), self.workspace.clone())
+                .await?,
+        )
     }
 }
 struct Route {
@@ -125,11 +145,13 @@ impl Drop for Shared {
 struct Instance {
     shared: Arc<Shared>,
     provider: CodexModelProvider,
+    workspace: Option<PathBuf>,
 }
 impl Instance {
     async fn from_transport(
         transport: impl AppServerTransport,
         provider: CodexModelProvider,
+        workspace: Option<PathBuf>,
     ) -> Result<Arc<Self>, RuntimeFailure> {
         let connection = Arc::new(
             AppServerConnection::initialize(transport, true)
@@ -153,14 +175,18 @@ impl Instance {
             .router
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
-        Ok(Arc::new(Self { shared, provider }))
+        Ok(Arc::new(Self {
+            shared,
+            provider,
+            workspace,
+        }))
     }
 }
 #[async_trait]
 impl RuntimeInstance for Instance {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            discovery: true,
+            discovery: self.provider == CodexModelProvider::OpenAi,
             native_continuation: true,
             text_replay: true,
             tool_calls: true,
@@ -174,6 +200,9 @@ impl RuntimeInstance for Instance {
     async fn discover_models(&self) -> Result<ModelDiscovery, RuntimeFailure> {
         if !self.is_alive() {
             return Err(failure("runtime stopped", RuntimeOperation::ModelDiscovery));
+        }
+        if self.provider != CodexModelProvider::OpenAi {
+            return Ok(ModelDiscovery::Unsupported);
         }
         let catalog = crate::catalog::discover(&self.shared.connection)
             .await
@@ -201,6 +230,7 @@ impl RuntimeInstance for Instance {
             shared: self.shared.clone(),
             id: seed.id,
             model: model_config(seed.model, &self.provider)?,
+            workspace: self.workspace.clone(),
             tools: seed.tools.clone(),
             snapshot: snapshot_definitions(seed.tools.definitions().0),
             state: tokio::sync::Mutex::new(ConversationState {
@@ -265,6 +295,7 @@ struct Conversation {
     shared: Arc<Shared>,
     id: ConversationId,
     model: CodexModelConfig,
+    workspace: Option<PathBuf>,
     tools: Arc<dyn HostToolPort>,
     snapshot: crate::bridge::ThreadToolSnapshot,
     state: tokio::sync::Mutex<ConversationState>,
@@ -358,10 +389,12 @@ impl RuntimeConversation for Conversation {
                     runtime::restricted_thread_params(
                         Some(snapshot.dynamic_tools),
                         &self.model,
-                        None,
+                        self.workspace.as_deref(),
                     ),
                 )
                 .await
+                .map_err(|e| e.into_runtime_failure(RuntimeOperation::SessionStart))?;
+            runtime::verify_effective_workspace_context(&response, self.workspace.as_deref())
                 .map_err(|e| e.into_runtime_failure(RuntimeOperation::SessionStart))?;
             runtime::verify_effective_model_config(&response, &self.model)
                 .map_err(|e| e.into_runtime_failure(RuntimeOperation::SessionStart))?;
