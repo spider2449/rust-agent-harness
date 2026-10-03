@@ -7,6 +7,8 @@ use futures::{Stream, StreamExt};
 use rah_protocol::{AgentEvent, AgentRequest, SessionId};
 use thiserror::Error;
 
+/// Experimental provider-neutral lifecycle contracts. Not yet a stable RAH API.
+pub mod experimental;
 mod failure;
 mod minimal;
 mod model_discovery;
