@@ -9,6 +9,7 @@ use thiserror::Error;
 
 /// Experimental provider-neutral lifecycle contracts. Not yet a stable RAH API.
 pub mod experimental;
+pub mod experimental_host;
 mod failure;
 mod minimal;
 mod model_discovery;

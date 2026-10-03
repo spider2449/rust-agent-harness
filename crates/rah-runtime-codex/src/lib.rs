@@ -4,6 +4,7 @@ mod bridge;
 mod catalog;
 mod connection;
 mod errors;
+pub mod experimental;
 mod model_config;
 mod process;
 mod protocol;

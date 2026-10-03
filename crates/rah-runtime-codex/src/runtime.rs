@@ -48,10 +48,10 @@ struct BridgeMode {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
-struct TurnRoute {
-    session_id: SessionId,
-    thread_id: String,
-    turn_id: String,
+pub(crate) struct TurnRoute {
+    pub(crate) session_id: SessionId,
+    pub(crate) thread_id: String,
+    pub(crate) turn_id: String,
 }
 
 impl Drop for BridgeMode {
@@ -462,7 +462,7 @@ impl AgentRuntime for CodexRuntime {
     }
 }
 
-fn restricted_thread_params(
+pub(crate) fn restricted_thread_params(
     dynamic_tools: Option<Vec<Value>>,
     model_config: &CodexModelConfig,
     workspace_context: Option<&Path>,
@@ -577,7 +577,7 @@ pub(crate) fn verify_effective_model_config(
     Ok(())
 }
 
-fn translate_input(request: &AgentRequest) -> Vec<Value> {
+pub(crate) fn translate_input(request: &AgentRequest) -> Vec<Value> {
     request
         .input
         .messages
@@ -594,7 +594,7 @@ fn translate_input(request: &AgentRequest) -> Vec<Value> {
         .collect()
 }
 
-fn event_stream(
+pub(crate) fn event_stream(
     connection: Arc<AppServerConnection>,
     mut receiver: broadcast::Receiver<ConnectionEvent>,
     sessions: Arc<Mutex<HashMap<SessionId, SessionRecord>>>,
@@ -823,7 +823,7 @@ fn passive_stream(
     })
 }
 
-fn required_string(value: &Value, path: &[&str]) -> Result<String, CodexAdapterError> {
+pub(crate) fn required_string(value: &Value, path: &[&str]) -> Result<String, CodexAdapterError> {
     let mut current = value;
     for segment in path {
         current = current

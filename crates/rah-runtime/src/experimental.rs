@@ -82,6 +82,31 @@ pub struct ToolReply {
 pub trait HostToolPort: Send + Sync {
     fn definitions(&self) -> ToolSnapshot;
     async fn request(&self, request: ToolRequest) -> Result<ToolReply, RuntimeFailure>;
+
+    /// Requests host admission, never grants the adapter turn exclusivity policy.
+    /// The host assigns the operation identity and live lifecycle receiver.
+    async fn admit_turn(&self) -> Result<HostTurnLease, RuntimeFailure> {
+        Err(crate::experimental_host::unavailable())
+    }
+
+    /// Live mode: lifecycle facts are delivered through the host-owned lease.
+    /// Buffered legacy ports are deliberately not usable through this mode.
+    async fn request_live(&self, _request: ToolRequest) -> Result<ToolOutput, RuntimeFailure> {
+        Err(crate::experimental_host::unavailable())
+    }
+}
+
+/// Host-issued admission. Dropping this owner withdraws new Tool submissions;
+/// already admitted effects remain host-owned until their result is accounted for.
+pub struct HostTurnLease {
+    pub session_id: SessionId,
+    pub events: RuntimeEventStream,
+    pub lifetime: Box<dyn HostTurnLifetime>,
+}
+
+/// Withdrawal-only lease control. It cannot admit or renew a host turn.
+pub trait HostTurnLifetime: Send + Sync {
+    fn stop_requests(&self);
 }
 
 /// Only the host supplies the conversation ID and scoped Tool port.

@@ -85,7 +85,10 @@ struct DynamicCallParams {
 }
 
 pub(crate) fn snapshot_tools(registry: &ToolRegistry) -> ThreadToolSnapshot {
-    let definitions = registry.definitions();
+    snapshot_definitions(registry.definitions())
+}
+
+pub(crate) fn snapshot_definitions(definitions: Vec<ToolDefinition>) -> ThreadToolSnapshot {
     let mut unavailable_aliases = definitions
         .iter()
         .filter(|definition| codex_name_is_usable(definition.name.as_str()))
@@ -718,7 +721,7 @@ fn parse_params(value: &Value) -> Result<DynamicCallParams, String> {
     })
 }
 
-fn output_response(output: &ToolOutput) -> Value {
+pub(crate) fn output_response(output: &ToolOutput) -> Value {
     let content_items = output
         .content
         .iter()
