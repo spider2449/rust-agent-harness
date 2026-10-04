@@ -1287,11 +1287,12 @@ function renderModelConfiguration(configuration) {
   renderedModelConfiguration = configuration;
   const provider = document.querySelector("#model-provider");
   const model = document.querySelector("#model-identifier");
-  provider.value = configuration.provider;
-  model.value = configuration.model ?? "";
-  model.disabled = configuration.provider === "inherit" || chatRunning;
-  provider.disabled = chatRunning;
-  const llama = configuration.provider === "llama_cpp";
+  const codex = configuration.runtimeSelection?.runtimeAdapter === "codex";
+  provider.value = codex ? configuration.provider : "";
+  model.value = configuration.runtimeSelection?.currentModel ?? "";
+  model.disabled = !codex || configuration.provider === "inherit" || chatRunning;
+  provider.disabled = !codex || chatRunning;
+  const llama = codex && configuration.provider === "llama_cpp";
   const endpointControls = document.querySelector("#llama-cpp-endpoint");
   endpointControls.hidden = !llama;
   for (const element of endpointControls.querySelectorAll("select, input")) element.disabled = chatRunning;
@@ -1310,9 +1311,11 @@ function renderModelConfiguration(configuration) {
   };
   document.querySelector("#llama-cpp-readiness").textContent = readiness[configuration.readiness] ?? "Not tested";
   document.querySelector("#test-llama-cpp-endpoint").disabled = !llama || chatRunning || configuration.readiness === "checking";
-  document.querySelector("#apply-model-configuration").disabled = chatRunning;
-  document.querySelector("#reset-model-preferences").disabled = chatRunning;
-  document.querySelector("#model-hint").textContent = modelHint(configuration.provider);
+  document.querySelector("#apply-model-configuration").disabled = !codex || chatRunning;
+  document.querySelector("#reset-model-preferences").disabled = !codex || chatRunning;
+  document.querySelector("#model-hint").textContent = codex ? modelHint(configuration.provider)
+    : configuration.runtimeSelection?.runtimeAdapter === "openai" ? "Native OpenAI: model from backend configuration; Codex preferences are inactive."
+    : "No runtime adapter configured; Codex preferences are inactive.";
 }
 
 async function refreshModelConfiguration(invoke) {
@@ -2087,14 +2090,16 @@ function waitForTauriApi() {
 
 async function loadStatus(invoke) {
   const status = await invoke("app_status");
+  const codex = status.runtimeAdapter === "codex";
+  if (renderedModelConfiguration?.runtimeSelection?.runtimeAdapter !== status.runtimeAdapter) await refreshModelConfiguration(invoke);
   renderedCodexStatus = status.codexStatus;
   renderRows(document.querySelector("#application-status"), applicationRows, status);
   renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
   renderModelPreflight(status.modelPreflight);
   const button = document.querySelector("#codex-connection");
   const connectionError = document.querySelector("#connection-error");
-  button.disabled = status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
-  button.textContent = status.codexStatus === "connected" ? "Disconnect Codex" : "Connect Codex";
+  button.disabled = status.runtimeAvailable !== true || status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
+  button.textContent = status.codexStatus === "connected" ? "Disconnect Runtime" : "Connect Runtime";
   const connected = status.codexStatus === "connected";
   const reconnectRequired = status.repositoryToolsStatus === "reconnect required"
     || status.modelConfigurationStatus === "reconnect required"
@@ -2126,12 +2131,12 @@ async function loadStatus(invoke) {
   const model = document.querySelector("#model-identifier");
   const provider = document.querySelector("#model-provider");
   const endpointControls = document.querySelector("#llama-cpp-endpoint");
-  document.querySelector("#apply-model-configuration").disabled = chatRunning;
-  document.querySelector("#reset-model-preferences").disabled = chatRunning;
-  provider.disabled = chatRunning;
-  model.disabled = chatRunning || provider.value === "inherit";
+  document.querySelector("#apply-model-configuration").disabled = !codex || chatRunning;
+  document.querySelector("#reset-model-preferences").disabled = !codex || chatRunning;
+  provider.disabled = !codex || chatRunning;
+  model.disabled = !codex || chatRunning || provider.value === "inherit";
   for (const element of endpointControls.querySelectorAll("select, input")) {
-    element.disabled = chatRunning;
+    element.disabled = !codex || chatRunning;
   }
   if (status.codexError) {
     connectionError.textContent = errorMessage(status.codexError);
@@ -2519,7 +2524,9 @@ async function initializeDesktop() {
   document.querySelector("#model-provider").addEventListener("change", () => {
     const provider = document.querySelector("#model-provider");
     const model = document.querySelector("#model-identifier");
-    model.disabled = chatRunning || provider.value === "inherit";
+    model.value = "";
+    renderModelPreflight(null);
+    model.disabled = renderedModelConfiguration?.runtimeSelection?.runtimeAdapter !== "codex" || chatRunning || provider.value === "inherit";
     document.querySelector("#llama-cpp-endpoint").hidden = provider.value !== "llama_cpp";
     document.querySelector("#model-hint").textContent = modelHint(provider.value);
   });

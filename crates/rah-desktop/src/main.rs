@@ -12,6 +12,8 @@ use codex_composition::{
 #[cfg(target_os = "windows")]
 mod production_composition;
 #[cfg(target_os = "windows")]
+mod runtime_model_state;
+#[cfg(target_os = "windows")]
 mod runtime_selection;
 #[cfg(target_os = "windows")]
 use runtime_selection::RuntimeArtifactSource;
@@ -233,6 +235,8 @@ fn startup_activation_snapshot() -> StartupActivationCounters {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppStatus {
+    runtime_adapter: runtime_model_state::RuntimeAdapterIdentity,
+    runtime_available: bool,
     #[cfg(target_os = "windows")]
     #[serde(skip_serializing_if = "Option::is_none")]
     model_preflight: Option<model_preflight::ModelPreflightPresentation>,
@@ -409,7 +413,8 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 #[cfg(target_os = "windows")]
 struct DesktopAppState {
     runtime_adapter: Option<runtime_selection::ProductionAdapter>,
-    model_preflight: Mutex<Option<(u64, u64, model_preflight::ModelPreflightState)>>,
+    openai_configured_model: Option<String>,
+    model_preflight: Mutex<Option<model_preflight::ScopedModelPreflight>>,
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
     active_chat: Mutex<Option<ActiveChat>>,
@@ -585,6 +590,7 @@ impl DesktopAppState {
         persistence.select_namespace("neutral-v1".to_owned());
         Self {
             runtime_adapter: runtime_selection::selected_adapter(),
+            openai_configured_model: runtime_model_state::configured_openai_model(),
             connection: Mutex::new(ConnectionState::NotConnected),
             model_preflight: Mutex::new(None),
             chat: Mutex::new(ChatState::Idle),
@@ -1150,6 +1156,8 @@ impl DesktopAppState {
             repository_generation,
             model_generation,
         );
+        status.runtime_adapter = runtime_model_state::identity(self.runtime_adapter);
+        status.runtime_available = self.runtime_adapter.is_some();
         let connection_generation = *self
             .next_connection_generation
             .lock()
@@ -1159,15 +1167,16 @@ impl DesktopAppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .filter(|(captured_connection, captured_model, _)| {
-                *captured_connection == connection_generation
-                    && *captured_model == model_generation
+            .filter(|observation| {
+                observation.adapter == runtime_model_state::identity(self.runtime_adapter)
+                    && observation.connection_generation == connection_generation
+                    && observation.model_generation == model_generation
                     && matches!(
                         *connection,
                         ConnectionState::Connected { .. } | ConnectionState::Error(_)
                     )
             })
-            .map(|(_, _, view)| view.presentation.clone());
+            .map(|observation| observation.state.presentation.clone());
         let current_profile_generation = *self
             .trusted_profile_generation
             .lock()
@@ -1697,6 +1706,7 @@ fn normalize_dns_hostname(host: &str) -> Result<String, FrontendError> {
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Inactive Codex upstream preferences. `provider = openai` never selects a runtime adapter.
 pub(crate) struct DesktopModelSelection {
     pub(crate) provider: DesktopModelProvider,
     pub(crate) model: Option<String>,
@@ -1789,6 +1799,7 @@ enum ReadinessState {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ModelConfigurationPresentation {
+    runtime_selection: runtime_model_state::RuntimeSelectionState,
     provider: DesktopModelProvider,
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1973,6 +1984,8 @@ fn current_app_status(
         ConnectionState::Disconnecting => ("connected", "disconnecting", None, None, None),
     };
     AppStatus {
+        runtime_adapter: runtime_model_state::RuntimeAdapterIdentity::None,
+        runtime_available: false,
         model_preflight: None,
         app_name: "RAH",
         app_version: env!("CARGO_PKG_VERSION"),

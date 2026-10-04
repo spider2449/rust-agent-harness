@@ -21,6 +21,11 @@ pub(super) fn model_configuration(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ModelConfigurationPresentation {
+        runtime_selection: super::runtime_model_state::present(
+            state.runtime_adapter,
+            &selection,
+            state.openai_configured_model.as_deref(),
+        ),
         provider: selection.provider,
         model: selection.model,
         endpoint: selection

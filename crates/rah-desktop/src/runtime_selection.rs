@@ -91,8 +91,9 @@ pub(crate) fn configured_factory(
     adapter: ProductionAdapter,
     selection: &crate::DesktopModelSelection,
     workspace: &std::path::Path,
+    openai_model: Option<&str>,
 ) -> Result<FactoryConfiguration, FrontendError> {
-    let _ = (selection, workspace);
+    let _ = (selection, workspace, openai_model);
     match adapter {
         #[cfg(feature = "provider-codex")]
         ProductionAdapter::Codex => {
@@ -120,8 +121,9 @@ pub(crate) fn configured_factory(
         ProductionAdapter::OpenAi => {
             let key = std::env::var("OPENAI_API_KEY")
                 .map_err(|_| FrontendError::RuntimeConnectionFailed)?;
-            let model = std::env::var("RAH_OPENAI_MODEL")
-                .map_err(|_| FrontendError::ModelConfigurationInvalid)?;
+            let model = openai_model
+                .ok_or(FrontendError::ModelConfigurationInvalid)?
+                .to_owned();
             configured_openai(key, model)
         }
     }

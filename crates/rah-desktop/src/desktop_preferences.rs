@@ -822,6 +822,25 @@ mod tests {
     }
 
     #[test]
+    fn task509a_historical_openai_is_codex_preference_in_all_schema_versions() {
+        for version in 1..=3 {
+            let bytes = format!(
+                r#"{{"version":{version},"model":{{"provider":"openai","model":"gpt-6.1-sol"}}}}"#
+            );
+            let (preference, _, _) = parse(bytes.as_bytes()).unwrap();
+            assert_eq!(preference.provider, DesktopModelProvider::OpenAi);
+            assert_eq!(preference.model.as_deref(), Some("gpt-6.1-sol"));
+            let rewritten = canonical(&preference, None, None).unwrap();
+            assert_eq!(parse(&rewritten).unwrap().0, preference);
+            assert!(
+                !String::from_utf8(rewritten)
+                    .unwrap()
+                    .contains("runtime_adapter")
+            );
+        }
+    }
+
+    #[test]
     fn v1_migrates_model_only_and_v2_restores_closed_identity() {
         let selection = explicit(DesktopModelProvider::OpenAi);
         let v1 = br#"{"version":1,"model":{"provider":"openai","model":"model"}}"#;

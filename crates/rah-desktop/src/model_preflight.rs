@@ -5,6 +5,13 @@ use serde::Serialize;
 
 use crate::FrontendError;
 
+pub(crate) struct ScopedModelPreflight {
+    pub adapter: crate::runtime_model_state::RuntimeAdapterIdentity,
+    pub connection_generation: u64,
+    pub model_generation: u64,
+    pub state: ModelPreflightState,
+}
+
 /// Ephemeral discovery evidence only. No authority or persisted configuration.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,7 +179,12 @@ mod tests {
         );
         *state.connection.lock().unwrap() =
             crate::ConnectionState::Error(FrontendError::ModelCatalogUnavailable);
-        *state.model_preflight.lock().unwrap() = Some((0, 0, observation));
+        *state.model_preflight.lock().unwrap() = Some(ScopedModelPreflight {
+            adapter: crate::runtime_model_state::identity(state.runtime_adapter),
+            connection_generation: 0,
+            model_generation: 0,
+            state: observation,
+        });
         let status = state.status();
         assert_eq!(status.codex_status, "error");
         assert_eq!(

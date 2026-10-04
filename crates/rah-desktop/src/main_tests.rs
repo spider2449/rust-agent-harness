@@ -16660,6 +16660,11 @@ fn desktop_model_selection_rejects_invalid_or_inherit_model_values() {
 #[test]
 fn model_configuration_presentation_is_closed_and_sanitized() {
     let presentation = ModelConfigurationPresentation {
+        runtime_selection: super::runtime_model_state::present(
+            None,
+            &DesktopModelSelection::default(),
+            None,
+        ),
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("rah-local-model".to_owned()),
         endpoint: Some(ProviderEndpointPresentation::from(&default_test_endpoint())),
@@ -16670,7 +16675,7 @@ fn model_configuration_presentation_is_closed_and_sanitized() {
     let serialized = serde_json::to_string(&presentation).expect("presentation serializes");
     assert_eq!(
         serialized,
-        r#"{"provider":"llama_cpp","model":"rah-local-model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080,"normalized":"http://127.0.0.1:8080/v1"},"insecureTransport":false,"readiness":"not_tested","status":"active"}"#
+        r#"{"runtimeSelection":{"runtimeAdapter":"none","runtimeAvailable":false,"modelSourceKind":"none","codexModelProvider":null,"currentModel":null,"modelValidated":false},"provider":"llama_cpp","model":"rah-local-model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080,"normalized":"http://127.0.0.1:8080/v1"},"insecureTransport":false,"readiness":"not_tested","status":"active"}"#
     );
     for forbidden in [
         "base_url",
