@@ -1,5 +1,15 @@
 # Task 509B — Provider-aware model picker, freshness, and Connect gating
 
+## Task 509E reference-only policy resolution
+
+[Task 509E](2026-10-04-task-509e-unbound-codex-catalog-picker-policy.md)
+selects A: provider-unbound runtime suggestions, explicit Codex Custom mode,
+mode-aware Connect gates and unverified compatibility even after Ready. It
+defines Inherit and runtime/provider switching and preserves native OpenAI's
+snapshot-only/no-custom policy. Its exact resume scope supersedes the earlier
+provider-bound prerequisite/catalog-only assumptions below. Historical findings
+remain unchanged; no picker implementation is resumed or delivered by this note.
+
 Starting HEAD: `570e93319382343b1fa3d7996c413736d9e13770`; clean worktree.
 Version 0.33.0; certified Codex baseline 0.157.1.
 

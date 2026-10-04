@@ -1,5 +1,13 @@
 # Task 510A — Newer Codex provider-bound discovery protocol audit
 
+## Task 509E reference-only policy follow-up
+
+[Task 509E](2026-10-04-task-509e-unbound-codex-catalog-picker-policy.md)
+selects a runtime-advertised, provider-unverified suggestion picker contract.
+It resolves the product prerequisite without changing this C classification or
+claiming provider-bound discovery. Task 510B certification remains separate;
+0.160.0 is still unadmitted/uncertified. No picker implementation is delivered.
+
 Starting HEAD: `570e93319382343b1fa3d7996c413736d9e13770`.
 
 Research only. Preserve Task 509/509A/509B/509C/509D documentation WIP.
