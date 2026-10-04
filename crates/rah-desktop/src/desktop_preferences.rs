@@ -1,8 +1,8 @@
 //! Private, closed persistence for inactive Desktop preferences.
 
 use crate::{
-    DesktopCommitIdentity, DesktopModelProvider, DesktopModelSelection, ProviderEndpoint,
-    ProviderHost, ProviderScheme,
+    DesktopCommitIdentity, DesktopModelProvider, DesktopModelSelection, ModelSelectionMode,
+    ProviderEndpoint, ProviderHost, ProviderScheme,
 };
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
@@ -371,6 +371,11 @@ fn canonical(
     remembered_path: Option<&RememberedTrustedProfilePath>,
 ) -> Result<Vec<u8>, ()> {
     selection.validate().map_err(|_| ())?;
+    let mode = match selection.model_selection_mode {
+        Some(ModelSelectionMode::Advertised) => "advertised",
+        Some(ModelSelectionMode::Custom) => "custom",
+        None => "", // Inherit emits no discriminator.
+    };
     let model = match selection.provider {
         DesktopModelProvider::Inherit => r#"{"provider":"inherit"}"#.to_owned(),
         DesktopModelProvider::OpenAi
@@ -378,7 +383,7 @@ fn canonical(
         | DesktopModelProvider::LmStudio => {
             let provider = provider_name(selection.provider);
             format!(
-                r#"{{"provider":"{provider}","model":{}}}"#,
+                r#"{{"provider":"{provider}","model":{},"model_selection_mode":"{mode}"}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?
             )
         }
@@ -391,14 +396,14 @@ fn canonical(
                 return Err(());
             }
             format!(
-                r#"{{"provider":"llama_cpp","model":{},"endpoint":{{"scheme":"http","host":{},"port":{}}}}}"#,
+                r#"{{"provider":"llama_cpp","model":{},"model_selection_mode":"{mode}","endpoint":{{"scheme":"http","host":{},"port":{}}}}}"#,
                 serde_json::to_string(selection.model.as_ref().ok_or(())?).map_err(|_| ())?,
                 serde_json::to_string(&ip.to_string()).map_err(|_| ())?,
                 endpoint.port
             )
         }
     };
-    let mut json = format!(r#"{{"version":3,"model":{model}"#);
+    let mut json = format!(r#"{{"version":4,"model":{model}"#);
     if let Some(identity) = identity {
         identity.validate()?;
         json.push_str(",\"commit_identity\":{\"name\":");
@@ -448,6 +453,7 @@ struct Root {
 }
 #[derive(Default)]
 struct Model {
+    model_selection_mode: Option<ModelSelectionMode>,
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<Endpoint>,
@@ -484,7 +490,7 @@ fn parse(
     }
     let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     let root: Root = serde_json::from_str(text).map_err(|_| ())?;
-    if !matches!(root.version, Some(1..=3)) {
+    if !matches!(root.version, Some(1..=4)) {
         return Err(());
     }
     let model = root.model.ok_or(())?;
@@ -515,8 +521,21 @@ fn parse(
         }
         None => None,
     };
+    let mode = match root.version {
+        Some(1..=3) => {
+            // Historical schemas never carried Custom intent. Absence from a
+            // future catalog is stale Advertised state, never inferred Custom.
+            if model.model_selection_mode.is_some() {
+                return Err(());
+            }
+            model.model.as_ref().map(|_| ModelSelectionMode::Advertised)
+        }
+        Some(4) => model.model_selection_mode,
+        _ => return Err(()),
+    };
     let result = DesktopModelSelection {
         provider,
+        model_selection_mode: mode,
         model: model.model,
         llama_cpp_endpoint: endpoint,
     };
@@ -524,11 +543,11 @@ fn parse(
     let identity = match (root.version, root.commit_identity) {
         (Some(1), None) | (Some(2), None) => None,
         (Some(1), Some(_)) => return Err(()),
-        (Some(2 | 3), Some(value)) => Some(DesktopCommitIdentity {
+        (Some(2..=4), Some(value)) => Some(DesktopCommitIdentity {
             name: value.name.ok_or(())?,
             email: value.email.ok_or(())?,
         }),
-        (Some(3), None) => None,
+        (Some(3 | 4), None) => None,
         _ => return Err(()),
     };
     if let Some(identity) = &identity {
@@ -536,8 +555,8 @@ fn parse(
     }
     let remembered_path = match (root.version, root.trusted_profile) {
         (Some(1 | 2), Some(_)) => return Err(()),
-        (Some(1..=3), None) => None,
-        (Some(3), Some(value)) => Some(RememberedTrustedProfilePath::parse(PathBuf::from(
+        (Some(1..=4), None) => None,
+        (Some(3 | 4), Some(value)) => Some(RememberedTrustedProfilePath::parse(PathBuf::from(
             value.path.ok_or(())?,
         ))?),
         _ => return Err(()),
@@ -549,7 +568,7 @@ macro_rules! closed_map { ($name:ident, $type:ty, { $($field:literal => $slot:id
 impl<'de> Deserialize<'de> for $type { fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { struct V; impl<'de> Visitor<'de> for V { type Value = $type; fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("closed preferences object") } fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<$type, A::Error> { let mut value: $type = Default::default(); while let Some(key) = map.next_key::<String>()? { match key.as_str() { $($field => { if value.$slot.is_some() { return Err(de::Error::duplicate_field($field)); } value.$slot = Some(map.next_value::<$value>()?); }),* _ => return Err(de::Error::unknown_field(&key, &[$($field),*])), } } Ok(value) } } d.deserialize_map(V) } }
 }; }
 closed_map!(RootMap, Root, { "version" => version: u64, "model" => model: Model, "commit_identity" => commit_identity: CommitIdentity, "trusted_profile" => trusted_profile: TrustedProfilePreference });
-closed_map!(ModelMap, Model, { "provider" => provider: String, "model" => model: String, "endpoint" => endpoint: Endpoint });
+closed_map!(ModelMap, Model, { "provider" => provider: String, "model" => model: String, "endpoint" => endpoint: Endpoint, "model_selection_mode" => model_selection_mode: ModelSelectionMode });
 closed_map!(EndpointMap, Endpoint, { "scheme" => scheme: String, "host" => host: String, "port" => port: u16 });
 closed_map!(CommitIdentityMap, CommitIdentity, { "name" => name: String, "email" => email: String });
 closed_map!(TrustedProfilePreferenceMap, TrustedProfilePreference, { "path" => path: String });
@@ -752,10 +771,11 @@ mod tests {
         }
     }
 
-    fn explicit(provider: DesktopModelProvider) -> DesktopModelSelection {
+    fn advertised_model_pref(provider: DesktopModelProvider) -> DesktopModelSelection {
         DesktopModelSelection {
             provider,
             model: Some("model".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         }
     }
@@ -766,39 +786,131 @@ mod tests {
     }
 
     #[test]
+    fn v4_explicit_modes_round_trip_and_same_id_remains_distinct() {
+        for (id, mode, wire_mode) in [
+            ("model-a", ModelSelectionMode::Advertised, "advertised"),
+            ("custom-model-a", ModelSelectionMode::Custom, "custom"),
+            ("same-model", ModelSelectionMode::Advertised, "advertised"),
+            ("same-model", ModelSelectionMode::Custom, "custom"),
+        ] {
+            let selection = DesktopModelSelection {
+                provider: DesktopModelProvider::OpenAi,
+                model: Some(id.into()),
+                model_selection_mode: Some(mode),
+                llama_cpp_endpoint: None,
+            };
+            let expected = format!(
+                "{{\"version\":4,\"model\":{{\"provider\":\"openai\",\"model\":\"{id}\",\"model_selection_mode\":\"{wire_mode}\"}}}}\n"
+            );
+            let bytes = canonical(&selection, None, None).unwrap();
+            assert_eq!(bytes, expected.as_bytes());
+            let restored = parse(&bytes).unwrap().0;
+            assert_eq!(restored, selection);
+            assert!(
+                matches!(restored.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
+            );
+        }
+        let advertised = parse(br#"{"version":4,"model":{"provider":"openai","model":"same-model","model_selection_mode":"advertised"}}"#).unwrap().0;
+        let custom = parse(br#"{"version":4,"model":{"provider":"openai","model":"same-model","model_selection_mode":"custom"}}"#).unwrap().0;
+        assert_ne!(advertised, custom);
+        assert_ne!(
+            canonical(&advertised, None, None),
+            canonical(&custom, None, None)
+        );
+    }
+
+    #[test]
+    fn legacy_ids_absent_from_catalog_remain_advertised_and_inherit_has_no_mode() {
+        let hypothetical_catalog = ["another-model"];
+        for version in 1..=3 {
+            let id = "legacy-absent-model";
+            assert!(!hypothetical_catalog.contains(&id));
+            let bytes = format!(
+                r#"{{"version":{version},"model":{{"provider":"openai","model":"{id}"}}}}"#
+            );
+            let selection = parse(bytes.as_bytes()).unwrap().0;
+            assert_eq!(selection.model.as_deref(), Some(id));
+            assert_eq!(
+                selection.model_selection_mode,
+                Some(ModelSelectionMode::Advertised)
+            );
+            assert!(
+                matches!(selection.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
+            );
+        }
+        for version in 1..=4 {
+            let bytes = format!(r#"{{"version":{version},"model":{{"provider":"inherit"}}}}"#);
+            let selection = parse(bytes.as_bytes()).unwrap().0;
+            assert_eq!(selection, DesktopModelSelection::default());
+            assert_eq!(selection.model, None);
+            assert_eq!(selection.model_selection_mode, None);
+            assert_eq!(
+                canonical(&selection, None, None).unwrap(),
+                b"{\"version\":4,\"model\":{\"provider\":\"inherit\"}}\n"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_malformed_and_unknown_fields_fail_closed() {
+        for model in [
+            r#"{"provider":"openai","model":"x"}"#,
+            r#"{"provider":"openai","model":"x","model_selection_mode":"future"}"#,
+            r#"{"provider":"openai","model_selection_mode":"advertised"}"#,
+            r#"{"provider":"inherit","model":"x","model_selection_mode":"custom"}"#,
+            r#"{"provider":"inherit","model_selection_mode":"custom"}"#,
+            r#"{"provider":"openai","model":"x","model_selection_mode":null}"#,
+            r#"{"provider":"openai","model":"x","model_selection_mode":42}"#,
+            r#"{"provider":"openai","model":"x","model_selection_mode":"advertised","unknown":true}"#,
+            r#"{"provider":"openai","model":"x","model_selection_mode":"advertised","model_selection_mode":"custom"}"#,
+        ] {
+            let bytes = format!(r#"{{"version":4,"model":{model}}}"#);
+            assert!(parse(bytes.as_bytes()).is_err(), "{bytes}");
+        }
+        assert!(parse(br#"{"version":4,"model":{"provider":"inherit"},"unknown":true}"#).is_err());
+        for version in 1..=3 {
+            let bytes = format!(
+                r#"{{"version":{version},"model":{{"provider":"openai","model":"x","model_selection_mode":"advertised"}}}}"#
+            );
+            assert!(parse(bytes.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
     fn canonical_provider_shapes_round_trip() {
         let mut all = vec![
             (
                 DesktopModelSelection::default(),
-                r#"{"version":3,"model":{"provider":"inherit"}}"#,
+                r#"{"version":4,"model":{"provider":"inherit"}}"#,
             ),
             (
-                explicit(DesktopModelProvider::OpenAi),
-                r#"{"version":3,"model":{"provider":"openai","model":"model"}}\n"#,
+                advertised_model_pref(DesktopModelProvider::OpenAi),
+                r#"{"version":4,"model":{"provider":"openai","model":"model","model_selection_mode":"advertised"}}\n"#,
             ),
             (
-                explicit(DesktopModelProvider::Ollama),
-                r#"{"version":3,"model":{"provider":"ollama","model":"model"}}\n"#,
+                advertised_model_pref(DesktopModelProvider::Ollama),
+                r#"{"version":4,"model":{"provider":"ollama","model":"model","model_selection_mode":"advertised"}}\n"#,
             ),
             (
-                explicit(DesktopModelProvider::LmStudio),
-                r#"{"version":3,"model":{"provider":"lm_studio","model":"model"}}\n"#,
+                advertised_model_pref(DesktopModelProvider::LmStudio),
+                r#"{"version":4,"model":{"provider":"lm_studio","model":"model","model_selection_mode":"advertised"}}\n"#,
             ),
         ];
         for (host, expected) in [
             (
                 "127.0.0.1",
-                r#"{"version":3,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
+                r#"{"version":4,"model":{"provider":"llama_cpp","model":"model","model_selection_mode":"advertised","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080}}}\n"#,
             ),
             (
                 "::1",
-                r#"{"version":3,"model":{"provider":"llama_cpp","model":"model","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
+                r#"{"version":4,"model":{"provider":"llama_cpp","model":"model","model_selection_mode":"advertised","endpoint":{"scheme":"http","host":"::1","port":8080}}}\n"#,
             ),
         ] {
             all.push((
                 DesktopModelSelection {
                     provider: DesktopModelProvider::LlamaCpp,
                     model: Some("model".into()),
+                    model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
                     llama_cpp_endpoint: Some(ProviderEndpoint {
                         scheme: ProviderScheme::Http,
                         host: ProviderHost::Ip(host.parse().unwrap()),
@@ -842,7 +954,7 @@ mod tests {
 
     #[test]
     fn v1_migrates_model_only_and_v2_restores_closed_identity() {
-        let selection = explicit(DesktopModelProvider::OpenAi);
+        let selection = advertised_model_pref(DesktopModelProvider::OpenAi);
         let v1 = br#"{"version":1,"model":{"provider":"openai","model":"model"}}"#;
         assert_eq!(parse(v1).unwrap(), (selection.clone(), None, None));
 
@@ -855,17 +967,26 @@ mod tests {
     }
 
     #[test]
-    fn v3_profile_schema_is_canonical_and_ordered() {
-        let selection = explicit(DesktopModelProvider::OpenAi);
+    fn v3_profile_migrates_to_canonical_ordered_v4() {
+        let selection = advertised_model_pref(DesktopModelProvider::OpenAi);
         let identity = DesktopCommitIdentity {
             name: "RAH Host".into(),
             email: "rah-host@example.invalid".into(),
         };
         let path = remembered_path(r"C:\profiles\provider.json");
+        let legacy = br#"{"version":3,"model":{"provider":"openai","model":"model"},"commit_identity":{"name":"RAH Host","email":"rah-host@example.invalid"},"trusted_profile":{"path":"C:\\profiles\\provider.json"}}"#;
+        assert_eq!(
+            parse(legacy).unwrap(),
+            (
+                selection.clone(),
+                Some(identity.clone()),
+                Some(path.clone())
+            )
+        );
         let bytes = canonical(&selection, Some(&identity), Some(&path)).unwrap();
         assert_eq!(
             bytes,
-            br#"{"version":3,"model":{"provider":"openai","model":"model"},"commit_identity":{"name":"RAH Host","email":"rah-host@example.invalid"},"trusted_profile":{"path":"C:\\profiles\\provider.json"}}
+            br#"{"version":4,"model":{"provider":"openai","model":"model","model_selection_mode":"advertised"},"commit_identity":{"name":"RAH Host","email":"rah-host@example.invalid"},"trusted_profile":{"path":"C:\\profiles\\provider.json"}}
 "#
         );
         assert_eq!(
@@ -954,8 +1075,8 @@ mod tests {
     #[test]
     fn all_preference_planes_preserve_each_other_and_forget_is_not_global_reset() {
         let directory = TestDirectory::new();
-        let first = explicit(DesktopModelProvider::OpenAi);
-        let later = explicit(DesktopModelProvider::Ollama);
+        let first = advertised_model_pref(DesktopModelProvider::OpenAi);
+        let later = advertised_model_pref(DesktopModelProvider::Ollama);
         let identity = DesktopCommitIdentity {
             name: "RAH Host".into(),
             email: "rah-host@example.invalid".into(),
@@ -1010,9 +1131,9 @@ mod tests {
     }
 
     #[test]
-    fn successful_save_upgrades_v1_and_v2_to_v3_with_remembered_path() {
+    fn successful_save_upgrades_v1_and_v2_to_v4_with_remembered_path() {
         let path = remembered_path(r"C:\profiles\provider.json");
-        let selection = explicit(DesktopModelProvider::OpenAi);
+        let selection = advertised_model_pref(DesktopModelProvider::OpenAi);
         let identity = DesktopCommitIdentity {
             name: "RAH Host".into(),
             email: "rah-host@example.invalid".into(),
@@ -1031,7 +1152,7 @@ mod tests {
                 .save_trusted_profile_path(&selection, path.clone())
                 .unwrap();
             let bytes = fs::read(directory.preference_path()).unwrap();
-            assert!(bytes.starts_with(br#"{"version":3,"model"#));
+            assert!(bytes.starts_with(br#"{"version":4,"model"#));
             assert_eq!(
                 parse(&bytes).unwrap(),
                 (selection.clone(), identity, Some(path.clone()))
@@ -1045,7 +1166,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TestDirectory::new();
-        let selection = explicit(DesktopModelProvider::OpenAi);
+        let selection = advertised_model_pref(DesktopModelProvider::OpenAi);
         let old_path = remembered_path(r"C:\profiles\old.json");
         let new_path = remembered_path(r"C:\profiles\new.json");
         let mut preferences = Preferences::start(directory.0.clone()).0;
@@ -1099,7 +1220,7 @@ mod tests {
     #[test]
     fn v2_identity_schema_and_values_fail_closed() {
         for bytes in [
-            br#"{"version":4,"model":{"provider":"inherit"}}"#.as_slice(),
+            br#"{"version":5,"model":{"provider":"inherit"}}"#.as_slice(),
             br#"{"version":"2","model":{"provider":"inherit"}}"#.as_slice(),
             br#"{"version":2,"model":{"provider":"inherit"},"unknown":true}"#.as_slice(),
             br#"{"version":2,"model":{"provider":"inherit"},"commit_identity":{"name":"n","email":"e","unknown":true}}"#.as_slice(),
@@ -1160,7 +1281,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TestDirectory::new();
         let mut preferences = Preferences::start(directory.0.clone()).0;
-        let first = explicit(DesktopModelProvider::OpenAi);
+        let first = advertised_model_pref(DesktopModelProvider::OpenAi);
         let identity = DesktopCommitIdentity {
             name: "RAH Host".into(),
             email: "rah-host@example.invalid".into(),
@@ -1183,7 +1304,7 @@ mod tests {
         assert_eq!(fs::read(directory.preference_path()).unwrap(), durable);
         clear_test_state();
         preferences
-            .save(&explicit(DesktopModelProvider::Ollama))
+            .save(&advertised_model_pref(DesktopModelProvider::Ollama))
             .unwrap();
         assert!(
             parse(&fs::read(directory.preference_path()).unwrap())
@@ -1283,7 +1404,7 @@ mod tests {
     fn preferences_only_write_for_persistable_selections_and_reset() {
         let directory = TestDirectory::new();
         let mut preferences = Preferences::start(directory.0.clone()).0;
-        let selection = explicit(DesktopModelProvider::OpenAi);
+        let selection = advertised_model_pref(DesktopModelProvider::OpenAi);
         preferences.save(&selection).unwrap();
         assert_eq!(
             fs::read(directory.preference_path()).unwrap(),
@@ -1293,6 +1414,7 @@ mod tests {
         let non_loopback = DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("model".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: Some(ProviderEndpoint {
                 scheme: ProviderScheme::Http,
                 host: ProviderHost::Ip("192.168.1.1".parse().unwrap()),
@@ -1340,8 +1462,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TestDirectory::new();
         let mut preferences = Preferences::start(directory.0.clone()).0;
-        let prior = explicit(DesktopModelProvider::OpenAi);
-        let next = explicit(DesktopModelProvider::Ollama);
+        let prior = advertised_model_pref(DesktopModelProvider::OpenAi);
+        let next = advertised_model_pref(DesktopModelProvider::Ollama);
         preferences.save(&prior).unwrap();
         let durable = fs::read(directory.preference_path()).unwrap();
         for fault in [
@@ -1385,7 +1507,7 @@ mod tests {
         let mut preferences = Preferences::start(directory.0.clone()).0;
         set_test_fault(directory.preference_path(), TestFault::FirstMove);
         assert_eq!(
-            preferences.save(&explicit(DesktopModelProvider::OpenAi)),
+            preferences.save(&advertised_model_pref(DesktopModelProvider::OpenAi)),
             Err(Warning::SaveFailed)
         );
         assert!(!directory.preference_path().exists());
@@ -1409,8 +1531,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TestDirectory::new();
         let mut preferences = Preferences::start(directory.0.clone()).0;
-        let prior = explicit(DesktopModelProvider::OpenAi);
-        let next = explicit(DesktopModelProvider::Ollama);
+        let prior = advertised_model_pref(DesktopModelProvider::OpenAi);
+        let next = advertised_model_pref(DesktopModelProvider::Ollama);
         preferences.save(&prior).unwrap();
         clear_test_state();
         set_test_fault(
@@ -1456,13 +1578,14 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TestDirectory::new();
         let mut preferences = Preferences::start(directory.0.clone()).0;
-        let durable = explicit(DesktopModelProvider::OpenAi);
+        let durable = advertised_model_pref(DesktopModelProvider::OpenAi);
         preferences.save(&durable).unwrap();
         let prior = fs::read(directory.preference_path()).unwrap();
         clear_test_state();
         let non_loopback = DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("model".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: Some(ProviderEndpoint {
                 scheme: ProviderScheme::Http,
                 host: ProviderHost::Ip("192.168.1.1".parse().unwrap()),

@@ -84,6 +84,7 @@ mod tests {
         let preferences = DesktopModelSelection {
             provider: DesktopModelProvider::OpenAi,
             model: Some("gpt-6.1-sol".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         };
         let codex = scoped(RuntimeAdapterIdentity::Codex, &preferences, None);
@@ -123,6 +124,7 @@ mod tests {
         let preference = DesktopModelSelection {
             provider: DesktopModelProvider::OpenAi,
             model: Some("gpt-6.1-sol".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         };
         desktop.model.lock().unwrap().selection = preference.clone();

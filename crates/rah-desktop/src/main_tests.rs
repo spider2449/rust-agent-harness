@@ -16229,6 +16229,7 @@ fn llama_adapter_handoff_uses_the_synthesized_endpoint_without_credentials() {
     let selection = DesktopModelSelection {
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("model".to_owned()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: Some(
             ProviderEndpoint::parse(ProviderEndpointInput {
                 scheme: ProviderScheme::Https,
@@ -16304,6 +16305,7 @@ fn endpoint_normalization_controls_generation_and_llama_only_closure() {
     let selection = |host: &str, scheme, port| DesktopModelSelection {
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("model".to_owned()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: Some(
             ProviderEndpoint::parse(ProviderEndpointInput {
                 scheme,
@@ -16347,6 +16349,8 @@ fn endpoint_normalization_controls_generation_and_llama_only_closure() {
             } else {
                 Some("model".to_owned())
             },
+            model_selection_mode: (provider != DesktopModelProvider::Inherit)
+                .then_some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: Some(default_test_endpoint()),
         };
         assert_eq!(
@@ -16358,6 +16362,7 @@ fn endpoint_normalization_controls_generation_and_llama_only_closure() {
         DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("model".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None
         }
         .codex_model_config(),
@@ -16552,6 +16557,7 @@ fn stale_readiness_result_cannot_overwrite_a_new_model_generation() {
         model.selection = DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("old".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: Some(old_endpoint.clone()),
         };
         model.generation = 7;
@@ -16559,6 +16565,7 @@ fn stale_readiness_result_cannot_overwrite_a_new_model_generation() {
         model.selection = DesktopModelSelection {
             provider: DesktopModelProvider::LlamaCpp,
             model: Some("new".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: Some(new_endpoint.clone()),
         };
         model.generation = 8;
@@ -16617,6 +16624,7 @@ fn desktop_model_selection_maps_only_closed_provider_choices() {
         let selection = DesktopModelSelection {
             provider,
             model: Some("exact-model".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: (provider == DesktopModelProvider::LlamaCpp)
                 .then(default_test_endpoint),
         };
@@ -16637,16 +16645,19 @@ fn desktop_model_selection_rejects_invalid_or_inherit_model_values() {
         DesktopModelSelection {
             provider: DesktopModelProvider::OpenAi,
             model: None,
+            model_selection_mode: None,
             llama_cpp_endpoint: None,
         },
         DesktopModelSelection {
             provider: DesktopModelProvider::Ollama,
             model: Some("   ".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         },
         DesktopModelSelection {
             provider: DesktopModelProvider::Inherit,
             model: Some("not-allowed".to_owned()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         },
     ] {
@@ -16696,6 +16707,7 @@ fn model_selection_changes_generation_only_when_effective_selection_changes() {
     let selection = DesktopModelSelection {
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("rah-local-model".to_owned()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: Some(default_test_endpoint()),
     };
     assert_eq!(
@@ -16720,6 +16732,7 @@ fn model_selection_is_rejected_while_chat_is_running() {
             DesktopModelSelection {
                 provider: DesktopModelProvider::OpenAi,
                 model: Some("test-model".to_owned()),
+                model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
                 llama_cpp_endpoint: None,
             },
         ),
@@ -17100,6 +17113,7 @@ fn preference_restore_initializes_only_inactive_desired_state() {
     let selection = DesktopModelSelection {
         provider: DesktopModelProvider::Ollama,
         model: Some("restored-model".to_owned()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     let mut preferences = Preferences::start(storage.0.clone()).0;
@@ -17145,11 +17159,13 @@ fn apply_and_reset_save_failures_do_not_roll_back_current_desired_state() {
     let durable = DesktopModelSelection {
         provider: DesktopModelProvider::OpenAi,
         model: Some("A".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     let applied = DesktopModelSelection {
         provider: DesktopModelProvider::Ollama,
         model: Some("B".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     let mut preferences = Preferences::start(storage.0.clone()).0;
@@ -17180,6 +17196,7 @@ fn apply_and_reset_save_failures_do_not_roll_back_current_desired_state() {
     let later = DesktopModelSelection {
         provider: DesktopModelProvider::LmStudio,
         model: Some("C".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     apply_model_selection(&mut model, ChatState::Idle, later.clone()).unwrap();
@@ -17214,6 +17231,7 @@ fn reset_is_idle_only_and_changes_no_conversation_state() {
     let selection = DesktopModelSelection {
         provider: DesktopModelProvider::OpenAi,
         model: Some("model".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     for busy in [ChatState::Running, ChatState::CancelRequested] {
@@ -17974,6 +17992,7 @@ fn startup_preference_matrix_restores_only_inactive_state_without_activation() {
     let valid = DesktopModelSelection {
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("loopback".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: Some(default_test_endpoint()),
     };
     for (stored, expected, warning) in [
@@ -18327,6 +18346,7 @@ fn preference_write_matrix_excludes_all_non_apply_reset_events() {
         DesktopModelSelection {
             provider: DesktopModelProvider::OpenAi,
             model: Some("process-local".into()),
+            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
             llama_cpp_endpoint: None,
         },
     )
@@ -18354,6 +18374,7 @@ fn only_apply_and_reset_create_one_preference_transaction_and_identical_apply_sk
     let applied = DesktopModelSelection {
         provider: DesktopModelProvider::OpenAi,
         model: Some("applied".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     reset_test_accounting();
@@ -18389,11 +18410,13 @@ fn non_loopback_apply_changes_current_state_without_preference_filesystem_activi
     let durable = DesktopModelSelection {
         provider: DesktopModelProvider::OpenAi,
         model: Some("A".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     let remote = DesktopModelSelection {
         provider: DesktopModelProvider::LlamaCpp,
         model: Some("B".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: Some(
             ProviderEndpoint::parse(ProviderEndpointInput {
                 scheme: ProviderScheme::Http,
@@ -18432,6 +18455,7 @@ fn reset_and_restore_keep_preference_and_conversation_persistence_separate() {
     let non_default = DesktopModelSelection {
         provider: DesktopModelProvider::Ollama,
         model: Some("non-default".into()),
+        model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
         llama_cpp_endpoint: None,
     };
     let mut preferences = Preferences::start(storage.0.clone()).0;

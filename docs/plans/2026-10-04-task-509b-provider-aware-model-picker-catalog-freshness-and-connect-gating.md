@@ -1,5 +1,12 @@
 # Task 509B — Provider-aware model picker, freshness, and Connect gating
 
+## Task 509B-R reference-only persistence stop
+
+[Task 509B-R](2026-10-04-task-509b-runtime-advertised-picker-freshness-custom-and-connect-gating.md)
+audits the corrected Task 509E resume scope and stops under its explicit Custom
+persistence prerequisite: classification C, bounded schema migration required.
+The historical findings below remain unchanged. No picker implementation delivered.
+
 ## Task 509E reference-only policy resolution
 
 [Task 509E](2026-10-04-task-509e-unbound-codex-catalog-picker-policy.md)

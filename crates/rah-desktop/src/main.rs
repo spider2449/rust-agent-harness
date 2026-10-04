@@ -1704,12 +1704,24 @@ fn normalize_dns_hostname(host: &str) -> Result<String, FrontendError> {
     Ok(hostname.to_ascii_lowercase())
 }
 
+/// User-selection provenance, never catalog validity or authority.
+/// Legacy explicit IDs are Advertised and require fresh revalidation even if
+/// absent from a catalog. Custom survives even if its ID later is advertised.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelSelectionMode {
+    Advertised,
+    Custom,
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Inactive Codex upstream preferences. `provider = openai` never selects a runtime adapter.
 pub(crate) struct DesktopModelSelection {
     pub(crate) provider: DesktopModelProvider,
     pub(crate) model: Option<String>,
+    pub(crate) model_selection_mode: Option<ModelSelectionMode>,
     pub(crate) llama_cpp_endpoint: Option<ProviderEndpoint>,
 }
 
@@ -1719,6 +1731,7 @@ impl Default for DesktopModelSelection {
         Self {
             provider: DesktopModelProvider::Inherit,
             model: None,
+            model_selection_mode: None,
             llama_cpp_endpoint: None,
         }
     }
@@ -1727,6 +1740,9 @@ impl Default for DesktopModelSelection {
 #[cfg(target_os = "windows")]
 impl DesktopModelSelection {
     pub(crate) fn validate(&self) -> Result<(), FrontendError> {
+        if self.model.is_some() != self.model_selection_mode.is_some() {
+            return Err(FrontendError::ModelConfigurationInvalid);
+        }
         match self.provider {
             DesktopModelProvider::Inherit
                 if self.model.is_none() && self.llama_cpp_endpoint.is_none() =>
@@ -4908,8 +4924,20 @@ fn set_model_configuration(
     let llama_cpp_endpoint = llama_cpp_endpoint
         .map(ProviderEndpoint::parse)
         .transpose()?;
+    // Existing controls cannot create Custom. Preserve restored provenance
+    // across upstream-provider changes; catalog/runtime validity is separate.
+    let model_selection_mode = model.as_ref().map(|_| {
+        state
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .selection
+            .model_selection_mode
+            .unwrap_or(ModelSelectionMode::Advertised)
+    });
     let selection = DesktopModelSelection {
         provider,
+        model_selection_mode,
         model,
         llama_cpp_endpoint,
     };
