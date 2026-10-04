@@ -115,3 +115,10 @@ non-live supported presets. Decide custom-model policy explicitly, retain fresh
 Connect-time validation and Disconnect boundaries, and test absent-model and
 runtime/source switches. No Codex runtime refresh, live OpenAI work, Task 510,
 layout redesign, persistent native OpenAI preference, or authority expansion.
+
+## Task 509B reference-only follow-up
+
+[Task 509B](2026-10-04-task-509b-provider-aware-model-picker-catalog-freshness-and-connect-gating.md)
+records the remaining preselection backend catalog/source contract gap and its B
+disposition. This reference does not revise Task 509A's implementation, validation
+evidence, historical disposition or subsequent checkpoint classification.

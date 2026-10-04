@@ -221,3 +221,9 @@ no full Desktop UI redesign. Do not start Task 510 from this classification B.
 ## Task 509A reference-only follow-up
 
 The bounded state-model prerequisite is tracked in [Task 509A](2026-10-04-task-509a-runtime-adapter-model-provider-state-separation.md). This reference does not revise Task 509's classification or historical evidence.
+
+## Task 509B reference-only follow-up
+
+[Task 509B](2026-10-04-task-509b-provider-aware-model-picker-catalog-freshness-and-connect-gating.md)
+records the preselection backend catalog/source contract gap and classification B.
+This reference does not revise this plan's historical findings or classification.
