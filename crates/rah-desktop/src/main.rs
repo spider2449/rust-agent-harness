@@ -9539,6 +9539,9 @@ fn main() {
 #[path = "main_tests.rs"]
 mod tests;
 
+#[cfg(all(test, target_os = "windows", feature = "certification-harness"))]
+mod certification_tests;
+
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn connect_codex(

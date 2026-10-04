@@ -57,8 +57,16 @@ impl ProcessTransport {
     ) -> Result<Self, CodexAdapterError> {
         let executable = resolve_executable(executable)?;
         verify_version(&executable).await?;
-        verify_schema(&executable, experimental_api).await?;
-        let mut child = Command::new(&executable)
+        Self::start_verified(&executable, experimental_api).await
+    }
+
+    // Caller must perform production admission or exact certification identity checks.
+    pub(crate) async fn start_verified(
+        executable: &Path,
+        experimental_api: bool,
+    ) -> Result<Self, CodexAdapterError> {
+        verify_schema(executable, experimental_api).await?;
+        let mut child = Command::new(executable)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -66,21 +74,33 @@ impl ProcessTransport {
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| CodexAdapterError::ProcessStartup {
-                path: executable.clone(),
+                path: executable.to_path_buf(),
                 source,
             })?;
+        #[cfg(feature = "certification-harness")]
+        if executable.components().any(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .starts_with("rah-codex-certification-snapshot-")
+        }) {
+            println!(
+                "certification snapshot app-server spawn path={} pid={:?}",
+                executable.display(),
+                child.id()
+            );
+        }
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| startup_pipe(&executable, "stdin"))?;
+            .ok_or_else(|| startup_pipe(executable, "stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| startup_pipe(&executable, "stdout"))?;
+            .ok_or_else(|| startup_pipe(executable, "stdout"))?;
         let stderr_pipe = child
             .stderr
             .take()
-            .ok_or_else(|| startup_pipe(&executable, "stderr"))?;
+            .ok_or_else(|| startup_pipe(executable, "stderr"))?;
         let stderr = Arc::new(Mutex::new(String::new()));
         let captured = Arc::clone(&stderr);
         let stderr_task = tokio::spawn(async move {

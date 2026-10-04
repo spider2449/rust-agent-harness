@@ -3,6 +3,10 @@ name = "rah-runtime-codex"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+certification-harness = []
+
 [dependencies]
 async-trait.workspace = true
 async-stream.workspace = true
@@ -16,6 +20,9 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 rah-cli = { path = "../rah-cli" }

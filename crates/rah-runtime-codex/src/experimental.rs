@@ -29,12 +29,18 @@ use tokio::{
 /// rah-runtime's factory contract.
 pub struct CodexFactory {
     executable: PathBuf,
+    #[cfg(feature = "certification-harness")]
+    pub(crate) candidate: Option<crate::certification_support::ExactCodexCandidate>,
     provider: CodexModelProvider,
     workspace: Option<PathBuf>,
     #[cfg(test)]
     fixture: Mutex<Option<crate::test_support::FakeTransport>>,
 }
 impl CodexFactory {
+    #[cfg(all(test, feature = "certification-harness"))]
+    pub(crate) fn executable_for_certification_test(&self) -> PathBuf {
+        self.executable.clone()
+    }
     /// Host measurement of the resolved file, not a running-image/TOCTOU guarantee.
     /// The returned absolute selector still passes normal version/schema admission.
     pub fn measured_artifact(
@@ -53,10 +59,20 @@ impl CodexFactory {
         Ok((path, format!("{:x}", Sha256::digest(bytes))))
     }
 
+    async fn start_transport(&self) -> Result<ProcessTransport, CodexAdapterError> {
+        #[cfg(feature = "certification-harness")]
+        if let Some(candidate) = &self.candidate {
+            candidate.verify().await?;
+            return ProcessTransport::start_verified(&self.executable, true).await;
+        }
+        ProcessTransport::start(&self.executable, true).await
+    }
+
     /// Provider-unbound runtime advertisements. No conversation or inference.
     /// Separate from provider-specific discovery capability reporting.
     pub async fn advertised_catalog(&self) -> Result<rah_runtime::ModelCatalog, RuntimeFailure> {
-        let transport = ProcessTransport::start(&self.executable, true)
+        let transport = self
+            .start_transport()
             .await
             .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
         let connection = AppServerConnection::initialize(transport, true)
@@ -77,6 +93,8 @@ impl CodexFactory {
     pub fn new(executable: PathBuf, provider: CodexModelProvider) -> Self {
         Self {
             executable,
+            #[cfg(feature = "certification-harness")]
+            candidate: None,
             provider,
             workspace: None,
             #[cfg(test)]
@@ -141,7 +159,8 @@ impl ConfiguredRuntimeFactory for CodexFactory {
                 .await?);
             }
         }
-        let transport = ProcessTransport::start(&self.executable, true)
+        let transport = self
+            .start_transport()
             .await
             .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
         Ok(

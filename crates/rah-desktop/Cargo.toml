@@ -9,6 +9,7 @@ default = ["provider-codex"]
 provider-codex = ["dep:rah-runtime-codex"]
 provider-openai = ["dep:rah-runtime-openai"]
 openai-fixture = ["provider-openai", "rah-runtime-openai/fixture-support"]
+certification-harness = ["provider-codex", "rah-runtime-codex/certification-harness"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 tauri-build = { version = "2" }
@@ -36,3 +37,8 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 tokio = { workspace = true, features = ["net", "io-util"] }
 async-trait.workspace = true
 rah-tools = { path = "../rah-tools", features = ["live-test-support"] }
+
+[[test]]
+name = "codex-certification"
+path = "src/main.rs"
+required-features = ["certification-harness"]

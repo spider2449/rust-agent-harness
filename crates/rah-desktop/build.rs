@@ -53,6 +53,26 @@ fn main() {
         ]),
     ))
     .expect("failed to build Tauri desktop command permissions");
+
+    // Tauri links its generated Windows resource only into binary targets.
+    // The explicit certification integration test reuses main.rs and needs
+    // the same Common Controls v6 activation manifest for native dialog imports.
+    // Cargo runs this script per package, not per test; this package's only
+    // integration target is codex-certification (required-features gated).
+    if std::env::var_os("CARGO_FEATURE_CERTIFICATION_HARNESS").is_some()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let resource = std::path::PathBuf::from(
+            std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"),
+        )
+        .join("resource.lib");
+        assert!(
+            resource.is_file(),
+            "Tauri Windows resource was not generated"
+        );
+        println!("cargo:rustc-link-arg-tests={}", resource.display());
+    }
 }
 
 /// Keeps the Task 120 frontend commands on the closed default IPC surface.

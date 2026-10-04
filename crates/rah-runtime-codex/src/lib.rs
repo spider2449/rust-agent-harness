@@ -1,5 +1,9 @@
 //! Optional, process-isolated Codex runtime adapter for RAH.
 
+#[cfg(feature = "certification-harness")]
+#[doc(hidden)]
+pub mod certification_support;
+
 mod bridge;
 mod catalog;
 mod connection;

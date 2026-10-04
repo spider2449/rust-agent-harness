@@ -7,6 +7,15 @@ use thiserror::Error;
 /// Typed failures produced by the private Codex app-server adapter.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// Process-local verification evidence for explicit certification builds.
+    #[cfg(feature = "certification-harness")]
+    #[doc(hidden)]
+    #[error("certification artifact verification failed")]
+    CertificationVerification {
+        /// Exact evidence, never projected to public diagnostics.
+        #[source]
+        source: crate::certification_support::CertificationVerificationError,
+    },
     /// A bounded catalog observation exceeded its deadline.
     #[error("model catalog observation exceeded its 5 second deadline")]
     CatalogDeadline,
@@ -120,6 +129,8 @@ impl CodexAdapterError {
             return failure.at_operation(operation);
         }
         let kind = match &self {
+            #[cfg(feature = "certification-harness")]
+            Self::CertificationVerification { .. } => RuntimeFailureKind::IncompatibleRuntime,
             Self::WorkspaceContext { .. } | Self::InvalidModelProviderConfig { .. } => {
                 RuntimeFailureKind::InvalidConfiguration
             }

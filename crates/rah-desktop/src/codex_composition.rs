@@ -9,6 +9,8 @@ pub(super) use rah_runtime_codex::{
 #[cfg(target_os = "windows")]
 pub(super) fn frontend_error(error: &CodexAdapterError) -> FrontendError {
     match error {
+        #[cfg(feature = "certification-harness")]
+        CodexAdapterError::CertificationVerification { .. } => FrontendError::CodexConnectionFailed,
         CodexAdapterError::CatalogDeadline => FrontendError::ModelCatalogUnavailable,
         CodexAdapterError::WorkspaceContext { .. }
         | CodexAdapterError::InvalidModelProviderConfig { .. } => {
