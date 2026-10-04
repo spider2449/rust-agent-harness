@@ -1,5 +1,10 @@
 # Task 509B-R — Runtime-advertised picker, freshness, Custom and Connect gating
 
+Reference-only follow-up: [Task 509B-R2](2026-10-04-task-509b-r2-runtime-advertised-picker-custom-freshness-and-connect.md)
+resumed implementation after preferences v4 publication, then stopped with E
+on the first focused compile failure. Its preserved WIP is not validated and
+does not change this report's historical classification or authorize Task 510B.
+
 Starting HEAD: `8c88bfac36d96bb16958375936a315170a2a6cb8`; clean worktree.
 Task 509E policy A is authoritative. Certified/preferred Codex remains 0.157.1.
 

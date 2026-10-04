@@ -1,5 +1,10 @@
 # Task 509F1 — v4 fixture migration and certification
 
+Reference-only follow-up: [Task 509B-R2](2026-10-04-task-509b-r2-runtime-advertised-picker-custom-freshness-and-connect.md)
+uses the published v4 modes in stopped picker/source WIP. R2 classified E after
+its first focused compilation failure; it does not alter F1's persistence
+certification or establish validated picker/Connect behavior.
+
 Starting HEAD: `8c88bfac36d96bb16958375936a315170a2a6cb8`.
 Preserve all stopped Task 509F implementation and documentation WIP.
 

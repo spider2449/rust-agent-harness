@@ -2,13 +2,25 @@ use super::{
     ConnectionState, DesktopAppState, ModelConfigurationPresentation, ProviderEndpoint,
     ProviderEndpointPresentation, model_configuration_status,
 };
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub(super) fn model_configuration(
-    state: State<'_, DesktopAppState>,
+pub(super) async fn model_configuration(app: AppHandle) -> ModelConfigurationPresentation {
+    // The command future owns the handle; no invoke-borrowed State escapes.
+    model_configuration_for_state(app.state::<DesktopAppState>().inner()).await
+}
+
+pub(super) async fn model_configuration_for_state(
+    state: &DesktopAppState,
 ) -> ModelConfigurationPresentation {
+    super::model_source::refresh(state, false).await;
+    // Capture configuration and source together after asynchronous resolution.
+    let _lifecycle = state
+        .lifecycle_coordination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let model_source = super::model_source::current(state);
     let (selection, generation, readiness) = {
         let model = state
             .model
@@ -21,6 +33,8 @@ pub(super) fn model_configuration(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ModelConfigurationPresentation {
+        model_source,
+        model_selection_mode: selection.model_selection_mode,
         runtime_selection: super::runtime_model_state::present(
             state.runtime_adapter,
             &selection,

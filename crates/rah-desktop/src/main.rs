@@ -36,6 +36,8 @@ mod host_invocation;
 #[cfg(target_os = "windows")]
 mod model_preflight;
 #[cfg(target_os = "windows")]
+mod model_source;
+#[cfg(target_os = "windows")]
 mod provider_composition;
 #[cfg(target_os = "windows")]
 mod remembered_workspace;
@@ -415,6 +417,7 @@ struct DesktopAppState {
     runtime_adapter: Option<runtime_selection::ProductionAdapter>,
     openai_configured_model: Option<String>,
     model_preflight: Mutex<Option<model_preflight::ScopedModelPreflight>>,
+    model_source: Mutex<model_source::Owner>,
     connection: Mutex<ConnectionState>,
     chat: Mutex<ChatState>,
     active_chat: Mutex<Option<ActiveChat>>,
@@ -593,6 +596,7 @@ impl DesktopAppState {
             openai_configured_model: runtime_model_state::configured_openai_model(),
             connection: Mutex::new(ConnectionState::NotConnected),
             model_preflight: Mutex::new(None),
+            model_source: Mutex::new(model_source::Owner::default()),
             chat: Mutex::new(ChatState::Idle),
             active_chat: Mutex::new(None),
             next_chat_generation: Mutex::new(0),
@@ -1708,7 +1712,7 @@ fn normalize_dns_hostname(host: &str) -> Result<String, FrontendError> {
 /// Legacy explicit IDs are Advertised and require fresh revalidation even if
 /// absent from a catalog. Custom survives even if its ID later is advertised.
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelSelectionMode {
     Advertised,
@@ -1815,7 +1819,9 @@ enum ReadinessState {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ModelConfigurationPresentation {
+    model_selection_mode: Option<ModelSelectionMode>,
     runtime_selection: runtime_model_state::RuntimeSelectionState,
+    model_source: model_source::Snapshot,
     provider: DesktopModelProvider,
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2125,6 +2131,7 @@ enum ProviderPublicationRejectionReason {
 
 #[cfg(target_os = "windows")]
 struct PendingConnectedPublication {
+    source_snapshot: Option<model_source::Snapshot>,
     runtime: Arc<DesktopRuntime>,
     activation: Option<DesktopProviderActivation>,
     source: RuntimeArtifactSource,
@@ -2155,6 +2162,17 @@ fn publish_connected_provider_state(
         .lifecycle_coordination
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pending
+        .source_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| model_source::precheck(state, snapshot).is_err())
+    {
+        return Err(Box::new(RejectedProviderPublication {
+            runtime: pending.runtime,
+            activation: pending.activation,
+            reason: ProviderPublicationRejectionReason::Stale,
+        }));
+    }
     let mut connection = state
         .connection
         .lock()
@@ -2261,6 +2279,7 @@ fn publish_connected_provider_state(
         composition,
         allowed_permissions,
         commit_capability,
+        source_snapshot: _,
     } = pending;
     *published_provider = activation;
     *connection = ConnectionState::Connected {
@@ -4904,6 +4923,7 @@ fn set_model_configuration(
     state: State<'_, DesktopAppState>,
     provider: DesktopModelProvider,
     model: Option<String>,
+    model_selection_mode: Option<ModelSelectionMode>,
     llama_cpp_endpoint: Option<ProviderEndpointInput>,
 ) -> Result<(), FrontendError> {
     let _lifecycle_coordination = state
@@ -4924,17 +4944,6 @@ fn set_model_configuration(
     let llama_cpp_endpoint = llama_cpp_endpoint
         .map(ProviderEndpoint::parse)
         .transpose()?;
-    // Existing controls cannot create Custom. Preserve restored provenance
-    // across upstream-provider changes; catalog/runtime validity is separate.
-    let model_selection_mode = model.as_ref().map(|_| {
-        state
-            .model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .selection
-            .model_selection_mode
-            .unwrap_or(ModelSelectionMode::Advertised)
-    });
     let selection = DesktopModelSelection {
         provider,
         model_selection_mode,
@@ -4954,6 +4963,7 @@ fn set_model_configuration(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     apply_model_selection(&mut current, chat, selection.clone())?;
     drop(current);
+    model_source::configuration_changed(state.inner());
     if state
         .preferences
         .lock()
@@ -5068,6 +5078,7 @@ fn reset_model_preferences(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     apply_model_selection(&mut current, chat, DesktopModelSelection::default())?;
     drop(current);
+    model_source::configuration_changed(state.inner());
     if state
         .preferences
         .lock()
@@ -8264,6 +8275,11 @@ async fn disconnect_codex(
             }
         }
     };
+    state
+        .model_source
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .revoke();
     revoke_repository_commit_context(state.inner()).await;
 
     let activation = state

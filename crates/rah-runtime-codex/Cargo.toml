@@ -12,6 +12,7 @@ rah-runtime = { path = "../rah-runtime" }
 rah-tools = { path = "../rah-tools" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
@@ -21,6 +22,5 @@ rah-cli = { path = "../rah-cli" }
 rah-tools = { path = "../rah-tools", features = ["live-test-support"] }
 rah-tools-mcp = { path = "../rah-tools-mcp" }
 rah-tools-plugin = { path = "../rah-tools-plugin" }
-sha2.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

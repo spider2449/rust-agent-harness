@@ -107,7 +107,7 @@ impl ProcessTransport {
     }
 }
 
-fn resolve_executable(executable: &Path) -> Result<PathBuf, CodexAdapterError> {
+pub(crate) fn resolve_executable(executable: &Path) -> Result<PathBuf, CodexAdapterError> {
     #[cfg(windows)]
     {
         resolve_windows_executable(executable, std::env::var_os("PATH").as_deref())

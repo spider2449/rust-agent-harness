@@ -20,6 +20,9 @@ let activeAssistant = null;
 let resumeAvailable = false;
 let resumeUsed = false;
 let renderedModelConfiguration = null;
+let renderedModelSource = null;
+let modelSourceRequest = 0;
+let modelDraftDirty = false;
 let renderedCommitReview = null;
 let renderedTrustedProfileSelection = null;
 let renderedRepositoryMembership = null;
@@ -130,7 +133,7 @@ function errorMessage(error) {
     codex_baseline_invalid: "Certified Codex baseline is invalid",
     codex_host_unsupported: "Certified Codex baseline requires Windows x64",
     unsupported_codex_version: "Runtime uncertified: this Codex version is not admitted",
-    model_not_advertised: "The selected model is not advertised by the current certified Codex runtime. Choose an advertised model, or separately certify a newer Codex runtime.",
+    model_not_advertised: "The selected model is not advertised by the current certified Codex runtime. Choose a runtime-advertised model, or explicitly select Custom model ID; provider compatibility remains unverified.",
     model_catalog_unavailable: "The current Codex model catalog could not be obtained. Connection stopped; model availability is unknown.",
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",
@@ -1290,6 +1293,8 @@ function renderModelConfiguration(configuration) {
   const codex = configuration.runtimeSelection?.runtimeAdapter === "codex";
   provider.value = codex ? configuration.provider : "";
   model.value = configuration.runtimeSelection?.currentModel ?? "";
+  model.hidden = !codex || configuration.modelSelectionMode !== "custom";
+  modelDraftDirty = false;
   model.disabled = !codex || configuration.provider === "inherit" || chatRunning;
   provider.disabled = !codex || chatRunning;
   const llama = codex && configuration.provider === "llama_cpp";
@@ -1319,7 +1324,62 @@ function renderModelConfiguration(configuration) {
 }
 
 async function refreshModelConfiguration(invoke) {
-  renderModelConfiguration(await invoke("model_configuration"));
+  await refreshModelSource(invoke);
+}
+
+function renderModelSource(view) {
+  renderedModelSource = view;
+  const picker = document.querySelector("#model-picker");
+  const custom = document.querySelector("#model-identifier");
+  const hint = document.querySelector("#model-source-hint");
+  const configuration = view?.adapter === "codex" && Object.hasOwn(view, "selectionMode") && !modelDraftDirty
+    ? { ...renderedModelConfiguration, provider: view.codexUpstreamProvider, modelSelectionMode: view.selectionMode, model: view.selectedModel }
+    : renderedModelConfiguration;
+  const codex = view?.adapter === "codex";
+  const inherited = codex && configuration?.provider === "inherit";
+  const source = view?.source ?? { kind: "unavailable" };
+  const options = [];
+  const add = (value, label) => { const option = document.createElement("option"); option.value = value; option.textContent = label; options.push(option); };
+  if (inherited) add("", "Runtime default / Inherit");
+  else if (source.kind === "configured") add(source.model, source.model);
+  else {
+    add("", source.kind === "loading" ? "Loading models?" : source.kind === "empty_catalog" ? "No runtime-advertised models" : "Select a model");
+    if (codex && ["advertised_catalog", "runtime_default"].includes(source.kind)) for (const id of source.models) add(id, id);
+    if (codex) add("__custom__", "Custom model ID?");
+  }
+  picker.replaceChildren(...options);
+  const mode = configuration?.modelSelectionMode;
+  const id = configuration?.model;
+  if (codex && !inherited && mode === "advertised" && id && !options.some(o => o.value === id)) {
+    add(id, id + " ? invalid for current runtime catalog");
+    options[options.length - 1].disabled = true;
+    picker.replaceChildren(...options);
+  }
+  picker.value = codex ? mode === "custom" ? "__custom__" : id ?? "" : source.kind === "configured" ? source.model : "";
+  custom.hidden = !codex || inherited || mode !== "custom";
+  const busy = chatRunning || ["connecting", "connected", "disconnecting"].includes(renderedCodexStatus);
+  picker.disabled = !codex || inherited || busy || source.kind === "loading";
+  custom.disabled = !codex || inherited || busy || source.kind === "loading";
+  const stateHints = { loading: "Loading Codex runtime advertisements?", empty_catalog: "Codex runtime advertised no models.", unavailable: "Model source unavailable.", error: "Codex model catalog could not be resolved.", no_runtime: "No runtime adapter configured.", runtime_default: "Runtime default / Inherit · provider compatibility Unverified", configured: "Configured for native OpenAI", advertised_catalog: "Advertised by Codex runtime · provider compatibility Unverified" };
+  hint.textContent = mode === "custom" && codex ? "Custom · unverified. " + (stateHints[source.kind] ?? "") : stateHints[source.kind] ?? "Model source unavailable.";
+  if (view?.eligibility === "advertised_absent") hint.textContent += " Saved Advertised ID is invalid for the current catalog; select a model or explicitly choose Custom.";
+}
+
+async function refreshModelSource(invoke) {
+  const request = ++modelSourceRequest;
+  renderModelSource({ adapter: renderedModelConfiguration?.runtimeSelection?.runtimeAdapter, source: { kind: "loading" }, eligibility: "loading" });
+  try {
+    const configuration = await invoke("model_configuration");
+    if (request !== modelSourceRequest) return;
+    renderModelConfiguration(configuration);
+    renderModelSource(configuration.modelSource);
+  } catch (_) {
+    if (request === modelSourceRequest) renderModelSource({ adapter: renderedModelConfiguration?.runtimeSelection?.runtimeAdapter, source: { kind: "error" }, eligibility: "source_unavailable" });
+  }
+}
+
+function modelConnectAllowed() {
+  return !modelDraftDirty && ["advertised_unverified", "custom_unverified", "inherited_unverified", "configured"].includes(renderedModelSource?.eligibility);
 }
 
 function renderRepositorySnapshot(snapshot) {
@@ -2093,12 +2153,20 @@ async function loadStatus(invoke) {
   const codex = status.runtimeAdapter === "codex";
   if (renderedModelConfiguration?.runtimeSelection?.runtimeAdapter !== status.runtimeAdapter) await refreshModelConfiguration(invoke);
   renderedCodexStatus = status.codexStatus;
+  if (!modelDraftDirty && status.codexStatus !== "connected") {
+    const request = modelSourceRequest;
+    const configuration = await invoke("model_configuration");
+    if (request === modelSourceRequest) {
+      renderModelConfiguration(configuration);
+      renderModelSource(configuration.modelSource);
+    }
+  }
   renderRows(document.querySelector("#application-status"), applicationRows, status);
   renderRows(document.querySelector("#runtime-status"), runtimeRows, status);
   renderModelPreflight(status.modelPreflight);
   const button = document.querySelector("#codex-connection");
   const connectionError = document.querySelector("#connection-error");
-  button.disabled = status.runtimeAvailable !== true || status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
+  button.disabled = (status.codexStatus !== "connected" && !modelConnectAllowed()) || status.runtimeAvailable !== true || status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
   button.textContent = status.codexStatus === "connected" ? "Disconnect Runtime" : "Connect Runtime";
   const connected = status.codexStatus === "connected";
   const reconnectRequired = status.repositoryToolsStatus === "reconnect required"
@@ -2134,7 +2202,8 @@ async function loadStatus(invoke) {
   document.querySelector("#apply-model-configuration").disabled = !codex || chatRunning;
   document.querySelector("#reset-model-preferences").disabled = !codex || chatRunning;
   provider.disabled = !codex || chatRunning;
-  model.disabled = !codex || chatRunning || provider.value === "inherit";
+  model.disabled = !codex || chatRunning || connected || provider.value === "inherit";
+  document.querySelector("#model-picker").disabled = !codex || chatRunning || connected || provider.value === "inherit" || renderedModelSource?.source?.kind === "loading";
   for (const element of endpointControls.querySelectorAll("select, input")) {
     element.disabled = !codex || chatRunning;
   }
@@ -2525,16 +2594,36 @@ async function initializeDesktop() {
     const provider = document.querySelector("#model-provider");
     const model = document.querySelector("#model-identifier");
     model.value = "";
+    ++modelSourceRequest;
+    modelDraftDirty = true;
+    document.querySelector("#codex-connection").disabled = true;
+    document.querySelector("#model-picker").value = "";
+    model.hidden = true;
+    if (renderedModelSource) {
+      renderedModelConfiguration = { ...renderedModelConfiguration, provider: provider.value, model: null, modelSelectionMode: null };
+      renderModelSource(renderedModelSource);
+      modelDraftDirty = true;
+    }
     renderModelPreflight(null);
     model.disabled = renderedModelConfiguration?.runtimeSelection?.runtimeAdapter !== "codex" || chatRunning || provider.value === "inherit";
     document.querySelector("#llama-cpp-endpoint").hidden = provider.value !== "llama_cpp";
     document.querySelector("#model-hint").textContent = modelHint(provider.value);
   });
+  document.querySelector("#model-picker").addEventListener("change", () => {
+    const custom = document.querySelector("#model-identifier");
+    custom.hidden = document.querySelector("#model-picker").value !== "__custom__";
+    modelDraftDirty = true;
+    document.querySelector("#codex-connection").disabled = true;
+    document.querySelector("#model-source-hint").textContent = custom.hidden ? "Advertised by Codex runtime · provider compatibility Unverified. Apply selection to revalidate." : "Custom · unverified. Apply a structurally valid model ID.";
+  });
+  document.querySelector("#model-identifier").addEventListener("input", () => { ++modelSourceRequest; modelDraftDirty = true; document.querySelector("#codex-connection").disabled = true; });
   document.querySelector("#apply-model-configuration").addEventListener("click", async () => {
     const error = document.querySelector("#model-error");
     error.hidden = true;
     const provider = document.querySelector("#model-provider").value;
-    const model = document.querySelector("#model-identifier").value;
+    const pickerValue = document.querySelector("#model-picker").value;
+    const mode = provider === "inherit" ? null : pickerValue === "__custom__" ? "custom" : "advertised";
+    const model = mode === "custom" ? document.querySelector("#model-identifier").value : pickerValue;
     const llamaCppEndpoint = provider === "llama_cpp" ? {
       scheme: document.querySelector("#llama-cpp-scheme").value,
       host: document.querySelector("#llama-cpp-host").value,
@@ -2544,6 +2633,7 @@ async function initializeDesktop() {
       await invoke("set_model_configuration", {
         provider,
         model: provider === "inherit" ? null : model,
+        modelSelectionMode: mode,
         llamaCppEndpoint,
       });
       await refreshModelConfiguration(invoke);

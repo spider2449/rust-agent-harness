@@ -57,6 +57,25 @@ pub(super) async fn connect_with_configuration(
         }
         (model.selection.clone(), model.generation)
     };
+    // Injected deterministic factories do not resolve an external artifact.
+    let source_snapshot = if configured.is_none() {
+        let snapshot = model_source::refresh(state, true).await;
+        if !snapshot.eligibility.allowed() {
+            let error = if snapshot.eligibility == model_source::Eligibility::AdvertisedAbsent {
+                FrontendError::ModelNotAdvertised
+            } else {
+                FrontendError::ModelConfigurationInvalid
+            };
+            *state
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = ConnectionState::Error(error);
+            return Err(error);
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     let (profile_selection, profile_generation) = {
         let selection = state
             .trusted_profile
@@ -221,7 +240,10 @@ pub(super) async fn connect_with_configuration(
                     .is_some_and(|value| value.branch_creation_authority.is_some()),
                 "bridge_enabled": true,
             }));
-            let (instance, preflight) = runtime_composition::create_and_preflight(factory.as_ref(), &model)
+            let preflight_model = if model_selection.model_selection_mode == Some(ModelSelectionMode::Custom) {
+                rah_runtime::experimental::ModelSelection::RuntimeDefault
+            } else { model.clone() };
+            let (instance, preflight) = runtime_composition::create_and_preflight(factory.as_ref(), &preflight_model)
                 .await.map_err(|error| runtime_frontend_error(&error))?;
             let (presentation, gate) = model_preflight::present(selected_model, preflight);
             append_live_evidence(serde_json::json!({
@@ -251,6 +273,10 @@ pub(super) async fn connect_with_configuration(
     }.await;
     match connection {
         Ok((runtime, source)) => {
+            let artifact_current = match &source_snapshot {
+                Some(snapshot) => model_source::artifact_current(snapshot).await,
+                None => true,
+            };
             let runtime = Arc::new(runtime);
             connect_pre_publication_barrier(state);
             let published_fingerprint = repository_fingerprint.clone();
@@ -275,22 +301,27 @@ pub(super) async fn connect_with_configuration(
                 .commit_identity_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let stale = !connection_publication_is_current(
-                ConnectionPublicationCurrentness {
-                    repository_generation,
-                    model_generation,
-                    profile_generation,
-                    connection_generation,
-                    identity_generation,
-                },
-                ConnectionPublicationCurrentness {
-                    repository_generation: current_repository_generation,
-                    model_generation: current_model_generation,
-                    profile_generation: current_profile_generation,
-                    connection_generation: current_connection_generation,
-                    identity_generation: current_identity_generation,
-                },
-            );
+            let source_stale = source_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| model_source::precheck(state, snapshot).is_err());
+            let stale = !artifact_current
+                || source_stale
+                || !connection_publication_is_current(
+                    ConnectionPublicationCurrentness {
+                        repository_generation,
+                        model_generation,
+                        profile_generation,
+                        connection_generation,
+                        identity_generation,
+                    },
+                    ConnectionPublicationCurrentness {
+                        repository_generation: current_repository_generation,
+                        model_generation: current_model_generation,
+                        profile_generation: current_profile_generation,
+                        connection_generation: current_connection_generation,
+                        identity_generation: current_identity_generation,
+                    },
+                );
             if stale {
                 append_live_evidence(serde_json::json!({
                     "event": "connection_publication_rejected_stale",
@@ -321,6 +352,7 @@ pub(super) async fn connect_with_configuration(
             }
 
             let pending = PendingConnectedPublication {
+                source_snapshot,
                 runtime,
                 activation: provider_activation.take(),
                 source,

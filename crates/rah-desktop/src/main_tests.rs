@@ -6353,6 +6353,7 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
     publish_connected_provider_state(
         &state,
         PendingConnectedPublication {
+            source_snapshot: None,
             runtime: Arc::new(runtime),
             activation: None,
             source,
@@ -6850,6 +6851,7 @@ async fn windows_live_desktop_repo_create_branch_host_driven() -> Result<(), Str
     publish_connected_provider_state(
         &state,
         PendingConnectedPublication {
+            source_snapshot: None,
             runtime: Arc::new(runtime),
             activation: None,
             source,
@@ -9446,6 +9448,7 @@ async fn task_321_i_real_stage_reservation_rejects_real_connect_publication() {
     .expect("pending Commit capability should compose");
     let commit_control = Arc::new(commit_control);
     let pending = PendingConnectedPublication {
+        source_snapshot: None,
         runtime: Arc::clone(&runtime),
         activation: None,
         source: CodexExecutableSource::Path,
@@ -10526,6 +10529,7 @@ async fn task349_close_and_connect_currentness_follow_lifecycle_order() {
         publish_connected_provider_state(
             &connect_first,
             super::PendingConnectedPublication {
+                source_snapshot: None,
                 runtime,
                 activation: None,
                 source: CodexExecutableSource::Path,
@@ -12154,6 +12158,7 @@ async fn effective_authority_snapshot_reaps_expired_preparation_without_issuing_
         publish_connected_provider_state(
             &state,
             PendingConnectedPublication {
+                source_snapshot: None,
                 runtime: Arc::clone(&runtime),
                 activation: None,
                 source: CodexExecutableSource::Path,
@@ -16670,7 +16675,11 @@ fn desktop_model_selection_rejects_invalid_or_inherit_model_values() {
 
 #[test]
 fn model_configuration_presentation_is_closed_and_sanitized() {
+    let mut state = DesktopAppState::new(std::env::temp_dir());
+    state.runtime_adapter = None;
     let presentation = ModelConfigurationPresentation {
+        model_source: super::model_source::current(&state),
+        model_selection_mode: None,
         runtime_selection: super::runtime_model_state::present(
             None,
             &DesktopModelSelection::default(),
@@ -16686,7 +16695,7 @@ fn model_configuration_presentation_is_closed_and_sanitized() {
     let serialized = serde_json::to_string(&presentation).expect("presentation serializes");
     assert_eq!(
         serialized,
-        r#"{"runtimeSelection":{"runtimeAdapter":"none","runtimeAvailable":false,"modelSourceKind":"none","codexModelProvider":null,"currentModel":null,"modelValidated":false},"provider":"llama_cpp","model":"rah-local-model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080,"normalized":"http://127.0.0.1:8080/v1"},"insecureTransport":false,"readiness":"not_tested","status":"active"}"#
+        r#"{"modelSelectionMode":null,"runtimeSelection":{"runtimeAdapter":"none","runtimeAvailable":false,"modelSourceKind":"none","codexModelProvider":null,"currentModel":null,"modelValidated":false},"modelSource":{"generation":1,"requestId":0,"adapter":"none","admittedArtifactSha256":null,"codexUpstreamProvider":null,"selectionMode":null,"selectedModel":null,"source":{"kind":"unavailable"},"eligibility":"no_runtime","compatibility":"unverified"},"provider":"llama_cpp","model":"rah-local-model","endpoint":{"scheme":"http","host":"127.0.0.1","port":8080,"normalized":"http://127.0.0.1:8080/v1"},"insecureTransport":false,"readiness":"not_tested","status":"active"}"#
     );
     for forbidden in [
         "base_url",
@@ -26053,6 +26062,7 @@ async fn task453_desktop_executable_file_identity() -> Result<(), String> {
         app.state(),
         DesktopModelProvider::OpenAi,
         Some("gpt-6-luna".to_owned()),
+        Some(crate::ModelSelectionMode::Advertised),
         None,
     )
     .map_err(|error| format!("model selection failed: {error:?}"))?;
@@ -26183,6 +26193,7 @@ async fn task_450_current_codex_desktop_neutral_chat() -> Result<(), String> {
         app.state(),
         DesktopModelProvider::OpenAi,
         Some("gpt-6-luna".to_owned()),
+        Some(crate::ModelSelectionMode::Advertised),
         None,
     )
     .map_err(|error| format!("Desktop model selection failed: {error:?}"))?;

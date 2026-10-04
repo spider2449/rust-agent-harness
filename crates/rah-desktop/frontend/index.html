@@ -55,7 +55,9 @@
             <option value="llama_cpp">llama.cpp</option>
           </select>
           <label for="model-identifier">Model</label>
-          <input id="model-identifier" type="text" maxlength="256" list="advertised-models" />
+          <select id="model-picker" aria-label="Model"></select>
+          <input id="model-identifier" type="text" maxlength="256" aria-label="Custom model ID" hidden />
+          <p id="model-source-hint" class="model-hint" aria-live="polite"></p>
           <datalist id="advertised-models"></datalist>
           <p id="model-preflight" class="model-hint" hidden></p>
           <div id="llama-cpp-endpoint" hidden>

@@ -35,6 +35,45 @@ pub struct CodexFactory {
     fixture: Mutex<Option<crate::test_support::FakeTransport>>,
 }
 impl CodexFactory {
+    /// Host measurement of the resolved file, not a running-image/TOCTOU guarantee.
+    /// The returned absolute selector still passes normal version/schema admission.
+    pub fn measured_artifact(
+        executable: &std::path::Path,
+    ) -> Result<(PathBuf, String), RuntimeFailure> {
+        use sha2::{Digest, Sha256};
+        let path = crate::process::resolve_executable(executable)
+            .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
+        let bytes = std::fs::read(&path).map_err(|source| {
+            CodexAdapterError::ProcessStartup {
+                path: path.clone(),
+                source,
+            }
+            .into_runtime_failure(RuntimeOperation::Connection)
+        })?;
+        Ok((path, format!("{:x}", Sha256::digest(bytes))))
+    }
+
+    /// Provider-unbound runtime advertisements. No conversation or inference.
+    /// Separate from provider-specific discovery capability reporting.
+    pub async fn advertised_catalog(&self) -> Result<rah_runtime::ModelCatalog, RuntimeFailure> {
+        let transport = ProcessTransport::start(&self.executable, true)
+            .await
+            .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
+        let connection = AppServerConnection::initialize(transport, true)
+            .await
+            .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
+        let result = crate::catalog::discover(&connection)
+            .await
+            .map_err(|e| e.into_runtime_failure(RuntimeOperation::ModelDiscovery));
+        let shutdown = connection
+            .shutdown()
+            .await
+            .map_err(|e| e.into_runtime_failure(RuntimeOperation::Shutdown));
+        let catalog = result?;
+        shutdown?;
+        Ok(catalog)
+    }
+
     pub fn new(executable: PathBuf, provider: CodexModelProvider) -> Self {
         Self {
             executable,

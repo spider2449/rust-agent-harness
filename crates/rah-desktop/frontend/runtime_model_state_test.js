@@ -5,10 +5,11 @@ const vm = require("node:vm");
 const source = fs.readFileSync(`${__dirname}/status.js`, "utf8");
 const elements = new Map();
 const element = selector => {
-  if (!elements.has(selector)) elements.set(selector, { value: "", querySelectorAll: () => [] });
+  if (!elements.has(selector)) elements.set(selector, { value: "", children: [], replaceChildren(...children) { this.children = children; }, addEventListener() {}, querySelectorAll: () => [] });
   return elements.get(selector);
 };
-const context = vm.createContext({ document: { querySelector: element }, chatRunning: false,
+const context = vm.createContext({ document: { querySelector: element, createElement: () => ({}) }, chatRunning: false,
+  renderedCodexStatus: "not connected", renderedModelSource: null, modelSourceRequest: 0, modelDraftDirty: false,
   renderedModelConfiguration: null, modelHint: value => value,
   renderModelPreflight: () => { context.cleared = true; } });
 vm.runInContext(source.slice(source.indexOf("function renderModelConfiguration"), source.indexOf("function renderRepositorySnapshot")), context);
@@ -48,12 +49,13 @@ Object.assign(context, { renderRows: () => {}, applicationRows: [], runtimeRows:
 vm.runInContext(source.slice(source.indexOf("async function loadStatus"), source.indexOf("function appendMessage")), context);
 (async () => {
   for (const runtimeAdapter of ["openai", "none", "codex"]) {
+    const snapshot = { adapter: runtimeAdapter, source: runtimeAdapter === "codex" ? { kind: "advertised_catalog", models: ["gpt-6-astra"] } : runtimeAdapter === "openai" ? { kind: "configured", model: "configured-model" } : { kind: "no_runtime" }, eligibility: runtimeAdapter === "codex" ? "advertised_absent" : runtimeAdapter === "openai" ? "configured" : "no_runtime" };
     await context.loadStatus(async command => command === "app_status" ? {
       runtimeAdapter, runtimeAvailable: runtimeAdapter !== "none", codexStatus: "not connected",
-    } : { ...preference, runtimeSelection: { runtimeAdapter, currentModel: runtimeAdapter === "codex" ? preference.model : runtimeAdapter === "openai" ? "configured-model" : null } });
+    } : { modelSource: snapshot, ...preference, modelSelectionMode: "advertised", runtimeSelection: { runtimeAdapter, currentModel: runtimeAdapter === "codex" ? preference.model : runtimeAdapter === "openai" ? "configured-model" : null } });
     assert.equal(element("#model-provider").disabled, runtimeAdapter !== "codex");
     assert.equal(element("#apply-model-configuration").disabled, runtimeAdapter !== "codex");
-    assert.equal(element("#codex-connection").disabled, runtimeAdapter === "none");
+    assert.equal(element("#codex-connection").disabled, runtimeAdapter !== "openai");
     assert.equal(element("#new-conversation").disabled, false);
     assert.equal(element("#clear-conversation-history").disabled, false);
   }
