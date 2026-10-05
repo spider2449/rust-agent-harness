@@ -30,7 +30,7 @@ pub(crate) const FILE_INFO_CHILD_TIMEOUT: Duration = Duration::from_secs(5);
 const FILE_INFO_MAX_OBSERVATION_STAGES: u32 = 4;
 pub(crate) const FILE_INFO_TOTAL_TIMEOUT: Duration =
     FILE_INFO_CHILD_TIMEOUT.saturating_mul(FILE_INFO_MAX_OBSERVATION_STAGES);
-const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const STATUS_TIMEOUT: Duration = Duration::from_secs(14);
 const DIFF_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_STDOUT_LIMIT: usize = 96 * 1024;
@@ -879,6 +879,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("exceeded its total timeout"));
+    }
+
+    #[test]
+    fn status_remainder_is_one_fourteen_second_budget_and_expiry_rejects_final_child() {
+        assert_eq!(super::STATUS_TIMEOUT, Duration::from_secs(14));
+        let started = Instant::now();
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_secs(6),
+            Duration::from_secs(13),
+            Duration::from_secs(14) - Duration::from_nanos(1),
+        ] {
+            assert_eq!(
+                child_timeout(super::STATUS_TIMEOUT, started, None, started + elapsed).unwrap(),
+                Duration::from_secs(14) - elapsed
+            );
+        }
+        for elapsed in [Duration::from_secs(14), Duration::from_secs(15)] {
+            let error =
+                child_timeout(super::STATUS_TIMEOUT, started, None, started + elapsed).unwrap_err();
+            assert!(error.to_string().contains("exceeded its total timeout"));
+        }
     }
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
