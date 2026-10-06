@@ -41,4 +41,7 @@ This refines the ownership boundaries of ADRs 0001, 0005 and 0006 without enabli
 provider-owned capabilities or expanding host authority. Runtime contracts remain
 experimental; production use does not declare API stability. Provider registration,
 provider selection UI, alternate adapters and inference engines are outside this
-decision. Exact certification policy remains adapter-specific under ADR 0030.
+decision. Admission remains adapter-specific: ADR 0030's exact-version policy
+is superseded in design by [ADR 0034](0034-artifact-bound-codex-compatibility-admission.md).
+Replacement implementation is pending Task 510C2; conversation/authority
+ownership and current production admission remain unchanged.

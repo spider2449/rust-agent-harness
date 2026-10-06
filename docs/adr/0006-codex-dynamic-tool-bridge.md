@@ -2,6 +2,12 @@
 
 Status: Accepted
 
+Version-pinning disposition (2026-10-06): [ADR 0034](0034-artifact-bound-codex-compatibility-admission.md)
+supersedes decision 7's version pin and executable/schema-pin consequences with
+conditionally required artifact-bound Tool compatibility. Experimental opt-in,
+host authority, one responder and private routing remain. Implementation is
+pending C2; production admission is unchanged. Original decisions remain below.
+
 ## Context
 
 ADR-0005 established the Codex app-server process boundary and kept Codex-owned

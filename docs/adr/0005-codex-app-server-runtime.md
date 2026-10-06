@@ -2,6 +2,12 @@
 
 Status: Accepted
 
+Version-pinning disposition (2026-10-06): [ADR 0034](0034-artifact-bound-codex-compatibility-admission.md)
+supersedes decision 1's version pin and the version-check consequence for future
+artifact-bound compatibility admission. All process, private-wire, execution,
+approval and cancellation boundaries remain. C2 implementation is pending;
+current production admission is unchanged. Original v0.1 decisions remain below.
+
 ## Context
 
 ADR-0001 makes `AgentRuntime` a RAH-owned abstraction, ADR-0002 confines Codex

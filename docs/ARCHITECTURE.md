@@ -11,6 +11,18 @@ tracked-file Tools retain their scopes under ADRs 0012–0014. HostExplicit
 remains exactly 11. The v0.33 release gate records immutable publication and
 preserved preparation evidence.
 
+## Accepted Codex compatibility admission design (implementation pending)
+
+[ADR 0034](adr/0034-artifact-bound-codex-compatibility-admission.md) replaces
+exact-version admission authority in design with a versioned, artifact-bound
+deterministic local contract. The Codex adapter/factory owns private schema,
+distribution, dispatch and behavioral evidence before conversation creation;
+neutral composition consumes closed sanitized assessment facts. Desktop does
+not own admission. Wire DTOs and JSON stay private. Pre-conversation fallback
+requires exact certified distribution identity and full contract evidence;
+mid-conversation runtime switching/replay is prohibited. Task 510C1 changes
+documentation only; production replacement awaits Task 510C2.
+
 ## Historical RAH v0.32.0 Architecture - released
 
 The v0.32 primary capability is bounded repository structure browsing with

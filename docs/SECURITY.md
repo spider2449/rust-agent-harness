@@ -22,6 +22,17 @@ runtime admission. Neither Codex version admission nor model/provider input
 grants Tool or repository authority. This current-source policy does not
 rewrite the historical v0.32.0 evidence below.
 
+Accepted replacement design: [ADR 0034](adr/0034-artifact-bound-codex-compatibility-admission.md)
+supersedes ADR 0030's exact-version authority with deterministic artifact-bound
+compatibility. Task 510C2 implementation is pending; the current code described
+above is unchanged. Missing, malformed, contradictory or indeterminate required
+evidence blocks admission or selects a separately verified certified fallback
+before conversation creation. Compatibility grants runtime execution compatibility
+only: no repository, filesystem, Tool, permission or Trusted Profile authority.
+Unknown compatible runtimes receive identical downstream restrictions;
+HostExplicit remains exactly 11. No mid-conversation switching or replay, and no
+provider/model/auth/quota outage automatically becomes runtime incompatibility.
+
 `repo.list` is a bounded, read-only `RepositoryObservation` Tool. It cannot
 grant repository authority or mutate repository state. The host supplies the
 selected active repository; model input cannot choose a root, worktree, member,

@@ -1,8 +1,19 @@
 # ADR 0030 — Moving Codex runtime certification
 
-Status: Accepted
+Status: Accepted; exact-version admission portions superseded by ADR 0034
 
 Date: 2026-09-27
+
+## Supersession — 2026-10-06
+
+[ADR 0034](0034-artifact-bound-codex-compatibility-admission.md) supersedes the
+version-admission portions of decisions 1, 3, 4 and 6 below with an artifact-bound
+deterministic local contract. These original decisions are retained as historical
+trace of why exact certification was required. Historical release certification,
+host-owned selection, private process boundary and no-authority-grant rules remain.
+ADR 0034 is accepted design; replacement production admission is pending Task
+510C2. Current code remains exact-version-gated; this document change adds no
+accepted executable version and changes no preferred baseline.
 
 ## Context
 
