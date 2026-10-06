@@ -189,7 +189,7 @@ fn run() -> Result<u8, String> {
             thread::sleep(Duration::from_millis(delay));
             Ok(0)
         }
-        "spawn-child" => {
+        "spawn-child" | "spawn-pipe-child" => {
             let marker = args.next().ok_or("missing marker file")?;
             let child_pid_file = args.next().ok_or("missing child pid file")?;
             let delay = args.next().ok_or("missing delay")?;
@@ -198,8 +198,16 @@ fn run() -> Result<u8, String> {
             let child = Command::new(executable)
                 .args(["delayed-write", &marker, &child_pid_file, &delay])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(if operation == "spawn-pipe-child" {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                })
+                .stderr(if operation == "spawn-pipe-child" {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                })
                 .spawn()
                 .map_err(|error| error.to_string())?;
             println!("{}", child.id());

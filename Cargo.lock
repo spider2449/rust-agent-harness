@@ -2896,6 +2896,7 @@ dependencies = [
  "futures",
  "rah-model",
  "rah-protocol",
+ "rah-sandbox",
  "rah-tools",
  "serde_json",
  "thiserror 2.0.20",

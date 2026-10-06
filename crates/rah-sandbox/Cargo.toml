@@ -3,6 +3,10 @@ name = "rah-sandbox"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Opt-in local timing evidence; no process policy change.
+live-test-support = []
+
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true

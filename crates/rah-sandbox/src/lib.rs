@@ -9,6 +9,9 @@ mod process;
 mod supervised_process;
 mod workspace;
 
+#[cfg(feature = "live-test-support")]
+pub use supervised_process::provenance;
+
 pub use process::ProcessSandbox;
 pub use supervised_process::{
     HostProcessOutput, HostProcessSpec, OutputLimits, OutputOverflow, execute_host_process,

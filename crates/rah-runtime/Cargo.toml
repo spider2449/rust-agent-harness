@@ -3,6 +3,10 @@ name = "rah-runtime"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Diagnostic timing for ordinary host dispatch only.
+live-test-support = ["rah-tools/live-test-support"]
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
@@ -16,5 +20,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
+rah-sandbox = { path = "../rah-sandbox" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

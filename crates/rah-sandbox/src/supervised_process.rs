@@ -104,6 +104,30 @@ pub struct HostProcessOutput {
 pub async fn execute_host_process(
     spec: HostProcessSpec,
 ) -> Result<HostProcessOutput, SandboxError> {
+    #[cfg(feature = "live-test-support")]
+    provenance::record("HostProcessSpec/env_clear=true", &spec);
+    let result = execute_host_process_inner(spec).await;
+    #[cfg(feature = "live-test-support")]
+    match &result {
+        Ok(output) => provenance::record("HostProcessOutput", output),
+        Err(error) => provenance::error("process_return", error),
+    }
+    result
+}
+
+async fn execute_host_process_inner(
+    spec: HostProcessSpec,
+) -> Result<HostProcessOutput, SandboxError> {
+    #[cfg(feature = "live-test-support")]
+    let _timing = ProcessTiming(std::time::Instant::now());
+    #[cfg(feature = "live-test-support")]
+    diagnostic(
+        "child_start",
+        &format!(
+            "{:?} {:?} timeout={:?}",
+            spec.executable, spec.args, spec.timeout
+        ),
+    );
     spec.output_limits.validate()?;
     if spec.timeout.is_zero() {
         return Err(execution_error("timeout must be greater than zero"));
@@ -126,11 +150,25 @@ pub async fn execute_host_process(
         .kill_on_drop(true);
     configure_process_group(&mut command);
 
-    let mut child = command.spawn().map_err(|error| SandboxError::Execution {
-        program: "configured capability executable".to_owned(),
-        message: error.to_string(),
+    let mut child = command.spawn().map_err(|error| {
+        #[cfg(feature = "live-test-support")]
+        provenance::io_error("Command::spawn", &error);
+        SandboxError::Execution {
+            program: "configured capability executable".to_owned(),
+            message: error.to_string(),
+        }
     })?;
-    let mut supervisor = ProcessSupervisor::attach(&child)?;
+    #[cfg(feature = "live-test-support")]
+    provenance::record("spawn_pid", &child.id());
+    // Attach ownership before diagnostic output can delay this critical path.
+    let attachment = ProcessSupervisor::attach(&child);
+    #[cfg(feature = "live-test-support")]
+    diagnostic("spawn_complete", &format!("pid={:?}", child.id()));
+    #[cfg(feature = "live-test-support")]
+    if let Err(error) = &attachment {
+        diagnostic("supervisor_attachment_failed", &format!("{error:?}"));
+    }
+    let mut supervisor = attachment?;
     let stdout = child
         .stdout
         .take()
@@ -170,10 +208,13 @@ pub async fn execute_host_process(
 
     let (mut exit_code, timed_out, mut overflow, mut termination_attempted) = match completion {
         Completion::Exited(status) => {
-            let status = status.map_err(|error| execution_error(error.to_string()))?;
+            let status = status.map_err(|error| io_execution_error(&error))?;
             (status.code(), false, None, false)
         }
         Completion::TimedOut => {
+            #[cfg(feature = "live-test-support")]
+            diagnostic("timeout_detected", &format!("pid={:?}", child.id()));
+
             terminate_and_reap(&mut child, &mut supervisor).await?;
             (None, true, None, true)
         }
@@ -183,8 +224,16 @@ pub async fn execute_host_process(
         }
     };
 
+    #[cfg(feature = "live-test-support")]
+    diagnostic("wait_complete", "");
     let stdout = join_reader(stdout_task).await?;
+    #[cfg(feature = "live-test-support")]
+    diagnostic("stdout_join_complete", "");
+
     let stderr = join_reader(stderr_task).await?;
+    #[cfg(feature = "live-test-support")]
+    diagnostic("stderr_join_complete", "");
+
     if overflow.is_none() {
         overflow = stdout.overflow.or(stderr.overflow);
         if overflow.is_some() {
@@ -195,6 +244,11 @@ pub async fn execute_host_process(
     }
     supervisor.disarm();
 
+    #[cfg(feature = "live-test-support")]
+    diagnostic(
+        "child_end",
+        &format!("timed_out={timed_out} termination={termination_attempted}"),
+    );
     Ok(HostProcessOutput {
         stdout: stdout.bytes,
         stderr: stderr.bytes,
@@ -274,7 +328,7 @@ async fn join_reader(
 ) -> Result<ReadResult, SandboxError> {
     match time::timeout(TERMINATION_GRACE, &mut task).await {
         Ok(Ok(Ok(bytes))) => Ok(bytes),
-        Ok(Ok(Err(error))) => Err(execution_error(error.to_string())),
+        Ok(Ok(Err(error))) => Err(io_execution_error(&error)),
         Ok(Err(error)) => Err(execution_error(format!("output reader failed: {error}"))),
         Err(_) => {
             task.abort();
@@ -289,15 +343,35 @@ async fn terminate_and_reap(
     child: &mut Child,
     supervisor: &mut ProcessSupervisor,
 ) -> Result<(), SandboxError> {
+    #[cfg(feature = "live-test-support")]
+    diagnostic("kill_request", &format!("pid={:?}", child.id()));
     supervisor.terminate()?;
     let _ = child.start_kill();
+    #[cfg(feature = "live-test-support")]
+    diagnostic("kill_requested", "");
+
     time::timeout(TERMINATION_GRACE, child.wait())
         .await
         .map_err(|_| execution_error("process did not exit after termination attempt"))?
-        .map_err(|error| execution_error(error.to_string()))?;
+        .map_err(|error| io_execution_error(&error))?;
+    #[cfg(feature = "live-test-support")]
+    diagnostic("reap_complete", "");
     Ok(())
 }
 
+fn os_execution_error(operation: &str) -> SandboxError {
+    let error = std::io::Error::last_os_error();
+    #[cfg(feature = "live-test-support")]
+    provenance::io_error(operation, &error);
+    #[cfg(not(feature = "live-test-support"))]
+    let _ = operation;
+    io_execution_error(&error)
+}
+fn io_execution_error(error: &std::io::Error) -> SandboxError {
+    #[cfg(feature = "live-test-support")]
+    provenance::io_error("OS process operation", error);
+    execution_error(error.to_string())
+}
 fn execution_error(message: impl Into<String>) -> SandboxError {
     SandboxError::Execution {
         program: "configured capability executable".to_owned(),
@@ -341,7 +415,7 @@ impl ProcessSupervisor {
 
         let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if raw_job.is_null() {
-            return Err(execution_error(std::io::Error::last_os_error().to_string()));
+            return Err(os_execution_error("CreateJobObjectW"));
         }
         let job = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw_job.cast()) };
         let mut information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -355,7 +429,7 @@ impl ProcessSupervisor {
             )
         };
         if configured == 0 {
-            return Err(execution_error(std::io::Error::last_os_error().to_string()));
+            return Err(os_execution_error("SetInformationJobObject"));
         }
         let child_handle = child
             .raw_handle()
@@ -363,7 +437,7 @@ impl ProcessSupervisor {
         let assigned =
             unsafe { AssignProcessToJobObject(job.as_raw_handle().cast(), child_handle.cast()) };
         if assigned == 0 {
-            return Err(execution_error(std::io::Error::last_os_error().to_string()));
+            return Err(os_execution_error("AssignProcessToJobObject"));
         }
         Ok(Self { job: Some(job) })
     }
@@ -377,7 +451,7 @@ impl ProcessSupervisor {
         };
         let terminated = unsafe { TerminateJobObject(job.as_raw_handle().cast(), 1) };
         if terminated == 0 {
-            return Err(execution_error(std::io::Error::last_os_error().to_string()));
+            return Err(os_execution_error("TerminateJobObject"));
         }
         Ok(())
     }
@@ -411,7 +485,7 @@ impl ProcessSupervisor {
         if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             Ok(())
         } else {
-            Err(execution_error(std::io::Error::last_os_error().to_string()))
+            Err(os_execution_error("libc::kill"))
         }
     }
 
@@ -439,5 +513,110 @@ impl ProcessSupervisor {
 impl Drop for ProcessSupervisor {
     fn drop(&mut self) {
         let _ = self.terminate();
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+fn diagnostic(event: &str, detail: &str) {
+    provenance::record(event, &detail);
+    if std::env::var_os("RAH_R4H_TIMING").is_some() {
+        eprintln!(
+            "R4H process event={event} wall_ns={} {detail}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+struct ProcessTiming(std::time::Instant);
+
+#[cfg(feature = "live-test-support")]
+impl Drop for ProcessTiming {
+    fn drop(&mut self) {
+        diagnostic("child_return", &format!("total={:?}", self.0.elapsed()));
+    }
+}
+/// Process-local diagnostic capture; never serialized into Tool output.
+#[cfg(feature = "live-test-support")]
+pub mod provenance {
+    use std::{
+        fmt::Debug,
+        sync::Mutex,
+        time::{Instant, SystemTime},
+    };
+    static RECORDS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    tokio::task_local! {
+        static PHASE: (String, Option<std::time::Duration>);
+    }
+    /// Captures one host operation without synchronous diagnostic I/O.
+    pub async fn capture<F: std::future::Future>(future: F) -> (F::Output, Vec<String>) {
+        assert!(
+            RECORDS.lock().unwrap().replace(Vec::new()).is_none(),
+            "serial diagnostic capture only"
+        );
+        let result = future.await;
+        let retained = RECORDS.lock().unwrap().take().unwrap();
+        (result, retained)
+    }
+    /// Associates a subprocess with its source-defined caller and parent budget.
+    pub async fn phase<F: std::future::Future>(
+        name: &str,
+        remaining: Option<std::time::Duration>,
+        future: F,
+    ) -> F::Output {
+        PHASE.scope((name.into(), remaining), future).await
+    }
+    /// Retains concrete structured fields before an error conversion.
+    pub fn record<T: Debug + ?Sized>(event: &str, value: &T) {
+        if let Some(records) = RECORDS.lock().unwrap().as_mut() {
+            let phase = PHASE.try_with(Clone::clone).ok();
+            records.push(format!(
+                "wall={:?} monotonic={:?} phase={phase:?} event={event} type={} value={value:?}",
+                SystemTime::now(),
+                Instant::now(),
+                std::any::type_name::<T>()
+            ));
+        }
+    }
+    /// Retains a typed source and each nested source before sanitization.
+    pub fn error<E: std::error::Error + 'static>(event: &str, error: &E) {
+        record(event, error);
+        let mut source = error.source();
+        while let Some(error) = source {
+            record("nested_source", error);
+            source = error.source();
+        }
+    }
+    /// Retains OS kind/code in addition to the concrete io::Error.
+    pub fn io_error(operation: &str, error: &std::io::Error) {
+        self::error(operation, error);
+        record(
+            "io_fields",
+            &(operation, error.kind(), error.raw_os_error()),
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn blocked_pipe_reader_is_aborted_after_existing_grace() {
+        let task = tokio::spawn(std::future::pending::<Result<ReadResult, std::io::Error>>());
+        let abort = task.abort_handle();
+        let started = std::time::Instant::now();
+        let error = match join_reader(task).await {
+            Err(error) => error,
+            Ok(_) => panic!("blocked reader succeeded"),
+        };
+        assert!(error.to_string().contains("output pipe did not close"));
+        // One existing grace for join, one grace for scheduler/test observation.
+        assert!(started.elapsed() < TERMINATION_GRACE * 2);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        eprintln!("R4H blocked_pipe wall={:?} aborted=true", started.elapsed());
     }
 }

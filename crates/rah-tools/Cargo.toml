@@ -5,9 +5,9 @@ edition.workspace = true
 
 [features]
 # Opt-in fixture observability for the live Codex repository-patch example.
-# This records only a process-local replacement-attempt counter and grants no
-# additional tool, filesystem, or process authority.
-live-test-support = []
+# This records a process-local replacement-attempt counter and opt-in repository
+# observation timings; it grants no additional tool, filesystem, or process authority.
+live-test-support = ["rah-sandbox/live-test-support"]
 
 [dependencies]
 async-trait.workspace = true

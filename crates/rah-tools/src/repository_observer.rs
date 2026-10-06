@@ -339,6 +339,15 @@ impl RepositoryObserver {
         path: Option<&str>,
         started: Instant,
     ) -> Result<HostProcessOutput, ToolError> {
+        #[cfg(feature = "live-test-support")]
+        if matches!(command, ObserverCommand::Status) {
+            return crate::repository_git_layout::DIAGNOSTIC_OBSERVATION
+                .scope(
+                    (started, STATUS_TIMEOUT),
+                    self.run_with_budget(command, path, started, None),
+                )
+                .await;
+        }
         self.run_with_budget(command, path, started, None).await
     }
 
@@ -387,10 +396,21 @@ impl RepositoryObserver {
         started: Instant,
         aggregate: Option<(Instant, Duration)>,
     ) -> Result<HostProcessOutput, ToolError> {
+        #[cfg(feature = "live-test-support")]
+        let mut phase = Instant::now();
         self.revalidate()?;
+        #[cfg(feature = "live-test-support")]
+        observation_timing("revalidate", &mut phase, started, STATUS_TIMEOUT);
         self.repository
             .validate_git_with_budget(&self.git, aggregate)
             .await?;
+        #[cfg(feature = "live-test-support")]
+        observation_timing(
+            "validate_git_with_budget",
+            &mut phase,
+            started,
+            STATUS_TIMEOUT,
+        );
         if matches!(
             command,
             ObserverCommand::Status
@@ -400,6 +420,8 @@ impl RepositoryObserver {
                 | ObserverCommand::DiffPatch(_)
         ) {
             self.validate_observation()?;
+            #[cfg(feature = "live-test-support")]
+            observation_timing("validate_observation", &mut phase, started, STATUS_TIMEOUT);
         }
         let timeout = match command {
             ObserverCommand::Status => STATUS_TIMEOUT,
@@ -413,6 +435,8 @@ impl RepositoryObserver {
             | ObserverCommand::FileInfoStatus => FILE_INFO_CHILD_TIMEOUT,
         };
         let remaining = child_timeout(timeout, started, aggregate, Instant::now())?;
+        #[cfg(feature = "live-test-support")]
+        observation_timing("child_timeout", &mut phase, started, timeout);
         let policy = match command {
             ObserverCommand::Index => &self.index,
             ObserverCommand::TrackedInventory => &self.tracked_inventory,
@@ -433,7 +457,33 @@ impl RepositoryObserver {
             Some(path) => ToolInput(json!({"text": path})),
             None => ToolInput(json!({})),
         };
-        policy.execute_process(&input).await
+        #[cfg(feature = "live-test-support")]
+        let result = rah_sandbox::provenance::phase(
+            "RepositoryObserver::run_with_budget/execute_process",
+            Some(timeout.saturating_sub(started.elapsed())),
+            policy.execute_process(&input),
+        )
+        .await;
+        #[cfg(not(feature = "live-test-support"))]
+        let result = policy.execute_process(&input).await;
+        #[cfg(feature = "live-test-support")]
+        observation_timing("execute_process", &mut phase, started, timeout);
+        result
+    }
+}
+
+#[cfg(feature = "live-test-support")]
+fn observation_timing(name: &str, phase: &mut Instant, started: Instant, limit: Duration) {
+    if std::env::var_os("RAH_R4_OBSERVATION_TIMING").is_some() {
+        let now = Instant::now();
+        eprintln!(
+            "R4 phase={name} start={:?} duration={:?} cumulative={:?} remaining={:?}",
+            phase.saturating_duration_since(started),
+            now.saturating_duration_since(*phase),
+            now.saturating_duration_since(started),
+            limit.saturating_sub(now.saturating_duration_since(started))
+        );
+        *phase = now;
     }
 }
 
@@ -901,6 +951,88 @@ mod tests {
                 child_timeout(super::STATUS_TIMEOUT, started, None, started + elapsed).unwrap_err();
             assert!(error.to_string().contains("exceeded its total timeout"));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "R4H native fixture path supplied explicitly; deterministic observation timeout"]
+    async fn r4h_forced_observation_child_timeout() {
+        let root = repository();
+        let git = native_git();
+        assert!(
+            Command::new(&git)
+                .args(["init", "--quiet"])
+                .arg(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let fixture = fs::canonicalize(std::env::var_os("RAH_R4H_FIXTURE").unwrap()).unwrap();
+        // Layout validation requires the index path to exist. Keep this fixture
+        // consistent with the existing repository-status fixtures.
+        fs::write(root.join("tracked.txt"), "fixture\n").unwrap();
+        assert!(
+            Command::new(&git)
+                .current_dir(&root)
+                .args(["add", "tracked.txt"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new(&git)
+                .current_dir(&root)
+                .args([
+                    "-c",
+                    "user.name=RAH Test",
+                    "-c",
+                    "user.email=rah@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut observer = RepositoryObserver::new(&git, &root).unwrap();
+        let pid_file = root.join("child.pid");
+        observer.status = crate::HostExecutionPolicy::new(
+            &fixture,
+            crate::HostArgumentPolicy::Exact(vec![
+                "pid-delay".into(),
+                pid_file.display().to_string(),
+                "30000".into(),
+            ]),
+            &root,
+            ".",
+        )
+        .unwrap()
+        .with_environment(crate::git_support::repository_observer_environment(&root).unwrap())
+        .unwrap();
+        // Backdate only the private test start, leaving one second of the real
+        // status envelope for validation plus the native test-owned child.
+        let started = Instant::now() - (super::STATUS_TIMEOUT - Duration::from_secs(1));
+        let wall = Instant::now();
+        let output = observer
+            .run(ObserverCommand::Status, None, started)
+            .await
+            .unwrap();
+        assert!(output.timed_out && output.termination_attempted);
+        assert!(pid_file.exists(), "slow child must have entered");
+        // Remaining envelope <=1s plus reap and both reader graces (2s each).
+        assert!(wall.elapsed() < Duration::from_secs(7));
+        eprintln!(
+            "R4H forced_observation wall={:?} pid={} timed_out={} termination={} exit={:?}",
+            wall.elapsed(),
+            fs::read_to_string(&pid_file).unwrap(),
+            output.timed_out,
+            output.termination_attempted,
+            output.exit_code
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);

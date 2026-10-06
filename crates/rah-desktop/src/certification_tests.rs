@@ -16,6 +16,164 @@ fn descriptor() -> ExactCodexCandidate {
     }
 }
 
+#[tokio::test]
+#[ignore = "Task 510B-R5C explicitly authorized real bundle Desktop turn"]
+async fn task510br5c_bundle_desktop_turn() {
+    use rah_runtime_codex::certification_support::{ProtocolCapture, measure_artifact};
+    let bundle = std::path::Path::new(
+        "F:/Temp/rah-codex-certification-bundle-b2cdfb57-d558-466d-a6cb-83a1c9d3224c",
+    );
+    let before = measure_artifact(&bundle.join("codex.exe")).unwrap();
+    assert_eq!(before.sha256, HASH);
+    assert_eq!(before.file_id, Some(0x00110000000c1861));
+    let companion = measure_artifact(&bundle.join("codex-code-mode-host.exe")).unwrap();
+    assert_eq!(
+        companion.sha256,
+        "1d448bfde19e7a280d600d8d0bcddf77afbe9feaec1e804905becc5f39bc9db6"
+    );
+    assert_eq!(companion.file_id, Some(0x00180000000c1862));
+    let root = std::env::temp_dir().join(format!(
+        "rah-task510br5c-desktop-{}",
+        rah_protocol::SessionId::new()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let capture = ProtocolCapture::default();
+    let factory = verify_and_construct_candidate(
+        ExactCodexCandidate {
+            path: bundle.join("codex.exe"),
+            ..descriptor()
+        },
+        rah_runtime_codex::CodexModelProvider::OpenAi,
+        &root,
+    )
+    .await
+    .unwrap()
+    .with_protocol_capture(capture.clone());
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(root))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    set_model_configuration(
+        app.handle().clone(),
+        state.clone(),
+        DesktopModelProvider::OpenAi,
+        Some("gpt-6.1-sol".into()),
+        Some(ModelSelectionMode::Advertised),
+        None,
+    )
+    .unwrap();
+    let connected = tokio::time::timeout(
+        Duration::from_secs(60),
+        production_composition::connect_with_configuration(
+            state.inner(),
+            runtime_selection::ProductionAdapter::Codex,
+            Some((
+                Box::new(factory),
+                ModelSelection::Explicit("gpt-6.1-sol".into()),
+                RuntimeArtifactSource::Path,
+            )),
+        ),
+    )
+    .await
+    .unwrap();
+    match &connected {
+        Ok(result) => assert_eq!(result.status, "connected"),
+        Err(error) => panic!("Desktop Connect failed: {error:?}"),
+    }
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("Desktop Connect did not publish connected state"),
+    };
+    let result = async {
+        connected.unwrap();
+        let generations = current_host_generation_tuple(state.inner());
+        let prompt = "Reply exactly RAH510B_DESKTOP_OK. Do not use tools.".to_owned();
+        let (messages, epoch) = {
+            let mut conversation = state.conversation.lock().unwrap();
+            conversation.reconcile(ConversationContextIdentity {
+                repository_generation: generations[0],
+                model_generation: generations[1],
+            });
+            (
+                conversation.request_messages(&prompt).unwrap(),
+                conversation.epoch,
+            )
+        };
+        let generation = state.start_chat().unwrap();
+        run_chat(
+            app.handle().clone(),
+            runtime.clone(),
+            AgentRequest {
+                request_id: RequestId::new(),
+                input: AgentInput { messages },
+                options: AgentOptions::default(),
+            },
+            prompt,
+            epoch,
+            generation,
+            generations,
+        )
+        .await;
+        let history = state.conversation.lock().unwrap().history.clone();
+        assert_eq!(
+            history.len(),
+            2,
+            "real Desktop completion must commit one pair"
+        );
+        assert!(history[1].content.contains("RAH510B_DESKTOP_OK"));
+        assert_eq!(*state.chat.lock().unwrap(), ChatState::Idle);
+        let wire: Vec<(bool, serde_json::Value)> = capture
+            .records()
+            .into_iter()
+            .map(|(outgoing, message)| (outgoing, serde_json::from_str(&message).unwrap()))
+            .collect();
+        let catalog = wire
+            .iter()
+            .find(|(out, m)| *out && m["method"] == "model/list")
+            .unwrap();
+        assert!(wire.iter().any(|(out, m)| {
+            !out && m["id"] == catalog.1["id"]
+                && m["result"]["data"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|model| model["id"] == "gpt-6.1-sol"))
+        }));
+        assert!(!wire.iter().any(|(_, m)| m["method"] == "item/tool/call"));
+        println!("Desktop Connect/catalog/gpt-6.1-sol/real chat completion PASS");
+    };
+    let result = tokio::time::timeout(Duration::from_secs(180), result).await;
+    let shutdown =
+        tokio::time::timeout(Duration::from_secs(20), disconnect_codex(state.clone())).await;
+    std::fs::write(
+        "F:/Temp/rah-task510br5c-evidence/desktop-wire.json",
+        serde_json::to_string_pretty(
+            &capture
+                .timeline()
+                .into_iter()
+                .map(|(timestamp, outgoing, message)| {
+                    (
+                        timestamp,
+                        outgoing,
+                        serde_json::from_str::<serde_json::Value>(&message).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(shutdown, Ok(Ok(result)) if result.status == "not connected"));
+    assert!(!runtime.is_alive());
+    assert_eq!(measure_artifact(&bundle.join("codex.exe")).unwrap(), before);
+    assert_eq!(
+        measure_artifact(&bundle.join("codex-code-mode-host.exe")).unwrap(),
+        companion
+    );
+    result.unwrap();
+    println!("Desktop Disconnect/clean shutdown/unchanged bundle PASS");
+}
+
 #[test]
 fn certification_frontend_mapping_preserves_private_sources() {
     use std::error::Error;

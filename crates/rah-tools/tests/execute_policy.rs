@@ -481,6 +481,41 @@ async fn wait_for_process_exit(pid: u32) {
 }
 
 #[cfg(windows)]
+#[tokio::test]
+async fn r4h_timeout_reaps_tree_with_descendant_owned_output_pipes() {
+    let root = TestDirectory::new("r4h-pipe-tree");
+    let marker = root.0.join("marker");
+    let pid_file = root.0.join("child.pid");
+    let marker_arg = marker.display().to_string();
+    let pid_arg = pid_file.display().to_string();
+    let policy = exact_policy(
+        &root.0,
+        &["spawn-pipe-child", &marker_arg, &pid_arg, "30000"],
+    )
+    .with_timeout(Duration::from_secs(1))
+    .unwrap();
+    let started = Instant::now();
+    let tool = HostExecutionTool::new("test.pipe-tree", "Native pipe tree control", policy);
+    let output = run(&tool, json!({})).await.unwrap();
+    assert_eq!(json_content(&output)["timed_out"], true);
+    assert_eq!(json_content(&output)["termination_attempted"], true);
+    assert!(started.elapsed() < Duration::from_secs(7));
+    let pid = fs::read_to_string(pid_file)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !process_is_running(pid),
+        "descendant must be gone at return"
+    );
+    assert!(!marker.exists());
+    eprintln!(
+        "R4H pipe_tree wall={:?} descendant={pid} exited=true",
+        started.elapsed()
+    );
+}
+
+#[cfg(windows)]
 fn process_is_running(pid: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, STILL_ACTIVE},

@@ -583,6 +583,22 @@ fn is_reparse(_: &fs::Metadata) -> bool {
     false
 }
 
+#[cfg(feature = "live-test-support")]
+tokio::task_local! {
+    pub(crate) static DIAGNOSTIC_OBSERVATION: (Instant, Duration);
+}
+
+#[cfg(feature = "live-test-support")]
+fn diagnostic_probe_budget(event: &str, arguments: &[&str], allowance: Duration) {
+    if let Ok((started, limit)) = DIAGNOSTIC_OBSERVATION.try_with(|value| *value) {
+        let elapsed = started.elapsed();
+        rah_sandbox::provenance::record(
+            event,
+            &(arguments, elapsed, limit.saturating_sub(elapsed), allowance),
+        );
+    }
+}
+
 async fn probe(
     git: &Path,
     root: &Path,
@@ -590,6 +606,14 @@ async fn probe(
     stdout_limit: usize,
     aggregate: Option<(Instant, Duration)>,
 ) -> Result<Vec<u8>, ToolError> {
+    #[cfg(feature = "live-test-support")]
+    let phase_started = Instant::now();
+    #[cfg(feature = "live-test-support")]
+    diagnostic_probe_budget(
+        "R4J probe_before/argv_elapsed_remaining_allowance",
+        arguments,
+        probe_timeout(aggregate, Instant::now())?,
+    );
     let policy = HostExecutionPolicy::new(
         git,
         HostArgumentPolicy::Exact(arguments.iter().map(|value| (*value).into()).collect()),
@@ -603,7 +627,31 @@ async fn probe(
         combined_bytes: stdout_limit.saturating_add(PROBE_STDERR_LIMIT),
     })?
     .with_timeout(probe_timeout(aggregate, Instant::now())?)?;
-    let output = policy.execute_process(&ToolInput(json!({}))).await?;
+    let input = ToolInput(json!({}));
+    #[cfg(feature = "live-test-support")]
+    let output = rah_sandbox::provenance::phase(
+        "repository_git_layout::probe",
+        aggregate.map(|(start, limit)| limit.saturating_sub(start.elapsed())),
+        policy.execute_process(&input),
+    )
+    .await?;
+    #[cfg(not(feature = "live-test-support"))]
+    let output = policy.execute_process(&input).await?;
+    #[cfg(feature = "live-test-support")]
+    {
+        diagnostic_probe_budget(
+            "R4J probe_after/argv_elapsed_remaining_duration",
+            arguments,
+            phase_started.elapsed(),
+        );
+    }
+    #[cfg(feature = "live-test-support")]
+    if std::env::var_os("RAH_R4_OBSERVATION_TIMING").is_some() {
+        eprintln!(
+            "R4 probe={arguments:?} duration={:?} aggregate={aggregate:?}",
+            phase_started.elapsed()
+        );
+    }
     if output.timed_out
         && matches!(aggregate, Some((started, limit)) if limit.saturating_sub(Instant::now().saturating_duration_since(started)).is_zero())
     {

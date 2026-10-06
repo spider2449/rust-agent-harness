@@ -207,8 +207,12 @@ impl HostExecutionPolicy {
             output_limits: self.output_limits,
         })
         .await
-        .map_err(|error| ToolError::Execution {
-            message: error.to_string(),
+        .map_err(|error| {
+            #[cfg(feature = "live-test-support")]
+            rah_sandbox::provenance::error("SandboxError -> ToolError", &error);
+            ToolError::Execution {
+                message: error.to_string(),
+            }
         })
     }
 

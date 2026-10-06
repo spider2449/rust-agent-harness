@@ -73,6 +73,12 @@ impl RepositoryNestedBoundaryPolicy {
     /// observation.  A boundary or an ambiguous traversable entry rejects the
     /// complete observation before Git can read it.
     pub(crate) fn validate_observation(&self) -> Result<(), ToolError> {
+        #[cfg(feature = "live-test-support")]
+        let timing_started = std::time::Instant::now();
+        #[cfg(feature = "live-test-support")]
+        let mut marker_time = std::time::Duration::ZERO;
+        #[cfg(feature = "live-test-support")]
+        let mut entries = 0usize;
         let mut pending = vec![self.root.clone()];
         let mut directories = 0usize;
         while let Some(directory) = pending.pop() {
@@ -84,10 +90,20 @@ impl RepositoryNestedBoundaryPolicy {
             }
             if !paths_equivalent(&directory, &self.root) {
                 reject_ambiguous_component(&directory)?;
+                #[cfg(feature = "live-test-support")]
+                let marker_started = std::time::Instant::now();
                 reject_nested_marker(&directory)?;
+                #[cfg(feature = "live-test-support")]
+                {
+                    marker_time += marker_started.elapsed();
+                }
             }
             for entry in fs::read_dir(&directory).map_err(boundary_observation_error)? {
                 let entry = entry.map_err(boundary_observation_error)?;
+                #[cfg(feature = "live-test-support")]
+                {
+                    entries += 1;
+                }
                 let path = entry.path();
                 let metadata = fs::symlink_metadata(&path).map_err(boundary_observation_error)?;
                 if is_dot_git_name(entry.file_name().as_os_str()) {
@@ -117,6 +133,13 @@ impl RepositoryNestedBoundaryPolicy {
                     pending.push(path);
                 }
             }
+        }
+        #[cfg(feature = "live-test-support")]
+        if std::env::var_os("RAH_R4_OBSERVATION_TIMING").is_some() {
+            eprintln!(
+                "R4 boundary directories={directories} entries={entries} marker_time={marker_time:?} total={:?}",
+                timing_started.elapsed()
+            );
         }
         Ok(())
     }

@@ -31,6 +31,8 @@ pub struct CodexFactory {
     executable: PathBuf,
     #[cfg(feature = "certification-harness")]
     pub(crate) candidate: Option<crate::certification_support::ExactCodexCandidate>,
+    #[cfg(feature = "certification-harness")]
+    pub(crate) protocol_capture: Option<crate::certification_support::ProtocolCapture>,
     provider: CodexModelProvider,
     workspace: Option<PathBuf>,
     #[cfg(test)]
@@ -95,6 +97,8 @@ impl CodexFactory {
             executable,
             #[cfg(feature = "certification-harness")]
             candidate: None,
+            #[cfg(feature = "certification-harness")]
+            protocol_capture: None,
             provider,
             workspace: None,
             #[cfg(test)]
@@ -163,6 +167,11 @@ impl ConfiguredRuntimeFactory for CodexFactory {
             .start_transport()
             .await
             .map_err(|e| e.into_runtime_failure(RuntimeOperation::Connection))?;
+        #[cfg(feature = "certification-harness")]
+        let transport = crate::certification_support::ObservedTransport {
+            inner: transport,
+            capture: self.protocol_capture.clone(),
+        };
         Ok(
             Instance::from_transport(transport, self.provider.clone(), self.workspace.clone())
                 .await?,

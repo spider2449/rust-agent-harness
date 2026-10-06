@@ -199,6 +199,8 @@ impl HostToolPort for Port {
         })
     }
     async fn request_live(&self, request: ToolRequest) -> Result<ToolOutput, RuntimeFailure> {
+        #[cfg(feature = "live-test-support")]
+        let _timing = DispatchTiming::new();
         let owner = self.owner.upgrade().ok_or_else(unavailable)?;
         let expected = self
             .snapshot
@@ -243,6 +245,8 @@ impl HostToolPort for Port {
                 ));
                 return Err(failure);
             }
+            #[cfg(feature = "live-test-support")]
+            dispatch_mark("authorization_complete");
             state.inflight += 1;
             let _ = events.send(
                 AgentEvent::ToolStarted {
@@ -272,6 +276,8 @@ impl HostToolPort for Port {
                     ToolContext::default(),
                 )
                 .await;
+                #[cfg(feature = "live-test-support")]
+                dispatch_mark("tool_execution_complete");
                 let result = match result {
                     Ok(output) => {
                         let _ = events.send(
@@ -299,6 +305,8 @@ impl HostToolPort for Port {
                         Err(failure)
                     }
                 };
+                #[cfg(feature = "live-test-support")]
+                dispatch_mark("result_conversion_complete");
                 let _ = reply.send(result);
                 drop(reservation);
             });
@@ -316,6 +324,38 @@ fn dispatch_failure(source: AuthorizedDispatchError) -> RuntimeFailure {
         },
         source,
     )
+}
+
+#[cfg(feature = "live-test-support")]
+struct DispatchTiming(std::time::Instant);
+#[cfg(feature = "live-test-support")]
+impl DispatchTiming {
+    fn new() -> Self {
+        let started = std::time::Instant::now();
+        dispatch_mark("dispatch_start");
+        Self(started)
+    }
+}
+#[cfg(feature = "live-test-support")]
+impl Drop for DispatchTiming {
+    fn drop(&mut self) {
+        if std::env::var_os("RAH_R4H_TIMING").is_some() {
+            dispatch_mark("dispatch_return");
+            eprintln!("R4H dispatch_total={:?}", self.0.elapsed());
+        }
+    }
+}
+#[cfg(feature = "live-test-support")]
+fn dispatch_mark(event: &str) {
+    if std::env::var_os("RAH_R4H_TIMING").is_some() {
+        eprintln!(
+            "R4H host event={event} wall_ns={}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+    }
 }
 
 #[cfg(test)]

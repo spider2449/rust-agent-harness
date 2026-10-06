@@ -66,16 +66,34 @@ impl Tool for RepositoryStatusTool {
         _context: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         validate_empty_request(&input)?;
+        #[cfg(feature = "live-test-support")]
+        status_timing("lease_wait_start");
         let _lease = self.observer.acquire_lease().await;
+        #[cfg(feature = "live-test-support")]
+        status_timing("lease_acquired");
         self.observer.revalidate()?;
+        #[cfg(feature = "live-test-support")]
+        status_timing("observation_start");
         let output = self
             .observer
             .run(ObserverCommand::Status, None, Instant::now())
-            .await?;
+            .await;
+        #[cfg(feature = "live-test-support")]
+        status_timing("observation_end");
+        #[cfg(feature = "live-test-support")]
+        if std::env::var_os("RAH_R4H_TIMING").is_some()
+            && let Err(error) = &output
+        {
+            eprintln!("R4H status observation_error={error:?}");
+        }
+        let output = output?;
         self.observer.revalidate()?;
         let bytes = successful_status_output(output)?;
         let entries = parse_status(&bytes)?;
-        bounded_output(entries)
+        let result = bounded_output(entries);
+        #[cfg(feature = "live-test-support")]
+        status_timing("status_conversion_complete");
+        result
     }
 }
 
@@ -451,6 +469,19 @@ fn bounded_output(entries: Vec<StatusEntry>) -> Result<ToolOutput, ToolError> {
 
 fn status_error(message: impl Into<String>) -> ToolError {
     git_error(format!("repository status {0}", message.into()))
+}
+
+#[cfg(feature = "live-test-support")]
+fn status_timing(event: &str) {
+    if std::env::var_os("RAH_R4H_TIMING").is_some() {
+        eprintln!(
+            "R4H status event={event} wall_ns={}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+    }
 }
 
 #[cfg(test)]

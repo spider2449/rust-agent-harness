@@ -666,6 +666,17 @@ mod tests {
         candidate.expected_version = "0.160.0".into();
         candidate.expected_sha256.clear();
         assert!(candidate.validate().is_err());
+        for malformed in [
+            "a".repeat(61),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+        ] {
+            candidate.expected_sha256 = malformed;
+            assert!(candidate.validate().is_err());
+        }
+        candidate.expected_sha256 = "abcdef0123456789".repeat(4);
+        assert!(candidate.validate().is_ok());
     }
 
     #[tokio::test]
@@ -695,5 +706,291 @@ mod tests {
         assert!(!crate::is_current_certified_codex_version(
             "codex-cli 0.160.0"
         ));
+    }
+}
+/// In-memory wire evidence confined to the explicit certification feature.
+#[derive(Default)]
+struct CaptureState {
+    records: std::sync::Mutex<Vec<(bool, serde_json::Value)>>,
+    changed: tokio::sync::Notify,
+    timeline: std::sync::Mutex<Vec<(u128, bool, serde_json::Value)>>,
+}
+#[derive(Clone, Default)]
+pub struct ProtocolCapture(Arc<CaptureState>);
+impl ProtocolCapture {
+    fn raw_records(&self) -> Vec<(bool, serde_json::Value)> {
+        self.0.records.lock().unwrap().clone()
+    }
+    /// Owned JSON snapshots; wire values remain private to the adapter.
+    pub fn records(&self) -> Vec<(bool, String)> {
+        self.raw_records()
+            .into_iter()
+            .map(|(outgoing, message)| (outgoing, message.to_string()))
+            .collect()
+    }
+    fn record(&self, outgoing: bool, message: &serde_json::Value) {
+        self.0
+            .records
+            .lock()
+            .unwrap()
+            .push((outgoing, message.clone()));
+        self.0.timeline.lock().unwrap().push((
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros(),
+            outgoing,
+            message.clone(),
+        ));
+        self.0.changed.notify_waiters();
+    }
+    /// Timestamped owned JSON snapshots, in capture order.
+    pub fn timeline(&self) -> Vec<(u128, bool, String)> {
+        self.0
+            .timeline
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(timestamp, outgoing, message)| (*timestamp, *outgoing, message.to_string()))
+            .collect()
+    }
+
+    /// Certification-only provider readiness. Local neutral events never satisfy
+    /// this wait. A captured terminal notification vetoes a late interruption.
+    pub async fn wait_for_active_turn(&self) -> Result<(String, String), &'static str> {
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(result) = active_turn_readiness(&self.raw_records()) {
+                return result;
+            }
+            changed.await;
+        }
+    }
+}
+
+fn active_turn_readiness(
+    records: &[(bool, serde_json::Value)],
+) -> Option<Result<(String, String), &'static str>> {
+    let start = records
+        .iter()
+        .find(|(out, m)| *out && m["method"] == "turn/start")?
+        .1
+        .clone();
+    let thread = start["params"]["threadId"].as_str()?;
+    let response = records
+        .iter()
+        .find(|(out, m)| !out && m["id"] == start["id"] && m.get("result").is_some())?;
+    let turn = response.1["result"]["turn"]["id"].as_str()?;
+    let matches_route = |m: &serde_json::Value| {
+        m["params"]["threadId"] == thread && m["params"]["turn"]["id"] == turn
+    };
+    if records
+        .iter()
+        .any(|(out, m)| !out && m["method"] == "turn/completed" && matches_route(m))
+    {
+        return Some(Err(
+            "provider turn already terminal before certification cancellation",
+        ));
+    }
+    records
+        .iter()
+        .any(|(out, m)| {
+            !out && m["method"] == "turn/started"
+                && matches_route(m)
+                && m["params"]["turn"]["status"] == "inProgress"
+        })
+        .then(|| Ok((thread.to_owned(), turn.to_owned())))
+}
+impl VerifiedCertificationCandidate {
+    pub fn with_protocol_capture(mut self, capture: ProtocolCapture) -> Self {
+        self.factory.protocol_capture = Some(capture);
+        self
+    }
+}
+pub(crate) struct ObservedTransport<T> {
+    pub(crate) inner: T,
+    pub(crate) capture: Option<ProtocolCapture>,
+}
+#[async_trait]
+impl<T: crate::transport::AppServerTransport> crate::transport::AppServerTransport
+    for ObservedTransport<T>
+{
+    async fn send(&mut self, message: serde_json::Value) -> Result<(), CodexAdapterError> {
+        if let Some(capture) = &self.capture {
+            capture.record(true, &message);
+        }
+        self.inner.send(message).await?;
+        Ok(())
+    }
+    async fn receive(&mut self) -> Result<serde_json::Value, CodexAdapterError> {
+        let message = self.inner.receive().await?;
+        if let Some(capture) = &self.capture {
+            capture.record(false, &message);
+        }
+        Ok(message)
+    }
+    async fn shutdown(&mut self) -> Result<(), CodexAdapterError> {
+        self.inner.shutdown().await
+    }
+}
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::transport::AppServerTransport;
+    use futures::FutureExt;
+
+    fn acknowledged(capture: &ProtocolCapture) {
+        capture.record(
+            true,
+            &serde_json::json!({"id":3,"method":"turn/start","params":{"threadId":"exact-thread"}}),
+        );
+        capture.record(false, &serde_json::json!({"id":3,"result":{"turn":{"id":"exact-turn","status":"inProgress","startedAt":null}}}));
+    }
+
+    fn notification(method: &str, thread: &str, turn: &str, status: &str) -> serde_json::Value {
+        serde_json::json!({"method":method,"params":{"threadId":thread,"turn":{"id":turn,"status":status}}})
+    }
+
+    #[tokio::test]
+    async fn local_model_request_started_does_not_unlock_cancellation() {
+        let capture = ProtocolCapture::default();
+        acknowledged(&capture);
+        capture.record(false, &serde_json::json!({"type":"model_request_started"}));
+        assert!(capture.wait_for_active_turn().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_started_unlocks_exact_route_without_sleep() {
+        let capture = ProtocolCapture::default();
+        acknowledged(&capture);
+        let waiting = capture.wait_for_active_turn();
+        tokio::pin!(waiting);
+        assert!(waiting.as_mut().now_or_never().is_none());
+        capture.record(
+            false,
+            &notification("turn/started", "exact-thread", "exact-turn", "inProgress"),
+        );
+        assert_eq!(
+            waiting.await,
+            Ok(("exact-thread".into(), "exact-turn".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_completion_vetoes_cancellation_even_after_started() {
+        let capture = ProtocolCapture::default();
+        acknowledged(&capture);
+        capture.record(
+            false,
+            &notification("turn/started", "exact-thread", "exact-turn", "inProgress"),
+        );
+        capture.record(
+            false,
+            &notification("turn/completed", "exact-thread", "exact-turn", "completed"),
+        );
+        assert!(capture.wait_for_active_turn().await.is_err());
+        assert!(
+            !capture
+                .raw_records()
+                .iter()
+                .any(|(out, m)| *out && m["method"] == "turn/interrupt")
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_thread_or_turn_never_unlocks_cancellation() {
+        let capture = ProtocolCapture::default();
+        acknowledged(&capture);
+        for (thread, turn) in [("foreign", "exact-turn"), ("exact-thread", "foreign")] {
+            capture.record(
+                false,
+                &notification("turn/started", thread, turn, "inProgress"),
+            );
+        }
+        assert!(capture.wait_for_active_turn().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_activity_requires_matching_start_acknowledgement() {
+        let capture = ProtocolCapture::default();
+        capture.record(
+            false,
+            &notification("turn/started", "exact-thread", "exact-turn", "inProgress"),
+        );
+        assert!(capture.wait_for_active_turn().now_or_never().is_none());
+        acknowledged(&capture);
+        assert!(capture.wait_for_active_turn().await.is_ok());
+    }
+    #[tokio::test]
+    async fn observer_preserves_both_wire_directions() {
+        let (inner, mut peer) = crate::test_support::fake_transport();
+        let capture = ProtocolCapture::default();
+        let mut transport = ObservedTransport {
+            inner,
+            capture: Some(capture.clone()),
+        };
+        let outgoing = serde_json::json!({"id":1,"method":"turn/start","params":{}});
+        transport.send(outgoing.clone()).await.unwrap();
+        assert_eq!(peer.next_sent().await, outgoing);
+        let incoming =
+            serde_json::json!({"method":"item/tool/call","params":{"tool":"rah_tool_0"}});
+        peer.send(incoming.clone());
+        assert_eq!(transport.receive().await.unwrap(), incoming);
+        assert_eq!(
+            capture.raw_records(),
+            vec![(true, outgoing), (false, incoming)]
+        );
+        transport.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn opaque_snapshots_preserve_protocol_evidence() {
+        let capture = ProtocolCapture::default();
+        let messages = vec![
+            (
+                true,
+                serde_json::json!({"id":1,"method":"thread/start","params":{"dynamicTools":[{"name":"rah_tool_0","inputSchema":{"type":"object"}}]}}),
+            ),
+            (
+                false,
+                serde_json::json!({"id":2,"method":"item/tool/call","params":{"tool":"rah_tool_0","arguments":{"text":"quote \" and newline\n and Unicode 台灣"}}}),
+            ),
+            (
+                false,
+                notification("turn/started", "exact-thread", "exact-turn", "inProgress"),
+            ),
+            (
+                true,
+                serde_json::json!({"id":4,"method":"turn/interrupt","params":{"threadId":"exact-thread","turnId":"exact-turn"}}),
+            ),
+            (false, serde_json::json!({"id":4,"result":{}})),
+            (
+                false,
+                serde_json::json!({"id":5,"error":{"code":-1,"message":"diagnostic fixture","data":null}}),
+            ),
+        ];
+        for (outgoing, message) in &messages {
+            capture.record(*outgoing, message);
+        }
+        let decoded: Vec<(bool, serde_json::Value)> = capture
+            .records()
+            .into_iter()
+            .map(|(outgoing, message)| (outgoing, serde_json::from_str(&message).unwrap()))
+            .collect();
+        assert_eq!(decoded, messages);
+        let timeline = capture.timeline();
+        assert_eq!(timeline.len(), messages.len());
+        for ((timestamp, outgoing, message), expected) in timeline.into_iter().zip(messages) {
+            assert!(timestamp > 0);
+            assert_eq!(
+                (
+                    outgoing,
+                    serde_json::from_str::<serde_json::Value>(&message).unwrap()
+                ),
+                expected
+            );
+        }
     }
 }
