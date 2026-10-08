@@ -157,6 +157,419 @@ fn text_events(text: &str) -> Vec<Value> {
         ]),
     ]
 }
+
+struct LocalServer {
+    origin: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for LocalServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl LocalServer {
+    async fn new(replies: Vec<(u16, String)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let task = tokio::spawn(async move {
+            for (status, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 2048];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let header = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let len = header
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(|n| n.parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + len {
+                    let mut chunk = [0; 2048];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8(bytes).unwrap());
+                if body == "HOLD" {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+                    let mut byte = [0];
+                    let _ = socket.read(&mut byte).await;
+                    continue;
+                }
+                let kind = if body.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if socket.write_all(header.as_bytes()).await.is_err() {
+                    continue;
+                }
+                // Separate writes exercise the streaming transport, not a blocking JSON path.
+                for chunk in body.as_bytes().chunks(7) {
+                    if socket.write_all(chunk).await.is_err() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        Self {
+            origin,
+            requests,
+            task,
+        }
+    }
+    async fn llama(models: &[&str], turns: Vec<String>) -> Self {
+        let mut replies = vec![
+            (200, json!({"status":"ok"}).to_string()),
+            (
+                200,
+                json!({"data": models.iter().map(|id| json!({"id":id})).collect::<Vec<_>>()})
+                    .to_string(),
+            ),
+        ];
+        replies.extend(turns.into_iter().map(|s| (200, s)));
+        Self::new(replies).await
+    }
+}
+fn frames(events: Vec<Value>) -> String {
+    events
+        .into_iter()
+        .map(|v| format!("data: {v}\n\n"))
+        .collect()
+}
+fn llama_function_events(values: &[i32]) -> Vec<Value> {
+    let reasoning = json!({"id":"private-reasoning","type":"reasoning","summary":[],"content":[],"encrypted_content":""});
+    let mut events = vec![json!({"type":"response.output_item.added","item":reasoning})];
+    for mut event in function_events(values) {
+        if event["type"] == "response.function_call_arguments.done" {
+            continue;
+        }
+        event.as_object_mut().unwrap().remove("output_index");
+        if event["type"] == "response.completed" {
+            event["response"]["output"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, reasoning.clone());
+        }
+        events.push(event);
+    }
+    events
+}
+fn llama_error(error: &RuntimeFailure) -> &LlamaCppError {
+    error.source().unwrap().downcast_ref().unwrap()
+}
+#[tokio::test]
+async fn llama_health_loading_malformed_and_unreachable() {
+    for (status, body, expected) in [
+        (503, "{}", LlamaCppError::Loading),
+        (200, "oops", LlamaCppError::Malformed),
+        (200, "{\"status\":\"loading\"}", LlamaCppError::Malformed),
+    ] {
+        let server = LocalServer::new(vec![(status, body.into())]).await;
+        let error = LlamaCppFactory::new(&server.origin, None)
+            .create()
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(llama_error(&error), &expected);
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let error = LlamaCppFactory::new(origin, None)
+        .create()
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(llama_error(&error), &LlamaCppError::Unreachable);
+}
+#[test]
+fn llama_endpoint_and_credential_boundaries() {
+    for endpoint in [
+        "http://example.com:8080",
+        "http://127.0.0.1:8080/path",
+        "http://key@localhost:8080",
+        "http://localhost:8080?key=x",
+        "ftp://localhost",
+        "invalid",
+    ] {
+        assert!(LlamaCppFactory::new(endpoint, None).validate().is_err());
+    }
+    for endpoint in [
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        "http://localhost:8080",
+    ] {
+        LlamaCppFactory::new(endpoint, None).validate().unwrap();
+    }
+    assert!(
+        !format!(
+            "{:?}",
+            LlamaCppFactory::new("http://localhost:8080", Some(SECRET.into()))
+        )
+        .contains(SECRET)
+    );
+}
+#[tokio::test]
+async fn llama_health_models_stream_and_reconnect() {
+    for _ in 0..2 {
+        let server =
+            LocalServer::llama(&["local-model"], vec![frames(text_events("RAH_LLAMA_OK"))]).await;
+        let runtime = LlamaCppFactory::new(&server.origin, None)
+            .create()
+            .await
+            .unwrap();
+        assert!(runtime.capabilities().streaming);
+        let (scope, _) = scope();
+        let conversation = runtime
+            .open(ConversationSeed {
+                id: ConversationId::new("host-owned"),
+                model: ModelSelection::RuntimeDefault,
+                tools: scope.port(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(conversation.id().as_str(), "host-owned");
+        let events = collect(conversation.send(replay()).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+        );
+        assert!(events.iter().any(
+            |e| matches!(e.event(), AgentEvent::ModelDelta { delta, .. } if delta == "RAH_LLAMA_OK")
+        ));
+        conversation.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+        assert!(!runtime.is_alive());
+        let requests = server.requests.lock().unwrap();
+        assert!(requests[0].starts_with("GET /health "));
+        assert!(requests[1].starts_with("GET /v1/models "));
+        assert!(requests[2].starts_with("POST /v1/responses "));
+        assert!(
+            requests
+                .iter()
+                .all(|r| !r.to_ascii_lowercase().contains("authorization:"))
+        );
+        assert!(requests[2].contains("local-model"));
+    }
+}
+#[tokio::test]
+async fn llama_model_selection_and_malformed_stream() {
+    let server = LocalServer::llama(&["one", "two"], vec!["data: malformed\n\n".into()]).await;
+    let runtime = LlamaCppFactory::new(&server.origin, None)
+        .create()
+        .await
+        .unwrap();
+    let (scope, _) = scope();
+    for model in [
+        ModelSelection::RuntimeDefault,
+        ModelSelection::Explicit("absent".into()),
+    ] {
+        assert!(
+            runtime
+                .open(ConversationSeed {
+                    id: ConversationId::new("host"),
+                    model,
+                    tools: scope.port()
+                })
+                .await
+                .is_err()
+        );
+    }
+    let c = runtime
+        .open(ConversationSeed {
+            id: ConversationId::new("host"),
+            model: ModelSelection::Explicit("one".into()),
+            tools: scope.port(),
+        })
+        .await
+        .unwrap();
+    let events = collect(c.send(replay()).await.unwrap()).await;
+    assert_eq!(source(failure(&events)), &E::EventJson);
+    runtime.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn llama_provider_local_key_and_host_tool_round_trip() {
+    let local_calls = llama_function_events(&[7]);
+    let server = LocalServer::llama(
+        &["local-model"],
+        vec![frames(local_calls), frames(text_events("done"))],
+    )
+    .await;
+    let runtime = LlamaCppFactory::new(&server.origin, Some("LOCAL-ONLY".into()))
+        .create()
+        .await
+        .unwrap();
+    let (scope, effects) = scope();
+    let c = runtime
+        .open(ConversationSeed {
+            id: ConversationId::new("host"),
+            model: ModelSelection::RuntimeDefault,
+            tools: scope.port(),
+        })
+        .await
+        .unwrap();
+    let events = collect(c.send(replay()).await.unwrap()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    runtime.shutdown().await.unwrap();
+    let requests = server.requests.lock().unwrap();
+    assert!(!requests[0].contains("LOCAL-ONLY"));
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|r| r.contains("LOCAL-ONLY") && !r.contains(SECRET))
+    );
+    assert!(requests[3].contains("function_call_output"));
+}
+#[tokio::test]
+async fn llama_cancel_stream_then_next_turn_recovers() {
+    let server = LocalServer::llama(
+        &["local"],
+        vec!["HOLD".into(), frames(text_events("recovered"))],
+    )
+    .await;
+    let runtime = LlamaCppFactory::new(&server.origin, None)
+        .create()
+        .await
+        .unwrap();
+    let (scope, _) = scope();
+    let c = runtime
+        .open(ConversationSeed {
+            id: ConversationId::new("host"),
+            model: ModelSelection::RuntimeDefault,
+            tools: scope.port(),
+        })
+        .await
+        .unwrap();
+    let turn = c.send(replay()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.requests.lock().unwrap().len() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let control = turn.control.clone();
+    let events = tokio::spawn(collect(turn));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), control.cancel())
+            .await
+            .unwrap()
+            .unwrap(),
+        CancelOutcome::Stopped
+    );
+    let events = events.await.unwrap();
+    assert_eq!(source(failure(&events)), &E::Cancelled);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+    );
+    assert!(runtime.is_alive());
+    let events = collect(c.send(replay()).await.unwrap()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+    );
+    c.close().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+#[test]
+fn llama_missing_indices_are_correlated_by_item_and_final_arguments_stay_checked() {
+    for wrong in ["id", "call_id", "name", "arguments"] {
+        let mut normalizer = crate::llamacpp::EventNormalizer::default();
+        let mut parser = protocol::Response::default();
+        let mut rejected = false;
+        for mut event in function_events(&[7]) {
+            if event["type"] == "response.function_call_arguments.done" {
+                continue;
+            }
+            event.as_object_mut().unwrap().remove("output_index");
+            if event["type"] == "response.output_item.done" {
+                event["item"][wrong] = json!("mismatched");
+            }
+            let events = match normalizer.normalize(event) {
+                Ok(events) => events,
+                Err(_) => {
+                    rejected = true;
+                    break;
+                }
+            };
+            for event in events {
+                if parser.event(event).is_err() {
+                    rejected = true;
+                    break;
+                }
+            }
+            if rejected {
+                break;
+            }
+        }
+        assert!(rejected, "mismatched {wrong} admitted");
+        assert!(parser.output.is_none());
+    }
+    let mut normalizer = crate::llamacpp::EventNormalizer::default();
+    assert!(normalizer.normalize(json!({"type":"response.function_call_arguments.delta","item_id":"unknown","delta":"{}"})).is_err());
+    let added = json!({"type":"response.output_item.added","item":{"type":"function_call","id":"id","call_id":"call","name":"echo","arguments":""}});
+    normalizer.normalize(added.clone()).unwrap();
+    assert!(normalizer.normalize(added).is_err());
+    assert!(normalizer.normalize(json!({"type":"response.function_call_arguments.delta","item_id":"id","output_index":99,"delta":"{}"})).is_err());
+}
+
+#[test]
+fn llama_reasoning_before_function_preserves_completed_output_order() {
+    let bytes = frames(llama_function_events(&[7])).into_bytes();
+    let mut sse = crate::sse::Sse::default();
+    let events = sse.push(&bytes).unwrap();
+    sse.finish().unwrap();
+    let mut normalizer = crate::llamacpp::EventNormalizer::default();
+    let mut response = protocol::Response::default();
+    for event in events {
+        let kind = event["type"].as_str().unwrap().to_owned();
+        for normalized in normalizer
+            .normalize(event)
+            .unwrap_or_else(|error| panic!("normalization failed at {kind}: {error}"))
+        {
+            let normalized_kind = normalized["type"].as_str().unwrap().to_owned();
+            response
+                .event(normalized)
+                .unwrap_or_else(|error| panic!("parser failed at {normalized_kind}: {error}"));
+        }
+    }
+    assert!(response.output.is_some());
+}
 fn completed(output: Vec<Value>) -> Value {
     json!({"type":"response.completed","response":{"id":"private-response-id","status":"completed","output":output}})
 }

@@ -7,7 +7,9 @@ and does not load model weights or implement model execution.
 
 ## Production runtime
 
-The normal Windows Desktop build uses the native OpenAI Responses adapter:
+The normal Windows Desktop build includes native OpenAI and llama.cpp Responses
+adapters. Select a provider and model under Runtime, apply the configuration,
+then Connect. Provider changes require Disconnect first.
 
 ```powershell
 cargo build -p rah-desktop
@@ -18,7 +20,18 @@ $env:RAH_OPENAI_MODEL = 'your-supported-model-id'
 
 Credentials remain externally configured and backend-only; do not place keys in
 project files. Model identifiers are provider configuration, not a Codex catalog.
-Connect validates configuration; native model discovery is unsupported, so model
+For llama.cpp, start your existing llama-server, select llama.cpp, and use the
+default endpoint `http://127.0.0.1:8080`. Native endpoints must be loopback HTTP(S)
+origins. Leave Model empty to use the sole model returned by `/v1/models`, or
+configure a listed model explicitly. Connect checks `/health` with a bounded
+deadline and reports loading/unreachable servers. Streaming chat uses
+`/v1/responses` directly. No model is downloaded or server started by Desktop.
+No llama.cpp key is required by default; a protected server may use backend-only
+`RAH_LLAMA_CPP_API_KEY`, which is separate from `OPENAI_API_KEY`. Tool support
+depends on the local model/template; requests execute only through the RAH host.
+Backend startup defaults can also use `RAH_RUNTIME_PROVIDER=llama_cpp`,
+`RAH_LLAMA_CPP_ENDPOINT`, and optional `RAH_LLAMA_CPP_MODEL`.
+Connect validates configuration; OpenAI model discovery is unsupported, so model
 availability is not claimed before the provider request. Rejections and transport
 failures use sanitized neutral runtime diagnostics. Native OpenAI supports
 host-owned text replay, streaming, host-authorized Tools, cancellation and shutdown;
@@ -27,7 +40,7 @@ provider-native continuation is unsupported.
 Default Desktop has no dependency on `rah-runtime-codex` and requires no Codex
 executable, app-server, companion, version check or certification. The legacy
 adapter remains available with `--no-default-features --features provider-codex`.
-Both adapters can be built with `--features provider-codex`: unset selection
+Legacy Codex can be included with `--features provider-codex`: unset selection
 prefers OpenAI, and `RAH_RUNTIME_PROVIDER=codex` explicitly selects the legacy
 adapter with its existing admission rules. Unknown or uncompiled selections
 fail closed. A `--no-default-features` build has no provider and fails closed.
@@ -35,8 +48,9 @@ There is no automatic provider fallback or replay after failure.
 
 Codex CLI compatibility work is stopped. ADR 0034 and historical certification
 records remain legacy design/evidence; they do not block native production.
-The validation UI and existing IPC command names are retained. Runtime selection
-is backend-owned and captured at startup; changed environment requires restart.
+The existing IPC command names are retained. Runtime selection is host-owned;
+the Runtime controls configure it while disconnected. Changed credential
+environment requires restart.
 Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
 without granting repository authority or claiming rollback.
 

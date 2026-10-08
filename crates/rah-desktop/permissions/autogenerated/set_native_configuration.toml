@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-native-configuration"
+description = "Enables the set_native_configuration command without any pre-configured scope."
+commands.allow = ["set_native_configuration"]
+
+[[permission]]
+identifier = "deny-set-native-configuration"
+description = "Denies the set_native_configuration command without any pre-configured scope."
+commands.deny = ["set_native_configuration"]

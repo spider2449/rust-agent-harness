@@ -13,8 +13,8 @@ preserved preparation evidence.
 
 ## Native OpenAI production composition
 
-Desktop defaults to `provider-openai`, with `provider-codex` optional legacy
-support. Backend `RAH_RUNTIME_PROVIDER` selection precedes provider-specific
+Desktop defaults to `provider-openai` and `provider-llamacpp`, with
+`provider-codex` optional legacy support. Backend `RAH_RUNTIME_PROVIDER` selection precedes provider-specific
 preflight; absent selection prefers OpenAI when compiled, otherwise Codex-only
 uses its legacy adapter. Explicit unavailable/unknown selection and no-provider
 builds fail closed. Neither neutral contracts nor normal Desktop require Codex.
@@ -23,13 +23,17 @@ builds fail closed. Neither neutral contracts nor normal Desktop require Codex.
 Desktop host -> configured RuntimeFactory -> rah-runtime-openai
  -> runtime instance -> RAH conversation -> owned turn stream/control
  -> fixed OpenAI Responses endpoint
+Desktop host -> LlamaCppFactory -> same private Responses transport
+ -> loopback llama-server /health, /v1/models, /v1/responses
 provider Tool request -> revocable host port -> active lease/permissions
  -> ToolRegistry/authorized dispatch -> correlated Tool result -> continuation
 ```
 
-Backend-only OPENAI_API_KEY and RAH_OPENAI_MODEL retain the existing external
-configuration boundary. No credential store, frontend key channel or arbitrary
-endpoint is added. Native discovery and NativeContinuation are unsupported;
+Backend-only OPENAI_API_KEY retains the existing external credential boundary.
+The separate llama.cpp factory uses an optional RAH_LLAMA_CPP_API_KEY and
+loopback-only endpoint. It never resolves the OpenAI key. No credential store or
+frontend key channel is added. Desktop provider/model configuration is writable
+only while disconnected. OpenAI discovery and NativeContinuation are unsupported;
 Task 500 host-owned text replay is supported. Model rejection remains a provider
 runtime failure, never Codex compatibility evidence. ADR-B: this is composition
 under ADRs 0001/0002/0032/0033, with no public API or authority change.

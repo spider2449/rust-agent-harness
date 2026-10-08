@@ -36,9 +36,9 @@ pub(super) async fn model_configuration_for_state(
         model_source,
         model_selection_mode: selection.model_selection_mode,
         runtime_selection: super::runtime_model_state::present(
-            state.runtime_adapter,
+            state.selected_runtime_adapter(),
             &selection,
-            state.openai_configured_model.as_deref(),
+            state.native_model().as_deref(),
         ),
         provider: selection.provider,
         model: selection.model,

@@ -1782,6 +1782,13 @@ proxy use are disabled by its existing transport policy. Backend credentials
 remain externally configured; no frontend credential channel or persisted key
 is introduced. Local loopback fixtures require an explicit test-support feature.
 
+Native llama.cpp uses a separate loopback-only factory with bounded health/model
+checks and the shared private Responses transport. Its optional backend key is
+RAH_LLAMA_CPP_API_KEY; it never resolves OPENAI_API_KEY. Official OpenAI's origin
+is not configurable. Native provider/model/endpoint changes require a disconnected
+host state; remote native llama.cpp endpoints fail closed. Legacy ADR 0015 endpoint
+configuration and its limitations remain unchanged.
+
 Provider requests do not grant authority. The revocable HostToolScope validates
 active conversation/session leases before ToolRegistry and permission dispatch.
 Host-owned active repository/worktree boundaries, Trusted Profiles, remembered

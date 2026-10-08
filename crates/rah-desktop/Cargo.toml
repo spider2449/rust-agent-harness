@@ -5,9 +5,10 @@ edition.workspace = true
 build = "build.rs"
 
 [features]
-default = ["provider-openai"]
+default = ["provider-openai", "provider-llamacpp"]
 provider-codex = ["dep:rah-runtime-codex"]
 provider-openai = ["dep:rah-runtime-openai"]
+provider-llamacpp = ["dep:rah-runtime-openai"]
 openai-fixture = ["provider-openai", "rah-runtime-openai/fixture-support"]
 certification-harness = ["provider-codex", "rah-runtime-codex/certification-harness"]
 

@@ -15,7 +15,7 @@ struct Context {
 }
 impl Context {
     fn capture(state: &DesktopAppState) -> Self {
-        let adapter = identity(state.runtime_adapter);
+        let adapter = identity(state.selected_runtime_adapter());
         Self {
             adapter,
             selection: (adapter == RuntimeAdapterIdentity::Codex).then(|| {
@@ -26,9 +26,12 @@ impl Context {
                     .selection
                     .clone()
             }),
-            native_model: (adapter == RuntimeAdapterIdentity::OpenAi)
-                .then(|| state.openai_configured_model.clone())
-                .flatten(),
+            native_model: matches!(
+                adapter,
+                RuntimeAdapterIdentity::OpenAi | RuntimeAdapterIdentity::LlamaCpp
+            )
+            .then(|| state.native_model())
+            .flatten(),
             artifact_selector: (adapter == RuntimeAdapterIdentity::Codex)
                 .then(|| std::env::var_os("RAH_CODEX_EXECUTABLE"))
                 .flatten(),
@@ -190,7 +193,10 @@ impl Owner {
                 .selection
                 .as_ref()
                 .and_then(|s| s.model_selection_mode),
-            selected_model: if context.adapter == RuntimeAdapterIdentity::OpenAi {
+            selected_model: if matches!(
+                context.adapter,
+                RuntimeAdapterIdentity::OpenAi | RuntimeAdapterIdentity::LlamaCpp
+            ) {
                 context.native_model.clone()
             } else {
                 context.selection.as_ref().and_then(|s| s.model.clone())
@@ -216,6 +222,7 @@ pub(crate) fn configuration_changed(state: &DesktopAppState) {
 fn eligibility(context: &Context, source: &SourceState, rejected: Option<&str>) -> Eligibility {
     match context.adapter {
         RuntimeAdapterIdentity::None => Eligibility::NoRuntime,
+        RuntimeAdapterIdentity::LlamaCpp => Eligibility::Configured,
         RuntimeAdapterIdentity::OpenAi => match source {
             SourceState::Configured { model }
                 if crate::validate_model_identifier(model).is_ok() =>
@@ -326,6 +333,15 @@ pub(crate) async fn refresh(state: &DesktopAppState, force: bool) -> Snapshot {
 async fn resolve(context: &Context) -> (Option<String>, SourceState) {
     match context.adapter {
         RuntimeAdapterIdentity::None => (None, SourceState::NoRuntime),
+        RuntimeAdapterIdentity::LlamaCpp => (
+            None,
+            context.native_model.as_ref().map_or(
+                SourceState::RuntimeDefault { models: vec![] },
+                |model| SourceState::Configured {
+                    model: model.clone(),
+                },
+            ),
+        ),
         RuntimeAdapterIdentity::OpenAi => (
             None,
             context

@@ -214,7 +214,7 @@ pub(super) async fn connect_with_configuration(
     let connection = async {
         let workspace = repository.as_deref().map(|r| r.root.as_path())
             .or(neutral_workspace.as_deref()).ok_or(FrontendError::RuntimeConnectionFailed)?;
-        let (factory, model, source) = match configured { Some(configured) => configured, None => runtime_selection::configured_factory(adapter, &model_selection, workspace, state.openai_configured_model.as_deref())? };
+        let (factory, model, source) = match configured { Some(configured) => configured, None => runtime_selection::configured_factory(adapter, &model_selection, workspace, state.native_model().as_deref(), &state.llama_endpoint())? };
         let selected_model = match &model {
             rah_runtime::experimental::ModelSelection::Explicit(model) => Some(model.clone()),
             _ => None,

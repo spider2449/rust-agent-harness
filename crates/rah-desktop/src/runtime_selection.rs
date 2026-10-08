@@ -19,15 +19,48 @@ pub(crate) fn configured_version() -> Option<&'static str> {
     }
 }
 pub(crate) fn frontend_failure(error: &rah_runtime::RuntimeFailure) -> FrontendError {
-    #[cfg(feature = "provider-openai")]
+    #[cfg(any(feature = "provider-openai", feature = "provider-llamacpp"))]
     {
         use std::error::Error;
-        if error
+        if let Some(source) = error
             .source()
             .and_then(|s| s.downcast_ref::<rah_runtime_openai::OpenAiAdapterError>())
-            .is_some()
         {
-            return FrontendError::RuntimeConnectionFailed;
+            return match source {
+                rah_runtime_openai::OpenAiAdapterError::HttpStatus(401 | 403) => {
+                    FrontendError::OpenAiCredentialRejected
+                }
+                rah_runtime_openai::OpenAiAdapterError::HttpStatus(404) => {
+                    FrontendError::ProviderModelUnavailable
+                }
+                rah_runtime_openai::OpenAiAdapterError::Transport => {
+                    FrontendError::ProviderNetworkFailed
+                }
+                _ => FrontendError::RuntimeConnectionFailed,
+            };
+        }
+        if let Some(source) = error
+            .source()
+            .and_then(|s| s.downcast_ref::<rah_runtime_openai::LlamaCppError>())
+        {
+            return match source {
+                rah_runtime_openai::LlamaCppError::InvalidEndpoint => {
+                    FrontendError::LlamaEndpointInvalid
+                }
+                rah_runtime_openai::LlamaCppError::Unreachable => {
+                    FrontendError::LlamaServerUnreachable
+                }
+                rah_runtime_openai::LlamaCppError::Loading => FrontendError::LlamaServerLoading,
+                rah_runtime_openai::LlamaCppError::Malformed => {
+                    FrontendError::LlamaResponseMalformed
+                }
+                rah_runtime_openai::LlamaCppError::ModelUnavailable => {
+                    FrontendError::ProviderModelUnavailable
+                }
+                rah_runtime_openai::LlamaCppError::Authentication => {
+                    FrontendError::RuntimeConnectionFailed
+                }
+            };
         }
     }
     #[cfg(feature = "provider-codex")]
@@ -47,6 +80,36 @@ pub(crate) fn frontend_failure(error: &rah_runtime::RuntimeFailure) -> FrontendE
         FrontendError::RuntimeConnectionFailed
     }
 }
+/// Preserve closed native failures during a turn without changing legacy chat errors.
+pub(crate) fn chat_failure(
+    error: &rah_runtime::RuntimeFailure,
+    adapter: Option<ProductionAdapter>,
+    fallback: FrontendError,
+) -> FrontendError {
+    #[cfg(feature = "provider-llamacpp")]
+    if adapter == Some(ProductionAdapter::LlamaCpp)
+        && frontend_failure(error) == FrontendError::OpenAiCredentialRejected
+    {
+        return fallback;
+    }
+    #[cfg(feature = "provider-llamacpp")]
+    if adapter == Some(ProductionAdapter::LlamaCpp)
+        && error.diagnostic().kind == rah_protocol::RuntimeFailureKind::Protocol
+    {
+        return FrontendError::LlamaResponseMalformed;
+    }
+    let _ = adapter;
+    match frontend_failure(error) {
+        code @ (FrontendError::OpenAiCredentialRejected
+        | FrontendError::ProviderModelUnavailable
+        | FrontendError::ProviderNetworkFailed
+        | FrontendError::LlamaEndpointInvalid
+        | FrontendError::LlamaServerUnreachable
+        | FrontendError::LlamaServerLoading
+        | FrontendError::LlamaResponseMalformed) => code,
+        _ => fallback,
+    }
+}
 pub(crate) fn connect_unavailable(
     state: &crate::DesktopAppState,
 ) -> Result<crate::ConnectionResult, FrontendError> {
@@ -64,11 +127,17 @@ pub(crate) enum ProductionAdapter {
     Codex,
     #[cfg(feature = "provider-openai")]
     OpenAi,
+    #[cfg(feature = "provider-llamacpp")]
+    LlamaCpp,
 }
 pub(crate) fn selected_adapter() -> Option<ProductionAdapter> {
     select(std::env::var("RAH_RUNTIME_PROVIDER").ok().as_deref())
 }
-fn select(config: Option<&str>) -> Option<ProductionAdapter> {
+pub(crate) fn select(config: Option<&str>) -> Option<ProductionAdapter> {
+    #[cfg(feature = "provider-llamacpp")]
+    if config == Some("llama_cpp") {
+        return Some(ProductionAdapter::LlamaCpp);
+    }
     match (
         cfg!(feature = "provider-codex"),
         cfg!(feature = "provider-openai"),
@@ -86,14 +155,15 @@ pub(crate) type FactoryConfiguration = (
     rah_runtime::experimental::ModelSelection,
     RuntimeArtifactSource,
 );
-/// Backend-only configuration. No frontend credential or endpoint channel.
+/// Resolve provider-local credentials at the host composition root.
 pub(crate) fn configured_factory(
     adapter: ProductionAdapter,
     selection: &crate::DesktopModelSelection,
     workspace: &std::path::Path,
     openai_model: Option<&str>,
+    llama_endpoint: &str,
 ) -> Result<FactoryConfiguration, FrontendError> {
-    let _ = (selection, workspace, openai_model);
+    let _ = (selection, workspace, openai_model, llama_endpoint);
     match adapter {
         #[cfg(feature = "provider-codex")]
         ProductionAdapter::Codex => {
@@ -120,17 +190,36 @@ pub(crate) fn configured_factory(
         #[cfg(feature = "provider-openai")]
         ProductionAdapter::OpenAi => {
             let key = std::env::var("OPENAI_API_KEY")
-                .map_err(|_| FrontendError::RuntimeConnectionFailed)?;
+                .map_err(|_| FrontendError::OpenAiCredentialMissing)?;
             let model = openai_model
                 .ok_or(FrontendError::ModelConfigurationInvalid)?
                 .to_owned();
             configured_openai(key, model)
+        }
+        #[cfg(feature = "provider-llamacpp")]
+        ProductionAdapter::LlamaCpp => {
+            use rah_runtime::experimental::{ConfiguredRuntimeFactory, ModelSelection};
+            let factory = rah_runtime_openai::LlamaCppFactory::new(
+                llama_endpoint,
+                std::env::var("RAH_LLAMA_CPP_API_KEY").ok(),
+            );
+            factory.validate().map_err(|e| frontend_failure(&e))?;
+            Ok((
+                Box::new(factory),
+                openai_model.map_or(ModelSelection::RuntimeDefault, |m| {
+                    ModelSelection::Explicit(m.to_owned())
+                }),
+                RuntimeArtifactSource::Native,
+            ))
         }
     }
 }
 #[cfg(feature = "provider-openai")]
 fn configured_openai(key: String, model: String) -> Result<FactoryConfiguration, FrontendError> {
     use rah_runtime::experimental::{ConfiguredRuntimeFactory, ModelSelection};
+    if key.trim().is_empty() {
+        return Err(FrontendError::OpenAiCredentialMissing);
+    }
     if model.trim().is_empty() || model.len() > 256 {
         return Err(FrontendError::ModelConfigurationInvalid);
     }
@@ -145,6 +234,35 @@ fn configured_openai(key: String, model: String) -> Result<FactoryConfiguration,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "provider-openai")]
+    #[test]
+    fn task513_native_turn_failures_keep_closed_user_visible_codes() {
+        use rah_runtime_openai::OpenAiAdapterError as E;
+        for (error, expected) in [
+            (E::HttpStatus(401), FrontendError::OpenAiCredentialRejected),
+            (E::HttpStatus(404), FrontendError::ProviderModelUnavailable),
+            (E::Transport, FrontendError::ProviderNetworkFailed),
+            (E::Cancelled, FrontendError::ChatRuntimeFailed),
+        ] {
+            assert_eq!(
+                chat_failure(
+                    &error.into_runtime_failure(rah_protocol::RuntimeOperation::Turn),
+                    Some(ProductionAdapter::OpenAi),
+                    FrontendError::ChatRuntimeFailed
+                ),
+                expected
+            );
+        }
+        #[cfg(feature = "provider-llamacpp")]
+        assert_eq!(
+            chat_failure(
+                &E::Protocol.into_runtime_failure(rah_protocol::RuntimeOperation::Turn),
+                Some(ProductionAdapter::LlamaCpp),
+                FrontendError::ChatRuntimeFailed
+            ),
+            FrontendError::LlamaResponseMalformed
+        );
+    }
     #[test]
     fn task508_feature_selection_matrix() {
         assert_eq!(select(Some("unknown")), None);
@@ -177,6 +295,22 @@ mod tests {
             rah_runtime::experimental::ModelSelection::Explicit("fixture-model".into())
         );
         assert_eq!(source, RuntimeArtifactSource::Native);
+    }
+    #[cfg(feature = "provider-openai")]
+    #[test]
+    fn task513_missing_openai_credential_is_typed_and_sanitized() {
+        assert_eq!(
+            configured_openai(String::new(), "model".into()).err(),
+            Some(FrontendError::OpenAiCredentialMissing)
+        );
+        assert_eq!(
+            configured_openai("  ".into(), "model".into()).err(),
+            Some(FrontendError::OpenAiCredentialMissing)
+        );
+        assert_eq!(
+            serde_json::to_string(&FrontendError::OpenAiCredentialMissing).unwrap(),
+            "\"open_ai_credential_missing\""
+        );
     }
     #[cfg(feature = "provider-codex")]
     #[test]

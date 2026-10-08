@@ -8,6 +8,8 @@ pub(crate) enum RuntimeAdapterIdentity {
     Codex,
     #[serde(rename = "openai")]
     OpenAi,
+    #[serde(rename = "llama_cpp")]
+    LlamaCpp,
     None,
 }
 
@@ -17,6 +19,8 @@ pub(crate) fn identity(adapter: Option<ProductionAdapter>) -> RuntimeAdapterIden
         Some(ProductionAdapter::Codex) => RuntimeAdapterIdentity::Codex,
         #[cfg(feature = "provider-openai")]
         Some(ProductionAdapter::OpenAi) => RuntimeAdapterIdentity::OpenAi,
+        #[cfg(feature = "provider-llamacpp")]
+        Some(ProductionAdapter::LlamaCpp) => RuntimeAdapterIdentity::LlamaCpp,
         None => RuntimeAdapterIdentity::None,
     }
 }
@@ -60,6 +64,11 @@ fn scoped(
         ),
         RuntimeAdapterIdentity::OpenAi => (
             "openai_configuration",
+            None,
+            openai_model.map(str::to_owned),
+        ),
+        RuntimeAdapterIdentity::LlamaCpp => (
+            "llamacpp_configuration",
             None,
             openai_model.map(str::to_owned),
         ),

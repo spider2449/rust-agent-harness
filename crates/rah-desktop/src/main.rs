@@ -10,6 +10,8 @@ use codex_composition::{
     resolve_prepare_and_connect_codex,
 };
 #[cfg(target_os = "windows")]
+mod native_configuration;
+#[cfg(target_os = "windows")]
 mod production_composition;
 #[cfg(target_os = "windows")]
 mod runtime_model_state;
@@ -416,6 +418,7 @@ fn request_connect(connection: &mut ConnectionState) -> ConnectRequest {
 struct DesktopAppState {
     runtime_adapter: Option<runtime_selection::ProductionAdapter>,
     openai_configured_model: Option<String>,
+    native_configuration: Mutex<native_configuration::Configuration>,
     model_preflight: Mutex<Option<model_preflight::ScopedModelPreflight>>,
     model_source: Mutex<model_source::Owner>,
     connection: Mutex<ConnectionState>,
@@ -594,6 +597,7 @@ impl DesktopAppState {
         Self {
             runtime_adapter: runtime_selection::selected_adapter(),
             openai_configured_model: runtime_model_state::configured_openai_model(),
+            native_configuration: Mutex::new(native_configuration::Configuration::default()),
             connection: Mutex::new(ConnectionState::NotConnected),
             model_preflight: Mutex::new(None),
             model_source: Mutex::new(model_source::Owner::default()),
@@ -1160,8 +1164,8 @@ impl DesktopAppState {
             repository_generation,
             model_generation,
         );
-        status.runtime_adapter = runtime_model_state::identity(self.runtime_adapter);
-        status.runtime_available = self.runtime_adapter.is_some();
+        status.runtime_adapter = runtime_model_state::identity(self.selected_runtime_adapter());
+        status.runtime_available = self.selected_runtime_adapter().is_some();
         let connection_generation = *self
             .next_connection_generation
             .lock()
@@ -1172,7 +1176,8 @@ impl DesktopAppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .filter(|observation| {
-                observation.adapter == runtime_model_state::identity(self.runtime_adapter)
+                observation.adapter
+                    == runtime_model_state::identity(self.selected_runtime_adapter())
                     && observation.connection_generation == connection_generation
                     && observation.model_generation == model_generation
                     && matches!(
@@ -1496,6 +1501,14 @@ enum CommitAuthorizationPresentation {
 pub(crate) enum FrontendError {
     RuntimeAdapterUnavailable,
     RuntimeConnectionFailed,
+    OpenAiCredentialMissing,
+    OpenAiCredentialRejected,
+    ProviderModelUnavailable,
+    ProviderNetworkFailed,
+    LlamaEndpointInvalid,
+    LlamaServerUnreachable,
+    LlamaServerLoading,
+    LlamaResponseMalformed,
     CodexNotFound,
     CodexBaselineInvalid,
     CodexHostUnsupported,
@@ -8853,7 +8866,11 @@ async fn run_chat(
                     &app,
                     ChatEvent::Failed {
                         diagnostic: Some(error.diagnostic().clone()),
-                        code: FrontendError::ChatStartFailed,
+                        code: runtime_selection::chat_failure(
+                            &error,
+                            app.state::<DesktopAppState>().selected_runtime_adapter(),
+                            FrontendError::ChatStartFailed,
+                        ),
                     },
                 );
             }
@@ -8887,6 +8904,13 @@ async fn run_chat(
     let mut tool_calls = HashMap::new();
     let mut events = handle.events;
     while let Some(local_event) = events.next().await {
+        let failure_code = local_event.failure().map(|failure| {
+            runtime_selection::chat_failure(
+                failure,
+                app.state::<DesktopAppState>().selected_runtime_adapter(),
+                FrontendError::ChatRuntimeFailed,
+            )
+        });
         let diagnostic = local_event
             .failure()
             .map(|failure| failure.diagnostic().clone());
@@ -9022,7 +9046,7 @@ async fn run_chat(
                     &app,
                     ChatEvent::Failed {
                         diagnostic,
-                        code: FrontendError::ChatRuntimeFailed,
+                        code: failure_code.unwrap_or(FrontendError::ChatRuntimeFailed),
                     },
                 );
                 terminal = true;
@@ -9467,6 +9491,8 @@ fn main() -> ExitCode {
             commit_identity,
             desktop_preferences_commands::desktop_preferences_warning,
             set_model_configuration,
+            native_configuration::set_native_configuration,
+            native_configuration::native_configuration,
             set_commit_identity,
             reset_model_preferences,
             test_llama_cpp_endpoint,
@@ -9547,7 +9573,7 @@ mod certification_tests;
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
-    match state.runtime_adapter {
+    match state.selected_runtime_adapter() {
         #[cfg(feature = "provider-codex")]
         Some(runtime_selection::ProductionAdapter::Codex) => {
             production_composition::connect_selected(
@@ -9561,6 +9587,14 @@ async fn connect_codex(
             production_composition::connect_selected(
                 state.inner(),
                 runtime_selection::ProductionAdapter::OpenAi,
+            )
+            .await
+        }
+        #[cfg(feature = "provider-llamacpp")]
+        Some(runtime_selection::ProductionAdapter::LlamaCpp) => {
+            production_composition::connect_selected(
+                state.inner(),
+                runtime_selection::ProductionAdapter::LlamaCpp,
             )
             .await
         }

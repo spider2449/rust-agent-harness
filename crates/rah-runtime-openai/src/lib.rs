@@ -1,9 +1,12 @@
 //! Native Responses adapter behind the experimental neutral runtime seam.
 //! Desktop selects it by default; deterministic coverage is not live API
 //! certification. Only the scoped host port can execute a Tool.
-//! Continuation uses host-owned text replay; native continuation and model
-//! discovery are unsupported.
+//! Continuation uses host-owned text replay; native continuation is unsupported.
+//! Official OpenAI discovery is unsupported; the separate llama.cpp factory lists
+//! local server models without resolving official OpenAI credentials.
 mod error;
+mod llamacpp;
+pub use llamacpp::{LlamaCppError, LlamaCppFactory};
 mod protocol;
 mod sse;
 pub use error::OpenAiAdapterError;
@@ -84,28 +87,37 @@ impl ConfiguredRuntimeFactory for OpenAiFactory {
         let endpoint = ORIGIN.to_owned();
         #[cfg(any(test, feature = "fixture-support"))]
         let endpoint = self.endpoint.clone().unwrap_or(endpoint);
-        let client = reqwest::Client::builder()
-            .https_only(endpoint == ORIGIN)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .no_proxy()
-            .connect_timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(60))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|_| E::Transport.into_runtime_failure(RuntimeOperation::Connection))?;
-        Ok(Arc::new(Instance {
-            shared: Arc::new(Shared {
-                client,
-                key: self.key.clone(),
-                endpoint,
-                stop: CancellationToken::new(),
-                tasks: Mutex::new(Vec::new()),
-            }),
-        }))
+        transport_instance(endpoint, self.key.clone(), None)
     }
 }
+fn transport_instance(
+    endpoint: String,
+    key: String,
+    models: Option<Vec<String>>,
+) -> Result<Arc<dyn RuntimeInstance>, RuntimeFailure> {
+    let client = reqwest::Client::builder()
+        .https_only(endpoint == ORIGIN)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|_| E::Transport.into_runtime_failure(RuntimeOperation::Connection))?;
+    Ok(Arc::new(Instance {
+        shared: Arc::new(Shared {
+            client,
+            key,
+            endpoint,
+            models,
+            stop: CancellationToken::new(),
+            tasks: Mutex::new(Vec::new()),
+        }),
+    }))
+}
 struct Shared {
+    models: Option<Vec<String>>,
     client: reqwest::Client,
     key: String,
     endpoint: String,
@@ -132,7 +144,7 @@ struct Instance {
 impl RuntimeInstance for Instance {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            discovery: false,
+            discovery: self.shared.models.is_some(),
             native_continuation: false,
             text_replay: true,
             tool_calls: true,
@@ -147,7 +159,19 @@ impl RuntimeInstance for Instance {
         if !self.is_alive() {
             return Err(E::Shutdown.into_runtime_failure(RuntimeOperation::ModelDiscovery));
         }
-        Ok(ModelDiscovery::Unsupported)
+        Ok(match &self.shared.models {
+            Some(models) => ModelDiscovery::Catalog {
+                models: models
+                    .iter()
+                    .map(|id| ModelDescriptor {
+                        id: id.clone(),
+                        display_label: None,
+                    })
+                    .collect(),
+                complete: true,
+            },
+            None => ModelDiscovery::Unsupported,
+        })
     }
     async fn open(
         &self,
@@ -156,9 +180,30 @@ impl RuntimeInstance for Instance {
         if !self.is_alive() {
             return Err(E::Shutdown.into_runtime_failure(RuntimeOperation::SessionStart));
         }
-        let ModelSelection::Explicit(model) = seed.model else {
-            return Err(E::Configuration.into_runtime_failure(RuntimeOperation::SessionStart));
+        let model = match seed.model {
+            ModelSelection::Explicit(model) => model,
+            ModelSelection::RuntimeDefault => match self.shared.models.as_deref() {
+                Some([model]) => model.clone(),
+                Some(_) => {
+                    return Err(
+                        LlamaCppError::ModelUnavailable.failure(RuntimeOperation::SessionStart)
+                    );
+                }
+                _ => {
+                    return Err(
+                        E::Configuration.into_runtime_failure(RuntimeOperation::SessionStart)
+                    );
+                }
+            },
         };
+        if self
+            .shared
+            .models
+            .as_ref()
+            .is_some_and(|models| !models.contains(&model))
+        {
+            return Err(LlamaCppError::ModelUnavailable.failure(RuntimeOperation::SessionStart));
+        }
         if model.trim().is_empty() || model.len() > 256 {
             return Err(E::Configuration.into_runtime_failure(RuntimeOperation::SessionStart));
         }
@@ -278,6 +323,7 @@ impl RuntimeConversation for Conversation {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let correlation = Arc::new(Mutex::new(Correlation::default()));
         let job = Job {
+            llamacpp: self.shared.models.is_some(),
             client: self.shared.client.clone(),
             key: self.shared.key.clone(),
             endpoint: self.shared.endpoint.clone(),
@@ -417,6 +463,7 @@ impl RuntimeConversation for Conversation {
     }
 }
 struct Job {
+    llamacpp: bool,
     client: reqwest::Client,
     key: String,
     endpoint: String,
@@ -439,7 +486,9 @@ impl Job {
                 let model_request_id = ModelRequestId::new();
                 yield AgentEvent::ModelRequestStarted { session_id:self.session.clone(),model_request_id:model_request_id.clone() }.into();
                 let body = json!({"model":self.model,"input":self.history,"tools":self.definitions,"stream":true,"store":false});
-                let response = self.client.post(&self.endpoint).bearer_auth(&self.key)
+                let request = self.client.post(&self.endpoint);
+                let request = if self.key.is_empty() { request } else { request.bearer_auth(&self.key) };
+                let response = request
                     .header(reqwest::header::CONTENT_TYPE,"application/json")
                     .header(reqwest::header::ACCEPT,"text/event-stream")
                     .body(body.to_string()).send().await.map_err(|_| turn_failure(E::Transport))?;
@@ -448,15 +497,22 @@ impl Job {
                 let mut bytes = response.bytes_stream();
                 let mut parser = sse::Sse::default();
                 let mut assembled = protocol::Response::default();
+                let mut local_events = self.llamacpp.then(llamacpp::EventNormalizer::default);
                 let mut total = 0;
                 while let Some(chunk) = bytes.next().await {
                     let chunk = chunk.map_err(|_| turn_failure(E::Transport))?;
                     total += chunk.len();
                     if total > protocol::MAX_BYTES * 2 { Err(turn_failure(E::Sse))?; }
                     for event in parser.push(&chunk).map_err(turn_failure)? {
+                        let events = match &mut local_events {
+                            Some(local) => local.normalize(event).map_err(turn_failure)?,
+                            None => vec![event],
+                        };
+                        for event in events {
                         match assembled.event(event).map_err(turn_failure)? {
                             protocol::Update::Text(delta) => yield AgentEvent::ModelDelta { session_id:self.session.clone(),model_request_id:model_request_id.clone(),delta }.into(),
                             protocol::Update::Complete | protocol::Update::None => {},
+                        }
                         }
                     }
                     if assembled.output.is_some() { break; }

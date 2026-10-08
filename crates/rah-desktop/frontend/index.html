@@ -39,11 +39,24 @@
         </section>
         <section aria-labelledby="runtime-status-title">
           <h2 id="runtime-status-title">Runtime</h2>
+          <label for="native-provider">Provider</label>
+          <select id="native-provider">
+            <option value="openai">OpenAI — direct API</option>
+            <option value="llama_cpp">llama.cpp — direct local server</option>
+            <option value="codex">Codex CLI — legacy</option>
+          </select>
+          <label for="native-model">Model</label>
+          <input id="native-model" type="text" maxlength="256" />
+          <p class="model-hint">For llama.cpp, leave model empty to select the server's sole model.</p>
+          <label for="native-endpoint">llama.cpp endpoint (loopback)</label>
+          <input id="native-endpoint" type="url" value="http://127.0.0.1:8080" />
+          <p id="native-credential" class="model-hint">OpenAI requires OPENAI_API_KEY in the backend environment before launch. llama.cpp uses no key by default; optional RAH_LLAMA_CPP_API_KEY is separate.</p>
+          <button id="apply-native-configuration" type="button">Apply Provider Configuration</button>
           <dl id="runtime-status"></dl>
           <p id="connection-error" class="connection-error" hidden></p>
           <button id="codex-connection" type="button">Connect Runtime</button>
         </section>
-        <section class="model" aria-labelledby="model-title">
+        <section id="legacy-model-configuration" class="model" aria-labelledby="model-title">
           <h2 id="model-title">Model</h2>
           <p id="model-error" class="connection-error" hidden></p>
           <label for="model-provider">Codex Model Provider</label>

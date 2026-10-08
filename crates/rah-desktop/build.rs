@@ -11,6 +11,8 @@ fn main() {
             "clear_trusted_profile",
             "model_configuration",
             "set_model_configuration",
+            "native_configuration",
+            "set_native_configuration",
             "reset_model_preferences",
             "commit_identity",
             "set_commit_identity",

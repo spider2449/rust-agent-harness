@@ -15,6 +15,8 @@
     "allow-clear-trusted-profile",
     "allow-model-configuration",
     "allow-set-model-configuration",
+    "allow-native-configuration",
+    "allow-set-native-configuration",
     "allow-reset-model-preferences",
     "allow-commit-identity",
     "allow-set-commit-identity",

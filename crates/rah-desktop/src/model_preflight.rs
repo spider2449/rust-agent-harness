@@ -180,7 +180,7 @@ mod tests {
         *state.connection.lock().unwrap() =
             crate::ConnectionState::Error(FrontendError::ModelCatalogUnavailable);
         *state.model_preflight.lock().unwrap() = Some(ScopedModelPreflight {
-            adapter: crate::runtime_model_state::identity(state.runtime_adapter),
+            adapter: crate::runtime_model_state::identity(state.selected_runtime_adapter()),
             connection_generation: 0,
             model_generation: 0,
             state: observation,

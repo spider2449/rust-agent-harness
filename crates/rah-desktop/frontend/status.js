@@ -6,9 +6,9 @@ const applicationRows = [
 
 const runtimeRows = [
   ["RAH Runtime", "runtimeStatus"],
-  ["Codex", "codexStatus"],
-  ["Codex source", "codexSource"],
-  ["Codex version", "codexVersion"],
+  ["Connection", "codexStatus"],
+  ["Runtime source", "codexSource"],
+  ["Legacy Codex version", "codexVersion"],
   ["Profile", "profileStatus"],
   ["Repository", "repositoryStatus"],
   ["Repository tools", "repositoryToolsStatus"],
@@ -129,12 +129,20 @@ function errorMessage(error) {
   const messages = {
     runtime_adapter_unavailable: "No runtime adapter is configured in this build",
     runtime_connection_failed: "Runtime connection failed; check backend configuration",
+    open_ai_credential_missing: "OpenAI API credential is not configured. Set OPENAI_API_KEY securely in the backend environment and restart Desktop.",
+    open_ai_credential_rejected: "OpenAI rejected the configured API credential.",
+    provider_model_unavailable: "The selected provider model is unavailable.",
+    provider_network_failed: "The provider network request failed.",
+    llama_endpoint_invalid: "llama.cpp requires a valid loopback HTTP(S) endpoint.",
+    llama_server_unreachable: "The llama.cpp server is unreachable. Check the endpoint and start llama-server.",
+    llama_server_loading: "The llama.cpp server is loading its model. Connect again when ready.",
+    llama_response_malformed: "The llama.cpp server returned an incompatible response.",
     codex_not_found: "Codex executable not found",
     codex_baseline_invalid: "Certified Codex baseline is invalid",
     codex_host_unsupported: "Certified Codex baseline requires Windows x64",
     unsupported_codex_version: "Runtime uncertified: this Codex version is not admitted",
-    model_not_advertised: "The selected model is not advertised by the current certified Codex runtime. Choose a runtime-advertised model, or explicitly select Custom model ID; provider compatibility remains unverified.",
-    model_catalog_unavailable: "The current Codex model catalog could not be obtained. Connection stopped; model availability is unknown.",
+    model_not_advertised: "The selected model is not advertised by the current runtime. Choose a listed model; Custom model IDs remain unverified where supported.",
+    model_catalog_unavailable: "The current runtime model catalog could not be obtained. Connection stopped; model availability is unknown.",
     codex_schema_incompatible: "Codex schema is incompatible",
     codex_start_failed: "Codex failed to start",
     codex_connection_failed: "Codex connection failed",
@@ -2169,6 +2177,9 @@ async function loadStatus(invoke) {
   button.disabled = (status.codexStatus !== "connected" && !modelConnectAllowed()) || status.runtimeAvailable !== true || status.codexStatus === "connecting" || status.codexStatus === "disconnecting" || chatRunning;
   button.textContent = status.codexStatus === "connected" ? "Disconnect Runtime" : "Connect Runtime";
   const connected = status.codexStatus === "connected";
+  document.querySelector("#legacy-model-configuration").hidden = !codex;
+  const configurationBusy = !["not connected", "error"].includes(status.codexStatus) || chatRunning;
+  for (const id of ["native-provider", "native-model", "native-endpoint", "apply-native-configuration"]) document.querySelector(`#${id}`).disabled = configurationBusy;
   const reconnectRequired = status.repositoryToolsStatus === "reconnect required"
     || status.modelConfigurationStatus === "reconnect required"
     || status.profileStatus === "reconnect required";
@@ -2299,7 +2310,7 @@ function renderModelPreflight(view) {
   hint.hidden = true;
   if (!view) return;
   const outcomes = {
-    model_advertised: "Selected model is advertised by the current Codex runtime. Catalog membership does not prove entitlement or inference success.",
+    model_advertised: "Selected model is advertised by the current runtime. Catalog membership does not prove entitlement or inference success.",
     model_not_advertised: errorMessage("model_not_advertised"),
     model_catalog_unavailable: errorMessage("model_catalog_unavailable"),
     not_checked: "Selected model was not checked against a catalog. Inherit and other providers retain their configured selection.",
@@ -2351,6 +2362,7 @@ async function toggleCodexConnection(invoke) {
   try {
     const status = await invoke("app_status");
     disconnected = status.codexStatus === "connected";
+    button.textContent = disconnected ? "Disconnecting…" : "Connecting…";
     await invoke(disconnected ? "disconnect_codex" : "connect_codex");
   } catch (connectionError) {
     error.textContent = errorMessage(connectionError);
@@ -2367,6 +2379,27 @@ async function toggleCodexConnection(invoke) {
   }
 }
 
+async function initializeNativeConfiguration(invoke) {
+  const native = await invoke("native_configuration");
+  const nativeProvider = document.querySelector("#native-provider");
+  for (const option of nativeProvider.options) option.disabled = !({openai: native.openaiAvailable, llama_cpp: native.llamacppAvailable, codex: native.codexAvailable}[option.value]);
+  nativeProvider.value = native.provider;
+  document.querySelector("#native-model").value = native.model ?? "";
+  document.querySelector("#native-endpoint").value = native.endpoint;
+  document.querySelector("#native-credential").textContent = `OpenAI credential: ${native.credentialConfigured ? "configured" : "not configured"}. Set OPENAI_API_KEY securely in the backend environment before launch. llama.cpp needs no key by default; optional RAH_LLAMA_CPP_API_KEY is separate.`;
+  for (const id of ["native-provider", "native-model", "native-endpoint"]) document.querySelector(`#${id}`).addEventListener("input", () => { modelDraftDirty = true; document.querySelector("#codex-connection").disabled = true; });
+  document.querySelector("#apply-native-configuration").addEventListener("click", async () => {
+    const error = document.querySelector("#connection-error");
+    try {
+      await invoke("set_native_configuration", { provider: nativeProvider.value, model: document.querySelector("#native-model").value || null, endpoint: document.querySelector("#native-endpoint").value });
+      modelDraftDirty = false;
+      await refreshModelConfiguration(invoke);
+      await loadStatus(invoke);
+    } catch (failure) { error.textContent = errorMessage(failure); error.hidden = false; }
+  });
+
+}
+
 async function initializeDesktop() {
   const tauri = await waitForTauriApi();
   if (!tauri) {
@@ -2375,6 +2408,8 @@ async function initializeDesktop() {
   const { invoke } = tauri.core;
   const { dialog } = tauri;
   const { listen } = tauri.event;
+
+  await initializeNativeConfiguration(invoke);
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));

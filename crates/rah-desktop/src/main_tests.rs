@@ -26771,3 +26771,269 @@ async fn task508_production_openai_connect_turn_tool_disconnect_repository_autho
     assert_eq!(counters.codex_resolver, 0);
     assert_eq!(counters.codex_runtime_construction, 0);
 }
+
+#[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
+#[tokio::test(flavor = "current_thread")]
+async fn task513_native_configuration_connect_llama_chat_reconnect_and_provider_switch() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    super::native_configuration::configure(
+        state.inner(),
+        "openai",
+        Some("native-model".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::OpenAi)
+    );
+    let snapshot = super::model_source::refresh(state.inner(), true).await;
+    assert_eq!(snapshot.selected_model.as_deref(), Some("native-model"));
+    assert!(snapshot.eligibility.allowed());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    super::native_configuration::configure(state.inner(), "llama_cpp", None, Some(endpoint))
+        .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::LlamaCpp)
+    );
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            for path in ["/health", "/v1/models", "/v1/responses"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 4096];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with(&format!(
+                    "{} {path} ",
+                    if path == "/v1/responses" {
+                        "POST"
+                    } else {
+                        "GET"
+                    }
+                )));
+                let len = headers
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(|n| n.parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + len {
+                    let mut chunk = [0; 4096];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                let (kind, body) = match path {
+                    "/health" => ("application/json", "{\"status\":\"ok\"}".to_owned()),
+                    "/v1/models" => (
+                        "application/json",
+                        "{\"data\":[{\"id\":\"local-model\"}]}".to_owned(),
+                    ),
+                    _ => {
+                        let request: serde_json::Value =
+                            serde_json::from_slice(&bytes[header_end..]).unwrap();
+                        assert_eq!(request["model"], "local-model");
+                        assert_eq!(request["stream"], true);
+                        (
+                            "text/event-stream",
+                            format!(
+                                "data: {}\n\ndata: {}\n\n",
+                                serde_json::json!({"type":"response.output_text.delta","delta":"RAH_LLAMA_OK"}),
+                                serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RAH_LLAMA_OK"}]}]}})
+                            ),
+                        )
+                    }
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                for chunk in body.as_bytes().chunks(7) {
+                    socket.write_all(chunk).await.unwrap();
+                }
+            }
+        }
+    });
+    for _ in 0..2 {
+        super::connect_codex(state.clone()).await.unwrap();
+        let runtime = match &*state.connection.lock().unwrap() {
+            ConnectionState::Connected { runtime, .. } => runtime.clone(),
+            _ => panic!("not connected"),
+        };
+        assert_eq!(
+            super::native_configuration::configure(
+                state.inner(),
+                "openai",
+                Some("other".into()),
+                None
+            ),
+            Err(FrontendError::ModelConfigurationBusy)
+        );
+        let turn = runtime
+            .start(rah_protocol::AgentRequest {
+                request_id: rah_protocol::RequestId::new(),
+                input: rah_protocol::AgentInput {
+                    messages: vec![rah_protocol::Message {
+                        role: rah_protocol::MessageRole::User,
+                        content: "Reply with exactly: RAH_LLAMA_OK".into(),
+                    }],
+                },
+                options: rah_protocol::AgentOptions::default(),
+            })
+            .await
+            .unwrap();
+        let mut events = turn.events;
+        let mut text = String::new();
+        let mut completed = false;
+        while let Some(event) = events.next().await {
+            assert!(event.failure().is_none(), "{event:?}");
+            match event.event() {
+                AgentEvent::ModelDelta { delta, .. } => text.push_str(delta),
+                AgentEvent::Completed { .. } => completed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "RAH_LLAMA_OK");
+        assert!(completed);
+        super::disconnect_codex(state.clone()).await.unwrap();
+        assert!(!runtime.is_alive());
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+    }
+    server.await.unwrap();
+    super::native_configuration::configure(
+        state.inner(),
+        "openai",
+        Some("native-model".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::OpenAi)
+    );
+}
+
+#[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit Task 513 live local-server acceptance only"]
+async fn task513_live_native_llama_connect_first_response_disconnect() {
+    task513_live_llama_acceptance(false).await;
+}
+
+#[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit Task 513 live model-dependent Tool acceptance only"]
+async fn task513_live_native_llama_host_tool_roundtrip() {
+    task513_live_llama_acceptance(true).await;
+}
+
+#[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
+async fn task513_live_llama_acceptance(tool: bool) {
+    let endpoint = std::env::var("RAH_TASK513_LLAMA_ENDPOINT")
+        .expect("explicit local acceptance endpoint required");
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    super::native_configuration::configure(state.inner(), "llama_cpp", None, Some(endpoint))
+        .unwrap();
+    super::connect_codex(state.clone()).await.unwrap();
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("not connected"),
+    };
+    let turn = runtime
+        .start(rah_protocol::AgentRequest {
+            request_id: rah_protocol::RequestId::new(),
+            input: rah_protocol::AgentInput {
+                messages: vec![rah_protocol::Message {
+                    role: rah_protocol::MessageRole::User,
+                    content: if tool { "Call the echo function with text RAH_LLAMA_OK. After receiving its result, reply with exactly that text. You must call the function before answering." } else { "Reply with exactly: RAH_LLAMA_OK" }.into(),
+                }],
+            },
+            options: rah_protocol::AgentOptions::default(),
+        })
+        .await
+        .unwrap();
+    let control = turn.control.clone();
+    let result = tokio::time::timeout(Duration::from_secs(90), async {
+        let mut events = turn.events;
+        let mut text = String::new();
+        let mut deltas = 0;
+        let mut completed = false;
+        let mut failure = None;
+        let mut tool_started = 0;
+        let mut tool_finished = 0;
+        while let Some(event) = events.next().await {
+            if let Some(error) = event.failure() {
+                failure = Some(format!("{error:?}"));
+            }
+            match event.event() {
+                AgentEvent::ModelDelta { delta, .. } => {
+                    text.push_str(delta);
+                    deltas += 1;
+                }
+                AgentEvent::Completed { .. } => completed = true,
+                AgentEvent::ToolStarted { .. } => tool_started += 1,
+                AgentEvent::ToolFinished { output, .. } => {
+                    assert!(!output.is_error);
+                    tool_finished += 1;
+                }
+                _ => {}
+            }
+        }
+        (
+            text,
+            deltas,
+            completed,
+            failure,
+            tool_started,
+            tool_finished,
+        )
+    })
+    .await;
+    if result.is_err() {
+        control.cancel().await.unwrap();
+    }
+    super::disconnect_codex(state.clone()).await.unwrap();
+    assert!(!runtime.is_alive());
+    let (text, deltas, completed, failure, tool_started, tool_finished) =
+        result.expect("bounded live turn timed out");
+    println!(
+        "TASK513_LIVE_LLAMA={}",
+        serde_json::json!({"connected":true,"stream_deltas":deltas,"response_contains_marker":text.contains("RAH_LLAMA_OK"),"completed":completed,"failure":failure,"disconnected":true,"codex_compiled":cfg!(feature="provider-codex"),"tool_started":tool_started,"tool_finished":tool_finished})
+    );
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(completed);
+    assert!(deltas > 0);
+    assert!(text.contains("RAH_LLAMA_OK"));
+    if tool {
+        assert!(
+            tool_started > 0,
+            "local model did not request the host Tool"
+        );
+        assert_eq!(tool_started, tool_finished);
+    }
+}
