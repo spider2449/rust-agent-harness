@@ -11,7 +11,30 @@ tracked-file Tools retain their scopes under ADRs 0012–0014. HostExplicit
 remains exactly 11. The v0.33 release gate records immutable publication and
 preserved preparation evidence.
 
-## Accepted Codex compatibility admission design (implementation pending)
+## Native OpenAI production composition
+
+Desktop defaults to `provider-openai`, with `provider-codex` optional legacy
+support. Backend `RAH_RUNTIME_PROVIDER` selection precedes provider-specific
+preflight; absent selection prefers OpenAI when compiled, otherwise Codex-only
+uses its legacy adapter. Explicit unavailable/unknown selection and no-provider
+builds fail closed. Neither neutral contracts nor normal Desktop require Codex.
+
+```text
+Desktop host -> configured RuntimeFactory -> rah-runtime-openai
+ -> runtime instance -> RAH conversation -> owned turn stream/control
+ -> fixed OpenAI Responses endpoint
+provider Tool request -> revocable host port -> active lease/permissions
+ -> ToolRegistry/authorized dispatch -> correlated Tool result -> continuation
+```
+
+Backend-only OPENAI_API_KEY and RAH_OPENAI_MODEL retain the existing external
+configuration boundary. No credential store, frontend key channel or arbitrary
+endpoint is added. Native discovery and NativeContinuation are unsupported;
+Task 500 host-owned text replay is supported. Model rejection remains a provider
+runtime failure, never Codex compatibility evidence. ADR-B: this is composition
+under ADRs 0001/0002/0032/0033, with no public API or authority change.
+
+## Legacy Codex compatibility admission design (implementation stopped)
 
 [ADR 0034](adr/0034-artifact-bound-codex-compatibility-admission.md) replaces
 exact-version admission authority in design with a versioned, artifact-bound
@@ -21,7 +44,9 @@ neutral composition consumes closed sanitized assessment facts. Desktop does
 not own admission. Wire DTOs and JSON stay private. Pre-conversation fallback
 requires exact certified distribution identity and full contract evidence;
 mid-conversation runtime switching/replay is prohibited. Task 510C1 changes
-documentation only; production replacement awaits Task 510C2.
+documentation only; Task 510C2 and further CLI admission/certification work are
+stopped unless explicitly reauthorized. ADR 0034 remains legacy design and does
+not block native OpenAI production. Existing legacy admission stays fail closed.
 
 ## Historical RAH v0.32.0 Architecture - released
 
@@ -1326,6 +1351,8 @@ model   session      tools     runtime
 
 rah-tools   -> rah-protocol, rah-sandbox
 rah-runtime -> rah-model, rah-protocol, rah-tools
+rah-runtime-openai -> rah-protocol, rah-runtime
+rah-desktop -> rah-runtime-openai (default), rah-runtime-codex (optional legacy)
 rah-runtime-codex -> rah-protocol, rah-runtime, rah-tools
 rah-cli     -> rah-model, rah-protocol, rah-runtime, rah-tools
 ```

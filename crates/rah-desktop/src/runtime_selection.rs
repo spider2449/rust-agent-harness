@@ -1,5 +1,5 @@
-//! Private static selection; provider features may coexist. Future selection is host-owned.
-//! Codex remains the default; no implicit fallback or discovery without its feature.
+//! Backend-owned selection; native OpenAI is preferred when compiled.
+//! Codex is optional legacy support. Explicit selection never falls back.
 use crate::FrontendError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeArtifactSource {
@@ -75,9 +75,9 @@ fn select(config: Option<&str>) -> Option<ProductionAdapter> {
         config,
     ) {
         #[cfg(feature = "provider-codex")]
-        (true, false, _) | (true, true, Some("codex")) => Some(ProductionAdapter::Codex),
+        (true, false, None) | (true, _, Some("codex")) => Some(ProductionAdapter::Codex),
         #[cfg(feature = "provider-openai")]
-        (false, true, _) | (true, true, Some("openai")) => Some(ProductionAdapter::OpenAi),
+        (_, true, None | Some("openai")) => Some(ProductionAdapter::OpenAi),
         _ => None,
     }
 }
@@ -147,14 +147,19 @@ mod tests {
     use super::*;
     #[test]
     fn task508_feature_selection_matrix() {
-        if cfg!(all(feature = "provider-codex", feature = "provider-openai")) {
-            assert_eq!(select(None), None);
-            assert_eq!(select(Some("unknown")), None);
-        }
+        assert_eq!(select(Some("unknown")), None);
         #[cfg(feature = "provider-codex")]
         assert_eq!(select(Some("codex")), Some(ProductionAdapter::Codex));
         #[cfg(feature = "provider-openai")]
         assert_eq!(select(Some("openai")), Some(ProductionAdapter::OpenAi));
+        #[cfg(feature = "provider-openai")]
+        assert_eq!(select(None), Some(ProductionAdapter::OpenAi));
+        #[cfg(all(feature = "provider-codex", not(feature = "provider-openai")))]
+        assert_eq!(select(None), Some(ProductionAdapter::Codex));
+        #[cfg(not(feature = "provider-codex"))]
+        assert_eq!(select(Some("codex")), None);
+        #[cfg(not(feature = "provider-openai"))]
+        assert_eq!(select(Some("openai")), None);
         if !cfg!(any(feature = "provider-codex", feature = "provider-openai")) {
             assert_eq!(select(None), None);
         }

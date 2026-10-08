@@ -5,6 +5,41 @@ It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
 and does not load model weights or implement model execution.
 
+## Production runtime
+
+The normal Windows Desktop build uses the native OpenAI Responses adapter:
+
+```powershell
+cargo build -p rah-desktop
+$env:RAH_RUNTIME_PROVIDER = 'openai'
+$env:RAH_OPENAI_MODEL = 'your-supported-model-id'
+# Configure OPENAI_API_KEY securely in the backend environment before launch.
+```
+
+Credentials remain externally configured and backend-only; do not place keys in
+project files. Model identifiers are provider configuration, not a Codex catalog.
+Connect validates configuration; native model discovery is unsupported, so model
+availability is not claimed before the provider request. Rejections and transport
+failures use sanitized neutral runtime diagnostics. Native OpenAI supports
+host-owned text replay, streaming, host-authorized Tools, cancellation and shutdown;
+provider-native continuation is unsupported.
+
+Default Desktop has no dependency on `rah-runtime-codex` and requires no Codex
+executable, app-server, companion, version check or certification. The legacy
+adapter remains available with `--no-default-features --features provider-codex`.
+Both adapters can be built with `--features provider-codex`: unset selection
+prefers OpenAI, and `RAH_RUNTIME_PROVIDER=codex` explicitly selects the legacy
+adapter with its existing admission rules. Unknown or uncompiled selections
+fail closed. A `--no-default-features` build has no provider and fails closed.
+There is no automatic provider fallback or replay after failure.
+
+Codex CLI compatibility work is stopped. ADR 0034 and historical certification
+records remain legacy design/evidence; they do not block native production.
+The validation UI and existing IPC command names are retained. Runtime selection
+is backend-owned and captured at startup; changed environment requires restart.
+Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
+without granting repository authority or claiming rollback.
+
 ## RAH v0.33.0 released
 
 The v0.33 capability is `repo.edit-untracked-file`: bounded correction of one

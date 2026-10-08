@@ -1772,4 +1772,23 @@ namespace, not a grant of repository authority.
   validation.
 - The host-selected ADR 0015 endpoint is bounded initial provider configuration,
   not transport confinement. Redirect/proxy/DNS/peer identity/effective
-  destination guarantees and Task 120 remote generation proof are not claimed.
+   destination guarantees and Task 120 remote generation proof are not claimed.
+
+## Native OpenAI production composition
+
+Default Desktop uses the existing native Responses adapter and fixed
+`https://api.openai.com/v1/responses` endpoint. Redirects, retries and ambient
+proxy use are disabled by its existing transport policy. Backend credentials
+remain externally configured; no frontend credential channel or persisted key
+is introduced. Local loopback fixtures require an explicit test-support feature.
+
+Provider requests do not grant authority. The revocable HostToolScope validates
+active conversation/session leases before ToolRegistry and permission dispatch.
+Host-owned active repository/worktree boundaries, Trusted Profiles, remembered
+workspace semantics, reviewed mutations and uncertainty accounting remain
+unchanged. HostExplicit stays exactly 11. Cancellation and shutdown never imply
+rollback or permit automatic replay. Closed RuntimeFailure diagnostics retain
+typed sources locally and never serialize headers, keys or provider bodies.
+
+Codex remains an optional legacy adapter with existing restrictions. Its
+executable admission and ADR 0034 design are not native-runtime prerequisites.

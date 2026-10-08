@@ -16,6 +16,11 @@ rah-runtime ------> rah-model
              \----> rah-tools
              \----> rah-protocol
 
+rah-desktop ------> rah-runtime-openai (default optional feature)
+               \--> rah-runtime-codex (optional legacy feature)
+
+rah-runtime-openai -> rah-runtime, rah-protocol
+
 rah-runtime-codex -> rah-runtime
                   -> rah-protocol
                   -> rah-tools

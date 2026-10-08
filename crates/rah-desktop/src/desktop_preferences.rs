@@ -806,9 +806,6 @@ mod tests {
             assert_eq!(bytes, expected.as_bytes());
             let restored = parse(&bytes).unwrap().0;
             assert_eq!(restored, selection);
-            assert!(
-                matches!(restored.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
-            );
         }
         let advertised = parse(br#"{"version":4,"model":{"provider":"openai","model":"same-model","model_selection_mode":"advertised"}}"#).unwrap().0;
         let custom = parse(br#"{"version":4,"model":{"provider":"openai","model":"same-model","model_selection_mode":"custom"}}"#).unwrap().0;
@@ -834,9 +831,6 @@ mod tests {
                 selection.model_selection_mode,
                 Some(ModelSelectionMode::Advertised)
             );
-            assert!(
-                matches!(selection.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
-            );
         }
         for version in 1..=4 {
             let bytes = format!(r#"{{"version":{version},"model":{{"provider":"inherit"}}}}"#);
@@ -847,6 +841,43 @@ mod tests {
             assert_eq!(
                 canonical(&selection, None, None).unwrap(),
                 b"{\"version\":4,\"model\":{\"provider\":\"inherit\"}}\n"
+            );
+        }
+    }
+
+    #[cfg(feature = "provider-codex")]
+    #[test]
+    fn v4_explicit_modes_translate_to_codex_openai_config() {
+        for (id, mode) in [
+            ("model-a", ModelSelectionMode::Advertised),
+            ("custom-model-a", ModelSelectionMode::Custom),
+            ("same-model", ModelSelectionMode::Advertised),
+            ("same-model", ModelSelectionMode::Custom),
+        ] {
+            let selection = DesktopModelSelection {
+                provider: DesktopModelProvider::OpenAi,
+                model: Some(id.into()),
+                model_selection_mode: Some(mode),
+                llama_cpp_endpoint: None,
+            };
+            let bytes = canonical(&selection, None, None).unwrap();
+            let restored = parse(&bytes).unwrap().0;
+            assert!(
+                matches!(restored.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
+            );
+        }
+    }
+
+    #[cfg(feature = "provider-codex")]
+    #[test]
+    fn legacy_ids_absent_from_catalog_translate_to_codex_openai_config() {
+        for version in 1..=3 {
+            let bytes = format!(
+                r#"{{"version":{version},"model":{{"provider":"openai","model":"legacy-absent-model"}}}}"#
+            );
+            let selection = parse(bytes.as_bytes()).unwrap().0;
+            assert!(
+                matches!(selection.codex_model_config().unwrap(), rah_runtime_codex::CodexModelConfig::Explicit(ref config) if config.provider() == &rah_runtime_codex::CodexModelProvider::OpenAi)
             );
         }
     }

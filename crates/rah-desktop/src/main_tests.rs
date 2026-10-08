@@ -26690,6 +26690,83 @@ async fn task508_production_openai_connect_turn_tool_disconnect_repository_autho
         .await
         .is_err()
     );
+    // Task 511: reconnect through the shared production path, then cancel a
+    // provider request held open locally. Old handles cannot regain authority.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let factory =
+        rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap()).unwrap();
+    let (accepted, ready) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        accepted.send(()).unwrap();
+        released.await.unwrap();
+    });
+    super::production_composition::connect_with_configuration(
+        state.inner(),
+        ProductionAdapter::OpenAi,
+        Some((
+            Box::new(factory),
+            ModelSelection::Explicit("fixture-model".into()),
+            RuntimeArtifactSource::Native,
+        )),
+    )
+    .await
+    .unwrap();
+    let reconnected = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("reconnect did not publish"),
+    };
+    assert!(!Arc::ptr_eq(&runtime, &reconnected));
+    assert!(!runtime.is_alive());
+    let turn = reconnected.start(request()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        reconnected.cancel(turn.session_id.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut events = turn.events;
+    let mut cancelled = false;
+    let mut completed = false;
+    while let Some(event) = events.next().await {
+        if let Some(error) = event.failure() {
+            use std::error::Error;
+            assert_eq!(
+                error.diagnostic().kind,
+                rah_protocol::RuntimeFailureKind::Operation
+            );
+            assert_eq!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<rah_runtime_openai::OpenAiAdapterError>(),
+                Some(&rah_runtime_openai::OpenAiAdapterError::Cancelled),
+            );
+            cancelled = true;
+        }
+        completed |= matches!(event.event(), AgentEvent::Completed { .. });
+    }
+    assert!(cancelled);
+    assert!(!completed);
+    release.send(()).unwrap();
+    server.await.unwrap();
+    disconnect_codex(state.clone()).await.unwrap();
+    assert!(!reconnected.is_alive());
+    assert!(reconnected.start(request()).await.is_err());
     let counters = startup_activation_snapshot();
     assert_eq!(counters.codex_resolver, 0);
     assert_eq!(counters.codex_runtime_construction, 0);

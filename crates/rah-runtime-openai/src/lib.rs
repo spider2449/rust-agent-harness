@@ -1,5 +1,8 @@
-//! Experimental native Responses adapter. No Desktop composition or live API
-//! certification is implied. Only the scoped host port can execute a Tool.
+//! Native Responses adapter behind the experimental neutral runtime seam.
+//! Desktop selects it by default; deterministic coverage is not live API
+//! certification. Only the scoped host port can execute a Tool.
+//! Continuation uses host-owned text replay; native continuation and model
+//! discovery are unsupported.
 mod error;
 mod protocol;
 mod sse;
