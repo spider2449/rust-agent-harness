@@ -33,3 +33,6 @@ jobs:
 
       - name: Check Desktop Tauri permissions
         run: node crates/rah-desktop/tauri_permission_test.js
+
+      - name: Check Desktop chat lifecycle
+        run: node crates/rah-desktop/frontend/chat_lifecycle_test.js

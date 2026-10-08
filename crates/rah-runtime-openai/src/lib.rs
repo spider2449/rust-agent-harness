@@ -308,8 +308,19 @@ impl RuntimeConversation for Conversation {
         let TurnInput::TextReplay(request) = input else {
             return Err(E::Configuration.into_runtime_failure(RuntimeOperation::SessionResume));
         };
-        let history = protocol::input(&request)
+        let mut history = protocol::input(&request)
             .map_err(|e| e.into_runtime_failure(RuntimeOperation::SessionStart))?;
+        if self.shared.models.is_some() {
+            // llama.cpp distinguishes replayed assistant output from easy input
+            // messages using this discriminator, even with string content.
+            for item in &mut history {
+                if item["role"] == "assistant" {
+                    item["type"] = Value::String("message".into());
+                }
+            }
+            protocol::bounded(&history)
+                .map_err(|e| e.into_runtime_failure(RuntimeOperation::SessionStart))?;
+        }
         let lease = self.tools.admit_turn().await?;
         let session = lease.session_id.clone();
         let stop = self.stop.child_token();

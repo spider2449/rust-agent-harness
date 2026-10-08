@@ -336,6 +336,66 @@ fn llama_endpoint_and_credential_boundaries() {
     );
 }
 #[tokio::test]
+async fn assistant_replay_discriminator_is_local_provider_only() {
+    fn request() -> TurnInput {
+        let TurnInput::TextReplay(mut request) = replay() else {
+            unreachable!()
+        };
+        request.input.messages.extend([
+            Message {
+                role: MessageRole::Assistant,
+                content: "previous answer".into(),
+            },
+            Message {
+                role: MessageRole::User,
+                content: "next question".into(),
+            },
+        ]);
+        TurnInput::TextReplay(request)
+    }
+    let official = Fixture::new(vec![Script::text("answer")]).await;
+    let runtime = official.runtime().await;
+    let (host, _) = scope();
+    let chat = conversation(&runtime, host.port()).await;
+    let events = collect(chat.send(request()).await.unwrap()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+    );
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        official.requests.lock().unwrap()[0]["input"][1],
+        json!({"role":"assistant","content":"previous answer"})
+    );
+
+    let local = LocalServer::llama(&["fixture-model"], vec![frames(text_events("answer"))]).await;
+    let runtime = LlamaCppFactory::new(&local.origin, None)
+        .create()
+        .await
+        .unwrap();
+    let (host, _) = scope();
+    let chat = conversation(&runtime, host.port()).await;
+    let events = collect(chat.send(request()).await.unwrap()).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event(), AgentEvent::Completed { .. }))
+    );
+    runtime.shutdown().await.unwrap();
+    let requests = local.requests.lock().unwrap();
+    let body: Value = serde_json::from_str(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        body["input"][1],
+        json!({"type":"message","role":"assistant","content":"previous answer"})
+    );
+    assert_eq!(
+        body["input"][0],
+        json!({"role":"user","content":"fixture user"})
+    );
+}
+
+#[tokio::test]
 async fn llama_health_models_stream_and_reconnect() {
     for _ in 0..2 {
         let server =

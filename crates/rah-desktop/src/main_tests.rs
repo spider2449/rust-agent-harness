@@ -26934,6 +26934,363 @@ async fn task513_native_configuration_connect_llama_chat_reconnect_and_provider_
 
 #[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
 #[tokio::test(flavor = "current_thread")]
+async fn task514b_production_multi_turn_reconnect_and_missing_credential_recovery() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Isolate missing-key coverage from a developer's configured credentials
+    // without mutating this process's environment or making an OpenAI request.
+    if std::env::var_os("OPENAI_API_KEY").is_some() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::task514b_production_multi_turn_reconnect_and_missing_credential_recovery",
+                "--nocapture",
+            ])
+            .env_remove("OPENAI_API_KEY")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    let repository_fixture = TestRepository::git_repository(GitRepositoryState::Clean);
+    let git = TestRepository::native_git();
+    let member = super::admit_repository_with_semantic_validation(
+        state.inner(),
+        &git,
+        &repository_fixture.0,
+    )
+    .await
+    .unwrap();
+    activate_admitted_member(state.inner(), member)
+        .await
+        .unwrap();
+    let chat_events = listen_for_test_event(app.handle(), "chat_event");
+    let (terminal_sender, mut terminal_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let terminal_listener = app.listen("chat_event", move |event| {
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        if matches!(
+            payload["kind"].as_str(),
+            Some("completed" | "failed" | "cancelled")
+        ) {
+            let _ = terminal_sender.send(payload);
+        }
+    });
+    super::native_configuration::configure(
+        state.inner(),
+        "openai",
+        Some("native-model".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::OpenAi)
+    );
+    let snapshot = super::model_source::refresh(state.inner(), true).await;
+    assert_eq!(snapshot.selected_model.as_deref(), Some("native-model"));
+    assert!(snapshot.eligibility.allowed());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    super::native_configuration::configure(
+        state.inner(),
+        "llama_cpp",
+        None,
+        Some(endpoint.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::LlamaCpp)
+    );
+    let server = tokio::spawn(async move {
+        let mut responses = 0;
+        for connection in 0..3 {
+            for path in ["/health", "/v1/models", "/v1/responses", "/v1/responses"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 4096];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with(&format!(
+                    "{} {path} ",
+                    if path == "/v1/responses" {
+                        "POST"
+                    } else {
+                        "GET"
+                    }
+                )));
+                let len = headers
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(|n| n.parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + len {
+                    let mut chunk = [0; 4096];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                let (kind, body) = match path {
+                    "/health" => ("application/json", "{\"status\":\"ok\"}".to_owned()),
+                    "/v1/models" => (
+                        "application/json",
+                        "{\"data\":[{\"id\":\"local-model\"}]}".to_owned(),
+                    ),
+                    _ => {
+                        let request: serde_json::Value =
+                            serde_json::from_slice(&bytes[header_end..]).unwrap();
+                        assert_eq!(request["model"], "local-model");
+                        assert_eq!(request["stream"], true);
+                        let input = request["input"].as_array().unwrap();
+                        // Match llama.cpp's Responses input discriminator: assistant
+                        // replay is an output message, not an easy input message.
+                        if input
+                            .iter()
+                            .any(|item| item["role"] == "assistant" && item["type"] != "message")
+                        {
+                            let body = r#"{"error":{"code":400,"message":"Cannot determine type of 'item'","type":"invalid_request_error"}}"#;
+                            socket.write_all(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                            continue;
+                        }
+                        assert_eq!(
+                            input.len(),
+                            if connection == 1 {
+                                5 + 2 * (responses % 2)
+                            } else {
+                                1 + 2 * (responses % 2)
+                            }
+                        );
+                        assert_eq!(input[0]["content"], "first");
+                        if responses % 2 == 1 {
+                            assert_eq!(input[1]["role"], "assistant");
+                            assert_eq!(input[1]["content"], "RAH_LLAMA_OK");
+                            assert_eq!(input.last().unwrap()["content"], "second");
+                        }
+                        responses += 1;
+                        (
+                            "text/event-stream",
+                            format!(
+                                "data: {}\n\ndata: {}\n\n",
+                                serde_json::json!({"type":"response.output_text.delta","delta":"RAH_LLAMA_OK"}),
+                                serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RAH_LLAMA_OK"}]}]}})
+                            ),
+                        )
+                    }
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                for chunk in body.as_bytes().chunks(7) {
+                    socket.write_all(chunk).await.unwrap();
+                }
+            }
+        }
+    });
+    let mut previous_runtime: Option<Arc<super::DesktopRuntime>> = None;
+    for connection in 0..3 {
+        super::connect_codex(state.clone()).await.unwrap();
+        let runtime = match &*state.connection.lock().unwrap() {
+            ConnectionState::Connected { runtime, .. } => runtime.clone(),
+            _ => panic!("not connected"),
+        };
+        assert_eq!(
+            super::native_configuration::configure(
+                state.inner(),
+                "openai",
+                Some("other".into()),
+                None
+            ),
+            Err(FrontendError::ModelConfigurationBusy)
+        );
+        if let Some(previous) = previous_runtime.as_ref() {
+            assert_ne!(previous.conversation_id(), runtime.conversation_id());
+            assert!(
+                !Arc::ptr_eq(previous, &runtime),
+                "Reconnect must create a fresh runtime"
+            );
+        }
+        previous_runtime = Some(runtime.clone());
+        #[cfg(feature = "openai-fixture")]
+        let old_port = runtime.retained_port();
+        let mut first_epoch = None;
+        for prompt in ["first", "second"] {
+            eprintln!("Task514B connection={connection} prompt={prompt} dispatch");
+            super::send_chat(prompt.into(), app.handle().clone(), state.clone())
+                .await
+                .unwrap();
+            let settled = tokio::time::timeout(Duration::from_secs(10), async {
+                // Await an observable terminal instead of continuously polling
+                // Idle while the fixture server needs this current-thread IO driver.
+                let terminal = terminal_receiver
+                    .recv()
+                    .await
+                    .expect("terminal listener remains owned");
+                assert_eq!(terminal["kind"], "completed", "{terminal:?}");
+                loop {
+                    if *state.chat.lock().unwrap() == ChatState::Idle {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert!(
+                settled.is_ok(),
+                "connection={connection} prompt={prompt} chat={:?} events={:?}",
+                *state.chat.lock().unwrap(),
+                *chat_events.0.lock().unwrap()
+            );
+            assert!(state.active_chat.lock().unwrap().is_none());
+            assert_eq!(
+                state.host_invocation.lock().unwrap().state(),
+                CoordinatorState::Idle
+            );
+            let epoch = state.conversation.lock().unwrap().epoch;
+            if let Some(first) = first_epoch {
+                assert_eq!(epoch, first);
+            }
+            first_epoch = Some(epoch);
+        }
+        #[cfg(feature = "openai-fixture")]
+        let old_session = {
+            use rah_runtime::experimental::ToolRequest;
+            let lease = old_port.admit_turn().await.unwrap();
+            let session = lease.session_id.clone();
+            let result = old_port
+                .request_live(ToolRequest {
+                    session_id: session.clone(),
+                    name: ToolName::new("repo.status"),
+                    input: ToolInput(serde_json::json!({})),
+                })
+                .await
+                .unwrap();
+            assert!(
+                !result.is_error,
+                "active host-selected repository observation must work"
+            );
+            drop(lease);
+            session
+        };
+        super::disconnect_codex(state.clone()).await.unwrap();
+        assert!(!runtime.is_alive());
+        #[cfg(feature = "openai-fixture")]
+        assert!(
+            old_port
+                .request_live(rah_runtime::experimental::ToolRequest {
+                    session_id: old_session,
+                    name: ToolName::new("repo.status"),
+                    input: ToolInput(serde_json::json!({}))
+                })
+                .await
+                .is_err(),
+            "old repository authority must be revoked"
+        );
+        #[cfg(feature = "openai-fixture")]
+        assert!(
+            old_port.admit_turn().await.is_err(),
+            "revoked Tool port cannot regain admission"
+        );
+        assert!(matches!(
+            *state.connection.lock().unwrap(),
+            ConnectionState::NotConnected
+        ));
+        assert!(
+            runtime
+                .start(rah_protocol::AgentRequest {
+                    request_id: rah_protocol::RequestId::new(),
+                    input: rah_protocol::AgentInput { messages: vec![] },
+                    options: rah_protocol::AgentOptions::default(),
+                })
+                .await
+                .is_err(),
+            "withdrawn runtime cannot be reused"
+        );
+        if connection == 0 {
+            continue;
+        }
+        super::native_configuration::configure(
+            state.inner(),
+            "openai",
+            Some("native-model".into()),
+            None,
+        )
+        .unwrap();
+        // No credential is required or sent: this test runner must omit OPENAI_API_KEY.
+        assert!(
+            std::env::var("OPENAI_API_KEY").is_err(),
+            "run missing-key coverage without a credential"
+        );
+        assert_eq!(
+            super::connect_codex(state.clone()).await.err(),
+            Some(FrontendError::OpenAiCredentialMissing)
+        );
+        assert_eq!(*state.chat.lock().unwrap(), ChatState::Idle);
+        super::disconnect_codex(state.clone()).await.unwrap();
+        super::native_configuration::configure(
+            state.inner(),
+            "llama_cpp",
+            None,
+            Some(endpoint.clone()),
+        )
+        .unwrap();
+    }
+    server.await.unwrap();
+    let events = chat_events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| serde_json::from_str::<serde_json::Value>(event).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["kind"] == "completed")
+            .count(),
+        6
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["kind"] == "failed" || event["kind"] == "cancelled"),
+        "{events:?}"
+    );
+    app.unlisten(chat_events.1);
+    app.unlisten(terminal_listener);
+    super::native_configuration::configure(
+        state.inner(),
+        "openai",
+        Some("native-model".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        state.selected_runtime_adapter(),
+        Some(super::runtime_selection::ProductionAdapter::OpenAi)
+    );
+}
+
+#[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "explicit Task 513 live local-server acceptance only"]
 async fn task513_live_native_llama_connect_first_response_disconnect() {
     task513_live_llama_acceptance(false).await;

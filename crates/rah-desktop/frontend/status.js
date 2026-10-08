@@ -2734,16 +2734,22 @@ async function initializeDesktop() {
     const prompt = document.querySelector("#chat-prompt");
     const chatError = document.querySelector("#chat-error");
     chatError.hidden = true;
+    // Runtime events may arrive before the IPC reply. Reserve UI ownership
+    // before dispatch so a terminal event cannot be overwritten by that reply.
+    chatRunning = true;
+    updateRepositoryMembershipControls();
     try {
       const result = await invoke("send_chat", { prompt: prompt.value });
       if (result.contextChange) appendContextSeparator(result.contextChange);
       appendMessage("You", prompt.value);
       prompt.value = "";
-      chatRunning = true;
       updateRepositoryMembershipControls();
-      await loadStatus(invoke);
+      await loadStatus(invoke).catch(() => showBackendError());
     } catch (error) {
+      chatRunning = false;
+      updateRepositoryMembershipControls();
       showChatError(error);
+      await loadStatus(invoke).catch(() => showBackendError());
     }
   });
   await refreshTrustedProfileSelection(invoke);
