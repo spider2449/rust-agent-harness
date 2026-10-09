@@ -54,6 +54,37 @@ environment requires restart.
 Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
 without granting repository authority or claiming rollback.
 
+## RAH v0.34.0 release preparation
+
+Release preparation covers native OpenAI and llama.cpp runtimes, provider-neutral
+runtime ownership with optional legacy Codex, native lifecycle/cancellation,
+model-selected host Tool integration, and the redesigned Desktop workspace.
+All 14 Cargo packages and the Tauri bundle configuration use 0.34.0.
+This version is not published. **OPENAI_LIVE_NOT_VERIFIED** remains a blocking
+public-release gate: actual OpenAI Responses API acceptance or an explicit
+documented human-authorized waiver is required. Deterministic API fixtures and
+missing-key recovery do not satisfy it. See the
+[v0.34 release gate](docs/RAH_V0.34_RELEASE_GATE.md).
+
+The Desktop has a central conversation, a Workspace panel and an Inspector.
+Panels resize and collapse; presentation layout persists across restart.
+Workspace and Inspector section navigation keeps repository, runtime, Tool,
+authority and activity controls accessible, including narrow-window drawers.
+Persisted layout grants no repository or Tool authority. Remembered repositories
+still require fresh host admission and activation after restart.
+
+Cancel an active streaming turn and wait for its cancelled terminal before
+submitting another prompt. Disconnect/reconnect creates fresh runtime handles
+and revokes old Tool leases. For missing OpenAI credentials, configure the
+backend environment securely and restart, or explicitly select llama.cpp while
+disconnected. For a loading/unreachable local server, restore server health and
+explicitly reconnect. No automatic fallback or effect replay occurs. Cancellation
+does not reverse provider or Tool effects; inspect uncertain effects first.
+Operational recovery may restore a retained known-good executable and compatible
+configuration; it does not promise rollback of external effects or repository
+history. Installer execution and cross-platform live acceptance are not certified
+by the retained Windows executable/UI evidence.
+
 ## RAH v0.33.0 released
 
 The v0.33 capability is `repo.edit-untracked-file`: bounded correction of one

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.34.0 - release preparation (2026-10-09)
+
+- Native OpenAI Responses and loopback llama.cpp runtime integration, with
+  separate backend credentials and no implicit Codex fallback.
+- Provider-neutral runtime composition and revocable host Tool lifetime; Codex
+  remains an optional legacy adapter.
+- Native Desktop multi-turn lifecycle, cancellation terminal, next-turn and
+  reconnect corrections; missing-key recovery remains explicit.
+- Model-selected Tool requests pass through host permissions and ToolRegistry.
+- Redesigned conversation workspace, resizable/persistent side panels, and
+  Inspector/Workspace section navigation with narrow-window support.
+- All 14 workspace packages, internal lock records and Tauri bundle metadata
+  aligned to 0.34.0; repository/security authority and HostExplicit 11 unchanged.
+
+Prepared scope only; no v0.34.0 tag or GitHub Release is created by this task.
+**OPENAI_LIVE_NOT_VERIFIED** blocks final public release until real Responses API
+acceptance or an explicit documented human-authorized waiver. No waiver is granted.
+See [the release gate](docs/RAH_V0.34_RELEASE_GATE.md) for validation and limits.
+
+
 ## v0.33.0 - released (2026-10-01)
 
 ### Immutable publication record

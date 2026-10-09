@@ -1,4 +1,22 @@
-# RAH v0.33.0 Architecture - released
+# RAH v0.34.0 Architecture - release preparation
+
+The native production composition below preserves ADRs 0001/0002/0032/0033.
+RAH orchestrates inference and does not load weights or implement inference.
+Desktop owns runtime, conversation and turn lifetimes; provider translation stays
+inside adapters. Cancellation terminates the active stream with a typed cancelled
+terminal; teardown revokes host Tool admission before withdrawing composition.
+Already admitted effects remain accounted for; cancellation is not rollback.
+
+The conversation workspace and resizable Workspace/Inspector panels are
+frontend presentation. Version-1 layout persistence and section navigation grant
+no runtime, repository or Tool permission. Backend repository selection, fresh
+admission, active-generation checks and reviewed mutation boundaries remain
+unchanged. This preparation changes no dependency edge or accepted ADR.
+The 49-command Tauri surface and exactly 11 HostExplicit Tools are preserved.
+Actual OpenAI acceptance remains OPENAI_LIVE_NOT_VERIFIED; see the
+[v0.34 gate](RAH_V0.34_RELEASE_GATE.md).
+
+## Preserved v0.33 capability
 
 ADR 0031 defines ordinary `repo.edit-untracked-file` for one existing eligible
 untracked UTF-8 file inside the host-selected active admitted repository. It

@@ -1,4 +1,28 @@
-# RAH v0.33.0 Security Model - released
+# RAH v0.34.0 Security Model - release preparation
+
+MODEL REQUEST IS NOT AUTHORIZATION. Native model-selected Tool requests use
+revocable conversation/session leases, ToolRegistry and host permission dispatch.
+No provider metadata, frontend control or persisted layout can grant authority.
+Repository observation, bounded worktree mutation, index mutation and reviewed
+commit/history mutation remain separate. HostExplicit remains exactly 11.
+
+OPENAI_API_KEY is backend-only for fixed-origin official OpenAI. Loopback-only
+llama.cpp uses its separate optional RAH_LLAMA_CPP_API_KEY; keys are not stored
+in frontend layout/configuration or sent across the IPC presentation boundary.
+Changing credential environment requires restart. Missing credentials fail closed;
+explicit disconnected provider selection is the recovery path. No automatic
+fallback or replay is authorized. Cancel/disconnect/response loss do not imply
+rollback, strong OS sandboxing or removal of admitted external effects. Inspect
+uncertain effects before further action. Restoring a known-good executable is
+operational recovery, not repository-history or external-effect rollback.
+
+**OPENAI_LIVE_NOT_VERIFIED** remains a public-release blocker. Deterministic API
+fixtures and missing-key recovery are not real OpenAI Responses API acceptance.
+Only successful actual acceptance or an explicit documented human-authorized
+waiver can resolve that gate. This preparation grants no waiver. See the
+[v0.34 release gate](RAH_V0.34_RELEASE_GATE.md).
+
+## Preserved v0.33 security scope
 
 ADR 0031's `repo.edit-untracked-file` is an ordinary repository-bound Tool.
 Its target must be an existing, regular, non-ignored UTF-8 file in the active
