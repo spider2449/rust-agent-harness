@@ -1010,22 +1010,50 @@ async fn statuses_malformed_sse_json_api_and_interrupted_stream_are_typed_safe()
     }
 }
 #[tokio::test]
-async fn continuation_bound_is_typed_and_does_not_execute_ninth_round() {
-    let f = Fixture::new(
-        (0..=MAX_TOOL_ROUNDS)
-            .map(|_| Script::events(function_events(&[1])))
-            .collect(),
-    )
-    .await;
+async fn tool_continuation_past_eight_rounds_completes() {
+    const TOOL_ROUNDS: usize = 12;
+    let mut scripts = (0..TOOL_ROUNDS)
+        .map(|_| Script::events(function_events(&[1])))
+        .collect::<Vec<_>>();
+    scripts.push(Script::text("review complete"));
+    let f = Fixture::new(scripts).await;
     let runtime = f.runtime().await;
     let (scope, count) = scope();
     let c = conversation(&runtime, scope.port()).await;
     let events = collect(c.send(replay()).await.unwrap()).await;
-    let error = failure(&events);
-    assert_eq!(source(error), &E::ContinuationLimit);
-    safe(error);
-    assert_eq!(count.load(Ordering::SeqCst), MAX_TOOL_ROUNDS);
-    assert_eq!(f.requests.lock().unwrap().len(), MAX_TOOL_ROUNDS + 1);
+    assert!(events.iter().all(|event| event.failure().is_none()));
+    assert!(matches!(
+        events.last().unwrap().event(),
+        AgentEvent::Completed { .. }
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), AgentEvent::ModelRequestStarted { .. }))
+            .count(),
+        TOOL_ROUNDS + 1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), AgentEvent::ToolFinished { .. }))
+            .count(),
+        TOOL_ROUNDS
+    );
+    assert_eq!(count.load(Ordering::SeqCst), TOOL_ROUNDS);
+    {
+        let requests = f.requests.lock().unwrap();
+        assert_eq!(requests.len(), TOOL_ROUNDS + 1);
+        assert_eq!(
+            requests[TOOL_ROUNDS]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .count(),
+            TOOL_ROUNDS
+        );
+    }
     runtime.shutdown().await.unwrap();
 }
 #[tokio::test]
