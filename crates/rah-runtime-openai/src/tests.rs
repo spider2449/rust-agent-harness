@@ -1041,18 +1041,19 @@ async fn tool_continuation_past_eight_rounds_completes() {
         TOOL_ROUNDS
     );
     assert_eq!(count.load(Ordering::SeqCst), TOOL_ROUNDS);
-    let requests = f.requests.lock().unwrap();
-    assert_eq!(requests.len(), TOOL_ROUNDS + 1);
-    assert_eq!(
-        requests[TOOL_ROUNDS]["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|item| item["type"] == "function_call_output")
-            .count(),
-        TOOL_ROUNDS
-    );
-    drop(requests);
+    {
+        let requests = f.requests.lock().unwrap();
+        assert_eq!(requests.len(), TOOL_ROUNDS + 1);
+        assert_eq!(
+            requests[TOOL_ROUNDS]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .count(),
+            TOOL_ROUNDS
+        );
+    }
     runtime.shutdown().await.unwrap();
 }
 #[tokio::test]
