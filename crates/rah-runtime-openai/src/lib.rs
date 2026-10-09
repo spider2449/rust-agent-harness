@@ -36,8 +36,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const ORIGIN: &str = "https://api.openai.com/v1/responses";
-/// At most eight responses requesting Tools, followed by one final response.
-pub const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_EVENTS: usize = 32_768;
 
 /// Backend-only configuration: intentionally no serde, Clone or credential accessor.
@@ -492,7 +490,7 @@ impl Job {
     {
         Box::pin(async_stream::try_stream! {
             let mut final_text = String::new();
-            for round in 0..=MAX_TOOL_ROUNDS {
+            loop {
                 protocol::bounded(&self.history).map_err(turn_failure)?;
                 let model_request_id = ModelRequestId::new();
                 yield AgentEvent::ModelRequestStarted { session_id:self.session.clone(),model_request_id:model_request_id.clone() }.into();
@@ -536,7 +534,6 @@ impl Job {
                     yield AgentEvent::Completed { session_id:self.session.clone(),output:AgentOutput { message:Message { role:MessageRole::Assistant,content:final_text } } }.into();
                     return;
                 }
-                if round == MAX_TOOL_ROUNDS { Err(turn_failure(E::ContinuationLimit))?; }
                 self.history.extend(output.iter().cloned());
                 // Serialized execution uses exactly the same live host semantics
                 // as concurrent calls. The host allocates every neutral ToolCallId.
