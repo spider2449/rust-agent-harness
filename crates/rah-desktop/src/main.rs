@@ -2331,6 +2331,7 @@ struct EffectiveAuthoritySnapshotInputs {
     captured_repository_generation: Option<u64>,
     connection_state: ConnectionBindingState,
     runtime_source: Option<RuntimeArtifactSource>,
+    runtime_identity: runtime_model_state::RuntimeAdapterIdentity,
     captured_model_generation: Option<u64>,
     captured_connection_generation: Option<u64>,
     context_current: bool,
@@ -2522,6 +2523,7 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
         } => allowed_permissions.clone(),
         _ => Vec::new(),
     };
+    let runtime_identity = runtime_model_state::identity(state.selected_runtime_adapter());
     drop(connection);
     let effective_tools = composition
         .as_ref()
@@ -2566,6 +2568,7 @@ fn effective_authority_snapshot_for_state(state: &DesktopAppState) -> EffectiveA
         captured_repository_generation,
         connection_state,
         runtime_source,
+        runtime_identity,
         captured_model_generation,
         captured_connection_generation,
         context_current,

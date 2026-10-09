@@ -603,7 +603,7 @@ pub(crate) fn source_label(source: RuntimeArtifactSource) -> &'static str {
         RuntimeArtifactSource::CertifiedBaseline => "certified_side_by_side",
         RuntimeArtifactSource::Override => "configured_runtime",
         RuntimeArtifactSource::Path => "resolved_host_binary",
-        RuntimeArtifactSource::Native => "native_openai",
+        RuntimeArtifactSource::Native => "native",
     }
 }
 
@@ -664,8 +664,17 @@ pub(super) fn compose_effective_authority_snapshot(
     };
     let connection = ConnectionBinding {
         state: inputs.connection_state,
-        runtime_kind: (inputs.connection_state == ConnectionBindingState::Connected)
-            .then_some("codex"),
+        runtime_kind: if connection_current {
+            use crate::runtime_model_state::RuntimeAdapterIdentity;
+            match inputs.runtime_identity {
+                RuntimeAdapterIdentity::OpenAi => Some("OpenAI"),
+                RuntimeAdapterIdentity::LlamaCpp => Some("llama.cpp"),
+                RuntimeAdapterIdentity::Codex => Some("Codex CLI"),
+                RuntimeAdapterIdentity::None => None,
+            }
+        } else {
+            None
+        },
         runtime_source: inputs.runtime_source.map(source_label),
         captured_repository_generation: inputs.captured_repository_generation,
         captured_model_generation: inputs.captured_model_generation,
@@ -749,6 +758,7 @@ mod tests {
             captured_repository_generation: Some(7),
             connection_state: ConnectionBindingState::Connected,
             runtime_source: Some(RuntimeArtifactSource::CertifiedBaseline),
+            runtime_identity: crate::runtime_model_state::RuntimeAdapterIdentity::Codex,
             captured_model_generation: Some(3),
             captured_connection_generation: Some(9),
             context_current: true,
@@ -787,6 +797,60 @@ mod tests {
             rename_file_preparer_present: true,
             coordinator_state: CoordinatorState::Idle,
             commit_authorization: CommitAuthorizationPresentation::ReviewRequired,
+        }
+    }
+
+    #[test]
+    fn runtime_identity_uses_host_selection_and_keeps_source_separate() {
+        use crate::runtime_model_state::RuntimeAdapterIdentity as Identity;
+        for (identity, source, label) in [
+            (Identity::OpenAi, RuntimeArtifactSource::Native, "OpenAI"),
+            (
+                Identity::LlamaCpp,
+                RuntimeArtifactSource::Native,
+                "llama.cpp",
+            ),
+            (
+                Identity::Codex,
+                RuntimeArtifactSource::CertifiedBaseline,
+                "Codex CLI",
+            ),
+        ] {
+            let mut inputs = snapshot_inputs();
+            inputs.runtime_identity = identity;
+            inputs.runtime_source = Some(source);
+            let snapshot = compose_effective_authority_snapshot(inputs);
+            assert_eq!(snapshot.connection.runtime_kind, Some(label));
+            assert_eq!(
+                snapshot.connection.runtime_source,
+                Some(source_label(source))
+            );
+            assert_eq!(
+                snapshot.effective_tools[0].permission,
+                PermissionLevel::Read
+            );
+            assert!(snapshot.effective_tools[0].advertised);
+        }
+        assert_eq!(source_label(RuntimeArtifactSource::Native), "native");
+    }
+
+    #[test]
+    fn noncurrent_snapshots_never_claim_a_running_runtime() {
+        for state in [
+            ConnectionBindingState::NotConnected,
+            ConnectionBindingState::Connecting,
+            ConnectionBindingState::Disconnecting,
+            ConnectionBindingState::Error,
+            ConnectionBindingState::Connected,
+        ] {
+            let mut inputs = snapshot_inputs();
+            inputs.connection_state = state;
+            inputs.publication_current = false;
+            let snapshot = compose_effective_authority_snapshot(inputs);
+            assert_eq!(snapshot.connection.runtime_kind, None);
+            assert!(!snapshot.connection.advertised);
+            assert!(!snapshot.effective_tools[0].advertised);
+            assert!(!snapshot.effective_tools[0].host_invocation.eligible);
         }
     }
 
@@ -945,7 +1009,7 @@ mod tests {
             },
             connection: ConnectionBinding {
                 state: ConnectionBindingState::Connected,
-                runtime_kind: Some("codex"),
+                runtime_kind: Some("Codex CLI"),
                 runtime_source: Some("certified_side_by_side"),
                 captured_repository_generation: Some(7),
                 captured_model_generation: Some(3),

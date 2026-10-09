@@ -95,7 +95,7 @@ const authorityLabels = {
   sourceLabel: { desktop_builtin: "Desktop built-in", desktop_repository: "Desktop repository" },
   unavailableState: { configured_unavailable: "Configured unavailable", not_effective: "Not effective" },
   unavailableReason: { not_configured: "Not configured", authority_not_granted: "Host authority not granted", repository_required: "Select a repository", reconnect_required: "Reconnect required", provider_not_effective: "Provider not effective", provider_unavailable: "Provider unavailable", permission_not_configured: "Permission not configured", review_required: "Reviewed commit authorization required", stale_context: "Context is stale", not_connected_current: "Not connected/current", permission_denied: "Permission denied", model_turn_active: "Model turn active", host_invocation_busy: "HostExplicit busy", provider_not_supported: "Provider not supported for HostExplicit", not_supported: "Not supported", stale: "Stale — prepare again", unknown: "Unavailable reason unknown" },
-  reviewedCommit: { not_applicable: "Not applicable", identity_not_configured: "Identity not configured", review_required: "Review required", ready_to_authorize: "Ready to authorize", authorized_pending: "Authorized pending", stale: "Stale", authorization_revoked: "Authorization revoked", unavailable: "Unavailable" },
+  reviewedCommit: { not_applicable: "Not applicable", identity_not_configured: "Identity not configured", review_required: "Review required", ready_to_authorize: "Ready to authorize", authorized_pending: "Authorized pending", stale: "Stale", authorization_revoked: "Reviewed commit authorization revoked", unavailable: "Unavailable" },
 };
 
 const tauriApiRetryDelayMs = 100;
@@ -268,7 +268,7 @@ function renderEffectiveAuthority(snapshot) {
     renderAuthorityValue("Status", statusText),
     renderAuthorityValue("Repository", repository.selected ? (repository.displayName ?? "Selected repository") : "No repository selected"),
     renderAuthorityValue("Binding", snapshot.status === "connected_current" && repository.identity === "current" ? "Current" : authorityLabel("repositoryIdentity", repository.identity) === "Current" ? "Not current" : authorityLabel("repositoryIdentity", repository.identity)),
-    renderAuthorityValue("Runtime", connection.runtimeKind ?? authorityLabel("connectionState", connection.state)),
+    renderAuthorityValue("Runtime", snapshot.status === "connected_current" ? (connection.runtimeKind ?? "Unknown / unavailable") : statusText),
     renderAuthorityValue("Runtime source", connection.runtimeSource ?? "Unknown / unavailable"),
     renderAuthorityValue("Effective Tools", String((snapshot.effectiveTools ?? []).length)),
     renderAuthorityValue("Unavailable", String((snapshot.unavailableCapabilities ?? []).length)),
@@ -464,7 +464,7 @@ function renderEffectiveTool(tool) {
     form.append(button);
     hostBox.append(form);
   }
-  item.append(hostBox);
+  item.append(title, details, hostBox);
   return item;
 }
 

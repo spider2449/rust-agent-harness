@@ -414,4 +414,59 @@ assert.match(source, /pre\.textContent = String\(value \?\? ""\)/);
 assert.match(source, /pre\.textContent = String\(review\.preimage \?\? ""\)/);
 assert.equal(hostActivityRenderer.includes("textContent = payload"), false);
 
-console.log("effective authority frontend static tests passed");
+// Execute production functions with an observable DOM tree, so detached nodes
+// cannot satisfy these regressions.
+const vm = require("node:vm");
+class Node {
+  constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.text = ""; }
+  set textContent(value) { this.text = String(value); this.children = []; }
+  get textContent() { return this.text + this.children.map(child => child.textContent ?? String(child)).join(""); }
+  append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = children; this.text = ""; }
+}
+const nodes = new Map();
+const document = {
+  createElement: tag => new Node(tag),
+  querySelector: selector => {
+    if (!nodes.has(selector)) nodes.set(selector, new Node("div"));
+    return nodes.get(selector);
+  },
+};
+const context = vm.createContext({ document, updateRepositoryMembershipControls() {}, renderedEffectiveAuthority: null });
+vm.runInContext(source.slice(source.indexOf("const authorityStatusLabels"), source.indexOf("const tauriApiRetryDelayMs")), context);
+vm.runInContext(source.slice(source.indexOf("function authorityLabel"), source.indexOf("function appendMultiFileTarget")), context);
+const tool = {
+  publicToolName: "fs.read", sourceKind: "repository_host", sourceLabel: "desktop_repository",
+  effectClass: "read_only", authorityCategory: "read", permission: "read",
+  repositoryBound: true, advertised: true, hostInvocation: { eligible: true, kind: "fs_read" },
+};
+const row = context.renderEffectiveTool(tool);
+assert.deepEqual(row.children.map(node => node.tag), ["strong", "dl", "div"]);
+assert.equal(row.children[0].textContent, "fs.read");
+for (const detail of ["Repository host", "Desktop repository", "Read-only", "AuthorityRead", "Read classification", "Yes", "Advertised"]) {
+  assert.ok(row.children[1].textContent.includes(detail), `attached detail: ${detail}`);
+}
+assert.match(row.children[2].textContent, /Host action — not Model/);
+assert.equal(row.children[2].children[1].tag, "form");
+const statusRow = context.renderEffectiveTool({ ...tool, publicToolName: "repo.status", authorityCategory: "repository_observation", permission: "execute", hostInvocation: { eligible: true, kind: { repo_status: {} } } });
+assert.match(statusRow.textContent, /Repository observation/);
+assert.match(statusRow.textContent, /Execute classification/);
+assert.match(statusRow.textContent, /Read-only/);
+const unavailable = context.renderEffectiveTool({ ...tool, advertised: false, hostInvocation: { eligible: false, kind: "repo_status", unavailableReason: "permission_denied" } });
+assert.match(unavailable.textContent, /Not advertised \/ host effective only/);
+assert.match(unavailable.textContent, /Host action unavailable: Permission denied/);
+assert.equal(unavailable.children[2].children.length, 1);
+const hostile = context.renderEffectiveTool({ ...tool, publicToolName: '<img src=x onerror="secret()">', sourceLabel: "C:\\private\\token" });
+assert.equal(hostile.children[0].textContent, '<img src=x onerror="secret()">');
+assert.ok(!hostile.textContent.includes("C:\\private\\token"));
+assert.match(hostile.textContent, /Unknown \/ unavailable/);
+for (const status of ["disconnected", "connecting", "stale", "unavailable"]) {
+  context.renderEffectiveAuthority({ schemaVersion: 1, status, connection: { runtimeKind: "Codex CLI", state: status === "disconnected" ? "not_connected" : status === "unavailable" ? "error" : status }, reviewedCommit: "authorization_revoked" });
+  assert.match(document.querySelector("#effective-authority-summary").textContent, /Reviewed commit authorization revoked/);
+  assert.ok(!/Codex CLI|OpenAI|llama\.cpp/.test(document.querySelector("#effective-authority-summary").textContent));
+}
+for (const runtimeKind of ["OpenAI", "llama.cpp", "Codex CLI"]) {
+  context.renderEffectiveAuthority({ schemaVersion: 1, status: "connected_current", connection: { runtimeKind, runtimeSource: "native" } });
+  assert.ok(document.querySelector("#effective-authority-summary").textContent.includes(runtimeKind));
+}
+console.log("effective authority frontend tests passed (DOM attachment, Read, advertisement, eligibility, safe metadata, 4 noncurrent labels, commit scope)");
