@@ -60,10 +60,11 @@ Release preparation covers native OpenAI and llama.cpp runtimes, provider-neutra
 runtime ownership with optional legacy Codex, native lifecycle/cancellation,
 model-selected host Tool integration, and the redesigned Desktop workspace.
 All 14 Cargo packages and the Tauri bundle configuration use 0.34.0.
-This version is not published. **OPENAI_LIVE_NOT_VERIFIED** remains a blocking
-public-release gate: actual OpenAI Responses API acceptance or an explicit
-documented human-authorized waiver is required. Deterministic API fixtures and
-missing-key recovery do not satisfy it. See the
+This version is not published. **OPENAI_LIVE_NOT_VERIFIED** remains a live
+noncertification: Task 517's source-only waiver was explicitly approved by the
+human. Separate publication authorization is still required. Actual streaming,
+Tool continuation, multi-turn, reconnect and real-provider error behavior remain
+uncertified; deterministic fixtures and missing-key recovery are not live PASS. See the
 [v0.34 release gate](docs/RAH_V0.34_RELEASE_GATE.md).
 
 The Desktop has a central conversation, a Workspace panel and an Inspector.

@@ -1,13 +1,14 @@
 # RAH v0.34.0 release decision gate
 
-Status: **C - OPENAI RELEASE GATE REMAINS BLOCKED; NOT PUBLISHED**.
+Status: **B - HUMAN WAIVER EXPLICITLY APPROVED; READY FOR PUBLICATION AUTHORIZATION; NOT PUBLISHED**.
 
 Task 517 verified Task 516 closure at
 `041daae9cc448d0eaaef71dc15dfdce7a4aac6ef`: local/origin/live master matched and
 [exact-head CI 37888938589](https://github.com/spider2449/rust-agent-harness/actions/runs/37888938589)
 passed. The backend execution environment lacks OPENAI_API_KEY; model availability
 and explicit paid-call authorization are not established. No live request ran.
-The proposed waiver is **NOT APPROVED**; see the
+The human explicitly approved the documented source-only OpenAI waiver on
+2026-10-09; see the
 [Task 517 decision report](plans/2026-10-09-task-517-release-decision-report.md).
 **NSIS_INSTALLER_NOT_VERIFIED** remains separate. Proposed later publication is
 source only, following the prior release's zero uploaded assets; neither an
@@ -30,15 +31,15 @@ section navigation. Repository and security authority boundaries are unchanged.
 
 ## OpenAI public-release blocker
 
-**OPENAI_LIVE_NOT_VERIFIED**.
+**OPENAI_LIVE_NOT_VERIFIED - EXPLICIT HUMAN WAIVER APPROVED**.
 
 Actual official OpenAI Responses API acceptance has not been established.
 Deterministic API fixtures and missing-key recovery are not substitutes.
-Final public release remains blocked until either real acceptance succeeds or
-an explicit human-authorized waiver is documented. No waiver is inferred or
-granted by preparation, local tests, CI, or this gate. Release-decision preparation
-is distinct from final release readiness. No tag or GitHub Release is authorized
-by Task 516.
+The human explicitly approved Task 517's documented source-only waiver. That
+resolves the OpenAI publication blocker under the stated scope without certifying
+live behavior. No waiver is inferred from preparation, tests or CI. Separate
+publication authorization remains required; Task 516/517 authorize no tag or
+GitHub Release.
 
 ## Runtime, authority and recovery
 
@@ -115,4 +116,5 @@ Bundle configuration/version and executable resources PASS; NSIS installer was
 not built or tested (Tauri packaging CLI unavailable). Exact-head CI and master
 equality after the normal push are required for classification A. That classification
 means READY FOR RELEASE DECISION; OPENAI GATE EXPLICITLY RECORDED, never final
-public-release readiness while OPENAI_LIVE_NOT_VERIFIED remains unresolved.
+public-release readiness by itself. Task 517's explicit waiver subsequently
+resolves the OpenAI decision for source-only scope, retaining live noncertification.

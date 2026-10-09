@@ -16,10 +16,11 @@ rollback, strong OS sandboxing or removal of admitted external effects. Inspect
 uncertain effects before further action. Restoring a known-good executable is
 operational recovery, not repository-history or external-effect rollback.
 
-**OPENAI_LIVE_NOT_VERIFIED** remains a public-release blocker. Deterministic API
+**OPENAI_LIVE_NOT_VERIFIED** remains a live noncertification. Deterministic API
 fixtures and missing-key recovery are not real OpenAI Responses API acceptance.
-Only successful actual acceptance or an explicit documented human-authorized
-waiver can resolve that gate. This preparation grants no waiver. See the
+The human explicitly approved Task 517's documented source-only waiver, resolving
+the OpenAI publication decision without certifying real-provider behavior or
+changing security authority. Separate publication authorization is required. See the
 [v0.34 release gate](RAH_V0.34_RELEASE_GATE.md).
 
 ## Preserved v0.33 security scope

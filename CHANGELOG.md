@@ -15,8 +15,9 @@
   aligned to 0.34.0; repository/security authority and HostExplicit 11 unchanged.
 
 Prepared scope only; no v0.34.0 tag or GitHub Release is created by this task.
-**OPENAI_LIVE_NOT_VERIFIED** blocks final public release until real Responses API
-acceptance or an explicit documented human-authorized waiver. No waiver is granted.
+**OPENAI_LIVE_NOT_VERIFIED** remains: the human explicitly approved Task 517's
+documented source-only waiver. Real Responses API acceptance is not certified;
+separate publication authorization is still required. NSIS is not certified.
 See [the release gate](docs/RAH_V0.34_RELEASE_GATE.md) for validation and limits.
 
 

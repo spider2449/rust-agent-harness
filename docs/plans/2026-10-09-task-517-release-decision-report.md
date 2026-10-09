@@ -1,6 +1,6 @@
 # Task 517 - v0.34.0 release decision report
 
-Date: 2026-10-09. **C - OPENAI RELEASE GATE REMAINS BLOCKED**.
+Date: 2026-10-09. **B - HUMAN WAIVER EXPLICITLY APPROVED; READY FOR PUBLICATION AUTHORIZATION**.
 
 ## Checkpoint and prerequisites
 
@@ -44,7 +44,7 @@ These are existing deterministic results, not live OpenAI certification or fresh
 Task 517 executions. Task 515C records accepted actual Windows missing-key and
 reconnect/recovery behavior. Successful llama.cpp and UI work is not reopened.
 
-## Proposed waiver - awaiting explicit human decision
+## Documented waiver - explicitly approved by the human
 
 Proposal: permit later source-only v0.34.0 publication with native OpenAI included
 but explicitly uncertified against the real official Responses API. Retain
@@ -57,9 +57,12 @@ authentication, streaming or Tool behavior may still prevent successful operatio
 The accepted llama.cpp Windows scope and redesigned Desktop remain as recorded.
 Unsupported model discovery/provider-native continuation stay unsupported.
 
-Human waiver status: **NOT APPROVED**. This proposal grants no waiver and no
-publication authorization. CI, Task 516, missing credentials and historical release
-practice cannot substitute for explicit approval. A waiver is not live PASS.
+Human waiver status: **EXPLICITLY APPROVED**, 2026-10-09. After reviewing the
+concrete proposal, the human answered: "Explicitly approve the documented OpenAI
+waiver". The approval covers source-only scope and the limitations above. It
+resolves the OpenAI blocker but grants no publication authorization. CI, Task 516,
+missing credentials and historical release practice did not supply approval.
+A waiver is not live PASS. Before that answer, the recorded decision was C.
 
 ## Installer and publication boundary
 
@@ -78,7 +81,8 @@ is established for the proposed source-only scope.
 
 ## Changes, validation and closure
 
-Only the v0.34 release gate, Task 517 plan and this report change. No production
+The v0.34 release gate, Task 517 plan/report and current README, changelog and
+security release-status wording change to reflect explicit approval. No production
 code, version, dependency, ADR, public API, ToolRegistry or authority changes.
 The two historical untracked Task 514 reports retain their original hashes:
 `DD8ED29F56C022D30E1E4504A9F8D62DBE11D265D76F7C9FD145836670E8BC43` and
@@ -91,8 +95,9 @@ evidence reported in the completion response; this report does not predict PASS.
 No local implementation tests are rerun for this documentation-only change.
 No v0.34.0 tag, GitHub Release, release artifact or version bump is created.
 
-Next required decision: explicitly approve or reject the proposed waiver, or
-securely provide backend API access, choose an available model and explicitly
-authorize bounded potentially billable production acceptance. Until live PASS or
-explicit waiver approval, outcome C remains. Publication requires later separate
-human authorization even after that blocker is resolved.
+Next required action: obtain separate human authorization for source-only v0.34.0
+publication with the approved waiver and installer noncertification disclosed.
+Outcome B requires final documentation closure and exact-head CI PASS; no other
+mandatory source-only publication blocker was found. Live certification remains
+optional future work requiring securely configured API access, an available model
+and explicit bounded paid-call authorization.
