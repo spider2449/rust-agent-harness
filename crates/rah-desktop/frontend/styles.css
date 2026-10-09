@@ -409,3 +409,62 @@ dialog form {
   max-width: 100%;
   white-space: normal;
 }
+
+/* Desktop workspace shell. Existing feature styles above remain shared. */
+body { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+main { display: block; padding: 0; min-height: 0; flex: 1; overflow: hidden; }
+.workspace-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; padding: .45rem .7rem; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent); }
+.workspace-toolbar span { font-size: .75rem; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-toolbar #layout-runtime { flex: 1; }
+.workspace-toolbar button { margin: 0; padding: .35rem .5rem; font-size: .8rem; }
+.shell-notices { font-size: .75rem; padding: 0 .7rem; }
+.shell-notices p { margin: .15rem 0; }
+.status-card { display: grid; grid-template-columns: var(--left-width) 6px minmax(320px, 1fr) 6px var(--right-width); width: 100%; height: 100%; border: 0; border-radius: 0; padding: 0; }
+.status-card:has(#workspace-panel[hidden]) { grid-template-columns: 0 0 minmax(320px, 1fr) 6px var(--right-width); }
+.status-card:has(#inspector-panel[hidden]) { grid-template-columns: var(--left-width) 6px minmax(320px, 1fr) 0 0; }
+.status-card:has(#workspace-panel[hidden]):has(#inspector-panel[hidden]) { grid-template-columns: 0 0 minmax(0, 1fr) 0 0; }
+#workspace-panel { grid-column: 1; }
+#left-splitter { grid-column: 2; }
+#chat-panel { grid-column: 3; }
+#right-splitter { grid-column: 4; }
+#inspector-panel { grid-column: 5; }
+#workspace-panel, #inspector-panel { min-width: 0; overflow: auto; padding: .7rem; background: color-mix(in srgb, CanvasText 3%, Canvas); }
+.status-card section { min-width: 0; }
+h2 { font-size: 1rem; margin: .5rem 0; } h3 { font-size: .9rem; }
+button { margin-top: .4rem; padding: .4rem .6rem; font-size: .85rem; }
+input, select, textarea { max-width: 100%; min-width: 0; font: inherit; }
+p, dd, li, pre { overflow-wrap: anywhere; }
+.repository-actions, .repository-membership-actions, .authority-heading { flex-wrap: wrap; gap: .4rem; }
+.splitter { cursor: col-resize; background: color-mix(in srgb, CanvasText 12%, Canvas); touch-action: none; }
+.splitter:hover, .splitter:focus-visible, .splitter.dragging { background: Highlight; outline: 1px solid Highlight; }
+.splitter.dragging { user-select: none; }
+.inspector-tabs { display: flex; flex-wrap: wrap; gap: .25rem; position: sticky; top: -.7rem; padding: .4rem 0; background: Canvas; z-index: 1; }
+[role="tab"][aria-selected="true"] { background: Highlight; color: HighlightText; }
+[hidden] { display: none !important; }
+#chat-panel { display: flex; flex-direction: column; min-height: 0; padding: .8rem; overflow: hidden; gap: .3rem; }
+#chat-panel > p { margin: .2rem 0; font-size: .85rem; }
+#new-conversation { align-self: flex-end; margin: 0; }
+#chat-messages { flex: 1; min-height: 0; max-height: none; overflow: auto; display: block; margin: .3rem 0; }
+#chat-messages article { margin-bottom: .7rem; padding: .6rem; border-radius: .4rem; background: color-mix(in srgb, CanvasText 5%, Canvas); }
+#chat-form { flex-shrink: 0; display: flex; align-items: end; gap: .4rem; }
+#chat-prompt { flex: 1; resize: vertical; max-height: 25dvh; min-height: 3rem; margin: 0; }
+dialog { width: min(28rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow: auto; }
+dialog form { flex-wrap: wrap; }
+dialog button { max-width: 100%; white-space: normal; }
+.conversation-history { margin-top: 1rem; }
+.narrow.status-card { position: relative; display: block; }
+.narrow #chat-panel { height: 100%; }
+.narrow #workspace-panel, .narrow #inspector-panel { position: absolute; inset: 0 auto 0 0; width: min(360px, 85%); z-index: 3; border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas); box-shadow: 2px 0 8px #0003; }
+.narrow #inspector-panel { inset: 0 0 0 auto; }
+@media (max-width: 959px) { .workspace-toolbar span { max-width: 8rem; } .workspace-toolbar #layout-runtime { display: none; } }
+.section-navigation, .inspector-navigation { position: sticky; top: -.7rem; z-index: 2; background: Canvas; padding: .35rem 0; }
+.inspector-navigation .section-navigation, .inspector-navigation .inspector-tabs { position: static; }
+.section-navigation { display: flex; flex-wrap: wrap; gap: .25rem; }
+.section-navigation button { margin: 0; padding: .3rem; font-size: .75rem; }
+.section-navigation [aria-current="location"] { background: Highlight; color: HighlightText; }
+.section-toggle { text-align: left; width: 100%; margin: 0; font: inherit; }
+.section-toggle::before { content: "- "; }
+.section-toggle[aria-expanded="false"]::before { content: "+ "; }
+.active-section > h2, .active-section > h3, .active-section > summary { border-inline-start: 3px solid Highlight; }
+button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+#workspace-panel, #inspector-panel { scroll-behavior: auto; }

@@ -2186,8 +2186,8 @@ async function loadStatus(invoke) {
   const prompt = document.querySelector("#chat-prompt");
   const send = document.querySelector("#chat-send");
   document.querySelector("#chat-hint").textContent = connected
-    ? (reconnectRequired ? "Reconnect Codex to chat" : (chatRunning ? "Chat running" : "Chat ready"))
-    : "Connect Codex to chat";
+    ? (reconnectRequired ? "Reconnect runtime to chat" : (chatRunning ? "Chat running" : "Chat ready"))
+    : "Connect a runtime to chat";
   prompt.disabled = !connected || reconnectRequired || chatRunning;
   send.disabled = !connected || reconnectRequired;
   send.textContent = chatRunning ? "Cancel Turn" : "Send";
