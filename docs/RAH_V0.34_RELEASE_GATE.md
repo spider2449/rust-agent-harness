@@ -1,6 +1,17 @@
 # RAH v0.34.0 release decision gate
 
-Status: **LOCAL PREPARATION PASSED; EXACT-HEAD CI CLOSURE REQUIRED; NOT PUBLISHED**.
+Status: **C - OPENAI RELEASE GATE REMAINS BLOCKED; NOT PUBLISHED**.
+
+Task 517 verified Task 516 closure at
+`041daae9cc448d0eaaef71dc15dfdce7a4aac6ef`: local/origin/live master matched and
+[exact-head CI 37888938589](https://github.com/spider2449/rust-agent-harness/actions/runs/37888938589)
+passed. The backend execution environment lacks OPENAI_API_KEY; model availability
+and explicit paid-call authorization are not established. No live request ran.
+The proposed waiver is **NOT APPROVED**; see the
+[Task 517 decision report](plans/2026-10-09-task-517-release-decision-report.md).
+**NSIS_INSTALLER_NOT_VERIFIED** remains separate. Proposed later publication is
+source only, following the prior release's zero uploaded assets; neither an
+executable upload nor installer certification is authorized by this task.
 
 ## Scope and identity
 
