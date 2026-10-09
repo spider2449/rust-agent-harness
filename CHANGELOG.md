@@ -1,6 +1,23 @@
 # Changelog
 
-## v0.34.0 - release preparation (2026-10-09)
+## v0.34.0 - released (2026-10-09)
+
+### Immutable publication record
+
+- Release source and peeled tag target: `7b972988f2f116b87b3770d66be1ef970e20b726`.
+- Annotated tag: `v0.34.0`; tag object: `504c298947f81f531364d99c1189b8281ddf5a6f`.
+- Release-source master CI: [37889995880](https://github.com/spider2449/rust-agent-harness/actions/runs/37889995880) - PASS.
+- Tag CI: [37890500633](https://github.com/spider2449/rust-agent-harness/actions/runs/37890500633) - PASS.
+- [GitHub Release](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.34.0)
+  ID: `407568690`; published `2026-10-09T05:55:25Z`;
+  `draft=false`; `prerelease=false`; uploaded assets=`0`.
+- Source-only artifact scope: GitHub source archives; no executable or installer assets.
+
+Task 516 prepared the release, Task 517 recorded the explicit human waiver,
+and Task 518 performed authorized publication. Task 519 closes the historical
+documentation without changing the release source or tag.
+
+### Capability summary
 
 - Native OpenAI Responses and loopback llama.cpp runtime integration, with
   separate backend credentials and no implicit Codex fallback.
@@ -14,10 +31,11 @@
 - All 14 workspace packages, internal lock records and Tauri bundle metadata
   aligned to 0.34.0; repository/security authority and HostExplicit 11 unchanged.
 
-Prepared scope only; no v0.34.0 tag or GitHub Release is created by this task.
 **OPENAI_LIVE_NOT_VERIFIED** remains: the human explicitly approved Task 517's
 documented source-only waiver. Real Responses API acceptance is not certified;
-separate publication authorization is still required. NSIS is not certified.
+the waiver is not live PASS. **NSIS_INSTALLER_NOT_VERIFIED** remains; no
+executable or installer assets were uploaded, and cross-platform live behavior
+is not certified.
 See [the release gate](docs/RAH_V0.34_RELEASE_GATE.md) for validation and limits.
 
 

@@ -1,6 +1,25 @@
-# RAH v0.34.0 release decision gate
+# RAH v0.34.0 completed historical release record
 
-Status: **B - HUMAN WAIVER EXPLICITLY APPROVED; READY FOR PUBLICATION AUTHORIZATION; NOT PUBLISHED**.
+Status: **RELEASED SOURCE-ONLY BY TASK 518; TASK 519 POST-RELEASE DOCUMENTATION CLOSURE**.
+
+## Immutable publication record
+
+- Release source and peeled tag target: `7b972988f2f116b87b3770d66be1ef970e20b726`.
+- Annotated tag: `v0.34.0`; tag object: `504c298947f81f531364d99c1189b8281ddf5a6f`.
+- Release-source [master CI 37889995880](https://github.com/spider2449/rust-agent-harness/actions/runs/37889995880): PASS.
+- [Tag CI 37890500633](https://github.com/spider2449/rust-agent-harness/actions/runs/37890500633): PASS for the exact release source.
+- [GitHub Release](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.34.0)
+  ID: `407568690`; published `2026-10-09T05:55:25Z`;
+  `draft=false`; `prerelease=false`; uploaded assets=`0`.
+- Artifacts: GitHub source archives only; no executable or installer uploads.
+
+Task 516 performed preparation. Task 517 recorded the explicit human OpenAI
+waiver without publication authority. Task 518 separately received authorization
+and published the exact source above. Task 519 independently verified publication
+and corrected historical documentation; its later documentation commit is not
+the release source. See the [Task 519 closure record](plans/2026-10-09-task-519-v0.34-post-release-closure.md).
+
+## Historical preparation and waiver decision
 
 Task 517 verified Task 516 closure at
 `041daae9cc448d0eaaef71dc15dfdce7a4aac6ef`: local/origin/live master matched and
@@ -10,9 +29,9 @@ and explicit paid-call authorization are not established. No live request ran.
 The human explicitly approved the documented source-only OpenAI waiver on
 2026-10-09; see the
 [Task 517 decision report](plans/2026-10-09-task-517-release-decision-report.md).
-**NSIS_INSTALLER_NOT_VERIFIED** remains separate. Proposed later publication is
-source only, following the prior release's zero uploaded assets; neither an
-executable upload nor installer certification is authorized by this task.
+**NSIS_INSTALLER_NOT_VERIFIED** remains separate. Task 518 publication was
+source only, following the prior release's zero uploaded assets; no executable
+upload or installer certification was included.
 
 ## Scope and identity
 
@@ -37,9 +56,10 @@ Actual official OpenAI Responses API acceptance has not been established.
 Deterministic API fixtures and missing-key recovery are not substitutes.
 The human explicitly approved Task 517's documented source-only waiver. That
 resolves the OpenAI publication blocker under the stated scope without certifying
-live behavior. No waiver is inferred from preparation, tests or CI. Separate
-publication authorization remains required; Task 516/517 authorize no tag or
-GitHub Release.
+live behavior. No waiver is inferred from preparation, tests or CI. Task 516/517
+authorized no tag or GitHub Release; Task 518 subsequently supplied separate
+publication authorization and completed source-only publication. The waiver
+is not OpenAI live PASS.
 
 ## Runtime, authority and recovery
 

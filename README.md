@@ -54,15 +54,18 @@ environment requires restart.
 Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
 without granting repository authority or claiming rollback.
 
-## RAH v0.34.0 release preparation
+## RAH v0.34.0 released
 
-Release preparation covers native OpenAI and llama.cpp runtimes, provider-neutral
+The release covers native OpenAI and llama.cpp runtimes, provider-neutral
 runtime ownership with optional legacy Codex, native lifecycle/cancellation,
 model-selected host Tool integration, and the redesigned Desktop workspace.
 All 14 Cargo packages and the Tauri bundle configuration use 0.34.0.
-This version is not published. **OPENAI_LIVE_NOT_VERIFIED** remains a live
+Task 518 published [v0.34.0](https://github.com/spider2449/rust-agent-harness/releases/tag/v0.34.0)
+source-only, with GitHub source archives and zero uploaded assets. No executable
+or installer assets are provided. **NSIS_INSTALLER_NOT_VERIFIED** remains.
+**OPENAI_LIVE_NOT_VERIFIED** remains a live
 noncertification: Task 517's source-only waiver was explicitly approved by the
-human. Separate publication authorization is still required. Actual streaming,
+human; the waiver is not OpenAI live PASS. Actual streaming,
 Tool continuation, multi-turn, reconnect and real-provider error behavior remain
 uncertified; deterministic fixtures and missing-key recovery are not live PASS. See the
 [v0.34 release gate](docs/RAH_V0.34_RELEASE_GATE.md).

@@ -1,4 +1,4 @@
-# RAH v0.34.0 Security Model - release preparation
+# RAH v0.34.0 Security Model - released source-only
 
 MODEL REQUEST IS NOT AUTHORIZATION. Native model-selected Tool requests use
 revocable conversation/session leases, ToolRegistry and host permission dispatch.
@@ -20,7 +20,9 @@ operational recovery, not repository-history or external-effect rollback.
 fixtures and missing-key recovery are not real OpenAI Responses API acceptance.
 The human explicitly approved Task 517's documented source-only waiver, resolving
 the OpenAI publication decision without certifying real-provider behavior or
-changing security authority. Separate publication authorization is required. See the
+changing security authority. Task 518 separately authorized and completed
+source-only publication with zero uploaded assets; the waiver is not live PASS.
+Installer and cross-platform live certification remain unverified. See the
 [v0.34 release gate](RAH_V0.34_RELEASE_GATE.md).
 
 ## Preserved v0.33 security scope
