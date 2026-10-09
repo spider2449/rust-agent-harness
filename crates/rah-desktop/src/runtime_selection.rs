@@ -1,6 +1,25 @@
 //! Backend-owned selection; native OpenAI is preferred when compiled.
 //! Codex is optional legacy support. Explicit selection never falls back.
 use crate::FrontendError;
+/// Only the retained native Turn source identifies local cancellation. The
+/// neutral Operation category also covers ordinary failures and is insufficient.
+pub(crate) fn is_native_turn_cancelled(error: &rah_runtime::RuntimeFailure) -> bool {
+    #[cfg(any(feature = "provider-openai", feature = "provider-llamacpp"))]
+    {
+        use std::error::Error;
+        error.diagnostic().operation == rah_protocol::RuntimeOperation::Turn
+            && error
+                .source()
+                .and_then(|source| source.downcast_ref::<rah_runtime_openai::OpenAiAdapterError>())
+                == Some(&rah_runtime_openai::OpenAiAdapterError::Cancelled)
+    }
+    #[cfg(not(any(feature = "provider-openai", feature = "provider-llamacpp")))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeArtifactSource {
     Override,
@@ -130,6 +149,15 @@ pub(crate) enum ProductionAdapter {
     #[cfg(feature = "provider-llamacpp")]
     LlamaCpp,
 }
+pub(crate) fn has_native_cancellation_event(adapter: Option<ProductionAdapter>) -> bool {
+    match adapter {
+        #[cfg(feature = "provider-openai")]
+        Some(ProductionAdapter::OpenAi) => true,
+        #[cfg(feature = "provider-llamacpp")]
+        Some(ProductionAdapter::LlamaCpp) => true,
+        _ => false,
+    }
+}
 pub(crate) fn selected_adapter() -> Option<ProductionAdapter> {
     select(std::env::var("RAH_RUNTIME_PROVIDER").ok().as_deref())
 }
@@ -234,6 +262,34 @@ fn configured_openai(key: String, model: String) -> Result<FactoryConfiguration,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "provider-openai")]
+    #[test]
+    fn task514e_only_typed_turn_cancellation_is_identified() {
+        use rah_protocol::RuntimeOperation;
+        use rah_runtime_openai::OpenAiAdapterError as E;
+        for error in [
+            E::Cancelled,
+            E::Transport,
+            E::HttpStatus(401),
+            E::HttpStatus(500),
+            E::Api,
+            E::Protocol,
+            E::Sse,
+            E::EventJson,
+            E::Shutdown,
+            E::ContinuationLimit,
+        ] {
+            let expected = error == E::Cancelled;
+            let failure = error.into_runtime_failure(RuntimeOperation::Turn);
+            assert_eq!(is_native_turn_cancelled(&failure), expected);
+            assert!(!is_native_turn_cancelled(
+                &failure.clone().at_operation(RuntimeOperation::Shutdown)
+            ));
+            assert!(!is_native_turn_cancelled(
+                &rah_runtime::RuntimeFailure::without_source(failure.diagnostic().clone())
+            ));
+        }
+    }
     #[cfg(feature = "provider-openai")]
     #[test]
     fn task513_native_turn_failures_keep_closed_user_visible_codes() {

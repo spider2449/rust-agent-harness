@@ -27289,6 +27289,590 @@ async fn task514b_production_multi_turn_reconnect_and_missing_credential_recover
     );
 }
 
+#[cfg(feature = "openai-fixture")]
+#[tokio::test(flavor = "current_thread")]
+async fn task514e_production_cancel_event_wins_then_recovers() {
+    use super::runtime_selection::{ProductionAdapter, RuntimeArtifactSource};
+    use rah_runtime::experimental::ModelSelection;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    let events = listen_for_test_event(app.handle(), "chat_event");
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let listener_id = app.listen("chat_event", move |event| {
+        sender
+            .send(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap())
+            .unwrap();
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let factory =
+        rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap()).unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 8192];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"stream begun\"}\n\n").await.unwrap();
+        released.await.unwrap();
+        drop(socket);
+        let (mut socket, _) = listener.accept().await.unwrap();
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}]}}\n\n").await.unwrap();
+    });
+    super::production_composition::connect_with_configuration(
+        state.inner(),
+        ProductionAdapter::OpenAi,
+        Some((
+            Box::new(factory),
+            ModelSelection::Explicit("fixture-model".into()),
+            RuntimeArtifactSource::Native,
+        )),
+    )
+    .await
+    .unwrap();
+    super::send_chat("long response".into(), app.handle().clone(), state.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while receiver.recv().await.unwrap()["kind"] != "delta" {}
+    })
+    .await
+    .unwrap();
+    let (generation, runtime, session) = state.active_chat().unwrap();
+    assert!(state.request_cancel(generation, &runtime, &session));
+    // Hold cancel_chat's terminal claim until run_chat handles the typed event:
+    // this deterministically reproduces Ordering A from the Windows defect.
+    runtime.cancel(session.clone()).await.unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = receiver.recv().await.unwrap();
+            if matches!(
+                event["kind"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    println!("original production terminal: {terminal}");
+    assert_eq!(
+        terminal["kind"], "cancelled",
+        "accepted typed native cancellation must not be generic failure"
+    );
+    assert!(!state.claim_terminal(generation, &runtime, &session));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *state.chat.lock().unwrap() != ChatState::Idle {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(state.active_chat().is_err());
+    let captured: Vec<serde_json::Value> = events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| serde_json::from_str(e).unwrap())
+        .collect();
+    assert_eq!(
+        captured.iter().filter(|e| e["kind"] == "cancelled").count(),
+        1
+    );
+    assert!(!captured.iter().any(|e| e["kind"] == "failed"));
+    release.send(()).unwrap();
+    super::send_chat("next prompt".into(), app.handle().clone(), state.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = receiver.recv().await.unwrap();
+            assert_ne!(event["kind"], "failed", "recovery failed: {event}");
+            if event["kind"] == "completed" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *state.chat.lock().unwrap() != ChatState::Idle {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    super::disconnect_codex(state.clone()).await.unwrap();
+    assert!(!runtime.is_alive());
+    assert!(state.active_chat().is_err());
+    app.unlisten(listener_id);
+    app.unlisten(events.1);
+}
+
+#[cfg(feature = "openai-fixture")]
+#[tokio::test(flavor = "current_thread")]
+async fn task514e_terminal_orderings_negative_controls_and_stale_reconnect() {
+    use super::runtime_selection::{
+        ProductionAdapter, RuntimeArtifactSource, is_native_turn_cancelled,
+    };
+    use rah_runtime::experimental::ModelSelection;
+    use rah_runtime_openai::OpenAiAdapterError as E;
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let connect = || {
+        let factory =
+            rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap())
+                .unwrap();
+        super::production_composition::connect_with_configuration(
+            state.inner(),
+            ProductionAdapter::OpenAi,
+            Some((
+                Box::new(factory),
+                ModelSelection::Explicit("fixture-model".into()),
+                RuntimeArtifactSource::Native,
+            )),
+        )
+    };
+    connect().await.unwrap();
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("production connection missing"),
+    };
+    for event_first in [true, false] {
+        let generation = state.start_chat().unwrap();
+        let session = SessionId::new();
+        assert!(state.register_chat_session(generation, runtime.clone(), session.clone()));
+        assert!(state.request_cancel(generation, &runtime, &session));
+        assert!(!state.request_cancel(generation, &runtime, &session));
+        let failure = E::Cancelled.into_runtime_failure(rah_protocol::RuntimeOperation::Turn);
+        let terminals = if event_first {
+            assert_eq!(
+                state.claim_runtime_terminal(
+                    generation,
+                    &runtime,
+                    &session,
+                    is_native_turn_cancelled(&failure)
+                ),
+                Some(true)
+            );
+            1 + usize::from(state.claim_terminal(generation, &runtime, &session))
+        } else {
+            assert!(!state.claim_graceful_cancel_terminal(generation, &runtime, &session));
+            assert!(state.is_current_chat(generation, &runtime, &session));
+            assert_eq!(
+                state.claim_runtime_terminal(
+                    generation,
+                    &runtime,
+                    &session,
+                    is_native_turn_cancelled(&failure)
+                ),
+                Some(true)
+            );
+            1 + usize::from(state.claim_terminal(generation, &runtime, &session))
+        };
+        assert_eq!(terminals, 1, "both event/return orderings have one owner");
+        assert!(state.finish_claimed_chat(generation));
+        assert!(
+            !state.finish_claimed_chat(generation),
+            "ownership released exactly once"
+        );
+        assert_eq!(
+            state.host_invocation.lock().unwrap().state(),
+            CoordinatorState::Idle
+        );
+    }
+    // Completion and failure can own the terminal before a late Cancel click.
+    for typed in [false, true] {
+        let generation = state.start_chat().unwrap();
+        let session = SessionId::new();
+        assert!(state.register_chat_session(generation, runtime.clone(), session.clone()));
+        assert_eq!(
+            state.claim_runtime_terminal(generation, &runtime, &session, typed),
+            Some(false)
+        );
+        assert!(!state.request_cancel(generation, &runtime, &session));
+        assert!(state.finish_claimed_chat(generation));
+    }
+    for error in [
+        E::Transport,
+        E::HttpStatus(401),
+        E::Api,
+        E::Protocol,
+        E::Shutdown,
+        E::ContinuationLimit,
+    ] {
+        let generation = state.start_chat().unwrap();
+        let session = SessionId::new();
+        assert!(state.register_chat_session(generation, runtime.clone(), session.clone()));
+        assert!(state.request_cancel(generation, &runtime, &session));
+        let failure = error.into_runtime_failure(rah_protocol::RuntimeOperation::Turn);
+        assert!(!state.claim_graceful_cancel_terminal(generation, &runtime, &session));
+        assert_eq!(
+            state.claim_runtime_terminal(
+                generation,
+                &runtime,
+                &session,
+                is_native_turn_cancelled(&failure)
+            ),
+            Some(false),
+            "Cancel does not suppress a genuine failure"
+        );
+        assert!(state.finish_claimed_chat(generation));
+    }
+    let old_generation = state.start_chat().unwrap();
+    let old_session = SessionId::new();
+    assert!(state.register_chat_session(old_generation, runtime.clone(), old_session.clone()));
+    assert!(state.request_cancel(old_generation, &runtime, &old_session));
+    assert!(state.claim_terminal(old_generation, &runtime, &old_session));
+    assert!(state.finish_claimed_chat(old_generation));
+    let port = runtime.retained_port();
+    // Use the same production disconnect/reconnect lifecycle as Desktop.
+    super::disconnect_codex(state.clone()).await.unwrap();
+    connect().await.unwrap();
+    let fresh = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("reconnection missing"),
+    };
+    let generation = state.start_chat().unwrap();
+    let session = SessionId::new();
+    assert!(state.register_chat_session(generation, fresh.clone(), session.clone()));
+    assert_eq!(
+        state.claim_runtime_terminal(old_generation, &runtime, &old_session, true),
+        None
+    );
+    assert!(state.is_current_chat(generation, &fresh, &session));
+    assert!(!runtime.is_alive());
+    assert!(
+        port.request_live(rah_runtime::experimental::ToolRequest {
+            session_id: old_session,
+            name: ToolName::new("repo.status"),
+            input: ToolInput(serde_json::json!({}))
+        })
+        .await
+        .is_err()
+    );
+    assert!(state.claim_terminal(generation, &fresh, &session));
+    assert!(state.finish_claimed_chat(generation));
+    fresh.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "openai-fixture")]
+#[tokio::test(flavor = "current_thread")]
+async fn task514e_production_failures_after_cancel_request_remain_failed() {
+    use super::runtime_selection::{ProductionAdapter, RuntimeArtifactSource};
+    use rah_runtime::experimental::ModelSelection;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (response, expected) in [
+        (None, "provider_network_failed"),
+        (
+            Some(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"failed\"}}\n\n",
+            ),
+            "chat_runtime_failed",
+        ),
+        (
+            Some("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            "open_ai_credential_rejected",
+        ),
+    ] {
+        let storage = TestRepository::new();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(DesktopAppState::new(storage.0.clone()))
+            .build(tauri::generate_context!())
+            .unwrap();
+        let state = app.state::<DesktopAppState>();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let event_listener = app.listen("chat_event", move |event| {
+            sender
+                .send(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap())
+                .unwrap();
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let factory =
+            rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap())
+                .unwrap();
+        let (ready, request_ready) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut buffer = [0; 8192];
+                let n = socket.read(&mut buffer).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(|v| v.parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            ready.send(()).unwrap();
+            released.await.unwrap();
+            if let Some(response) = response {
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        super::production_composition::connect_with_configuration(
+            state.inner(),
+            ProductionAdapter::OpenAi,
+            Some((
+                Box::new(factory),
+                ModelSelection::Explicit("fixture-model".into()),
+                RuntimeArtifactSource::Native,
+            )),
+        )
+        .await
+        .unwrap();
+        super::send_chat(
+            "failure control".into(),
+            app.handle().clone(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), request_ready)
+            .await
+            .unwrap()
+            .unwrap();
+        let (generation, runtime, session) = state.active_chat().unwrap();
+        assert!(state.request_cancel(generation, &runtime, &session));
+        assert!(!state.claim_graceful_cancel_terminal(generation, &runtime, &session));
+        release.send(()).unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = receiver.recv().await.unwrap();
+                if matches!(
+                    event["kind"].as_str(),
+                    Some("completed" | "failed" | "cancelled")
+                ) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(terminal["kind"], "failed");
+        assert_eq!(terminal["code"], expected);
+        assert!(!state.claim_terminal(generation, &runtime, &session));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while *state.chat.lock().unwrap() != ChatState::Idle {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        while let Ok(event) = receiver.try_recv() {
+            assert!(!matches!(
+                event["kind"].as_str(),
+                Some("failed" | "cancelled" | "completed")
+            ));
+        }
+        server.await.unwrap();
+        super::disconnect_codex(state.clone()).await.unwrap();
+        app.unlisten(event_listener);
+    }
+}
+
+#[cfg(feature = "provider-openai")]
+#[tokio::test(flavor = "current_thread")]
+async fn task514e_cancelled_tool_preserves_uncertain_effect_accounting() {
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let refreshes = listen_for_test_event(app.handle(), "repository_snapshot_refresh");
+    let state = app.state::<DesktopAppState>();
+    let generation = state.start_chat().unwrap();
+    let id = ToolCallId::new();
+    let session = SessionId::new();
+    let mut calls = HashMap::new();
+    let composition = external_activity_composition(SourceKind::Mcp);
+    activity_event_with_composition(
+        &AgentEvent::ToolRequested {
+            session_id: session.clone(),
+            tool_call: ToolCall {
+                id: id.clone(),
+                name: ToolName::new("mcp.host.echo"),
+                input: ToolInput(serde_json::json!({})),
+            },
+        },
+        &mut calls,
+        &composition,
+        true,
+    )
+    .unwrap();
+    activity_event_with_composition(
+        &AgentEvent::ToolStarted {
+            session_id: session,
+            tool_call_id: id,
+        },
+        &mut calls,
+        &composition,
+        true,
+    )
+    .unwrap();
+    assert!(uncertain_repository_effect_pending(&calls));
+    assert!(
+        super::handle_uncertain_repository_effects(app.handle(), &mut calls, true).await,
+        "a cancellation terminal must retain the model owner for uncertain effects"
+    );
+    assert_eq!(
+        state.host_invocation.lock().unwrap().state(),
+        CoordinatorState::ModelTurn
+    );
+    assert_eq!(refreshes.0.lock().unwrap().len(), 1);
+    // Explicit test teardown; cancellation handling itself did not release it.
+    state.finish_chat(generation);
+    app.unlisten(refreshes.1);
+}
+
+#[cfg(feature = "openai-fixture")]
+#[tokio::test(flavor = "current_thread")]
+async fn task514e_production_cancel_returns_before_typed_event_consumption() {
+    use super::runtime_selection::{ProductionAdapter, RuntimeArtifactSource};
+    use rah_runtime::experimental::ModelSelection;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let storage = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(storage.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let state = app.state::<DesktopAppState>();
+    let observed = listen_for_test_event(app.handle(), "chat_event");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let factory =
+        rah_runtime_openai::OpenAiFactory::local_fixture(listener.local_addr().unwrap()).unwrap();
+    let (ready, request_ready) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = [0; 8192];
+        assert!(socket.read(&mut bytes).await.unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        ready.send(()).unwrap();
+        released.await.unwrap();
+    });
+    super::production_composition::connect_with_configuration(
+        state.inner(),
+        ProductionAdapter::OpenAi,
+        Some((
+            Box::new(factory),
+            ModelSelection::Explicit("fixture-model".into()),
+            RuntimeArtifactSource::Native,
+        )),
+    )
+    .await
+    .unwrap();
+    let runtime = match &*state.connection.lock().unwrap() {
+        ConnectionState::Connected { runtime, .. } => runtime.clone(),
+        _ => panic!("production runtime missing"),
+    };
+    let generation = state.start_chat().unwrap();
+    let turn = runtime
+        .start(AgentRequest {
+            request_id: RequestId::new(),
+            input: AgentInput {
+                messages: vec![Message {
+                    role: MessageRole::User,
+                    content: "held response".into(),
+                }],
+            },
+            options: AgentOptions::default(),
+        })
+        .await
+        .unwrap();
+    let session = turn.session_id.clone();
+    assert!(state.register_chat_session(generation, runtime.clone(), session.clone()));
+    tokio::time::timeout(Duration::from_secs(10), request_ready)
+        .await
+        .unwrap()
+        .unwrap();
+    // The real production command returns before this test consumes any events.
+    super::cancel_chat(app.handle().clone(), state.clone())
+        .await
+        .unwrap();
+    assert!(observed.0.lock().unwrap().is_empty());
+    assert!(state.is_current_chat(generation, &runtime, &session));
+    assert_eq!(
+        super::cancel_chat(app.handle().clone(), state.clone()).await,
+        Err(FrontendError::ChatNotRunning)
+    );
+    let mut events = turn.events;
+    let mut cancellation_count = 0;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = events.next().await {
+            if let Some(failure) = event.failure() {
+                assert!(super::runtime_selection::is_native_turn_cancelled(failure));
+                assert_eq!(
+                    state.claim_runtime_terminal(generation, &runtime, &session, true),
+                    Some(true)
+                );
+                super::emit_chat_event(
+                    app.handle(),
+                    super::ChatEvent::Cancelled {
+                        code: FrontendError::ChatCancelled,
+                    },
+                );
+                cancellation_count += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(cancellation_count, 1);
+    let terminals: Vec<Value> = observed
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| serde_json::from_str(e).unwrap())
+        .collect();
+    assert_eq!(
+        terminals,
+        vec![serde_json::json!({"kind":"cancelled","code":"chat_cancelled"})]
+    );
+    assert!(!state.claim_terminal(generation, &runtime, &session));
+    assert!(state.finish_claimed_chat(generation));
+    assert!(!state.finish_claimed_chat(generation));
+    release.send(()).unwrap();
+    server.await.unwrap();
+    super::disconnect_codex(state.clone()).await.unwrap();
+    app.unlisten(observed.1);
+}
+
 #[cfg(all(feature = "provider-openai", feature = "provider-llamacpp"))]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "explicit Task 513 live local-server acceptance only"]

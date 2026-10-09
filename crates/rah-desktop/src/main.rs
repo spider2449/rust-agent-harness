@@ -896,6 +896,7 @@ impl DesktopAppState {
             runtime: None,
             session_id: None,
             terminal: TerminalOwnership::new(generation),
+            cancel_requested: false,
         });
         Ok(generation)
     }
@@ -953,17 +954,22 @@ impl DesktopAppState {
             .lifecycle_coordination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let active = self
+        let mut active = self
             .active_chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let matches = active.as_ref().is_some_and(|chat| {
-            chat.terminal.is_unclaimed(generation)
+        let matches = active.as_mut().is_some_and(|chat| {
+            let matches = !chat.cancel_requested
+                && chat.terminal.is_unclaimed(generation)
                 && chat.session_id.as_ref() == Some(session_id)
                 && chat
                     .runtime
                     .as_ref()
-                    .is_some_and(|current| same_arc(current, runtime))
+                    .is_some_and(|current| same_arc(current, runtime));
+            if matches {
+                chat.cancel_requested = true;
+            }
+            matches
         });
         drop(active);
         if matches {
@@ -981,6 +987,32 @@ impl DesktopAppState {
         runtime: &Arc<DesktopRuntime>,
         session_id: &SessionId,
     ) -> bool {
+        self.claim_runtime_terminal(generation, runtime, session_id, false)
+            .is_some()
+    }
+
+    fn claim_graceful_cancel_terminal(
+        &self,
+        generation: u64,
+        runtime: &Arc<DesktopRuntime>,
+        session_id: &SessionId,
+    ) -> bool {
+        // Native cancellation always has a typed terminal event. A successful
+        // control reply can also mean AlreadyTerminal, so it cannot classify
+        // a queued completion or genuine failure on behalf of run_chat.
+        !runtime_selection::has_native_cancellation_event(self.selected_runtime_adapter())
+            && self.claim_terminal(generation, runtime, session_id)
+    }
+
+    /// Atomically binds cancellation classification to the same current turn
+    /// that owns the terminal. Stale events and late requests cannot influence it.
+    fn claim_runtime_terminal(
+        &self,
+        generation: u64,
+        runtime: &Arc<DesktopRuntime>,
+        session_id: &SessionId,
+        typed_native_cancelled: bool,
+    ) -> Option<bool> {
         let _lifecycle_coordination = self
             .lifecycle_coordination
             .lock()
@@ -989,9 +1021,7 @@ impl DesktopAppState {
             .active_chat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(chat) = active.as_mut() else {
-            return false;
-        };
+        let chat = active.as_mut()?;
         if !chat.terminal.is_unclaimed(generation)
             || chat.session_id.as_ref() != Some(session_id)
             || !chat
@@ -999,9 +1029,10 @@ impl DesktopAppState {
                 .as_ref()
                 .is_some_and(|current| same_arc(current, runtime))
         {
-            return false;
+            return None;
         }
-        chat.terminal.claim(generation)
+        let cancelled = typed_native_cancelled && chat.cancel_requested;
+        chat.terminal.claim(generation).then_some(cancelled)
     }
 
     fn finish_claimed_chat(&self, generation: u64) -> bool {
@@ -1114,6 +1145,7 @@ struct ActiveChat {
     runtime: Option<Arc<DesktopRuntime>>,
     session_id: Option<SessionId>,
     terminal: TerminalOwnership,
+    cancel_requested: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -8382,8 +8414,30 @@ fn repository_selection_allowed_for_connection(
 
 #[cfg(target_os = "windows")]
 fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
+    let terminal_kind = match &event {
+        ChatEvent::Completed => Some("completed"),
+        ChatEvent::Cancelled { .. } => Some("cancelled"),
+        ChatEvent::Failed { .. } => Some("failed"),
+        _ => None,
+    };
+    let state = app.state::<DesktopAppState>();
+    let session_generation = terminal_kind.and_then(|_| {
+        state
+            .active_chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|chat| chat.generation)
+    });
     if let Err(error) = app.emit("chat_event", event) {
         tracing::warn!(error = %error, "failed to emit desktop chat event");
+    } else if let Some(kind) = terminal_kind {
+        append_live_evidence(serde_json::json!({
+            "event": "desktop_chat_terminal",
+            "kind": kind,
+            "session_generation": session_generation,
+            "connection_generation": *state.next_connection_generation.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+        }));
     }
 }
 
@@ -8907,6 +8961,9 @@ async fn run_chat(
     let mut tool_calls = HashMap::new();
     let mut events = handle.events;
     while let Some(local_event) = events.next().await {
+        let typed_native_cancelled = local_event
+            .failure()
+            .is_some_and(runtime_selection::is_native_turn_cancelled);
         let failure_code = local_event.failure().map(|failure| {
             runtime_selection::chat_failure(
                 failure,
@@ -9021,12 +9078,25 @@ async fn run_chat(
                 retain_model_owner |=
                     handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
                         .await;
-                // The frontend receives only a closed error code. Retain the
-                // adapter-provided stage privately for live diagnosis.
-                tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
+                let Some(cancelled) = app.state::<DesktopAppState>().claim_runtime_terminal(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                    typed_native_cancelled,
+                ) else {
+                    if !retain_model_owner {
+                        app.state::<DesktopAppState>()
+                            .finish_claimed_chat(chat_generation);
+                    }
+                    return;
+                };
+                if !cancelled {
+                    tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
+                }
                 append_live_evidence(serde_json::json!({
-                    "event": "desktop_failure",
-                    "failure_stage": desktop_failure_stage(code),
+                    "event": if cancelled { "desktop_cancelled" } else { "desktop_failure" },
+                    "failure_stage": if cancelled { None } else { Some(desktop_failure_stage(code)) },
+                    "typed_native_cancelled": typed_native_cancelled,
                     "repository_generation": repository_generation,
                     "repository_fingerprint": repository_fingerprint,
                     "model_generation": model_generation,
@@ -9034,22 +9104,17 @@ async fn run_chat(
                     "connection_generation": connection_generation,
                     "session_generation": chat_generation,
                 }));
-                if !app.state::<DesktopAppState>().claim_terminal(
-                    chat_generation,
-                    &runtime,
-                    &session_id,
-                ) {
-                    if !retain_model_owner {
-                        app.state::<DesktopAppState>()
-                            .finish_claimed_chat(chat_generation);
-                    }
-                    return;
-                }
                 emit_chat_event(
                     &app,
-                    ChatEvent::Failed {
-                        diagnostic,
-                        code: failure_code.unwrap_or(FrontendError::ChatRuntimeFailed),
+                    if cancelled {
+                        ChatEvent::Cancelled {
+                            code: FrontendError::ChatCancelled,
+                        }
+                    } else {
+                        ChatEvent::Failed {
+                            diagnostic,
+                            code: failure_code.unwrap_or(FrontendError::ChatRuntimeFailed),
+                        }
                     },
                 );
                 terminal = true;
@@ -9254,10 +9319,9 @@ async fn cancel_chat(
     .await;
     match outcome {
         CancelRecoveryOutcome::Graceful(GracefulCancelOutcome::Completed) => {
-            // Either the adapter terminal event won first, or successful cancellation does.
-            // In both orders there is exactly one terminal owner and no completed persistence
-            // after cancellation owns the generation.
-            if state.claim_terminal(generation, &runtime, &session_id) {
+            // Native run_chat owns classification in both event/reply orders.
+            // Retain the existing legacy command terminal fallback.
+            if state.claim_graceful_cancel_terminal(generation, &runtime, &session_id) {
                 emit_chat_event(
                     &app,
                     ChatEvent::Cancelled {
