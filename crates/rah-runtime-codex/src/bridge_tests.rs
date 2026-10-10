@@ -1218,7 +1218,12 @@ async fn repository_list_dispatches_through_the_generic_bridge() {
         json!({
             "type":"object",
             "additionalProperties":false,
-            "properties":{"path":{"type":"string"}}
+            "properties":{"path":{
+                "type":"string",
+                "description":"Optional nonempty subdirectory relative to the selected repository, using '/' between components. Omit this field to list the root. No '.' or '..' components, .git components, absolute paths, backslashes, colons or NUL; at most 1024 UTF-8 bytes.",
+                "minLength":1,
+                "maxLength":1024
+            }}
         })
     );
 

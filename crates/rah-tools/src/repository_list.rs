@@ -49,13 +49,18 @@ impl Tool for RepositoryListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new(REPOSITORY_LIST_TOOL_NAME),
-            description: "Lists direct children of the selected tracked repository structure."
+            description: "Lists tracked direct children in the host-selected repository. For the repository root, pass {} and omit path. For a subdirectory, pass a safe repository-relative path such as {\"path\":\"crates\"}. Empty paths, '.', '..', absolute paths and backslashes are invalid."
                 .to_owned(),
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "path": {"type": "string"}
+                    "path": {
+                        "type": "string",
+                        "description": "Optional nonempty subdirectory relative to the selected repository, using '/' between components. Omit this field to list the root. No '.' or '..' components, .git components, absolute paths, backslashes, colons or NUL; at most 1024 UTF-8 bytes.",
+                        "minLength": 1,
+                        "maxLength": OBSERVER_MAX_PATH_BYTES
+                    }
                 }
             }),
             permission: PermissionLevel::Execute,
@@ -363,8 +368,55 @@ mod tests {
             json!({
                 "type":"object",
                 "additionalProperties":false,
-                "properties":{"path":{"type":"string"}}
+                "properties":{"path":{
+                    "type":"string",
+                    "description":"Optional nonempty subdirectory relative to the selected repository, using '/' between components. Omit this field to list the root. No '.' or '..' components, .git components, absolute paths, backslashes, colons or NUL; at most 1024 UTF-8 bytes.",
+                    "minLength":1,
+                    "maxLength":OBSERVER_MAX_PATH_BYTES
+                }}
             })
+        );
+    }
+
+    #[test]
+    fn root_contract_omits_path_and_rejects_empty_and_unsafe_aliases() {
+        assert!(
+            ListRequest::parse(&ToolInput(json!({})))
+                .unwrap()
+                .path
+                .is_none()
+        );
+        assert_eq!(
+            ListRequest::parse(&ToolInput(json!({"path":"crates/rah-tools"})))
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("crates/rah-tools")
+        );
+        for path in [
+            "",
+            ".",
+            "..",
+            "/",
+            "F:/repository",
+            "crates\\rah-tools",
+            "crates/../src",
+            ".GIT",
+        ] {
+            assert!(matches!(
+                ListRequest::parse(&ToolInput(json!({"path":path}))),
+                Err(ToolError::InvalidInput { .. })
+            ));
+        }
+        let fixture = Fixture::new();
+        let definition = RepositoryListTool::new(native_git(), &fixture.0)
+            .unwrap()
+            .definition();
+        assert!(definition.description.contains("pass {} and omit path"));
+        assert!(definition.input_schema.get("required").is_none());
+        assert_eq!(
+            definition.input_schema["properties"]["path"]["minLength"],
+            1
         );
     }
 

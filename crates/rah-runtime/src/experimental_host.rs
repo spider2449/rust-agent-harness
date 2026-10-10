@@ -326,6 +326,21 @@ fn dispatch_failure(source: AuthorizedDispatchError) -> RuntimeFailure {
     )
 }
 
+/// Closed classification only; never formats a private error or provider input.
+pub fn dispatch_error_category(source: &AuthorizedDispatchError) -> &'static str {
+    use rah_tools::{AuthorizedDispatchRejection as R, ToolError as T};
+    match source {
+        AuthorizedDispatchError::Rejected(R::NameMismatch { .. }) => "name_mismatch",
+        AuthorizedDispatchError::Rejected(R::UnknownTool { .. }) => "unknown_tool",
+        AuthorizedDispatchError::Rejected(R::DefinitionMismatch { .. }) => "definition_mismatch",
+        AuthorizedDispatchError::Rejected(R::PermissionDenied { .. }) => "permission_denied",
+        AuthorizedDispatchError::Tool(T::InvalidInput { .. }) => "tool_invalid_input",
+        AuthorizedDispatchError::Tool(T::Execution { .. }) => "tool_execution",
+        AuthorizedDispatchError::Tool(T::UnknownTool { .. }) => "tool_unknown",
+        AuthorizedDispatchError::Tool(T::DuplicateTool { .. }) => "tool_duplicate",
+    }
+}
+
 #[cfg(feature = "live-test-support")]
 struct DispatchTiming(std::time::Instant);
 #[cfg(feature = "live-test-support")]
@@ -368,6 +383,129 @@ mod tests {
         error::Error,
         sync::atomic::{AtomicUsize, Ordering},
     };
+    #[tokio::test]
+    async fn repo_list_root_nested_invalid_and_denied_through_live_host() {
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("rah-525b-{}", ToolCallId::new()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(
+            root.join("nested/file.txt"),
+            "private-file-content-sentinel",
+        )
+        .unwrap();
+        #[cfg(windows)]
+        let locator = Command::new("where.exe").arg("git.exe").output().unwrap();
+        #[cfg(not(windows))]
+        let locator = Command::new("which").arg("git").output().unwrap();
+        assert!(locator.status.success());
+        let git = std::path::PathBuf::from(
+            String::from_utf8(locator.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        );
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "--", "nested/file.txt"],
+        ] {
+            assert!(
+                Command::new(&git)
+                    .args(args)
+                    .current_dir(&root)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        for (input, allowed, category) in [
+            (serde_json::json!({}), true, None),
+            (serde_json::json!({"path":"nested"}), true, None),
+            (
+                serde_json::json!({"path":""}),
+                true,
+                Some("tool_invalid_input"),
+            ),
+            (
+                serde_json::json!({"path":"../private"}),
+                true,
+                Some("tool_invalid_input"),
+            ),
+            (serde_json::json!({}), false, Some("permission_denied")),
+        ] {
+            let mut registry = ToolRegistry::new();
+            registry
+                .register(Arc::new(
+                    rah_tools::RepositoryListTool::new(&git, &root).unwrap(),
+                ))
+                .unwrap();
+            let scope = HostToolScope::new(
+                Arc::new(registry),
+                if allowed {
+                    vec![PermissionLevel::Execute]
+                } else {
+                    vec![]
+                },
+            );
+            let port = scope.port();
+            let mut lease = port.admit_turn().await.unwrap();
+            let result = port
+                .request_live(ToolRequest {
+                    session_id: lease.session_id.clone(),
+                    name: ToolName::new("repo.list"),
+                    input: ToolInput(input),
+                })
+                .await;
+            let requested = lease.events.next().await.unwrap();
+            let AgentEvent::ToolRequested {
+                session_id,
+                tool_call,
+            } = requested.event()
+            else {
+                panic!("Requested missing")
+            };
+            assert_eq!(session_id, &lease.session_id);
+            let id = tool_call.id.clone();
+            if allowed {
+                assert!(
+                    matches!(lease.events.next().await.unwrap().event(), AgentEvent::ToolStarted { tool_call_id,.. } if *tool_call_id == id)
+                );
+            }
+            let terminal = lease.events.next().await.unwrap();
+            if let Some(category) = category {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    dispatch_error_category(
+                        error
+                            .source()
+                            .unwrap()
+                            .downcast_ref::<AuthorizedDispatchError>()
+                            .unwrap()
+                    ),
+                    category
+                );
+                assert!(
+                    matches!(terminal.event(), AgentEvent::Failed { session_id,.. } if *session_id == lease.session_id)
+                );
+            } else {
+                let output = result.unwrap();
+                assert!(!output.is_error);
+                assert!(
+                    !serde_json::to_string(&output)
+                        .unwrap()
+                        .contains("private-file-content-sentinel")
+                );
+                assert!(
+                    matches!(terminal.event(), AgentEvent::ToolFinished { session_id,tool_call_id,.. } if *session_id == lease.session_id && *tool_call_id == id)
+                );
+            }
+            scope.drained().await;
+            drop(lease.lifetime);
+            assert!(lease.events.next().await.is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     struct CountingTool {
         effects: Arc<AtomicUsize>,
         release: Arc<Notify>,
