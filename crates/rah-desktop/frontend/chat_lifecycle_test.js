@@ -11,9 +11,11 @@ const element = id => {
 async function scenario(kind, beforeReply, rejected = false) {
   const calls = [];
   const prompts = [];
+  const messages = [];
   element("#chat-prompt").value = "first prompt";
   const context = vm.createContext({ document: { querySelector: element }, chatRunning: false, activeAssistant: null,
-    appendMessage: () => ({ textContent: "" }), appendContextSeparator: () => {}, updateRepositoryMembershipControls: () => {},
+    appendMessage: (role, text) => { const message = { role, textContent: text }; messages.push(message); return message; }, appendContextSeparator: () => {}, updateRepositoryMembershipControls: () => {},
+    errorMessage: () => "Chat could not finish.", diagnosticText: () => "",
     modelConnectAllowed: () => true, resumeAvailable: false, resumeUsed: false,
     showBackendError: () => {}, showChatError: () => {} });
   // Exercise the production control renderer, including Disconnect and native
@@ -58,7 +60,69 @@ async function scenario(kind, beforeReply, rejected = false) {
   assert.ok(!calls.includes("cancel_chat"), "second prompt must not cancel a completed turn");
   assert.deepEqual(prompts, ["first prompt", "second prompt"]);
 }
+async function failurePresentation(partial) {
+  const messages = [];
+  const context = vm.createContext({ document: { querySelector: element }, chatRunning: true, activeAssistant: null,
+    appendMessage: (role, text) => { const message = { role, textContent: text }; messages.push(message); return message; },
+    updateRepositoryMembershipControls: () => {}, loadStatus: async () => {}, showBackendError: () => {},
+    errorMessage: () => "Chat could not finish." });
+  vm.runInContext(source.slice(source.indexOf("function diagnosticText("), source.indexOf("function renderModelPreflight(")), context);
+  vm.runInContext(source.slice(source.indexOf("function showChatError("), source.indexOf("async function toggleCodexConnection(")), context);
+  const emit = payload => context.handleChatEvent(() => {}, { payload });
+  emit({ kind: "started" });
+  assert.equal(messages.length, 0, "Started must not render a blank response");
+  emit({ kind: "delta", text: "" });
+  assert.equal(messages.length, 0);
+  if (partial) emit({ kind: "delta", text: "Partial response" });
+  emit({ kind: "failed", code: "chat_runtime_failed", diagnostic: { operation: "turn", kind: "transport", source: "secret provider body" } });
+  assert.equal(context.chatRunning, false);
+  assert.equal(context.activeAssistant, null);
+  assert.ok(messages.every(message => message.textContent.length));
+  const failure = messages.at(-1).textContent;
+  assert.match(failure, /Turn failed\./);
+  assert.match(failure, /transport failure at chat turn/);
+  assert.ok(!failure.includes("secret provider body"));
+  assert.ok(!failure.includes("Completed"));
+  if (partial) {
+    assert.equal(messages[0].textContent, "Partial response");
+    assert.match(failure, /response above is incomplete/);
+  } else assert.match(failure, /No response text was received/);
+  context.chatRunning = true;
+  emit({ kind: "started" });
+  emit({ kind: "delta", text: "Recovered" });
+  emit({ kind: "completed" });
+  assert.equal(messages.at(-1).textContent, "Recovered");
+  assert.equal(context.chatRunning, false);
+}
+function activityClosure() {
+  const entries = { children: [], append(entry) { this.children.push(entry); } };
+  const context = vm.createContext({ maxActivityEntries: 100, document: {
+    querySelector: () => entries,
+    createElement: () => ({ dataset: {}, children: [], append(...children) { this.children.push(...children); }, querySelector() { return this.children[1]; } }),
+  } });
+  vm.runInContext(source.slice(source.indexOf("function appendActivity("), source.indexOf("function showBackendError(")), context);
+  const emit = (activityId, kind, extra = {}) => context.appendActivity({ activityId, kind, tool: "repo.list", ...extra });
+  emit("first", "tool_requested");
+  emit("first", "tool_started");
+  emit("second", "tool_requested");
+  emit("second", "tool_started");
+  emit("first", "tool_finished", { result: "success" });
+  assert.equal(entries.children[1].children[1].textContent, "Started");
+  assert.equal(entries.children[3].children[1].textContent, "Running", "another same-name call remains independent");
+  emit("second", "tool_interrupted", { started: true });
+  assert.equal(entries.children[3].children[1].textContent, "Outcome unknown");
+  assert.equal(entries.children.at(-1).children[1].textContent, "Outcome unknown");
+  assert.ok(!entries.children.some(entry => entry.children[1].textContent === "Running"));
+  assert.equal(entries.children[4].children[1].textContent, "Completed", "confirmed result remains completed");
+  emit("denied", "tool_requested");
+  emit("denied", "tool_interrupted", { started: false });
+  assert.equal(entries.children.at(-1).children[1].textContent, "Not started");
+  assert.ok(!entries.children.at(-1).children[1].textContent.includes("Completed"));
+}
 (async () => {
+  activityClosure();
+  await failurePresentation(false);
+  await failurePresentation(true);
   for (const kind of ["completed", "failed", "cancelled"]) {
     await scenario(kind, true);
     await scenario(kind, false);

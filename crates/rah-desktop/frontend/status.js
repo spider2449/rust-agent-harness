@@ -2089,6 +2089,15 @@ async function refreshRepository(invoke) {
 
 function appendActivity(payload) {
   const entries = document.querySelector("#activity-entries");
+  // Close only this presentation entry; a missing result is not cancellation.
+  if (payload.activityId && ["tool_finished", "tool_interrupted"].includes(payload.kind)) {
+    for (const previous of entries.children) {
+      if (previous.dataset.activityId === payload.activityId && previous.dataset.state === "tool_started") {
+        previous.dataset.state = payload.kind === "tool_finished" ? "started" : "unknown";
+        previous.querySelector("span").textContent = payload.kind === "tool_finished" ? "Started" : "Outcome unknown";
+      }
+    }
+  }
   const entry = document.createElement("article");
   const tool = document.createElement("strong");
   const state = document.createElement("span");
@@ -2096,10 +2105,12 @@ function appendActivity(payload) {
     tool_requested: "Requested",
     tool_started: "Running",
     tool_finished: payload.result === "failed" ? "Failed" : "Completed",
+    tool_interrupted: payload.started ? "Outcome unknown" : "Not started",
   };
 
   entry.className = "activity-entry";
-  entry.dataset.state = payload.kind === "tool_finished" ? payload.result : payload.kind;
+  entry.dataset.state = payload.kind === "tool_finished" ? payload.result : payload.kind === "tool_interrupted" ? "unknown" : payload.kind;
+  if (payload.activityId) entry.dataset.activityId = payload.activityId;
   tool.textContent = payload.tool;
   state.textContent = labels[payload.kind] ?? "Unknown";
   entry.append(tool, state);
@@ -2338,11 +2349,15 @@ function showChatError(code, diagnostic) {
 function handleChatEvent(invoke, event) {
   const payload = event.payload;
   if (payload.kind === "started") {
-    activeAssistant = appendMessage("RAH", "");
+    activeAssistant = null;
     updateRepositoryMembershipControls();
-  } else if (payload.kind === "delta" && activeAssistant) {
+  } else if (payload.kind === "delta" && typeof payload.text === "string" && payload.text.length) {
+    if (!activeAssistant) activeAssistant = appendMessage("RAH", "");
     activeAssistant.textContent += payload.text;
   } else if (payload.kind === "failed" || payload.kind === "cancelled") {
+    const state = payload.kind === "failed" ? "Turn failed." : "Turn cancelled.";
+    const partial = activeAssistant ? " The response above is incomplete." : " No response text was received.";
+    appendMessage("RAH", state + partial + " " + errorMessage(payload.code) + diagnosticText(payload.diagnostic));
     showChatError(payload.code, payload.diagnostic);
   }
   if (["completed", "failed", "cancelled"].includes(payload.kind)) {

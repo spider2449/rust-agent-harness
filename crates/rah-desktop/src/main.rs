@@ -12,6 +12,8 @@ use codex_composition::{
 #[cfg(target_os = "windows")]
 mod native_configuration;
 #[cfg(target_os = "windows")]
+mod native_terminal_evidence;
+#[cfg(target_os = "windows")]
 mod production_composition;
 #[cfg(target_os = "windows")]
 mod runtime_model_state;
@@ -1944,6 +1946,18 @@ enum ActivityEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         commit: Option<CommitActivityPresentation>,
     },
+    #[serde(rename = "tool_interrupted")]
+    Interrupted { tool: String, started: bool },
+}
+
+/// Presentation correlation only; never an execution or authorization identity.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityNotification {
+    activity_id: String,
+    #[serde(flatten)]
+    event: ActivityEvent,
 }
 
 /// The only commit result details that Desktop may present. The underlying tool
@@ -8452,6 +8466,7 @@ enum RepositoryRefreshReason {
 #[derive(Clone, Debug)]
 struct ToolCallActivity {
     tool: String,
+    activity_id: String,
     external: bool,
     started: bool,
 }
@@ -8460,6 +8475,7 @@ struct ToolCallActivity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ActivityOutcome {
     activity: ActivityEvent,
+    activity_id: String,
     invalidate_review: bool,
     refresh_reason: Option<RepositoryRefreshReason>,
 }
@@ -8497,16 +8513,19 @@ fn activity_event_with_composition(
             }
             let tool = tool_call.name.as_str().to_owned();
             let external = is_external(&tool);
+            let activity_id = format!("activity-{}", rah_protocol::ToolCallId::new());
             tool_calls.insert(
                 tool_call.id.clone(),
                 ToolCallActivity {
                     tool: tool.clone(),
+                    activity_id: activity_id.clone(),
                     external,
                     started: false,
                 },
             );
             Some(ActivityOutcome {
                 activity: ActivityEvent::Requested { tool },
+                activity_id,
                 invalidate_review: false,
                 refresh_reason: None,
             })
@@ -8518,6 +8537,7 @@ fn activity_event_with_composition(
                 activity: ActivityEvent::Started {
                     tool: activity.tool.clone(),
                 },
+                activity_id: activity.activity_id.clone(),
                 invalidate_review: activity.external && repository_selected,
                 refresh_reason: None,
             })
@@ -8554,6 +8574,7 @@ fn activity_event_with_composition(
                 .then(|| commit_activity_presentation(output))
                 .flatten();
             ActivityOutcome {
+                activity_id: activity.activity_id,
                 activity: ActivityEvent::Finished {
                     tool: activity.tool,
                     result: if output.is_error {
@@ -8678,7 +8699,14 @@ async fn handle_uncertain_repository_effects(
     repository_selected: bool,
 ) -> bool {
     let refresh = uncertain_repository_effect_requires_refresh(repository_selected, tool_calls);
-    tool_calls.clear();
+    for notification in drain_unresolved_activity(tool_calls) {
+        append_live_evidence(serde_json::json!({
+            "event": "tool_outcome_unknown",
+            "activity_id": notification.activity_id,
+            "activity": notification.event,
+        }));
+        emit_activity_event(app, notification);
+    }
     if refresh {
         invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
         append_live_evidence(serde_json::json!({
@@ -8688,6 +8716,22 @@ async fn handle_uncertain_repository_effects(
         emit_repository_refresh(app);
     }
     refresh
+}
+
+#[cfg(target_os = "windows")]
+fn drain_unresolved_activity(
+    tool_calls: &mut HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+) -> Vec<ActivityNotification> {
+    tool_calls
+        .drain()
+        .map(|(_, activity)| ActivityNotification {
+            activity_id: activity.activity_id,
+            event: ActivityEvent::Interrupted {
+                tool: activity.tool,
+                started: activity.started,
+            },
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -8735,7 +8779,7 @@ fn commit_activity_presentation(
 }
 
 #[cfg(target_os = "windows")]
-fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
+fn emit_activity_event(app: &AppHandle, event: ActivityNotification) {
     if let Err(error) = app.emit("activity_event", event) {
         tracing::warn!(error = %error, "failed to emit desktop activity event");
     }
@@ -8744,6 +8788,190 @@ fn emit_activity_event(app: &AppHandle, event: ActivityEvent) {
 #[cfg(target_os = "windows")]
 fn append_live_evidence(record: serde_json::Value) {
     rah_protocol::live_evidence::append(&record);
+}
+
+// Private evidence only. Never format a source, input value, unknown key or output.
+#[cfg(target_os = "windows")]
+fn repo_list_input_evidence(call: &ToolCall) -> serde_json::Value {
+    let input = &call.input.0;
+    let object = input.as_object();
+    let path = object.and_then(|object| object.get("path"));
+    // Diagnostic syntax check only; Tool validation remains authoritative.
+    let path_valid = path.map(|value| {
+        value.as_str().is_some_and(|path| {
+            !path.is_empty()
+                && path.len() <= 1024
+                && !path.contains(['\\', ':', '\0'])
+                && path.split('/').all(|part| {
+                    !part.is_empty()
+                        && part != "."
+                        && part != ".."
+                        && !part.eq_ignore_ascii_case(".git")
+                })
+        })
+    });
+    serde_json::json!({
+        "tool": "repo.list",
+        "tool_call_id": call.id,
+        "input_type": match input {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        },
+        "allowed_keys_present": if path.is_some() { vec!["path"] } else { vec![] },
+        "key_set_valid": object.map(|object| object.keys().all(|key| key == "path")),
+        "path_present": path.is_some(),
+        "path_valid": path_valid,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn repo_list_failure_evidence(failure: Option<&rah_runtime::RuntimeFailure>) -> serde_json::Value {
+    use std::error::Error;
+    let mut source = failure.and_then(Error::source);
+    let mut dispatch = "unclassified";
+    let mut tool = "unclassified";
+    let mut reason = "unclassified";
+    // Bound traversal even for an erroneous/cyclic Error implementation.
+    for _ in 0..16 {
+        let Some(error) = source else { break };
+        if let Some(error) = error.downcast_ref::<AuthorizedDispatchError>() {
+            match error {
+                AuthorizedDispatchError::Rejected(rejection) => {
+                    dispatch = "rejected";
+                    reason = match rejection {
+                        AuthorizedDispatchRejection::NameMismatch { .. } => "name_mismatch",
+                        AuthorizedDispatchRejection::UnknownTool { .. } => "unknown_tool",
+                        AuthorizedDispatchRejection::DefinitionMismatch { .. } => {
+                            "definition_mismatch"
+                        }
+                        AuthorizedDispatchRejection::PermissionDenied { .. } => "permission_denied",
+                    };
+                }
+                AuthorizedDispatchError::Tool(_) => dispatch = "tool",
+            }
+        }
+        if let Some(error) = error.downcast_ref::<rah_tools::ToolError>() {
+            let message = match error {
+                rah_tools::ToolError::InvalidInput { message } => {
+                    tool = "invalid_input";
+                    Some(message.as_str())
+                }
+                rah_tools::ToolError::Execution { message } => {
+                    tool = "execution";
+                    Some(message.as_str())
+                }
+                _ => None,
+            };
+            reason = match message {
+                Some("repository listing input must be an object") => "input_not_object",
+                Some("repository listing input has unknown fields") => "unknown_input_fields",
+                Some("repository listing input exceeds its limit") => "input_limit",
+                Some("`path` must be a string") => "path_not_string",
+                Some("`path` must be a safe repository-relative path") => "unsafe_relative_path",
+                Some("repository listing repository listing exceeded its total timeout") => {
+                    "listing_timeout"
+                }
+                Some("repository listing requested repository path is not a directory") => {
+                    "target_not_directory"
+                }
+                Some("repository listing requested repository directory was not found") => {
+                    "directory_not_found"
+                }
+                Some("Git repository policy rejected capability: repository identity changed") => {
+                    "repository_identity_changed"
+                }
+                Some(
+                    "Git repository policy rejected capability: tracked repository inventory exceeded its limit",
+                ) => "inventory_limit",
+                Some(
+                    "Git repository policy rejected capability: tracked repository inventory did not complete successfully",
+                ) => "inventory_failed",
+                Some(
+                    "Git repository policy rejected capability: repository observation exceeded its total timeout",
+                ) => "observer_timeout",
+                Some("repository listing repository listing result exceeded its limit") => {
+                    "result_limit"
+                }
+                _ => "unclassified",
+            };
+        }
+        source = error.source();
+    }
+    serde_json::json!({
+        "authorized_dispatch_error": dispatch,
+        "tool_error": tool,
+        "reason_category": reason,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn repo_list_event_evidence(
+    event: &rah_runtime::RuntimeEvent,
+    pending: &mut HashMap<ToolCallId, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    match event.event() {
+        AgentEvent::ToolRequested { tool_call, .. } if tool_call.name.as_str() == "repo.list" => {
+            let mut record = repo_list_input_evidence(tool_call);
+            pending.insert(tool_call.id.clone(), record.clone());
+            record["event"] = "repo_list_requested".into();
+            vec![record]
+        }
+        AgentEvent::ToolStarted { tool_call_id, .. } => {
+            let Some(record) = pending.get_mut(tool_call_id) else {
+                return vec![];
+            };
+            record["failure_stage"] = "started".into();
+            vec![]
+        }
+        AgentEvent::ToolFinished {
+            tool_call_id,
+            output,
+            ..
+        } => {
+            let Some(mut record) = pending.remove(tool_call_id) else {
+                return vec![];
+            };
+            record["event"] = "repo_list_finished".into();
+            record["failure_stage"] = serde_json::Value::Null;
+            record["result_valid"] = (!output.is_error
+                && output.content.iter().any(|content| {
+                    matches!(content, ToolContent::Json(value) if value["status"] == "ok"
+                    && value["entries"].is_array() && value["complete"].is_boolean())
+                }))
+            .into();
+            vec![record]
+        }
+        AgentEvent::Failed { code, .. } => {
+            // Failed carries no ToolCallId. Multiple outstanding calls cannot
+            // be assigned this cause individually.
+            let classification = repo_list_failure_evidence(if pending.len() == 1 {
+                event.failure()
+            } else {
+                None
+            });
+            pending
+                .drain()
+                .map(|(_, mut record)| {
+                    record["event"] = "repo_list_failure".into();
+                    if record.get("failure_stage").is_none() {
+                        record["failure_stage"] = "requested".into();
+                    }
+                    record["chat_terminal_code"] = serde_json::json!(code);
+                    if let (Some(record), Some(classification)) =
+                        (record.as_object_mut(), classification.as_object())
+                    {
+                        record.extend(classification.clone());
+                    }
+                    record
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -8959,8 +9187,23 @@ async fn run_chat(
     let mut terminal = false;
     let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
+    let mut repo_list_evidence = HashMap::new();
+    let mut native_terminal_counters = native_terminal_evidence::Counters::default();
     let mut events = handle.events;
     while let Some(local_event) = events.next().await {
+        native_terminal_counters.observe(local_event.event());
+        if let Some(mut record) = native_terminal_counters.terminal(&local_event) {
+            record["session_generation"] = chat_generation.into();
+            record["connection_generation"] = connection_generation.into();
+            append_live_evidence(record);
+        }
+        for mut record in repo_list_event_evidence(&local_event, &mut repo_list_evidence) {
+            record["repository_generation"] = repository_generation.into();
+            record["connection_generation"] = connection_generation.into();
+            record["runtime_generation"] = connection_generation.into();
+            record["session_generation"] = chat_generation.into();
+            append_live_evidence(record);
+        }
         let typed_native_cancelled = local_event
             .failure()
             .is_some_and(runtime_selection::is_native_turn_cancelled);
@@ -8985,6 +9228,7 @@ async fn run_chat(
                 ActivityEvent::Requested { .. } => "tool_requested",
                 ActivityEvent::Started { .. } => "tool_started",
                 ActivityEvent::Finished { .. } => "tool_finished",
+                ActivityEvent::Interrupted { .. } => "tool_outcome_unknown",
             };
             append_desktop_context_evidence(
                 activity_name,
@@ -8997,7 +9241,13 @@ async fn run_chat(
             if outcome.invalidate_review {
                 invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
             }
-            emit_activity_event(&app, outcome.activity);
+            emit_activity_event(
+                &app,
+                ActivityNotification {
+                    activity_id: outcome.activity_id,
+                    event: outcome.activity,
+                },
+            );
             if let Some(reason) = outcome.refresh_reason {
                 append_live_evidence(serde_json::json!({
                     "event": "repository_refresh",

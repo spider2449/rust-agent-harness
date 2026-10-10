@@ -19189,6 +19189,370 @@ impl Task324TurnObserver {
     }
 }
 
+#[tokio::test]
+async fn task524_repository_fs_read_direct_and_host_dispatch() {
+    let fixture = TestRepository::new();
+    let text = "Task 524 fixture: 已驗證 UTF-8\n";
+    fs::write(fixture.0.join("repo-marker.txt"), text).unwrap();
+    let reader =
+        super::FsReadTool::new_repository(&fixture.0, super::DESKTOP_FS_READ_MAX_BYTES).unwrap();
+    let output = reader
+        .execute(
+            ToolInput(serde_json::json!({"path": "repo-marker.txt"})),
+            ToolContext::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.content, vec![ToolContent::Text(text.to_owned())]);
+    assert!(!output.is_error);
+    let registry =
+        Arc::new(desktop_tool_registry(Some(&fixture.desktop_repository()), None).unwrap());
+    task_324_host_registry_read(Arc::clone(&registry), text)
+        .await
+        .unwrap();
+    let definition = registry
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name.as_str() == "fs.read")
+        .unwrap();
+    assert_eq!(definition.permission, PermissionLevel::Read);
+    assert!(
+        authorize_tool_dispatch(
+            &registry,
+            &definition,
+            &[],
+            &host_call(
+                ToolName::new("fs.read"),
+                ToolInput(serde_json::json!({"path": "repo-marker.txt"})),
+            ),
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result() {
+    use rah_runtime::{experimental::ToolRequest, experimental_host::HostToolScope};
+    use std::error::Error;
+
+    let fixture = TestRepository::new();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .manage(DesktopAppState::new(fixture.0.clone()))
+        .build(tauri::generate_context!())
+        .unwrap();
+    let observed = listen_for_test_event(app.handle(), "activity_event");
+    let registry = desktop_tool_registry(Some(&fixture.desktop_repository()), None).unwrap();
+    // repo.list requires Execute dispatch permission even though it is read-only.
+    // Verify rejection separately; it must never claim that execution started.
+    let denied_scope = HostToolScope::new(Arc::clone(&registry), vec![PermissionLevel::Read]);
+    let denied_port = denied_scope.port();
+    let mut denied_lease = denied_port.admit_turn().await.unwrap();
+    let denied = denied_port
+        .request_live(ToolRequest {
+            session_id: denied_lease.session_id.clone(),
+            name: ToolName::new("repo.list"),
+            input: ToolInput(serde_json::json!({"path":"../outside"})),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        denied
+            .source()
+            .unwrap()
+            .downcast_ref::<rah_tools::AuthorizedDispatchError>(),
+        Some(rah_tools::AuthorizedDispatchError::Rejected(_))
+    ));
+    for expected in ["tool_requested", "failed"] {
+        let event = denied_lease.events.next().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(event.event()).unwrap()["type"],
+            expected
+        );
+        match event.event() {
+            AgentEvent::ToolRequested {
+                session_id,
+                tool_call,
+            } => {
+                assert_eq!(session_id, &denied_lease.session_id);
+                assert_eq!(tool_call.name.as_str(), "repo.list");
+            }
+            AgentEvent::Failed { code, .. } => {
+                assert_eq!(*code, rah_protocol::AgentErrorCode::PermissionDenied);
+                assert!(event.failure().is_some());
+            }
+            other => panic!("unexpected rejected host event: {other:?}"),
+        }
+    }
+    denied_scope.drained().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), denied_lease.events.next())
+            .await
+            .is_err()
+    );
+    drop(denied_lease);
+    denied_scope.revoke();
+    let scope = HostToolScope::new(registry, vec![PermissionLevel::Execute]);
+    let port = scope.port();
+    let mut lease = port.admit_turn().await.unwrap();
+    let failure = port
+        .request_live(ToolRequest {
+            session_id: lease.session_id.clone(),
+            name: ToolName::new("repo.list"),
+            input: ToolInput(serde_json::json!({"path":"../outside"})),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        failure
+            .source()
+            .unwrap()
+            .downcast_ref::<rah_tools::AuthorizedDispatchError>(),
+        Some(rah_tools::AuthorizedDispatchError::Tool(_))
+    ));
+    let mut calls = HashMap::new();
+    let mut activity_id = None;
+    let mut requested_call_id = None;
+    let mut evidence_calls = HashMap::new();
+    for expected in ["requested", "started", "failed"] {
+        let event = tokio::time::timeout(Duration::from_secs(5), lease.events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let evidence = super::repo_list_event_evidence(&event, &mut evidence_calls);
+        if expected == "failed" {
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0]["authorized_dispatch_error"], "tool");
+            assert_eq!(evidence[0]["tool_error"], "invalid_input");
+            assert_eq!(evidence[0]["reason_category"], "unsafe_relative_path");
+            assert_eq!(evidence[0]["failure_stage"], "started");
+            assert_eq!(
+                evidence[0]["tool_call_id"],
+                serde_json::json!(requested_call_id)
+            );
+            assert!(!evidence[0].to_string().contains("../outside"));
+        }
+        match (expected, event.event()) {
+            ("requested", AgentEvent::ToolRequested { tool_call, .. }) => {
+                assert_eq!(tool_call.name.as_str(), "repo.list");
+                requested_call_id = Some(tool_call.id.clone());
+                let outcome = activity_event_with_composition(
+                    event.event(),
+                    &mut calls,
+                    &empty_composition_metadata(),
+                    true,
+                )
+                .unwrap();
+                assert_ne!(outcome.activity_id, tool_call.id.to_string());
+                activity_id = Some(outcome.activity_id);
+            }
+            ("started", AgentEvent::ToolStarted { tool_call_id, .. }) => {
+                assert_eq!(Some(tool_call_id), requested_call_id.as_ref());
+                let outcome = activity_event_with_composition(
+                    event.event(),
+                    &mut calls,
+                    &empty_composition_metadata(),
+                    true,
+                )
+                .unwrap();
+                assert_eq!(Some(outcome.activity_id), activity_id);
+            }
+            ("failed", AgentEvent::Failed { code, .. }) => {
+                assert_eq!(*code, rah_protocol::AgentErrorCode::Tool);
+                assert!(matches!(
+                    event
+                        .failure()
+                        .unwrap()
+                        .source()
+                        .unwrap()
+                        .downcast_ref::<rah_tools::AuthorizedDispatchError>(),
+                    Some(rah_tools::AuthorizedDispatchError::Tool(_))
+                ));
+            }
+            (_, other) => {
+                panic!("unexpected host lifecycle: expected {expected}, observed {other:?}")
+            }
+        }
+    }
+    scope.drained().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), lease.events.next())
+            .await
+            .is_err()
+    );
+    assert!(!super::handle_uncertain_repository_effects(app.handle(), &mut calls, true).await);
+    assert!(calls.is_empty());
+    let events = observed.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+    assert_eq!(payload["kind"], "tool_interrupted");
+    assert_eq!(payload["tool"], "repo.list");
+    assert_eq!(payload["started"], true);
+    assert_eq!(payload["activityId"], activity_id.unwrap());
+    for forbidden in ["tool_call_id", "session_id", "input", "output", "result"] {
+        assert!(payload.get(forbidden).is_none());
+    }
+    drop(events);
+    drop(lease);
+    let next = port.admit_turn().await.unwrap();
+    drop(next);
+    scope.revoke();
+    scope.drained().await;
+    app.unlisten(observed.1);
+}
+
+#[test]
+fn task524e_private_failure_classification_and_success() {
+    use rah_runtime::{RuntimeEvent, RuntimeFailure};
+    let diagnostic = rah_protocol::RuntimeDiagnostic {
+        operation: rah_protocol::RuntimeOperation::Turn,
+        kind: rah_protocol::RuntimeFailureKind::Operation,
+        rpc_code: None,
+    };
+    for error in [
+        rah_tools::ToolError::InvalidInput {
+            message: "PRIVATE path/prompt/credential".into(),
+        },
+        rah_tools::ToolError::Execution {
+            message: "PRIVATE path/prompt/credential".into(),
+        },
+    ] {
+        let failure = RuntimeFailure::new(
+            diagnostic.clone(),
+            rah_tools::AuthorizedDispatchError::Tool(error),
+        );
+        let record = super::repo_list_failure_evidence(Some(&failure));
+        assert_eq!(record["authorized_dispatch_error"], "tool");
+        assert_eq!(record["reason_category"], "unclassified");
+        assert!(matches!(
+            record["tool_error"].as_str(),
+            Some("invalid_input" | "execution")
+        ));
+        assert!(!record.to_string().contains("PRIVATE"));
+    }
+    let unknown = RuntimeFailure::new(diagnostic, std::io::Error::other("PRIVATE unknown source"));
+    let record = super::repo_list_failure_evidence(Some(&unknown));
+    assert_eq!(record["authorized_dispatch_error"], "unclassified");
+    assert_eq!(record["tool_error"], "unclassified");
+    assert!(!record.to_string().contains("PRIVATE"));
+
+    let call = ToolCall {
+        id: ToolCallId::new(),
+        name: ToolName::new("repo.list"),
+        input: ToolInput(
+            serde_json::json!({"path":"private/directory", "PRIVATE unknown key":"secret"}),
+        ),
+    };
+    let input_record = super::repo_list_input_evidence(&call);
+    assert_eq!(input_record["key_set_valid"], false);
+    assert_eq!(input_record["path_valid"], true);
+    assert!(!input_record.to_string().contains("private/directory"));
+    assert!(!input_record.to_string().contains("PRIVATE"));
+    let session_id = SessionId::new();
+    let mut pending = HashMap::new();
+    let requested = RuntimeEvent::from(AgentEvent::ToolRequested {
+        session_id: session_id.clone(),
+        tool_call: call.clone(),
+    });
+    assert_eq!(
+        super::repo_list_event_evidence(&requested, &mut pending).len(),
+        1
+    );
+    let output = ToolOutput {
+        content: vec![ToolContent::Json(serde_json::json!({
+            "status":"ok", "entries":[{"path":"PRIVATE filename", "kind":"file"}], "complete":true
+        }))],
+        is_error: false,
+    };
+    let success = RuntimeEvent::from(AgentEvent::ToolFinished {
+        session_id,
+        tool_call_id: call.id,
+        output: output.clone(),
+    });
+    let records = super::repo_list_event_evidence(&success, &mut pending);
+    assert_eq!(records[0]["result_valid"], true);
+    assert!(pending.is_empty());
+    assert!(!records[0].to_string().contains("PRIVATE"));
+    assert!(
+        matches!(success.event(), AgentEvent::ToolFinished { output: actual, .. } if actual == &output)
+    );
+    assert!(super::repo_list_event_evidence(&success, &mut pending).is_empty());
+}
+
+#[test]
+fn task524a_unresolved_activity_is_correlated_and_drained_once() {
+    let session = SessionId::new();
+    let mut calls = HashMap::new();
+    let mut identities = Vec::new();
+    for started in [true, true, false] {
+        let id = ToolCallId::new();
+        let outcome = activity_event_with_composition(
+            &AgentEvent::ToolRequested {
+                session_id: session.clone(),
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: ToolName::new("repo.list"),
+                    input: ToolInput(serde_json::json!({})),
+                },
+            },
+            &mut calls,
+            &empty_composition_metadata(),
+            false,
+        )
+        .unwrap();
+        if started {
+            let running = activity_event_with_composition(
+                &AgentEvent::ToolStarted {
+                    session_id: session.clone(),
+                    tool_call_id: id.clone(),
+                },
+                &mut calls,
+                &empty_composition_metadata(),
+                false,
+            )
+            .unwrap();
+            assert_eq!(running.activity_id, outcome.activity_id);
+        }
+        identities.push((id, outcome.activity_id));
+    }
+    let finished = activity_event_with_composition(
+        &AgentEvent::ToolFinished {
+            session_id: session,
+            tool_call_id: identities[0].0.clone(),
+            output: ToolOutput {
+                content: vec![],
+                is_error: false,
+            },
+        },
+        &mut calls,
+        &empty_composition_metadata(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(finished.activity_id, identities[0].1);
+    let notifications = super::drain_unresolved_activity(&mut calls);
+    assert_eq!(notifications.len(), 2);
+    assert!(
+        !notifications
+            .iter()
+            .any(|event| event.activity_id == identities[0].1)
+    );
+    for (index, started) in [(1, true), (2, false)] {
+        let event = notifications
+            .iter()
+            .find(|event| event.activity_id == identities[index].1)
+            .unwrap();
+        assert_eq!(
+            event.event,
+            ActivityEvent::Interrupted {
+                tool: "repo.list".to_owned(),
+                started
+            }
+        );
+    }
+    assert!(super::drain_unresolved_activity(&mut calls).is_empty());
+}
+
 async fn task_324_host_registry_read(
     registry: Arc<ToolRegistry>,
     expected_marker: &str,
