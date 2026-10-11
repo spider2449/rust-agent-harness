@@ -263,6 +263,7 @@ async fn run_turn(
                 AgentEvent::Cancelled { .. } => return Err("Codex turn was cancelled".to_owned()),
                 AgentEvent::Started { .. }
                 | AgentEvent::ModelRequestStarted { .. }
+                | AgentEvent::ModelReasoningStarted { .. }
                 | AgentEvent::ModelDelta { .. } => {}
             }
         }
@@ -560,6 +561,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::Started { .. } => "Started",
         AgentEvent::ModelRequestStarted { .. } => "ModelRequestStarted",
+        AgentEvent::ModelReasoningStarted { .. } => "ModelReasoningStarted",
         AgentEvent::ModelDelta { .. } => "ModelDelta",
         AgentEvent::ToolRequested { .. } => "ToolRequested",
         AgentEvent::ToolStarted { .. } => "ToolStarted",

@@ -508,6 +508,7 @@ impl Job {
                 let mut assembled = protocol::Response::default();
                 let mut local_events = self.llamacpp.then(llamacpp::EventNormalizer::default);
                 let mut total = 0;
+                let mut reasoning_reported = false;
                 while let Some(chunk) = bytes.next().await {
                     let chunk = chunk.map_err(|_| turn_failure(E::Transport))?;
                     total += chunk.len();
@@ -520,7 +521,11 @@ impl Job {
                         for event in events {
                         match assembled.event(event).map_err(turn_failure)? {
                             protocol::Update::Text(delta) => yield AgentEvent::ModelDelta { session_id:self.session.clone(),model_request_id:model_request_id.clone(),delta }.into(),
-                            protocol::Update::Complete | protocol::Update::None => {},
+                            protocol::Update::Reasoning if !reasoning_reported => {
+                                reasoning_reported = true;
+                                yield AgentEvent::ModelReasoningStarted { session_id:self.session.clone(),model_request_id:model_request_id.clone() }.into();
+                            }
+                            protocol::Update::Reasoning | protocol::Update::Complete | protocol::Update::None => {},
                         }
                         }
                     }

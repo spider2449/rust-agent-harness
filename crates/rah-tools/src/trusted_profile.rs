@@ -1059,6 +1059,7 @@ fn capability_contract(
         | "repo.diff"
         | "repo.diff-staged"
         | "repo.search"
+        | "repo.stats"
         | "repo.list" => (
             PermissionLevel::Execute,
             [
@@ -1086,6 +1087,7 @@ fn is_repository_observer(name: &str) -> bool {
             | "repo.diff"
             | "repo.diff-staged"
             | "repo.search"
+            | "repo.stats"
             | "repo.list"
     )
 }
@@ -1797,13 +1799,14 @@ mod tests {
                 {"name": "repo.diff", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.diff-staged", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
                 {"name": "repo.search", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
-                {"name": "repo.list", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
+                {"name": "repo.list", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"},
+                {"name": "repo.stats", "enabled": true, "permission": "execute", "executable": "git", "repository": "workspace"}
             ]
         });
         let loaded = TrustedStaticProfile::load(directory.profile(&document.to_string()))
             .expect("observer static profile should not construct tools");
         assert!(loaded.registry().definitions().is_empty());
-        assert_eq!(loaded.repository_observers().len(), 6);
+        assert_eq!(loaded.repository_observers().len(), 7);
         for capability in &loaded.effective_profile().capabilities {
             assert!(capability.enabled);
             assert!(!capability.registered);
@@ -1848,6 +1851,7 @@ mod tests {
             "repo.diff-staged",
             "repo.search",
             "repo.list",
+            "repo.stats",
         ] {
             duplicate["capabilities"] = json!([
                 {"name":name, "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},

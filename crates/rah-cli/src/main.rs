@@ -160,6 +160,7 @@ async fn run_prompt(prompt: String) -> Result<()> {
             AgentEvent::Cancelled { .. } => bail!("agent session was cancelled"),
             AgentEvent::Started { .. }
             | AgentEvent::ModelRequestStarted { .. }
+            | AgentEvent::ModelReasoningStarted { .. }
             | AgentEvent::ToolRequested { .. }
             | AgentEvent::ToolStarted { .. }
             | AgentEvent::ToolFinished { .. }

@@ -698,6 +698,7 @@ mod tests {
             "repo.edit-untracked-file",
             "repo.search",
             "repo.list",
+            "repo.stats",
             "echo",
             "fixture",
             "mcp.example.tool",

@@ -8,9 +8,9 @@ use rah_tools::{
     RepositoryDirectoryCreationAuthority, RepositoryDirectoryCreationTool,
     RepositoryFileCreationTool, RepositoryFileDeletionAuthority, RepositoryFileDeletionTool,
     RepositoryFileInfoTool, RepositoryFileRenameAuthority, RepositoryFileRenameTool,
-    RepositoryListTool, RepositoryMultiFileEditTool, RepositorySearchTool, RepositoryStatusTool,
-    RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool, ToolRegistry,
-    TrustedStaticProfile,
+    RepositoryListTool, RepositoryMultiFileEditTool, RepositorySearchTool, RepositoryStatsTool,
+    RepositoryStatusTool, RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool,
+    ToolRegistry, TrustedStaticProfile,
 };
 use rah_tools_mcp::{McpAdapter, McpServerConfig};
 use rah_tools_plugin::{PluginAdapter, PluginConfig};
@@ -263,6 +263,10 @@ async fn compose_with_repository_file_authorities(
                 RepositoryListTool::new(executable, repository)
                     .map_err(|_| ProfileError::ConstructionFailed)?,
             ),
+            "repo.stats" => Arc::new(
+                RepositoryStatsTool::new(executable, repository)
+                    .map_err(|_| ProfileError::ConstructionFailed)?,
+            ),
             _ => return Err(ProfileError::ConstructionFailed),
         };
         registry
@@ -368,6 +372,7 @@ async fn compose_with_repository_file_authorities(
                     | "repo.diff"
                     | "repo.diff-staged"
                     | "repo.search"
+                    | "repo.stats"
                     | "repo.list"
             ))
         {
@@ -640,7 +645,8 @@ mod tests {
                 {"name":"repo.diff", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.diff-staged", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
                 {"name":"repo.search", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
-                {"name":"repo.list", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
+                {"name":"repo.list", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"},
+                {"name":"repo.stats", "enabled":true, "permission":"execute", "executable":"git", "repository":"workspace"}
             ],
             "mcp_providers": mcp_providers,
             "process_plugins": process_plugins
@@ -806,7 +812,7 @@ mod tests {
         let definitions = composition.registry().definitions();
         assert_eq!(
             definitions.len(),
-            12,
+            13,
             "built-ins, repository tools, and exactly admitted external tools are published"
         );
         for name in [
@@ -816,6 +822,7 @@ mod tests {
             "repo.diff-staged",
             "repo.search",
             "repo.list",
+            "repo.stats",
         ] {
             assert_eq!(
                 definitions
@@ -912,6 +919,7 @@ mod tests {
             "repo.diff-staged",
             "repo.search",
             "repo.list",
+            "repo.stats",
         ] {
             let observer = composition
                 .effective_profile()

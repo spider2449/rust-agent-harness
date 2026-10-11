@@ -94,6 +94,40 @@ async function failurePresentation(partial) {
   assert.equal(messages.at(-1).textContent, "Recovered");
   assert.equal(context.chatRunning, false);
 }
+function modelProgress() {
+  const messages = [];
+  const timers = new Map();
+  let nextTimer = 1;
+  let now = 0;
+  const context = vm.createContext({ document: { querySelector: element }, chatRunning: true, activeAssistant: null,
+    appendMessage: (role, text) => { const message = { role, textContent: text }; messages.push(message); return message; },
+    updateRepositoryMembershipControls: () => {}, loadStatus: async () => {}, showBackendError: () => {},
+    errorMessage: () => "Chat could not finish.", diagnosticText: () => "", showChatError: () => {},
+    Date: { now: () => now },
+    setInterval: callback => { timers.set(nextTimer, callback); return nextTimer++; },
+    clearInterval: id => timers.delete(id) });
+  vm.runInContext(source.slice(source.indexOf("function handleChatEvent("), source.indexOf("async function toggleCodexConnection(")), context);
+  const progress = element("#chat-progress");
+  const emit = payload => context.handleChatEvent(() => {}, { payload });
+  emit({ kind: "started" });
+  emit({ kind: "model_waiting" });
+  assert.equal(progress.hidden, false);
+  assert.equal(progress.textContent, "Waiting for model… 0s");
+  emit({ kind: "model_thinking" });
+  assert.equal(timers.size, 1, "a new progress label replaces the previous timer");
+  now = 125_000;
+  for (const tick of timers.values()) tick();
+  assert.equal(progress.textContent, "Model is thinking… 2m 5s");
+  assert.equal(messages.length, 0, "progress never renders as a chat message");
+  emit({ kind: "delta", text: "Answer" });
+  assert.equal(progress.hidden, true);
+  assert.equal(timers.size, 0);
+  emit({ kind: "model_waiting" });
+  emit({ kind: "completed" });
+  assert.equal(progress.hidden, true, "terminal clears progress");
+  assert.equal(timers.size, 0);
+  assert.equal(context.chatRunning, false);
+}
 function activityClosure() {
   const entries = { children: [], append(entry) { this.children.push(entry); } };
   const context = vm.createContext({ maxActivityEntries: 100, document: {
@@ -130,6 +164,7 @@ function activityClosure() {
 }
 (async () => {
   activityClosure();
+  modelProgress();
   await failurePresentation(false);
   await failurePresentation(true);
   for (const kind of ["completed", "failed", "cancelled"]) {

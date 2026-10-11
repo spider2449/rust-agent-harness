@@ -35,6 +35,7 @@ mod repository_mutation;
 mod repository_observer;
 mod repository_rename_file;
 mod repository_search;
+mod repository_stats;
 mod repository_status;
 mod repository_worktree_patch;
 mod shell_exec;
@@ -143,6 +144,7 @@ pub use repository_rename_file::{
     RepositoryRenameFileProof, RepositoryRenameFileReview, classify_repository_rename_file_output,
 };
 pub use repository_search::{REPOSITORY_SEARCH_TOOL_NAME, RepositorySearchTool};
+pub use repository_stats::{REPOSITORY_STATS_TOOL_NAME, RepositoryStatsTool};
 pub use repository_status::{REPOSITORY_STATUS_TOOL_NAME, RepositoryStatusTool};
 pub use repository_worktree_patch::{
     REPOSITORY_EDIT_UNTRACKED_FILE_TOOL_NAME, REPOSITORY_WORKTREE_PATCH_TOOL_NAME,

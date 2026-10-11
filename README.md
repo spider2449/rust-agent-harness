@@ -54,6 +54,14 @@ environment requires restart.
 Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
 without granting repository authority or claiming rollback.
 
+## Unreleased
+
+- Desktop shows "Waiting for model…" / "Model is thinking…" with elapsed time
+  while a model request is pending. Reasoning content is never displayed.
+- `repo.stats` counts tracked files recursively in the active repository (or a
+  subdirectory), grouped by extension and direct child directory, with byte
+  sizes. It reads no file contents and is a read-only repository observer.
+
 ## RAH v0.34.0 released
 
 The release covers native OpenAI and llama.cpp runtimes, provider-neutral

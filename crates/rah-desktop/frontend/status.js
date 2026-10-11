@@ -2392,6 +2392,11 @@ function showChatError(code, diagnostic) {
 
 function handleChatEvent(invoke, event) {
   const payload = event.payload;
+  if (payload.kind === "model_waiting" || payload.kind === "model_thinking") {
+    showChatProgress(payload.kind === "model_waiting" ? "Waiting for model" : "Model is thinking");
+    return;
+  }
+  hideChatProgress();
   if (payload.kind === "started") {
     activeAssistant = null;
     updateRepositoryMembershipControls();
@@ -2410,6 +2415,32 @@ function handleChatEvent(invoke, event) {
     updateRepositoryMembershipControls();
     void loadStatus(invoke).catch(() => showBackendError());
   }
+}
+
+// Presentation-only progress for a pending model request; it carries no
+// model content and grants nothing.
+let chatProgressTimer = null;
+
+function showChatProgress(label) {
+  hideChatProgress();
+  const progress = document.querySelector("#chat-progress");
+  const started = Date.now();
+  const render = () => {
+    const seconds = Math.floor((Date.now() - started) / 1000);
+    const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    progress.textContent = `${label}… ${elapsed}`;
+  };
+  render();
+  progress.hidden = false;
+  chatProgressTimer = setInterval(render, 1000);
+}
+
+function hideChatProgress() {
+  if (chatProgressTimer !== null) {
+    clearInterval(chatProgressTimer);
+    chatProgressTimer = null;
+  }
+  document.querySelector("#chat-progress").hidden = true;
 }
 
 async function toggleCodexConnection(invoke) {
@@ -2498,7 +2529,10 @@ async function initializeDesktop() {
   await initializeDiagnosticLog(invoke);
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
-  await listen("activity_event", (event) => appendActivity(event.payload));
+  await listen("activity_event", (event) => {
+    if (event.payload.kind === "tool_requested") hideChatProgress();
+    appendActivity(event.payload);
+  });
   await listen("host_activity_event", (event) => {
     appendHostActivity(event.payload);
     void refreshEffectiveAuthority(invoke);

@@ -102,7 +102,9 @@ async fn run_cancelled_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
                 model_delta_count += 1;
                 break;
             }
-            AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } => {}
+            AgentEvent::Started { .. }
+            | AgentEvent::ModelRequestStarted { .. }
+            | AgentEvent::ModelReasoningStarted { .. } => {}
             terminal => {
                 return Err(format!(
                     "turn stopped before the first model delta; received {}",
@@ -182,6 +184,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::Started { .. } => "Started",
         AgentEvent::ModelRequestStarted { .. } => "ModelRequestStarted",
+        AgentEvent::ModelReasoningStarted { .. } => "ModelReasoningStarted",
         AgentEvent::ModelDelta { .. } => "ModelDelta",
         AgentEvent::ToolRequested { .. } => "ToolRequested",
         AgentEvent::ToolStarted { .. } => "ToolStarted",

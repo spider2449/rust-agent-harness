@@ -6567,6 +6567,7 @@ async fn windows_live_desktop_repo_create_branch() -> Result<(), String> {
                 }
                 AgentEvent::Started { .. }
                 | AgentEvent::ModelRequestStarted { .. }
+                | AgentEvent::ModelReasoningStarted { .. }
                 | AgentEvent::ModelDelta { .. }
                 | AgentEvent::ApprovalRequired { .. } => {}
             }
@@ -11920,6 +11921,15 @@ fn serialized_chat_events_expose_only_the_closed_frontend_contract() {
     assert!(!serialized.contains("session"));
     assert!(!serialized.contains("thread"));
     assert!(!serialized.contains("path"));
+    for (event, expected) in [
+        (ChatEvent::ModelWaiting, r#"{"kind":"model_waiting"}"#),
+        (ChatEvent::ModelThinking, r#"{"kind":"model_thinking"}"#),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&event).expect("chat event serializes"),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -15229,6 +15239,7 @@ async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
             "repo.list",
             "repo.patch",
             "repo.search",
+            "repo.stats",
             "repo.status",
         ]
     );
@@ -15258,7 +15269,7 @@ async fn selected_repository_registry_has_only_the_intended_bounded_tools() {
             .iter()
             .filter(|&&permission| permission == PermissionLevel::Execute)
             .count(),
-        10
+        11
     );
     let untracked = definitions
         .iter()

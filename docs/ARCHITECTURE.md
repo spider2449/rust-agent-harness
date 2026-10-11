@@ -16,6 +16,21 @@ The 49-command Tauri surface and exactly 11 HostExplicit Tools are preserved.
 Actual OpenAI acceptance remains OPENAI_LIVE_NOT_VERIFIED; see the
 [v0.34 gate](RAH_V0.34_RELEASE_GATE.md).
 
+## Unreleased changes
+
+`AgentEvent::ModelReasoningStarted` is a provider-neutral, content-free
+progress signal: an adapter emits it at most once per model request when the
+provider streams reasoning. Reasoning content never crosses the adapter edge.
+Desktop presents it, together with `ModelRequestStarted`, as a transient
+"waiting/thinking" indicator with elapsed time; presentation grants nothing.
+
+`repo.stats` is a bounded, read-only repository observer in the existing
+`RepositoryObservation` boundary. It uses the same fixed tracked Git inventory
+as `repo.list` and returns recursive tracked-file counts and byte sizes grouped
+by extension and direct child directory, with bounded group lists. It reads no
+file contents, adds no dependency edge, permission, authority category or
+HostExplicit route, and HostExplicit remains exactly 11.
+
 ## Preserved v0.33 capability
 
 ADR 0031 defines ordinary `repo.edit-untracked-file` for one existing eligible

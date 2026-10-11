@@ -219,7 +219,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<(), String> {
                 AgentEvent::ApprovalRequired { .. } => return Err("unexpected approval request".to_owned()),
                 AgentEvent::Failed { message, .. } => return Err(format!("RAH failed: {message}")),
                 AgentEvent::Cancelled { .. } => return Err("RAH turn was cancelled".to_owned()),
-                AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } | AgentEvent::ModelDelta { .. } => {}
+                AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } | AgentEvent::ModelReasoningStarted { .. } | AgentEvent::ModelDelta { .. } => {}
             }
         }
         Ok(())
@@ -318,6 +318,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::Started { .. } => "Started",
         AgentEvent::ModelRequestStarted { .. } => "ModelRequestStarted",
+        AgentEvent::ModelReasoningStarted { .. } => "ModelReasoningStarted",
         AgentEvent::ModelDelta { .. } => "ModelDelta",
         AgentEvent::ToolRequested { .. } => "ToolRequested",
         AgentEvent::ToolStarted { .. } => "ToolStarted",

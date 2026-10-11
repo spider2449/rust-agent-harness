@@ -293,7 +293,7 @@ fn metadata(name: &str) -> Option<(EffectClass, AuthorityCategory, bool)> {
         "echo" => (EffectClass::Execute, AuthorityCategory::Execute, false),
         "fs.read" => (EffectClass::ReadOnly, AuthorityCategory::Read, true),
         "repo.file-info" | "repo.status" | "repo.diff" | "repo.diff-staged" | "repo.search"
-        | "repo.list" => (
+        | "repo.stats" | "repo.list" => (
             EffectClass::ReadOnly,
             AuthorityCategory::RepositoryObservation,
             true,
@@ -526,6 +526,7 @@ pub(crate) fn compose(
             "repo.diff-staged",
             "repo.search",
             "repo.list",
+            "repo.stats",
             "repo.patch",
             "repo.edit-untracked-file",
             "repo.edit-files",
@@ -1090,6 +1091,7 @@ mod tests {
             "repo.diff-staged",
             "repo.search",
             "repo.list",
+            "repo.stats",
             "repo.patch",
             "repo.edit-files",
             "repo.create-file",

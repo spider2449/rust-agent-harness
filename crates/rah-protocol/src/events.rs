@@ -62,6 +62,16 @@ pub enum AgentEvent {
         /// Incremental UTF-8 text.
         delta: String,
     },
+    /// The model began private reasoning for a model request.
+    ///
+    /// Progress signal only: reasoning content is never carried. Emitted at
+    /// most once per model request.
+    ModelReasoningStarted {
+        /// Session associated with the operation.
+        session_id: SessionId,
+        /// Model request that is reasoning.
+        model_request_id: ModelRequestId,
+    },
     /// The model requested a tool call.
     ToolRequested {
         /// Session associated with the operation.

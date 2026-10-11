@@ -57,6 +57,10 @@ fn representative_events_round_trip_through_serde() {
             session_id: session_id.clone(),
             model_request_id: model_request_id.clone(),
         },
+        AgentEvent::ModelReasoningStarted {
+            session_id: session_id.clone(),
+            model_request_id: model_request_id.clone(),
+        },
         AgentEvent::ModelDelta {
             session_id: session_id.clone(),
             model_request_id,

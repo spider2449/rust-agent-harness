@@ -524,6 +524,7 @@ p, dd, li, pre { overflow-wrap: anywhere; }
 #new-conversation { align-self: flex-end; margin: 0; }
 #chat-messages { flex: 1; min-height: 0; max-height: none; overflow: auto; display: block; margin: .3rem 0; }
 #chat-messages article { margin-bottom: .7rem; padding: .6rem; border-radius: .4rem; background: color-mix(in srgb, CanvasText 5%, Canvas); }
+.chat-progress { color: var(--muted); font-style: italic; }
 #chat-form { flex-shrink: 0; display: flex; align-items: end; gap: .4rem; }
 #chat-prompt { flex: 1; resize: vertical; max-height: 25vh; max-height: 25dvh; min-height: 3rem; margin: 0; }
 dialog { width: min(28rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); max-height: calc(100dvh - 2rem); overflow: auto; }

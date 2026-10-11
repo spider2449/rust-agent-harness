@@ -146,7 +146,9 @@ async fn run_turn(runtime: &CodexRuntime, prompt: &str, expected_text: &str) -> 
                 terminal_error =
                     Some("restricted live smoke received a tool or approval event".to_owned());
             }
-            AgentEvent::Started { .. } | AgentEvent::ModelRequestStarted { .. } => {}
+            AgentEvent::Started { .. }
+            | AgentEvent::ModelRequestStarted { .. }
+            | AgentEvent::ModelReasoningStarted { .. } => {}
         }
     }
 

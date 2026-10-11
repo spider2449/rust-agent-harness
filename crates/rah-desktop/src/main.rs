@@ -118,9 +118,9 @@ use rah_tools::{
     RepositoryPatchPreparationError, RepositoryPatchPreparationRequest,
     RepositoryPatchResultClassification, RepositoryRenameFilePreparationError,
     RepositoryRenameFilePreparationRequest, RepositoryRenameFileProof, RepositorySearchTool,
-    RepositoryStatusTool, RepositoryUntrackedFileEditTool, RepositoryWorktreePatchTool, Tool,
-    ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch, authorized_tool_dispatch,
-    classify_repository_patch_output,
+    RepositoryStatsTool, RepositoryStatusTool, RepositoryUntrackedFileEditTool,
+    RepositoryWorktreePatchTool, Tool, ToolContext, ToolError, ToolRegistry,
+    authorize_tool_dispatch, authorized_tool_dispatch, classify_repository_patch_output,
 };
 #[cfg(target_os = "windows")]
 use remembered_workspace::{
@@ -2017,6 +2017,11 @@ impl From<&ProviderEndpoint> for ProviderEndpointPresentation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
     Started,
+    /// Presentation-only progress: a model request is pending.
+    ModelWaiting,
+    /// Presentation-only progress: the model is reasoning. Never carries
+    /// reasoning content.
+    ModelThinking,
     Delta {
         text: String,
     },
@@ -8286,6 +8291,7 @@ fn desktop_tool_registry(
             RepositoryDiffStagedTool::new(&repository.git_executable, &repository.root)?;
         let search = RepositorySearchTool::new(&repository.git_executable, &repository.root)?;
         let list = RepositoryListTool::new(&repository.git_executable, &repository.root)?;
+        let stats = RepositoryStatsTool::new(&repository.git_executable, &repository.root)?;
         let patch = RepositoryWorktreePatchTool::new(&repository.git_executable, &repository.root)?;
         let edit_untracked_file =
             RepositoryUntrackedFileEditTool::new(&repository.git_executable, &repository.root)?;
@@ -8300,6 +8306,7 @@ fn desktop_tool_registry(
         registry.register(Arc::new(diff_staged))?;
         registry.register(Arc::new(search))?;
         registry.register(Arc::new(list))?;
+        registry.register(Arc::new(stats))?;
         registry.register(Arc::new(patch))?;
         registry.register(Arc::new(edit_untracked_file))?;
         registry.register(Arc::new(create_file))?;
@@ -9436,6 +9443,20 @@ async fn run_chat(
                     emit_chat_event(&app, ChatEvent::Delta { text: delta });
                 }
             }
+            AgentEvent::ModelRequestStarted { .. } | AgentEvent::ModelReasoningStarted { .. } => {
+                if app.state::<DesktopAppState>().is_current_chat(
+                    chat_generation,
+                    &runtime,
+                    &session_id,
+                ) {
+                    let progress = if matches!(event, AgentEvent::ModelRequestStarted { .. }) {
+                        ChatEvent::ModelWaiting
+                    } else {
+                        ChatEvent::ModelThinking
+                    };
+                    emit_chat_event(&app, progress);
+                }
+            }
             AgentEvent::Completed { output, .. } => {
                 record_unresolved_work_log(&mut work_log, &tool_calls);
                 retain_model_owner |=
@@ -9612,7 +9633,6 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Started { .. }
-            | AgentEvent::ModelRequestStarted { .. }
             | AgentEvent::ToolRequested { .. }
             | AgentEvent::ToolStarted { .. }
             | AgentEvent::ToolFinished { .. }

@@ -250,6 +250,7 @@ async fn run_turn(runtime: Arc<CodexRuntime>) -> Result<ToolOutput, String> {
                 AgentEvent::Cancelled { .. } => return Err("turn cancelled".to_owned()),
                 AgentEvent::Started { .. }
                 | AgentEvent::ModelRequestStarted { .. }
+                | AgentEvent::ModelReasoningStarted { .. }
                 | AgentEvent::ModelDelta { .. } => {}
             }
         }
@@ -676,6 +677,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::Started { .. } => "Started",
         AgentEvent::ModelRequestStarted { .. } => "ModelRequestStarted",
+        AgentEvent::ModelReasoningStarted { .. } => "ModelReasoningStarted",
         AgentEvent::ModelDelta { .. } => "ModelDelta",
         AgentEvent::ToolRequested { .. } => "ToolRequested",
         AgentEvent::ToolStarted { .. } => "ToolStarted",

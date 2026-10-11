@@ -105,6 +105,8 @@ struct Call {
 }
 pub(crate) enum Update {
     Text(String),
+    /// Reasoning progress; the reasoning content is discarded.
+    Reasoning,
     Complete,
     None,
 }
@@ -247,10 +249,11 @@ impl Response {
             | "response.output_text.annotation.added"
             | "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary_text.delta"
             | "response.reasoning_summary_text.done"
-            | "response.reasoning_text.delta"
             | "response.reasoning_text.done" => Ok(Update::None),
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                Ok(Update::Reasoning)
+            }
             _ => Err(E::Protocol),
         }
     }

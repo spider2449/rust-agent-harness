@@ -793,6 +793,36 @@ async fn factory_capabilities_explicit_model_and_configuration_redaction() {
     runtime.shutdown().await.unwrap();
 }
 #[tokio::test]
+async fn reasoning_reports_progress_once_without_content() {
+    let mut events = text_events("answer");
+    let reasoning = ["private-thought-1", "private-thought-2"].map(|delta| {
+        json!({"type":"response.reasoning_text.delta","item_id":"private-reasoning","output_index":0,"content_index":0,"delta":delta})
+    });
+    events.splice(2..2, reasoning.clone());
+    events.insert(
+        3,
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"private-reasoning","output_index":0,"summary_index":0,"delta":"private-summary"}),
+    );
+    let f = Fixture::new(vec![Script::events(events)]).await;
+    let runtime = f.runtime().await;
+    let (scope, _) = scope();
+    let c = conversation(&runtime, scope.port()).await;
+    let events = collect(c.send(replay()).await.unwrap()).await;
+    let kinds = events
+        .iter()
+        .map(|e| match e.event() {
+            AgentEvent::ModelRequestStarted { .. } => "request",
+            AgentEvent::ModelReasoningStarted { .. } => "reasoning",
+            AgentEvent::ModelDelta { .. } => "delta",
+            AgentEvent::Completed { .. } => "completed",
+            _ => "other",
+        })
+        .filter(|kind| *kind != "other")
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["request", "reasoning", "delta", "completed"]);
+    assert!(!format!("{events:?}").contains("private-"));
+}
+#[tokio::test]
 async fn ordinary_text_arbitrary_chunks_completion_once_and_replay() {
     let f = Fixture::new(vec![Script::text("中文🙂"), Script::text("next")]).await;
     let runtime = f.runtime().await;

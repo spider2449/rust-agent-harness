@@ -25,6 +25,21 @@ source-only publication with zero uploaded assets; the waiver is not live PASS.
 Installer and cross-platform live certification remain unverified. See the
 [v0.34 release gate](RAH_V0.34_RELEASE_GATE.md).
 
+## Unreleased changes
+
+`repo.stats` is a bounded, read-only `RepositoryObservation` Tool
+(`EffectClass::ReadOnly`, `PermissionLevel::Execute`, `repository_bound =
+true`), not HostExplicit. The host supplies the selected active repository;
+model input may only name an optional safe repository-relative subdirectory.
+It counts tracked, currently eligible regular files from the fixed tracked
+inventory and reports only counts, byte sizes, extensions and repository-relative
+directory names. It does not open or read file contents, discover untracked or
+ignored paths, or follow links; nested-repository and symlink/reparse checks
+from the observer boundary remain enforced. Results are best-effort and bounded.
+
+`ModelReasoningStarted` carries no reasoning text. Adapters discard reasoning
+content; Desktop shows only a progress label and elapsed time.
+
 ## Preserved v0.33 security scope
 
 ADR 0031's `repo.edit-untracked-file` is an ordinary repository-bound Tool.
