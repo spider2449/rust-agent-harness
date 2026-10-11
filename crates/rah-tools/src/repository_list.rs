@@ -125,10 +125,10 @@ impl RepositoryListTool {
         }
 
         if visible_file_target {
-            return Err(list_error("requested repository path is not a directory"));
+            return Err(invalid("requested repository path is not a directory"));
         }
         if !has_eligible_descendant {
-            return Err(list_error("requested repository directory was not found"));
+            return Err(invalid("requested repository directory was not found"));
         }
 
         self.observer.revalidate()?;
@@ -355,6 +355,31 @@ mod tests {
                 .await
                 .unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn missing_or_file_targets_are_correctable_input_rejections() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        fixture.commit_all();
+        let tool = RepositoryListTool::new(native_git(), &fixture.0).unwrap();
+        for (path, message) in [
+            ("missing", "requested repository directory was not found"),
+            ("src/lib.rs", "requested repository path is not a directory"),
+        ] {
+            let error = tool
+                .execute(ToolInput(json!({"path": path})), ToolContext::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                ToolError::InvalidInput {
+                    message: message.into()
+                }
+            );
+        }
+        assert_eq!(list(&tool, json!({"path":"src"})).await["status"], "ok");
     }
 
     #[test]

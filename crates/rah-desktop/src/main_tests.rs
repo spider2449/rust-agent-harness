@@ -19374,6 +19374,12 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
     let scope = HostToolScope::new(registry, vec![PermissionLevel::Execute]);
     let port = scope.port();
     let mut lease = port.admit_turn().await.unwrap();
+    // A missing directory is now a correctable input rejection. A repository
+    // identity change under the composed registry remains a terminal Tool
+    // execution failure after the call started.
+    let git_dir = fixture.0.join(".git");
+    let moved_git_dir = fixture.0.join(".git-moved");
+    std::fs::rename(&git_dir, &moved_git_dir).unwrap();
     let failure = port
         .request_live(ToolRequest {
             session_id: lease.session_id.clone(),
@@ -19382,6 +19388,7 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
         })
         .await
         .unwrap_err();
+    std::fs::rename(&moved_git_dir, &git_dir).unwrap();
     assert!(matches!(
         failure
             .source()

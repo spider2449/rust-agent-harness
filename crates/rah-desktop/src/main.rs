@@ -8977,12 +8977,8 @@ fn repo_list_failure_evidence(failure: Option<&rah_runtime::RuntimeFailure>) -> 
                 Some("repository listing repository listing exceeded its total timeout") => {
                     "listing_timeout"
                 }
-                Some("repository listing requested repository path is not a directory") => {
-                    "target_not_directory"
-                }
-                Some("repository listing requested repository directory was not found") => {
-                    "directory_not_found"
-                }
+                Some("requested repository path is not a directory") => "target_not_directory",
+                Some("requested repository directory was not found") => "directory_not_found",
                 Some("Git repository policy rejected capability: repository identity changed") => {
                     "repository_identity_changed"
                 }
