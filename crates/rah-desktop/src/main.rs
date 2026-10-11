@@ -49,6 +49,8 @@ mod remembered_workspace;
 mod repository_membership;
 #[cfg(target_os = "windows")]
 mod trusted_profile_selection;
+#[cfg(target_os = "windows")]
+mod work_log;
 
 #[cfg(all(target_os = "windows", feature = "provider-codex"))]
 use codex_baseline::{BaselineError, resolve as resolve_codex_executable};
@@ -586,6 +588,32 @@ impl DesktopAppState {
             .append_pair(prompt, assistant)
     }
 
+    fn persist_work_log(
+        &self,
+        entry: &work_log::WorkLogEntry,
+    ) -> Result<usize, ConversationPersistenceWarning> {
+        self.select_persistence_namespace();
+        self.persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append_work_log(entry)
+    }
+
+    /// Host-authored System message summarizing the selected namespace's work log.
+    fn work_log_memory(&self) -> (Option<Message>, usize) {
+        self.select_persistence_namespace();
+        let entries = self
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .work_log();
+        let message = work_log::render_memory_message(&entries).map(|content| Message {
+            role: MessageRole::System,
+            content,
+        });
+        (message, entries.len())
+    }
+
     fn new(storage_directory: PathBuf) -> Self {
         let remembered_workspace = RememberedWorkspaceState::open(storage_directory.clone());
         let neutral_workspace = neutral_workspace(&storage_directory);
@@ -724,12 +752,78 @@ enum ConversationContextChange {
     RepositoryAndModel,
 }
 
+/// Desktop replay-budget usage for the current conversation context.
+///
+/// This measures the Desktop-owned history replay window, not provider token usage.
+/// `dropped_messages` counts older messages that slid out of the replay window in
+/// this conversation context; they remain in the persisted transcript.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ConversationContextUsage {
+    messages: usize,
+    max_messages: usize,
+    bytes: usize,
+    max_bytes: usize,
+    dropped_messages: usize,
+}
+
+#[cfg(target_os = "windows")]
+fn replay_bytes(messages: &[Message]) -> usize {
+    messages.iter().map(|message| message.content.len()).sum()
+}
+
+/// Drops the oldest complete user/assistant pairs until `history` fits the
+/// replay window. Returns the number of dropped messages.
+#[cfg(target_os = "windows")]
+fn slide_replay_window(history: &mut Vec<Message>) -> usize {
+    let mut bytes = replay_bytes(history);
+    let mut start = 0;
+    while start < history.len()
+        && (history.len() - start > MAX_CONVERSATION_REPLAY_MESSAGES
+            || bytes > MAX_CONVERSATION_REPLAY_BYTES)
+    {
+        let end = (start + 2).min(history.len());
+        bytes -= replay_bytes(&history[start..end]);
+        start = end;
+    }
+    history.drain(..start);
+    start
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ConversationMemoryPresentation {
+    entries: usize,
+    max_entries: usize,
+}
+
+#[cfg(target_os = "windows")]
+fn emit_conversation_memory(app: &AppHandle, entries: usize) {
+    let presentation = ConversationMemoryPresentation {
+        entries,
+        max_entries: work_log::MAX_WORK_LOG_ENTRIES,
+    };
+    if let Err(error) = app.emit("conversation_memory", presentation) {
+        tracing::warn!(error = %error, "failed to emit conversation memory");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_conversation_context_usage(app: &AppHandle, usage: ConversationContextUsage) {
+    if let Err(error) = app.emit("conversation_context_usage", usage) {
+        tracing::warn!(error = %error, "failed to emit conversation context usage");
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Debug, Default)]
 struct DesktopConversationState {
     identity: Option<ConversationContextIdentity>,
     history: Vec<Message>,
     epoch: u64,
+    dropped_messages: usize,
 }
 
 #[cfg(target_os = "windows")]
@@ -746,6 +840,7 @@ impl DesktopConversationState {
             return None;
         }
         self.history.clear();
+        self.dropped_messages = 0;
         self.identity = Some(identity);
         self.epoch = self.epoch.wrapping_add(1);
         Some(
@@ -763,18 +858,26 @@ impl DesktopConversationState {
 
     fn start_new(&mut self) {
         self.history.clear();
+        self.dropped_messages = 0;
         self.identity = None;
         self.epoch = self.epoch.wrapping_add(1);
     }
 
+    fn context_usage(&self) -> ConversationContextUsage {
+        ConversationContextUsage {
+            messages: self.history.len(),
+            max_messages: MAX_CONVERSATION_REPLAY_MESSAGES,
+            bytes: replay_bytes(&self.history),
+            max_bytes: MAX_CONVERSATION_REPLAY_BYTES,
+            dropped_messages: self.dropped_messages,
+        }
+    }
+
     fn request_messages(&self, prompt: &str) -> Result<Vec<Message>, FrontendError> {
+        // `commit` and `resume` keep history inside the replay window; this
+        // remains a closed defensive check for any other history mutation.
         if self.history.len() > MAX_CONVERSATION_REPLAY_MESSAGES
-            || self
-                .history
-                .iter()
-                .map(|message| message.content.len())
-                .sum::<usize>()
-                > MAX_CONVERSATION_REPLAY_BYTES
+            || replay_bytes(&self.history) > MAX_CONVERSATION_REPLAY_BYTES
         {
             return Err(FrontendError::ConversationContextLimit);
         }
@@ -795,6 +898,9 @@ impl DesktopConversationState {
             content: prompt,
         });
         self.history.push(output);
+        self.dropped_messages = self
+            .dropped_messages
+            .saturating_add(slide_replay_window(&mut self.history));
         Ok(())
     }
 
@@ -813,7 +919,7 @@ impl DesktopConversationState {
         if !self.history.is_empty() {
             return Err(FrontendError::ConversationResumeUnavailable);
         }
-        let messages = pairs
+        let mut messages = pairs
             .into_iter()
             .flat_map(|pair| {
                 [
@@ -828,13 +934,8 @@ impl DesktopConversationState {
                 ]
             })
             .collect::<Vec<_>>();
+        let dropped_messages = slide_replay_window(&mut messages);
         if messages.is_empty()
-            || messages.len() > MAX_CONVERSATION_REPLAY_MESSAGES
-            || messages
-                .iter()
-                .map(|message| message.content.len())
-                .sum::<usize>()
-                > MAX_CONVERSATION_REPLAY_BYTES
             || messages.iter().enumerate().any(|(index, message)| {
                 message.role
                     != if index % 2 == 0 {
@@ -848,6 +949,7 @@ impl DesktopConversationState {
         }
         self.identity = Some(identity);
         self.history = messages;
+        self.dropped_messages = dropped_messages;
         self.epoch = self.epoch.wrapping_add(1);
         Ok(())
     }
@@ -9187,6 +9289,7 @@ async fn run_chat(
     let mut terminal = false;
     let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
+    let mut work_log = Some(work_log::WorkLogTurn::new(&prompt));
     let mut repo_list_evidence = HashMap::new();
     let mut native_terminal_counters = native_terminal_evidence::Counters::default();
     let mut events = handle.events;
@@ -9241,6 +9344,7 @@ async fn run_chat(
             if outcome.invalidate_review {
                 invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
             }
+            record_finished_work_log(&mut work_log, &outcome.activity);
             emit_activity_event(
                 &app,
                 ActivityNotification {
@@ -9272,6 +9376,7 @@ async fn run_chat(
                 }
             }
             AgentEvent::Completed { output, .. } => {
+                record_unresolved_work_log(&mut work_log, &tool_calls);
                 retain_model_owner |=
                     handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
                         .await;
@@ -9280,6 +9385,12 @@ async fn run_chat(
                     &runtime,
                     &session_id,
                 ) {
+                    finish_work_log(
+                        &app,
+                        &mut work_log,
+                        work_log::WorkLogOutcome::Interrupted,
+                        None,
+                    );
                     if !retain_model_owner {
                         app.state::<DesktopAppState>()
                             .finish_claimed_chat(chat_generation);
@@ -9287,6 +9398,7 @@ async fn run_chat(
                     return;
                 }
                 let assistant_text = output.message.content.clone();
+                let assistant_text_for_log = assistant_text.clone();
                 append_live_evidence(serde_json::json!({
                     "event": "desktop_completed",
                     "marker_observed": contains_live_completion_marker(&assistant_text),
@@ -9297,13 +9409,21 @@ async fn run_chat(
                     "connection_generation": connection_generation,
                     "session_generation": chat_generation,
                 }));
-                let committed = app
-                    .state::<DesktopAppState>()
-                    .conversation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .commit(conversation_epoch, prompt.clone(), output.message);
+                let committed = {
+                    let state = app.state::<DesktopAppState>();
+                    let mut conversation = state
+                        .conversation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    conversation
+                        .commit(conversation_epoch, prompt.clone(), output.message)
+                        .map(|()| conversation.context_usage())
+                };
+                if let Ok(usage) = committed {
+                    emit_conversation_context_usage(&app, usage);
+                }
                 if committed.is_err() {
+                    finish_work_log(&app, &mut work_log, work_log::WorkLogOutcome::Failed, None);
                     emit_chat_event(
                         &app,
                         ChatEvent::Failed {
@@ -9316,15 +9436,22 @@ async fn run_chat(
                 }
                 if let Err(warning) = app
                     .state::<DesktopAppState>()
-                    .persist_completed_pair(prompt.clone(), assistant_text)
+                    .persist_completed_pair(prompt.clone(), assistant_text.clone())
                 {
                     emit_persistence_warning(&app, warning);
                 }
+                finish_work_log(
+                    &app,
+                    &mut work_log,
+                    work_log::WorkLogOutcome::Completed,
+                    Some(&assistant_text_for_log),
+                );
                 emit_chat_event(&app, ChatEvent::Completed);
                 terminal = true;
                 break;
             }
             AgentEvent::Failed { code, message, .. } => {
+                record_unresolved_work_log(&mut work_log, &tool_calls);
                 retain_model_owner |=
                     handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
                         .await;
@@ -9334,12 +9461,28 @@ async fn run_chat(
                     &session_id,
                     typed_native_cancelled,
                 ) else {
+                    finish_work_log(
+                        &app,
+                        &mut work_log,
+                        work_log::WorkLogOutcome::Interrupted,
+                        None,
+                    );
                     if !retain_model_owner {
                         app.state::<DesktopAppState>()
                             .finish_claimed_chat(chat_generation);
                     }
                     return;
                 };
+                finish_work_log(
+                    &app,
+                    &mut work_log,
+                    if cancelled {
+                        work_log::WorkLogOutcome::Cancelled
+                    } else {
+                        work_log::WorkLogOutcome::Failed
+                    },
+                    None,
+                );
                 if !cancelled {
                     tracing::warn!(stage = "post-start runtime/event failure", error = %message, "desktop chat turn failed after start");
                 }
@@ -9371,6 +9514,7 @@ async fn run_chat(
                 break;
             }
             AgentEvent::Cancelled { .. } => {
+                record_unresolved_work_log(&mut work_log, &tool_calls);
                 retain_model_owner |=
                     handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected)
                         .await;
@@ -9379,12 +9523,24 @@ async fn run_chat(
                     &runtime,
                     &session_id,
                 ) {
+                    finish_work_log(
+                        &app,
+                        &mut work_log,
+                        work_log::WorkLogOutcome::Interrupted,
+                        None,
+                    );
                     if !retain_model_owner {
                         app.state::<DesktopAppState>()
                             .finish_claimed_chat(chat_generation);
                     }
                     return;
                 }
+                finish_work_log(
+                    &app,
+                    &mut work_log,
+                    work_log::WorkLogOutcome::Cancelled,
+                    None,
+                );
                 emit_chat_event(
                     &app,
                     ChatEvent::Cancelled {
@@ -9402,6 +9558,7 @@ async fn run_chat(
             | AgentEvent::ApprovalRequired { .. } => {}
         }
     }
+    record_unresolved_work_log(&mut work_log, &tool_calls);
     retain_model_owner |=
         handle_uncertain_repository_effects(&app, &mut tool_calls, repository_selected).await;
     if !terminal
@@ -9419,6 +9576,7 @@ async fn run_chat(
             "connection_generation": connection_generation,
             "session_generation": chat_generation,
         }));
+        finish_work_log(&app, &mut work_log, work_log::WorkLogOutcome::Failed, None);
         emit_chat_event(
             &app,
             ChatEvent::Failed {
@@ -9427,9 +9585,90 @@ async fn run_chat(
             },
         );
     }
+    // No-op when a terminal path above already recorded this turn.
+    finish_work_log(
+        &app,
+        &mut work_log,
+        work_log::WorkLogOutcome::Interrupted,
+        None,
+    );
     if !retain_model_owner {
         app.state::<DesktopAppState>()
             .finish_claimed_chat(chat_generation);
+    }
+}
+
+/// Records host-observed Tool results; never Tool inputs or model text.
+#[cfg(target_os = "windows")]
+fn record_finished_work_log(
+    work_log: &mut Option<work_log::WorkLogTurn>,
+    activity: &ActivityEvent,
+) {
+    let (
+        Some(turn),
+        ActivityEvent::Finished {
+            tool,
+            result,
+            commit,
+        },
+    ) = (work_log.as_mut(), activity)
+    else {
+        return;
+    };
+    let commit_oid = commit
+        .as_ref()
+        .filter(|commit| commit.status == CommitActivityStatus::CommittedVerified)
+        .and_then(|commit| commit.commit_oid.as_deref());
+    turn.record(
+        tool,
+        match result {
+            ActivityResult::Success => work_log::WorkLogToolResult::Success,
+            ActivityResult::Failed => work_log::WorkLogToolResult::Failed,
+        },
+        commit_oid,
+    );
+}
+
+/// Records Tool calls that never produced a host-observed result.
+#[cfg(target_os = "windows")]
+fn record_unresolved_work_log(
+    work_log: &mut Option<work_log::WorkLogTurn>,
+    tool_calls: &HashMap<rah_protocol::ToolCallId, ToolCallActivity>,
+) {
+    let Some(turn) = work_log.as_mut() else {
+        return;
+    };
+    let mut unresolved = tool_calls.values().collect::<Vec<_>>();
+    unresolved.sort_by(|left, right| left.activity_id.cmp(&right.activity_id));
+    for activity in unresolved {
+        turn.record(
+            &activity.tool,
+            if activity.started {
+                work_log::WorkLogToolResult::OutcomeUnknown
+            } else {
+                work_log::WorkLogToolResult::NotStarted
+            },
+            None,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn finish_work_log(
+    app: &AppHandle,
+    work_log: &mut Option<work_log::WorkLogTurn>,
+    outcome: work_log::WorkLogOutcome,
+    reply: Option<&str>,
+) {
+    let Some(turn) = work_log.take() else {
+        return;
+    };
+    match app
+        .state::<DesktopAppState>()
+        .persist_work_log(&turn.finish(outcome, reply))
+    {
+        Ok(entries) => emit_conversation_memory(app, entries),
+        Err(warning) => emit_persistence_warning(app, warning),
     }
 }
 
@@ -9492,14 +9731,18 @@ async fn send_chat(
         state.finish_chat(chat_generation);
         return Err(FrontendError::CodexReconnectRequired);
     }
+    let (memory, memory_entries) = state.work_log_memory();
+    emit_conversation_memory(&app, memory_entries);
     let (request, conversation_epoch, context_change) = {
         let mut conversation = state
             .conversation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let context_change = conversation.reconcile(identity);
+        emit_conversation_context_usage(&app, conversation.context_usage());
         let messages = match conversation.request_messages(&prompt) {
-            Ok(messages) => messages,
+            // Host-observed memory leads the replay; it is data, not authority.
+            Ok(messages) => memory.into_iter().chain(messages).collect(),
             Err(error) => {
                 state.finish_chat(chat_generation);
                 return Err(error);
@@ -9618,11 +9861,15 @@ fn new_conversation(
     {
         return Err(FrontendError::ChatAlreadyRunning);
     }
-    state
-        .conversation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .start_new();
+    let usage = {
+        let mut conversation = state
+            .conversation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conversation.start_new();
+        conversation.context_usage()
+    };
+    emit_conversation_context_usage(&app, usage);
     if let Err(warning) = state.persist_separator(SeparatorReason::NewConversation) {
         emit_persistence_warning(&app, warning);
     }
@@ -9631,7 +9878,10 @@ fn new_conversation(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn clear_conversation_history(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+fn clear_conversation_history(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
     clear_conversation_allowed(
         *state
             .chat
@@ -9645,11 +9895,17 @@ fn clear_conversation_history(state: State<'_, DesktopAppState>) -> Result<(), F
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear()
         .map_err(|_| FrontendError::ConversationHistoryClearFailed)?;
-    state
-        .conversation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .start_new();
+    let usage = {
+        let mut conversation = state
+            .conversation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conversation.start_new();
+        conversation.context_usage()
+    };
+    emit_conversation_context_usage(&app, usage);
+    // Clearing the namespace cascades to its work log.
+    emit_conversation_memory(&app, 0);
     Ok(())
 }
 
@@ -9673,7 +9929,10 @@ fn resume_persistence_error(error: ResumeError) -> FrontendError {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(), FrontendError> {
+fn resume_previous_conversation(
+    app: AppHandle,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), FrontendError> {
     if *state
         .chat
         .lock()
@@ -9753,14 +10012,11 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
         let pairs = persistence
             .resume_messages()
             .map_err(resume_persistence_error)?;
-        let message_count = pairs.len().saturating_mul(2);
-        let byte_count = pairs
-            .iter()
-            .map(|pair| pair.user.len() + pair.assistant.len())
-            .sum::<usize>();
-        if message_count > MAX_CONVERSATION_REPLAY_MESSAGES
-            || byte_count > MAX_CONVERSATION_REPLAY_BYTES
-        {
+        // Older pairs slide out of the replay window; only a newest pair that
+        // cannot fit by itself leaves nothing to resume.
+        if pairs.last().is_some_and(|pair| {
+            pair.user.len() + pair.assistant.len() > MAX_CONVERSATION_REPLAY_BYTES
+        }) {
             return Err(FrontendError::ConversationResumeTooLarge);
         }
         persistence
@@ -9768,7 +10024,9 @@ fn resume_previous_conversation(state: State<'_, DesktopAppState>) -> Result<(),
             .map_err(resume_persistence_error)?;
         pairs
     };
-    conversation.resume(identity, pairs)
+    conversation.resume(identity, pairs)?;
+    emit_conversation_context_usage(&app, conversation.context_usage());
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

@@ -1271,6 +1271,14 @@ supplies fixed Git identity, `safe.directory`, and verified runtime CWD at
 Repository-scoped transcript storage uses an opaque SHA-256 namespace rather
 than a raw path. Its private SQLite backend is storage only: it is not exposed
 as SQL to models or tools and does not grant repository mutation authority.
+Replay is a sliding window: older complete turns leave the replay window
+instead of blocking the next send, while remaining in the persisted
+transcript. Per
+[ADR 0035](adr/0035-host-observed-conversation-work-log-memory.md), the same
+database (schema `2`) keeps a bounded per-namespace work log of host-observed
+turn outcomes and closed Tool results, replayed as one host-authored `System`
+memory message. The work log is descriptive data, never authority, and
+contains no Tool input, output, or paths.
 
 The v0.14 Desktop workflow retains the v0.13 bounded capabilities and adds
 the separately authorized deletion capability without collapsing authority

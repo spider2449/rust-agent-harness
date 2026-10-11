@@ -16884,18 +16884,20 @@ fn resume_replay_limits_are_inclusive_and_context_changes_clear_it() {
     );
     assert!(exact.history.is_empty());
     let mut oversized = DesktopConversationState::default();
-    assert_eq!(
-        oversized.resume(
+    oversized
+        .resume(
             identity,
             (0..5)
-                .map(|_| ResumePair {
-                    user: "u".into(),
-                    assistant: "a".into()
+                .map(|index| ResumePair {
+                    user: format!("u{index}"),
+                    assistant: format!("a{index}"),
                 })
                 .collect(),
-        ),
-        Err(FrontendError::ConversationResumeTooLarge)
-    );
+        )
+        .unwrap();
+    assert_eq!(oversized.history.len(), MAX_CONVERSATION_REPLAY_MESSAGES);
+    assert_eq!(oversized.history[0], message(MessageRole::User, "u1"));
+    assert_eq!(oversized.context_usage().dropped_messages, 2);
 
     let exact_bytes = "x".repeat(MAX_CONVERSATION_REPLAY_BYTES / 8);
     let mut byte_boundary = DesktopConversationState::default();
@@ -17091,6 +17093,83 @@ fn conversation_replay_limits_are_closed_and_inclusive() {
         byte_limited.request_messages("next"),
         Err(FrontendError::ConversationContextLimit)
     );
+}
+
+#[test]
+fn conversation_context_usage_reports_replay_window() {
+    let mut conversation = DesktopConversationState::default();
+    let empty = conversation.context_usage();
+    assert_eq!(empty.messages, 0);
+    assert_eq!(empty.bytes, 0);
+    assert_eq!(empty.max_messages, MAX_CONVERSATION_REPLAY_MESSAGES);
+    assert_eq!(empty.max_bytes, MAX_CONVERSATION_REPLAY_BYTES);
+    assert_eq!(empty.dropped_messages, 0);
+
+    for _ in 0..MAX_CONVERSATION_REPLAY_MESSAGES / 2 {
+        conversation
+            .commit(0, "abc".into(), message(MessageRole::Assistant, "de"))
+            .unwrap();
+    }
+    let full = conversation.context_usage();
+    assert_eq!(full.messages, MAX_CONVERSATION_REPLAY_MESSAGES);
+    assert_eq!(full.bytes, 5 * MAX_CONVERSATION_REPLAY_MESSAGES / 2);
+    assert_eq!(full.dropped_messages, 0);
+
+    let serialized = serde_json::to_value(full).expect("usage serializes");
+    assert_eq!(serialized["maxMessages"], MAX_CONVERSATION_REPLAY_MESSAGES);
+    assert_eq!(serialized["droppedMessages"], 0);
+}
+
+#[test]
+fn committed_turns_slide_the_replay_window_instead_of_blocking() {
+    let mut conversation = DesktopConversationState::default();
+    for index in 0..MAX_CONVERSATION_REPLAY_MESSAGES {
+        conversation
+            .commit(
+                0,
+                format!("u{index}"),
+                message(MessageRole::Assistant, &format!("a{index}")),
+            )
+            .unwrap();
+        assert!(conversation.request_messages("next").is_ok());
+    }
+    assert_eq!(conversation.history.len(), MAX_CONVERSATION_REPLAY_MESSAGES);
+    let first_kept = MAX_CONVERSATION_REPLAY_MESSAGES / 2;
+    assert_eq!(
+        conversation.history[0],
+        message(MessageRole::User, &format!("u{first_kept}"))
+    );
+    assert_eq!(
+        conversation.context_usage().dropped_messages,
+        MAX_CONVERSATION_REPLAY_MESSAGES
+    );
+
+    // Byte budget: one large pair evicts older pairs, keeping whole pairs only.
+    let large = "x".repeat(MAX_CONVERSATION_REPLAY_BYTES - 1);
+    conversation
+        .commit(0, large.clone(), message(MessageRole::Assistant, "y"))
+        .unwrap();
+    assert_eq!(
+        conversation.history,
+        vec![
+            message(MessageRole::User, &large),
+            message(MessageRole::Assistant, "y"),
+        ]
+    );
+
+    // A pair larger than the whole budget cannot be replayed at all.
+    conversation
+        .commit(
+            0,
+            "x".repeat(MAX_CONVERSATION_REPLAY_BYTES),
+            message(MessageRole::Assistant, "y"),
+        )
+        .unwrap();
+    assert!(conversation.history.is_empty());
+    assert!(conversation.request_messages("next").is_ok());
+
+    conversation.start_new();
+    assert_eq!(conversation.context_usage().dropped_messages, 0);
 }
 
 #[test]
@@ -19601,6 +19680,94 @@ fn task524a_unresolved_activity_is_correlated_and_drained_once() {
         );
     }
     assert!(super::drain_unresolved_activity(&mut calls).is_empty());
+}
+
+#[test]
+fn work_log_records_only_host_observed_tool_results() {
+    use crate::work_log::{WorkLogOutcome, WorkLogToolResult, WorkLogTurn};
+    let session = SessionId::new();
+    let mut calls = HashMap::new();
+    let mut work_log = Some(WorkLogTurn::new("continue the refactor"));
+    let oid = "b".repeat(40);
+    super::record_finished_work_log(
+        &mut work_log,
+        &ActivityEvent::Finished {
+            tool: "repo.commit".to_owned(),
+            result: ActivityResult::Success,
+            commit: Some(super::CommitActivityPresentation {
+                status: super::CommitActivityStatus::CommittedVerified,
+                commit_oid: Some(oid.clone()),
+            }),
+        },
+    );
+    super::record_finished_work_log(
+        &mut work_log,
+        &ActivityEvent::Finished {
+            tool: "repo.patch".to_owned(),
+            result: ActivityResult::Failed,
+            commit: None,
+        },
+    );
+    // Requested/started events alone are not results.
+    super::record_finished_work_log(
+        &mut work_log,
+        &ActivityEvent::Started {
+            tool: "repo.read".to_owned(),
+        },
+    );
+    for started in [true, false] {
+        let id = ToolCallId::new();
+        activity_event_with_composition(
+            &AgentEvent::ToolRequested {
+                session_id: session.clone(),
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: ToolName::new("repo.edit-files"),
+                    input: ToolInput(serde_json::json!({"path": "PRIVATE"})),
+                },
+            },
+            &mut calls,
+            &empty_composition_metadata(),
+            false,
+        )
+        .unwrap();
+        if started {
+            activity_event_with_composition(
+                &AgentEvent::ToolStarted {
+                    session_id: session.clone(),
+                    tool_call_id: id,
+                },
+                &mut calls,
+                &empty_composition_metadata(),
+                false,
+            )
+            .unwrap();
+        }
+    }
+    super::record_unresolved_work_log(&mut work_log, &calls);
+    let entry = work_log
+        .take()
+        .unwrap()
+        .finish(WorkLogOutcome::Interrupted, None);
+    assert!(entry.is_valid());
+    let tools = &entry.tools.tools;
+    assert_eq!(tools.len(), 4);
+    assert_eq!(tools[0].tool, "repo.commit");
+    assert_eq!(tools[0].commit_oid.as_deref(), Some(oid.as_str()));
+    assert_eq!(tools[1].result, WorkLogToolResult::Failed);
+    let mut unresolved = tools[2..]
+        .iter()
+        .map(|tool| tool.result)
+        .collect::<Vec<_>>();
+    unresolved.sort_by_key(|result| *result == WorkLogToolResult::NotStarted);
+    assert_eq!(
+        unresolved,
+        [
+            WorkLogToolResult::OutcomeUnknown,
+            WorkLogToolResult::NotStarted
+        ]
+    );
+    assert!(!format!("{entry:?}").contains("PRIVATE"));
 }
 
 async fn task_324_host_registry_read(
@@ -27487,6 +27654,16 @@ async fn task514b_production_multi_turn_reconnect_and_missing_credential_recover
                             socket.write_all(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                             continue;
                         }
+                        // Every turn after the first leads with the host-observed
+                        // work-log memory as one System item.
+                        let memory = usize::from(responses > 0);
+                        if memory == 1 {
+                            assert_eq!(input[0]["role"], "system");
+                            let text = input[0]["content"].as_str().unwrap();
+                            assert!(text.starts_with("RAH host work log"), "{text}");
+                            assert!(text.contains(r#"[completed] user: "first""#), "{text}");
+                        }
+                        let input = &input[memory..];
                         assert_eq!(
                             input.len(),
                             if connection == 1 {

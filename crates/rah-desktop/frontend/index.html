@@ -216,13 +216,15 @@
           <p id="resume-success" hidden></p>
           <p id="chat-error" class="connection-error" hidden></p>
           <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+          <p id="context-usage" class="context-usage" aria-live="polite"></p>
+          <p id="conversation-memory" class="context-usage" aria-live="polite"></p>
           <button id="new-conversation" type="button" disabled>New Conversation</button>
           <button id="resume-previous-conversation" type="button" disabled>Resume Previous Conversation</button>
           <p id="resume-conversation-hint">Previous messages will be sent to the currently connected model context. Repository, model, and tool state are not restored from history.</p>
           <button id="clear-conversation-history" class="destructive-action" type="button" disabled>Clear Conversation History</button>
           <dialog id="clear-history-confirmation">
             <p>Clear all conversation history stored by RAH Desktop?</p>
-            <p>This removes locally stored conversation history and cannot be undone.</p>
+            <p>This removes locally stored conversation history and work-log memory for this workspace and cannot be undone.</p>
             <form method="dialog">
               <button value="cancel">Cancel</button>
               <button id="confirm-clear-history" class="destructive-action" value="confirm">Clear History</button>

@@ -348,6 +348,17 @@ dd[data-status^="not "] {
   font-weight: 600;
 }
 
+.context-usage {
+  margin: 0.2rem 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.context-usage[data-level="near"] {
+  color: #8a5a00;
+  opacity: 1;
+}
+
 button {
   margin-top: 1.5rem;
   padding: 0.65rem 1rem;

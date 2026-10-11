@@ -2283,8 +2283,44 @@ function showPersistenceWarning(warning) {
   error.hidden = false;
 }
 
+function renderContextUsage(usage) {
+  const element = document.querySelector("#context-usage");
+  if (!element) return;
+  const valid = usage && ["messages", "maxMessages", "bytes", "maxBytes", "droppedMessages"].every(key => Number.isSafeInteger(usage[key]) && usage[key] >= 0);
+  if (!valid) {
+    element.textContent = "";
+    element.dataset.level = "";
+    return;
+  }
+  const kib = bytes => (bytes / 1024).toFixed(1);
+  let text = `Context: ${usage.messages} / ${usage.maxMessages} messages · ${kib(usage.bytes)} / ${kib(usage.maxBytes)} KiB`;
+  let level = "ok";
+  if (usage.droppedMessages > 0) {
+    level = "near";
+    text += ` — ${usage.droppedMessages} older messages are no longer sent to the model (still kept in history).`;
+  } else if (usage.messages + 2 > usage.maxMessages || usage.bytes >= usage.maxBytes * 0.8) {
+    level = "near";
+    text += " — window full; the oldest turn will be dropped from model context next.";
+  }
+  element.textContent = text;
+  element.dataset.level = level;
+}
+
+function renderConversationMemory(memory) {
+  const element = document.querySelector("#conversation-memory");
+  if (!element) return;
+  if (!memory || !Number.isSafeInteger(memory.entries) || memory.entries < 0) {
+    element.textContent = "";
+    return;
+  }
+  element.textContent = memory.entries === 0
+    ? "Memory: no recorded turns for this workspace yet."
+    : `Memory: ${memory.entries} recorded turn${memory.entries === 1 ? "" : "s"} for this workspace are summarized for the model.`;
+}
+
 function renderTranscript(transcript) {
   resumeAvailable = transcript.resumeAvailable;
+  renderConversationMemory({ entries: transcript.memoryEntries });
   for (const record of transcript.records) {
     if (record.kind === "completed_message") {
       appendMessage(record.role === "user" ? "You" : "RAH", record.text);
@@ -2434,6 +2470,8 @@ async function initializeDesktop() {
     void loadStatus(invoke).catch(() => showBackendError());
   });
   await listen("conversation_persistence_warning", (event) => showPersistenceWarning(event.payload));
+  await listen("conversation_context_usage", (event) => renderContextUsage(event.payload));
+  await listen("conversation_memory", (event) => renderConversationMemory(event.payload));
   await listen("desktop_preferences_warning", (event) => {
     const error = document.querySelector("#model-error");
     error.textContent = event.payload === "preferences_restore_failed" ? "Model preferences could not be restored." : "Model preferences could not be saved.";

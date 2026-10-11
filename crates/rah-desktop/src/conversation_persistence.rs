@@ -1,4 +1,5 @@
 //! Host-owned, private SQLite transcript storage. SQL is never exposed outside this module.
+use crate::work_log::{MAX_WORK_LOG_ENTRIES, WorkLogEntry, WorkLogOutcome};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,8 +18,31 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_RECORDS: usize = 79;
 const MAX_PAIRS: usize = 64;
 const MAX_EPOCHS: usize = 16;
-const SCHEMA_VERSION: i64 = 1;
-const SCHEMA_SQL: &str = "CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=1),migration_complete INTEGER NOT NULL CHECK(migration_complete IN(0,1)),source_format TEXT NOT NULL CHECK(source_format IN('empty','v3')),imported_namespace_count INTEGER NOT NULL CHECK(imported_namespace_count>=0),imported_epoch_count INTEGER NOT NULL CHECK(imported_epoch_count>=0),imported_pair_count INTEGER NOT NULL CHECK(imported_pair_count>=0));CREATE TABLE namespaces(namespace_key TEXT PRIMARY KEY NOT NULL CHECK(namespace_key='neutral-v1' OR(length(namespace_key)=76 AND substr(namespace_key,1,12)='repo-sha256:' AND substr(namespace_key,13) NOT GLOB '*[^0-9a-f]*')));CREATE TABLE epochs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL CHECK(epoch_id>0),parent_epoch_id INTEGER,boundary TEXT,history_trimmed_before INTEGER NOT NULL CHECK(history_trimmed_before IN(0,1)),PRIMARY KEY(namespace_key,epoch_id),FOREIGN KEY(namespace_key) REFERENCES namespaces(namespace_key) ON DELETE CASCADE,FOREIGN KEY(namespace_key,parent_epoch_id) REFERENCES epochs(namespace_key,epoch_id),CHECK(parent_epoch_id IS NULL OR parent_epoch_id<epoch_id),CHECK(boundary IS NULL OR boundary IN('new_conversation','repository_changed','model_configuration_changed','repository_and_model_changed','application_restarted','history_trimmed')));CREATE TABLE pairs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL,pair_index INTEGER NOT NULL CHECK(pair_index>=0),user_text TEXT NOT NULL CHECK(length(CAST(user_text AS BLOB))<=16384),assistant_text TEXT NOT NULL CHECK(length(CAST(assistant_text AS BLOB))<=16384),PRIMARY KEY(namespace_key,epoch_id,pair_index),FOREIGN KEY(namespace_key,epoch_id) REFERENCES epochs(namespace_key,epoch_id) ON DELETE CASCADE);";
+const SCHEMA_VERSION: i64 = 2;
+const V1_SCHEMA_VERSION: i64 = 1;
+macro_rules! transcript_tables_sql {
+    () => {
+        "CREATE TABLE namespaces(namespace_key TEXT PRIMARY KEY NOT NULL CHECK(namespace_key='neutral-v1' OR(length(namespace_key)=76 AND substr(namespace_key,1,12)='repo-sha256:' AND substr(namespace_key,13) NOT GLOB '*[^0-9a-f]*')));CREATE TABLE epochs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL CHECK(epoch_id>0),parent_epoch_id INTEGER,boundary TEXT,history_trimmed_before INTEGER NOT NULL CHECK(history_trimmed_before IN(0,1)),PRIMARY KEY(namespace_key,epoch_id),FOREIGN KEY(namespace_key) REFERENCES namespaces(namespace_key) ON DELETE CASCADE,FOREIGN KEY(namespace_key,parent_epoch_id) REFERENCES epochs(namespace_key,epoch_id),CHECK(parent_epoch_id IS NULL OR parent_epoch_id<epoch_id),CHECK(boundary IS NULL OR boundary IN('new_conversation','repository_changed','model_configuration_changed','repository_and_model_changed','application_restarted','history_trimmed')));CREATE TABLE pairs(namespace_key TEXT NOT NULL,epoch_id INTEGER NOT NULL,pair_index INTEGER NOT NULL CHECK(pair_index>=0),user_text TEXT NOT NULL CHECK(length(CAST(user_text AS BLOB))<=16384),assistant_text TEXT NOT NULL CHECK(length(CAST(assistant_text AS BLOB))<=16384),PRIMARY KEY(namespace_key,epoch_id,pair_index),FOREIGN KEY(namespace_key,epoch_id) REFERENCES epochs(namespace_key,epoch_id) ON DELETE CASCADE);"
+    };
+}
+const V1_SCHEMA_SQL: &str = concat!(
+    "CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=1),migration_complete INTEGER NOT NULL CHECK(migration_complete IN(0,1)),source_format TEXT NOT NULL CHECK(source_format IN('empty','v3')),imported_namespace_count INTEGER NOT NULL CHECK(imported_namespace_count>=0),imported_epoch_count INTEGER NOT NULL CHECK(imported_epoch_count>=0),imported_pair_count INTEGER NOT NULL CHECK(imported_pair_count>=0));",
+    transcript_tables_sql!()
+);
+const SCHEMA_SQL: &str = concat!(
+    "CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=2),migration_complete INTEGER NOT NULL CHECK(migration_complete IN(0,1)),source_format TEXT NOT NULL CHECK(source_format IN('empty','v3','sqlite-v1')),imported_namespace_count INTEGER NOT NULL CHECK(imported_namespace_count>=0),imported_epoch_count INTEGER NOT NULL CHECK(imported_epoch_count>=0),imported_pair_count INTEGER NOT NULL CHECK(imported_pair_count>=0));",
+    transcript_tables_sql!(),
+    "CREATE TABLE work_log(namespace_key TEXT NOT NULL,entry_id INTEGER NOT NULL CHECK(entry_id>0),outcome TEXT NOT NULL CHECK(outcome IN('completed','failed','cancelled','interrupted')),prompt_excerpt TEXT NOT NULL CHECK(length(CAST(prompt_excerpt AS BLOB))<=512),reply_excerpt TEXT NOT NULL CHECK(length(CAST(reply_excerpt AS BLOB))<=512),tools_json TEXT NOT NULL CHECK(length(CAST(tools_json AS BLOB))<=8192),PRIMARY KEY(namespace_key,entry_id),FOREIGN KEY(namespace_key) REFERENCES namespaces(namespace_key) ON DELETE CASCADE);"
+);
+const V1_TABLES: [&str; 4] = ["schema_metadata", "namespaces", "epochs", "pairs"];
+const TABLES: [&str; 5] = [
+    "schema_metadata",
+    "namespaces",
+    "epochs",
+    "pairs",
+    "work_log",
+];
+const V1_ARCHIVE: &str = "conversation-transcript.sqlite3.migrated-v1";
 const FAULT_CREATE: u8 = 1;
 const FAULT_MIGRATION_BEFORE_COMMIT: u8 = 2;
 const FAULT_MIGRATION_COMMIT: u8 = 3;
@@ -51,6 +75,7 @@ pub(crate) enum Warning {
 pub(crate) struct Presentation {
     pub records: Vec<PresentationRecord>,
     pub resume_available: bool,
+    pub memory_entries: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<Warning>,
 }
@@ -170,6 +195,7 @@ impl Persistence {
         Presentation {
             records,
             resume_available,
+            memory_entries: self.work_log().len(),
             warning: self.warning,
         }
     }
@@ -207,6 +233,58 @@ impl Persistence {
     pub(crate) fn append_separator(&mut self, r: SeparatorReason) -> Result<(), Warning> {
         let n = self.selected_namespace.clone().ok_or(Warning::SaveFailed)?;
         self.separator(&n, r).map_err(|_| Warning::SaveFailed)
+    }
+    /// Appends one host-observed turn record and evicts the oldest beyond the bound.
+    /// Returns the retained entry count.
+    pub(crate) fn append_work_log(&mut self, entry: &WorkLogEntry) -> Result<usize, Warning> {
+        let n = self.selected_namespace.clone().ok_or(Warning::SaveFailed)?;
+        if !entry.is_valid() {
+            return Err(Warning::SaveFailed);
+        }
+        let tools = serde_json::to_string(&entry.tools).map_err(|_| Warning::SaveFailed)?;
+        let c = self.connection.as_mut().ok_or(Warning::SaveFailed)?;
+        let mut save = || -> rusqlite::Result<usize> {
+            let t = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            t.execute("INSERT OR IGNORE INTO namespaces VALUES(?1)", params![n])?;
+            let next: i64 = t.query_row(
+                "SELECT COALESCE(MAX(entry_id),0)+1 FROM work_log WHERE namespace_key=?1",
+                params![n],
+                |r| r.get(0),
+            )?;
+            t.execute(
+                "INSERT INTO work_log VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    n,
+                    next,
+                    entry.outcome.as_str(),
+                    entry.prompt_excerpt,
+                    entry.reply_excerpt,
+                    tools
+                ],
+            )?;
+            t.execute(
+                "DELETE FROM work_log WHERE namespace_key=?1 AND entry_id<=?2",
+                params![n, next - MAX_WORK_LOG_ENTRIES as i64],
+            )?;
+            let count: i64 = t.query_row(
+                "SELECT COUNT(*) FROM work_log WHERE namespace_key=?1",
+                params![n],
+                |r| r.get(0),
+            )?;
+            if fault(FAULT_MUTATION).is_err() {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            t.commit()?;
+            Ok(count as usize)
+        };
+        save().map_err(|_| Warning::SaveFailed)
+    }
+    /// Retained host-observed turn records for the selected namespace, oldest first.
+    pub(crate) fn work_log(&self) -> Vec<(u64, WorkLogEntry)> {
+        match (self.connection.as_ref(), self.selected_namespace.as_deref()) {
+            (Some(c), Some(n)) => load_work_log(c, n).unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
     fn separator(&mut self, n: &str, r: SeparatorReason) -> Result<(), ResumeError> {
         self.mutate(n, |v| {
@@ -255,11 +333,13 @@ impl Persistence {
 fn open_or_migrate(d: &Path) -> Result<Connection, ()> {
     let final_path = d.join(DB);
     if final_path.exists() {
-        return open(&final_path).map_err(|()| {
-            // A final filename is authoritative even when it cannot be opened.
-            // Never resurrect stale V3 data after this point.
-            quarantine(&final_path);
-        });
+        return open(&final_path)
+            .or_else(|()| migrate_v1(d, &final_path))
+            .map_err(|()| {
+                // A final filename is authoritative even when it cannot be opened.
+                // Never resurrect stale V3 data after this point.
+                quarantine(&final_path);
+            });
     }
     // A prior final database was corrupt. Its V3 predecessor must remain
     // inert: allowing an import here would resurrect stale history.
@@ -280,7 +360,11 @@ fn open_or_migrate(d: &Path) -> Result<Connection, ()> {
     } else {
         None
     };
-    create(&staging, v3.as_ref())?;
+    create(
+        &staging,
+        v3.as_ref(),
+        if v3.is_some() { "v3" } else { "empty" },
+    )?;
     open(&staging)?;
     fs::rename(&staging, &final_path).map_err(|_| ())?;
     if v3.is_some() && fault(FAULT_ARCHIVE).is_ok() {
@@ -292,14 +376,52 @@ fn open_or_migrate(d: &Path) -> Result<Connection, ()> {
     open(&final_path)
 }
 fn open(p: &Path) -> Result<Connection, ()> {
+    open_version(p, SCHEMA_VERSION)
+}
+fn open_version(p: &Path, version: i64) -> Result<Connection, ()> {
     let c = Connection::open_with_flags(
         p,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| ())?;
     pragmas(&c)?;
-    validate_db(&c)?;
+    validate_db(&c, version)?;
     Ok(c)
+}
+/// One-way upgrade of a valid schema v1 database. The v1 transcript is copied
+/// into a freshly created v2 staging database, a best-effort copy of v1 is
+/// archived, and the staging file atomically replaces the final file. Any
+/// invalid v1 database fails closed through the caller's quarantine.
+fn migrate_v1(d: &Path, final_path: &Path) -> Result<Connection, ()> {
+    let input = {
+        let c = open_version(final_path, V1_SCHEMA_VERSION)?;
+        let mut s = c
+            .prepare("SELECT namespace_key FROM namespaces ORDER BY namespace_key")
+            .map_err(|_| ())?;
+        let names = s
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|_| ())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        let mut namespaces = BTreeMap::new();
+        for n in names {
+            let v = load(&c, &n)?;
+            namespaces.insert(n, v);
+        }
+        V3 {
+            version: 3,
+            namespaces,
+        }
+    };
+    let staging = d.join(STAGING);
+    create(&staging, Some(&input), "sqlite-v1")?;
+    open(&staging)?;
+    if fault(FAULT_ARCHIVE).is_ok() {
+        let _ = fs::copy(final_path, d.join(V1_ARCHIVE));
+    }
+    // Replacing rename: the final path is either the valid v1 or the valid v2 file.
+    fs::rename(&staging, final_path).map_err(|_| ())?;
+    open(final_path)
 }
 fn pragmas(c: &Connection) -> Result<(), ()> {
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=250;").map_err(|_|())?;
@@ -319,7 +441,7 @@ fn pragmas(c: &Connection) -> Result<(), ()> {
         Err(())
     }
 }
-fn create(p: &Path, input: Option<&V3>) -> Result<(), ()> {
+fn create(p: &Path, input: Option<&V3>, source_format: &str) -> Result<(), ()> {
     let _ = fs::remove_file(p);
     fault(FAULT_CREATE)?;
     let mut c = Connection::open(p).map_err(|_| ())?;
@@ -339,22 +461,16 @@ fn create(p: &Path, input: Option<&V3>) -> Result<(), ()> {
     }
     t.execute(
         "INSERT INTO schema_metadata VALUES(1,?1,1,?2,?3,?4,?5)",
-        params![
-            SCHEMA_VERSION,
-            if input.is_some() { "v3" } else { "empty" },
-            ns,
-            es,
-            ps
-        ],
+        params![SCHEMA_VERSION, source_format, ns, es, ps],
     )
     .map_err(|_| ())?;
-    t.execute_batch("PRAGMA user_version=1").map_err(|_| ())?;
+    t.execute_batch("PRAGMA user_version=2").map_err(|_| ())?;
     fault(FAULT_MIGRATION_BEFORE_COMMIT)?;
     fault(FAULT_MIGRATION_COMMIT)?;
     t.commit().map_err(|_| ())?;
     Ok(())
 }
-fn validate_db(c: &Connection) -> Result<(), ()> {
+fn validate_db(c: &Connection, version: i64) -> Result<(), ()> {
     let v: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(|_| ())?;
@@ -368,7 +484,7 @@ fn validate_db(c: &Connection) -> Result<(), ()> {
     let ok: String = c
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|_| ())?;
-    if v != SCHEMA_VERSION || m != SCHEMA_VERSION || done != 1 || ok != "ok" || !schema_matches(c) {
+    if v != version || m != version || done != 1 || ok != "ok" || !schema_matches(c, version) {
         return Err(());
     }
     let mut s = c
@@ -386,11 +502,18 @@ fn validate_db(c: &Connection) -> Result<(), ()> {
         if !valid_namespace(&n) || validate(&load(c, &n)?).is_err() {
             return Err(());
         }
+        if version == SCHEMA_VERSION {
+            load_work_log(c, &n)?;
+        }
     }
     Ok(())
 }
-fn schema_matches(c: &Connection) -> bool {
-    let expected = ["schema_metadata", "namespaces", "epochs", "pairs"];
+fn schema_matches(c: &Connection, version: i64) -> bool {
+    let (expected, schema_sql): (&[&str], &str) = if version == SCHEMA_VERSION {
+        (&TABLES, SCHEMA_SQL)
+    } else {
+        (&V1_TABLES, V1_SCHEMA_SQL)
+    };
     let actual = c.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>());
     let Ok(actual) = actual else { return false };
@@ -401,7 +524,7 @@ fn schema_matches(c: &Connection) -> bool {
     {
         return false;
     }
-    let schema = SCHEMA_SQL
+    let schema = schema_sql
         .split(";")
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
@@ -486,6 +609,44 @@ fn load(c: &Connection, n: &str) -> Result<V2, ()> {
         validate(&v)?
     }
     Ok(v)
+}
+fn load_work_log(c: &Connection, n: &str) -> Result<Vec<(u64, WorkLogEntry)>, ()> {
+    if !valid_namespace(n) {
+        return Err(());
+    }
+    let mut s = c
+        .prepare("SELECT entry_id,outcome,prompt_excerpt,reply_excerpt,tools_json FROM work_log WHERE namespace_key=?1 ORDER BY entry_id")
+        .map_err(|_| ())?;
+    let rows = s
+        .query_map(params![n], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|_| ())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    if rows.len() > MAX_WORK_LOG_ENTRIES {
+        return Err(());
+    }
+    rows.into_iter()
+        .map(|(id, outcome, prompt_excerpt, reply_excerpt, tools)| {
+            let entry = WorkLogEntry {
+                outcome: WorkLogOutcome::parse(&outcome).ok_or(())?,
+                prompt_excerpt,
+                reply_excerpt,
+                tools: serde_json::from_str(&tools).map_err(|_| ())?,
+            };
+            if id <= 0 || !entry.is_valid() {
+                return Err(());
+            }
+            Ok((id as u64, entry))
+        })
+        .collect()
 }
 fn replace(c: &Connection, n: &str, v: &V2) -> rusqlite::Result<()> {
     c.execute("INSERT OR IGNORE INTO namespaces VALUES(?1)", params![n])?;
@@ -801,7 +962,7 @@ mod tests {
         let d = directory("empty");
         let p = Persistence::start(d.clone());
         let c = p.connection.as_ref().unwrap();
-        assert!(schema_matches(c));
+        assert!(schema_matches(c, SCHEMA_VERSION));
         assert_eq!(
             c.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -828,6 +989,120 @@ mod tests {
         let _ = fs::remove_dir_all(d);
     }
 
+    fn write_v1(d: &Path, names: &[(&str, &str)]) {
+        let c = Connection::open(d.join(DB)).unwrap();
+        pragmas(&c).unwrap();
+        c.execute_batch(V1_SCHEMA_SQL).unwrap();
+        for (n, v) in &v3(names).namespaces {
+            replace(&c, n, v).unwrap();
+        }
+        c.execute(
+            "INSERT INTO schema_metadata VALUES(1,1,1,'empty',0,0,0)",
+            [],
+        )
+        .unwrap();
+        c.execute_batch("PRAGMA user_version=1").unwrap();
+    }
+    fn work_entry(prompt: &str) -> WorkLogEntry {
+        let mut turn = crate::work_log::WorkLogTurn::new(prompt);
+        turn.record(
+            "repo.patch",
+            crate::work_log::WorkLogToolResult::Success,
+            None,
+        );
+        turn.finish(WorkLogOutcome::Completed, Some("patched"))
+    }
+
+    #[test]
+    fn valid_v1_database_migrates_to_v2_and_keeps_transcript() {
+        let _guard = lock();
+        let d = directory("v1-upgrade");
+        let key = "repo-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_v1(&d, &[("neutral-v1", "neutral"), (key, "repo")]);
+        let mut p = Persistence::start(d.clone());
+        assert_eq!(p.warning, None);
+        select(&mut p, key);
+        assert_eq!(texts(&p), ["repo", "assistant"]);
+        let c = p.connection.as_ref().unwrap();
+        assert!(schema_matches(c, SCHEMA_VERSION));
+        assert_eq!(
+            c.query_row("SELECT source_format FROM schema_metadata", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "sqlite-v1"
+        );
+        p.append_work_log(&work_entry("after upgrade")).unwrap();
+        drop(p);
+        assert!(d.join(V1_ARCHIVE).exists());
+        assert!(!d.join(STAGING).exists());
+        let mut reopened = Persistence::start(d.clone());
+        select(&mut reopened, key);
+        assert_eq!(reopened.warning, None);
+        assert_eq!(reopened.work_log().len(), 1);
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn work_log_is_bounded_namespace_isolated_and_cleared_with_history() {
+        let _guard = lock();
+        let d = directory("work-log");
+        let a = "repo-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "repo-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, a);
+        for index in 0..MAX_WORK_LOG_ENTRIES + 2 {
+            p.append_work_log(&work_entry(&format!("turn {index}")))
+                .unwrap();
+        }
+        let entries = p.work_log();
+        assert_eq!(entries.len(), MAX_WORK_LOG_ENTRIES);
+        assert_eq!(entries[0].1.prompt_excerpt, "turn 2");
+        assert_eq!(entries[0].0, 3);
+        assert_eq!(p.presentation().memory_entries, MAX_WORK_LOG_ENTRIES);
+
+        select(&mut p, b);
+        assert!(p.work_log().is_empty());
+        TEST_FAULT.with(|fault| fault.set(FAULT_MUTATION));
+        assert_eq!(
+            p.append_work_log(&work_entry("lost")),
+            Err(Warning::SaveFailed)
+        );
+        TEST_FAULT.with(|fault| fault.set(0));
+        assert!(p.work_log().is_empty());
+
+        let mut invalid = work_entry("x");
+        invalid.prompt_excerpt = "x".repeat(crate::work_log::MAX_EXCERPT_BYTES + 1);
+        assert_eq!(p.append_work_log(&invalid), Err(Warning::SaveFailed));
+
+        drop(p);
+        let mut restart = Persistence::start(d.clone());
+        select(&mut restart, a);
+        assert_eq!(restart.work_log().len(), MAX_WORK_LOG_ENTRIES);
+        restart.clear().unwrap();
+        assert!(restart.work_log().is_empty());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn malformed_work_log_row_fails_closed() {
+        let _guard = lock();
+        let d = directory("work-log-corrupt");
+        let mut p = Persistence::start(d.clone());
+        select(&mut p, "neutral-v1");
+        p.append_work_log(&work_entry("ok")).unwrap();
+        drop(p);
+        let c = Connection::open(d.join(DB)).unwrap();
+        c.execute(
+            "UPDATE work_log SET tools_json='{\"tools\":[],\"omitted\":0,\"x\":1}'",
+            [],
+        )
+        .unwrap();
+        drop(c);
+        let p = Persistence::start(d.clone());
+        assert_eq!(p.warning, Some(Warning::RestoreFailed));
+        assert!(d.join("conversation-transcript.sqlite3.corrupt").exists());
+        let _ = fs::remove_dir_all(d);
+    }
     #[test]
     fn migration_archive_failure_is_authoritative_once_after_restart() {
         let _guard = lock();
