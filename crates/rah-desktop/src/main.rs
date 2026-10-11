@@ -10079,6 +10079,12 @@ fn main() -> ExitCode {
         .setup(|app| {
             let storage_directory = app.path().app_local_data_dir()?;
             app.manage(DesktopAppState::new(storage_directory));
+            // The title is cosmetic; a failure must not prevent the shell from starting.
+            if let Some(window) = app.get_webview_window("main")
+                && let Err(error) = window.set_title(&desktop_window_title())
+            {
+                eprintln!("failed to set RAH desktop window title: {error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -10155,6 +10161,11 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_window_title() -> String {
+    format!("RAH v{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(not(target_os = "windows"))]

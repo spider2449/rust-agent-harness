@@ -2244,6 +2244,7 @@ function appendMessage(role, text) {
   const label = document.createElement("strong");
   const content = document.createElement("p");
   message.className = "chat-message";
+  message.dataset.role = role === "You" ? "user" : "assistant";
   label.textContent = role;
   content.textContent = text;
   message.append(label, content);

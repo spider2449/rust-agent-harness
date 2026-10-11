@@ -28616,3 +28616,11 @@ async fn task513_live_llama_acceptance(tool: bool) {
         assert_eq!(tool_started, tool_finished);
     }
 }
+
+#[test]
+fn desktop_window_title_includes_the_package_version() {
+    assert_eq!(
+        super::desktop_window_title(),
+        format!("RAH v{}", env!("CARGO_PKG_VERSION"))
+    );
+}

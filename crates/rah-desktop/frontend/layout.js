@@ -19,6 +19,30 @@ const DesktopLayout = (() => {
     if (theme === "system") delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = theme;
   }
+  // Enter sends; Shift+Enter inserts a newline. IME composition (keyCode 229)
+  // must never submit a half-composed message.
+  function submitsOnKey(event) {
+    return event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey
+      && !event.isComposing && event.keyCode !== 229;
+  }
+  // Older WebView2 runtimes (for example on offline LTSC hosts) lack these
+  // engine features; the shell degrades to fallbacks instead of breaking.
+  function legacyFeatures(supports) {
+    const missing = [];
+    if (!supports("color", "color-mix(in srgb, red 50%, blue)")) missing.push("color-mix");
+    if (!supports("selector(:has(*))")) missing.push(":has");
+    if (!supports("height", "1dvh")) missing.push("dvh");
+    if (!supports("field-sizing", "content")) missing.push("field-sizing");
+    return missing;
+  }
+  // Compact navigation labels; the full heading remains the accessible title.
+  const shortLabels = {
+    "workspace-repositories": "Repos", "workspace-remembered": "Saved", "workspace-conversations": "History",
+    "runtime-section-0": "Runtime", "runtime-section-1": "Model",
+    "tools-effective": "Effective", "tools-unavailable": "Unavailable", "tools-context": "Context",
+    "changes-status": "Status", "changes-worktree": "Worktree", "changes-staged": "Staged", "changes-review": "Review",
+    "settings-section-0": "Profile", "settings-section-1": "Identity", "settings-section-2": "Application",
+  };
   function bounds(side, value, available, other) {
     const minimum = side === "left" ? 180 : 260;
     return Math.max(minimum, Math.min(value, side === "left" ? 480 : 640, available - other - 320 - 12));
@@ -32,7 +56,7 @@ const DesktopLayout = (() => {
     const connectionError = $("#connection-error");
     const toolbar = document.createElement("header");
     toolbar.className = "workspace-toolbar";
-    toolbar.innerHTML = '<strong id="application-title">RAH</strong><span id="layout-repository"></span><span id="layout-runtime"></span><button id="toggle-workspace" type="button">Workspace</button><button id="toggle-inspector" type="button">Inspector</button><button id="focus-chat" type="button">Focus Chat</button><button id="reset-layout" type="button">Reset Layout</button>';
+    toolbar.innerHTML = '<strong id="application-title">RAH <small id="layout-version"></small></strong><span id="layout-repository"></span><span id="layout-runtime"></span><button id="toggle-workspace" type="button">Workspace</button><button id="toggle-inspector" type="button">Inspector</button><button id="focus-chat" type="button">Focus Chat</button><button id="reset-layout" type="button">Reset Layout</button>';
     document.body.prepend(toolbar);
     let theme;
     try { theme = validateTheme(localStorage.getItem(themeKey)); } catch { theme = "system"; }
@@ -49,7 +73,6 @@ const DesktopLayout = (() => {
     const left = document.createElement("aside"); left.id = "workspace-panel"; left.setAttribute("aria-label", "Workspace");
     const center = $(".chat"); center.id = "chat-panel";
     const right = document.createElement("aside"); right.id = "inspector-panel"; right.setAttribute("aria-label", "Inspector");
-    left.innerHTML = '<h2>Workspace</h2>';
     const repo = $(".repository");
     // Keep delegated repository handlers on their original ancestor.
     const navigation = document.createElement("div"); navigation.className = "workspace-navigation";
@@ -60,7 +83,8 @@ const DesktopLayout = (() => {
     history.innerHTML = '<summary>Conversation history and context</summary>';
     for (const id of ["resume-previous-conversation", "resume-conversation-hint", "clear-conversation-history"]) history.append($("#" + id));
     left.append(history);
-    const newConversation = $("#new-conversation"); center.prepend(newConversation);
+    const chatHeader = document.createElement("div"); chatHeader.className = "chat-header";
+    chatHeader.append($("#chat-title"), $("#new-conversation")); center.prepend(chatHeader);
     const tablist = document.createElement("div"); tablist.className = "inspector-tabs"; tablist.setAttribute("role", "tablist"); tablist.setAttribute("aria-label", "Inspector"); right.append(tablist);
     const sections = {
       runtime: [$("#runtime-status-title").closest("section"), $("#legacy-model-configuration")],
@@ -69,7 +93,8 @@ const DesktopLayout = (() => {
     };
     for (const tab of tabs) {
       const button = document.createElement("button"); button.type = "button"; button.id = "tab-" + tab;
-      button.textContent = { runtime: "Runtime / Model", authority: "Authority / Tools", activity: "Activity", repository: "Status / Review", settings: "Settings" }[tab];
+      button.textContent = { runtime: "Runtime", authority: "Tools", activity: "Activity", repository: "Changes", settings: "Settings" }[tab];
+      button.title = { runtime: "Runtime / Model", authority: "Authority / Tools", activity: "Activity", repository: "Status / Review", settings: "Settings" }[tab];
       button.setAttribute("role", "tab"); button.setAttribute("aria-controls", "panel-" + tab); tablist.append(button);
       const panel = document.createElement("div"); panel.id = "panel-" + tab; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", button.id); panel.tabIndex = 0;
       panel.append(...sections[tab]); right.append(panel);
@@ -98,12 +123,12 @@ const DesktopLayout = (() => {
         const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "section-toggle"; toggle.textContent = heading.textContent;
         const content = document.createElement("div"); content.id = id + "-content";
         for (const child of [...node.childNodes]) if (child !== heading) content.append(child);
-        heading.replaceChildren(toggle); node.append(content);
+        heading.replaceChildren(toggle); node.append(content); node.classList.add("panel-section");
         toggle.setAttribute("aria-controls", content.id);
         function expand(value) { if (node.tagName === "DETAILS") node.open = true; content.hidden = !value; toggle.setAttribute("aria-expanded", String(value)); }
         expand(true);
         toggle.addEventListener("click", event => { event.preventDefault(); expand(content.hidden); });
-        const link = document.createElement("button"); link.type = "button"; link.textContent = toggle.textContent; link.dataset.section = id; link.setAttribute("aria-controls", id); nav.append(link);
+        const link = document.createElement("button"); link.type = "button"; link.textContent = shortLabels[id] || toggle.textContent; link.title = toggle.textContent; link.dataset.section = id; link.setAttribute("aria-controls", id); nav.append(link);
         // Provider visibility remains owned by status.js, including legacy Model.
         link.hidden = node.hidden;
         new MutationObserver(() => { link.hidden = node.hidden; }).observe(node, { attributes: true, attributeFilter: ["hidden"] });
@@ -125,19 +150,22 @@ const DesktopLayout = (() => {
         if (next < 0) return; event.preventDefault(); items[next].link.focus({ preventScroll: true });
       });
       for (const [label, value] of [["Expand All", true], ["Collapse All", false]]) {
-        const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.expand = String(value);
+        const button = document.createElement("button"); button.type = "button"; button.className = "section-bulk"; button.title = label; button.setAttribute("aria-label", label); button.dataset.expand = String(value);
         button.addEventListener("click", () => items.forEach(item => item.expand(value))); nav.append(button);
       }
       const panel = side === "left" ? left : right;
       panel.addEventListener("scroll", () => {
         if (container.hidden || panel.hidden) return;
         const edge = (side === "left" ? nav : inspectorHeader).getBoundingClientRect().bottom + 10;
-        mark((items.filter(item => item.node.getBoundingClientRect().top <= edge).at(-1) || items[0]).id);
+        const passed = items.filter(item => item.node.getBoundingClientRect().top <= edge);
+        mark((passed[passed.length - 1] || items[0]).id);
       }, { passive: true });
       mark(items[0].id); sectionNavs.set(tab || "workspace", nav); return nav;
     }
     history.open = true;
-    left.prepend(addNavigation(left, "left", null, [["workspace-repositories", navigation], ["workspace-remembered", left.querySelector(".remembered-workspaces")], ["workspace-conversations", history]]));
+    const workspaceHeader = document.createElement("div"); workspaceHeader.className = "panel-header";
+    workspaceHeader.innerHTML = "<h2>Workspace</h2>"; left.prepend(workspaceHeader);
+    workspaceHeader.append(addNavigation(left, "left", null, [["workspace-repositories", navigation], ["workspace-remembered", left.querySelector(".remembered-workspaces")], ["workspace-conversations", history]]));
     const changes = [...repo.querySelectorAll(":scope > h3")].map((heading, index) => {
       const node = document.createElement("section"); heading.before(node); node.append(heading);
       while (node.nextElementSibling && node.nextElementSibling.tagName !== "H3") node.append(node.nextElementSibling);
@@ -186,6 +214,8 @@ const DesktopLayout = (() => {
         const collapsed = state[side + "Collapsed"];
         const panel = side === "left" ? left : right;
         panel.hidden = collapsed;
+        // Classes rather than :has() keep the grid correct on older WebView2.
+        shell.classList.toggle(side + "-hidden", collapsed);
         splitters[side].hidden = collapsed || narrow;
         splitters[side].setAttribute("aria-valuemin", side === "left" ? "180" : "260");
         splitters[side].setAttribute("aria-valuemax", String(bounds(side, 10000, shell.clientWidth, side === "left" ? r : l)));
@@ -216,6 +246,9 @@ const DesktopLayout = (() => {
     if (innerWidth < 960) state.leftCollapsed = state.rightCollapsed = true;
     window.addEventListener("resize", render);
     function summary() {
+      const version = [...$("#application-status").querySelectorAll("dt")].find(e => e.textContent === "Version")?.nextElementSibling?.textContent;
+      $("#layout-version").textContent = version ? "v" + version : "";
+      document.title = version ? "RAH v" + version : "RAH";
       $("#layout-repository").textContent = $("#repository-path")?.textContent || "No repository";
       const provider = $("#native-provider").value;
       const identity = { openai: "Native OpenAI", llama_cpp: "Native llama.cpp", codex: "Optional Codex CLI" }[provider] || "Runtime unavailable";
@@ -224,11 +257,35 @@ const DesktopLayout = (() => {
       $("#layout-runtime").textContent = `${identity} · ${model || "Provider default model"} · ${connection}`;
       $("#layout-runtime").title = $("#layout-runtime").textContent;
     }
+    const prompt = $("#chat-prompt");
+    prompt.placeholder = "Type a message… (Enter to send, Shift+Enter for a new line)";
+    const missing = typeof CSS !== "undefined" && CSS.supports ? legacyFeatures((...query) => CSS.supports(...query)) : ["CSS.supports"];
+    if (missing.length) {
+      const legacy = document.createElement("p"); legacy.id = "legacy-webview-notice"; legacy.className = "legacy-notice";
+      legacy.textContent = "This WebView2 runtime is outdated, so some styling is simplified. Update the Microsoft Edge WebView2 Runtime for the full interface.";
+      legacy.title = "Missing: " + missing.join(", ");
+      notices.append(legacy);
+    }
+    if (missing.includes("field-sizing")) {
+      // JavaScript auto-grow replaces CSS field-sizing. status.js clears the
+      // prompt while it is disabled, so re-measure when it is re-enabled.
+      const grow = () => { prompt.style.height = "auto"; prompt.style.height = prompt.scrollHeight + 2 + "px"; };
+      prompt.addEventListener("input", grow);
+      new MutationObserver(grow).observe(prompt, { attributes: true, attributeFilter: ["disabled"] });
+    }
+    prompt.addEventListener("keydown", (event) => {
+      if (!submitsOnKey(event)) return;
+      event.preventDefault();
+      // The Send button doubles as Cancel during a turn; Enter only ever sends.
+      const send = $("#chat-send");
+      if (!prompt.disabled && !send.disabled && send.textContent === "Send" && prompt.value.trim()) $("#chat-form").requestSubmit(send);
+    });
+    new MutationObserver(summary).observe($("#application-status"), { subtree: true, childList: true, characterData: true });
     new MutationObserver(summary).observe($("#runtime-status"), { subtree: true, childList: true, characterData: true });
     new MutationObserver(summary).observe($("#repository-path"), { subtree: true, childList: true, characterData: true });
     render(); summary();
   }
-  return { validate, validateTheme, bounds, defaults, install };
+  return { validate, validateTheme, submitsOnKey, legacyFeatures, bounds, defaults, install };
 })();
 if (typeof document !== "undefined") DesktopLayout.install();
 if (typeof module !== "undefined") module.exports = DesktopLayout;

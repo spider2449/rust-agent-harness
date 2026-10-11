@@ -12,6 +12,12 @@ assert.equal(layout.bounds("right", 10000, 1200, 240), 628);
 assert.deepEqual(Object.keys(layout.validate({ ...layout.defaults(), repository: 'must not persist' })), Object.keys(layout.defaults()));
 for (const theme of ["system", "light", "dark"]) assert.equal(layout.validateTheme(theme), theme);
 for (const invalid of [null, "", "solarized", "<b>"]) assert.equal(layout.validateTheme(invalid), "system");
+assert.equal(layout.submitsOnKey({ key: "Enter" }), true);
+for (const held of [{ shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true }, { keyCode: 229 }]) assert.equal(layout.submitsOnKey({ key: "Enter", ...held }), false, JSON.stringify(held));
+assert.equal(layout.submitsOnKey({ key: "a" }), false);
+assert.deepEqual(layout.legacyFeatures(() => true), []);
+assert.deepEqual(layout.legacyFeatures(() => false), ["color-mix", ":has", "dvh", "field-sizing"]);
+assert.deepEqual(layout.legacyFeatures((property) => property !== "field-sizing"), ["field-sizing"]);
 const edge = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"]].map(p => path.join(p || "", "Microsoft/Edge/Application/msedge.exe")).find(fs.existsSync);
 assert.ok(edge, "Edge required");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rah-workspace-layout-"));
@@ -35,9 +41,25 @@ if (sessionStorage.getItem('reloading') === 'yes') {
  check($('#tab-authority').getAttribute('aria-selected') === 'true', 'tab restored after reload');
  check(document.documentElement.dataset.theme === 'dark' && $('#theme-select').value === 'dark', 'theme restored after reload');
  if (innerWidth >= 960) check($('#workspace-panel').getBoundingClientRect().width === 250, 'width restored after reload');
- document.body.dataset.result = 'PASS';
+ // The toolbar and document title follow the backend-reported application version.
+ check($('#layout-version').textContent === '' && document.title === 'RAH', 'no version before status');
+ const row = document.createElement('div'); row.innerHTML = '<dt>Version</dt><dd>9.8.7</dd>'; $('#application-status').append(row);
+ setTimeout(() => { try {
+  check($('#layout-version').textContent === 'v9.8.7' && document.title === 'RAH v9.8.7', 'version shown in title');
+  document.body.dataset.result = 'PASS';
+ } catch (e) { document.body.dataset.result = e.message; } }, 0);
 } else {
 check(document.documentElement.scrollWidth <= innerWidth, 'horizontal overflow');
+check(!$('#legacy-webview-notice'), 'current WebView engine shows no legacy notice');
+check($('#workspace-panel > .panel-header h2') && $('#workspace-panel > .panel-header .section-navigation'), 'workspace header groups title and navigation');
+check(document.querySelectorAll('.panel-section').length >= 14 && [...document.querySelectorAll('.panel-section')].every(node => node.querySelector(':scope > :is(h2,h3,summary) > .section-toggle')), 'sections render as cards with toggles');
+check([...document.querySelectorAll('.section-bulk')].every(button => button.getAttribute('aria-label') && button.title === button.getAttribute('aria-label')), 'bulk controls labelled');
+check([...document.querySelectorAll('.section-navigation [data-section]')].every(link => link.title && link.textContent), 'jump links keep full title');
+if (innerWidth >= 960) {
+ const tabs = $('.inspector-tabs'); check(tabs.scrollWidth <= tabs.clientWidth + 1 && new Set([...tabs.children].map(tab => Math.round(tab.getBoundingClientRect().top))).size === 1, 'inspector tabs fit one row');
+ const rows = new Set([...$('#workspace-panel .section-navigation').children].filter(b => !b.hidden).map(b => Math.round(b.getBoundingClientRect().top)));
+ check(rows.size === 1, 'workspace navigation is one row');
+}
 const initial = $('#workspace-panel').getBoundingClientRect().width;
 if (innerWidth >= 960) {
  $('#left-splitter').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
@@ -47,7 +69,8 @@ if (innerWidth >= 960) {
  $('#left-splitter').dispatchEvent(new KeyboardEvent('keydown', {key:'End', bubbles:true}));
  check(document.documentElement.scrollWidth <= innerWidth, 'resize overflow');
  const width = $('#workspace-panel').getBoundingClientRect().width;
- $('#toggle-workspace').click(); check($('#workspace-panel').hidden, 'collapse');
+ $('#toggle-workspace').click(); check($('#workspace-panel').hidden && $('.status-card').classList.contains('left-hidden'), 'collapse');
+ check($('#chat-panel').getBoundingClientRect().left < 20, 'collapsed column released without :has()');
  $('#toggle-workspace').click(); check($('#workspace-panel').getBoundingClientRect().width === width, 'restore');
  const saved = JSON.parse(localStorage.getItem('rah.desktop.layout.v1'));
  check(saved.left === width, 'persist width');
@@ -149,6 +172,18 @@ $('#chat-prompt').disabled = true;
 $('#focus-chat').click(); check(document.activeElement.id === 'chat-panel', 'disconnected focus reaches chat');
 $('#chat-prompt').disabled = false;
 const composer = $('#chat-form').getBoundingClientRect(); check(composer.bottom <= innerHeight && composer.width > 0, 'composer visible');
+// Enter-to-send drives the production form submit; status.js owns the handler.
+let submits = 0; const countSubmit = event => { event.preventDefault(); submits += 1; };
+$('#chat-form').addEventListener('submit', countSubmit);
+const press = init => { const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }); $('#chat-prompt').dispatchEvent(event); return event; };
+$('#chat-send').disabled = false; $('#chat-send').textContent = 'Send';
+$('#chat-prompt').value = '   '; press({}); check(submits === 0, 'blank prompt not sent');
+$('#chat-prompt').value = 'hello'; check(press({}).defaultPrevented && submits === 1, 'Enter sends');
+check(!press({ shiftKey: true }).defaultPrevented && submits === 1, 'Shift+Enter keeps newline');
+press({ isComposing: true }); check(submits === 1, 'IME composition does not send');
+$('#chat-send').textContent = 'Cancel Turn'; press({}); check(submits === 1, 'Enter never cancels a running turn');
+$('#chat-send').textContent = 'Send'; $('#chat-send').disabled = true; press({}); check(submits === 1, 'disabled send not submitted');
+$('#chat-form').removeEventListener('submit', countSubmit); $('#chat-prompt').value = '';
 $('#reset-layout').click(); check(JSON.parse(localStorage.getItem('rah.desktop.layout.v1')).left === 240, 'reset');
 check(document.documentElement.dataset.theme === 'dark', 'reset layout keeps theme');
 check(document.documentElement.scrollWidth <= innerWidth, 'final overflow');
@@ -167,5 +202,22 @@ try {
   assert.equal(result.error, undefined, result.stderr);
   assert.equal(result.stdout.match(/data-result="([^"]*)"/)?.[1], 'PASS', `width ${width}: ${result.stderr.slice(-300)}`);
  }
+ // Simulate an outdated WebView2 engine: fallbacks must keep the shell usable.
+ const legacyChecks = `try {
+  const check = (v, message) => { if (!v) throw Error(message); };
+  const $ = s => document.querySelector(s);
+  check($('#legacy-webview-notice') && $('#legacy-webview-notice').closest('.shell-notices'), 'legacy notice shown');
+  const prompt = $('#chat-prompt'); prompt.disabled = false;
+  const before = prompt.getBoundingClientRect().height;
+  prompt.value = 'a\\nb\\nc\\nd\\ne'; prompt.dispatchEvent(new Event('input'));
+  check(prompt.getBoundingClientRect().height > before, 'JavaScript auto-grow fallback');
+  $('#toggle-workspace').click(); check($('.status-card').classList.contains('left-hidden'), 'class-based collapse');
+  document.body.dataset.result = 'PASS';
+ } catch (e) { document.body.dataset.result = e.message; }`;
+ const legacyFile = path.join(temp, "legacy.html");
+ fs.writeFileSync(legacyFile, original.replace(/<link[^>]*href="styles.css"[^>]*>/, () => `<style>${css}</style>`).replace('<script src="layout.js"></script>', () => `<script>CSS.supports = () => false;\n${js}</script>`).replace('<script src="status.js"></script>', () => `<script>${legacyChecks}</script>`));
+ const legacy = spawnSync(edge, ["--headless=new", "--disable-gpu", "--no-first-run", `--user-data-dir=${path.join(temp, 'profile-legacy')}`, "--window-size=1200,800", "--virtual-time-budget=1000", "--dump-dom", `file:///${legacyFile.replace(/\\/g, '/')}`], { encoding: "utf8", timeout: 30000 });
+ assert.equal(legacy.error, undefined, legacy.stderr);
+ assert.equal(legacy.stdout.match(/data-result="([^"]*)"/)?.[1], 'PASS', `legacy engine: ${legacy.stderr.slice(-300)}`);
  console.log("Workspace production layout: PASS (1600/1200/626/476, bounds, keyboard, collapse, tabs, persistence, reset, composer, theme)");
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
