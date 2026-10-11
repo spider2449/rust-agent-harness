@@ -9,12 +9,12 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 ## Status
 
-`master` is in **phase P0** of the
+`master` has completed **phase P1** (the `rah-kernel` crate) of the
 [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md).
 The architecture decision is
-[ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The kernel is
-not implemented yet. The legacy crates still build and behave as in v0.35.0
-while they are transformed phase by phase. See
+[ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The kernel
+exists; service contracts and plugins arrive from P2 on. The legacy crates still
+build and behave as in v0.35.0 while they are transformed phase by phase. See
 [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
 
 | Phase | Scope |

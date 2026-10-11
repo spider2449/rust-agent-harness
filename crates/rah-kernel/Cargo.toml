@@ -1,0 +1,17 @@
+[package]
+name = "rah-kernel"
+version.workspace = true
+edition.workspace = true
+description = "RAH plugin kernel: lifecycle, typed services, hooks, events and scoped resources"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

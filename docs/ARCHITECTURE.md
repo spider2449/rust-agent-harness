@@ -10,9 +10,8 @@ The authority-first architecture (v0.35.0 and earlier) is documented in
 
 ```text
 rah-protocol                         data types (dependency bottom)
-   ^
 rah-kernel                           lifecycle / services / hooks / events / scopes / config
-   ^
+   ^           ^                     (depends on no RAH crate)
 rah-api                              service contracts: ModelProvider, AgentLoop, Tool,
    ^                                 ToolInvoker, SessionLog, KvStore, ExecEnv, ...
 plugins/*                            depend only on rah-api and rah-protocol
@@ -28,16 +27,25 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
 
 ### Kernel
 
-- Lifecycle: `Registered -> Pending -> Starting -> Active -> Stopping -> Disposed`.
-  A plugin starts when every `requires` service is available. It is stopped
-  when a required service disappears, and restarted when the service returns.
-- Services: typed `ServiceKey<S>`; several named implementations per service,
-  chosen by configuration.
-- Hooks: ordered chains with bail (`tool.before_invoke`: Allow, Deny or Ask),
-  waterfall (`model.before_request`, `tool.after_invoke`) and serial
-  (`turn.*`) semantics.
-- Scopes: tasks, effects, services and hooks registered by a plugin are
-  released when its scope is disposed. Nothing outlives its owner.
+- Lifecycle: `Pending -> Starting -> Active -> Stopping`, plus `Failed` and
+  `DependencyCycle`. A plugin starts when every `requires` service resolves.
+  When a provider it is bound to stops, it is stopped first (dependents before
+  providers, reverse activation order) and restarts once the service resolves
+  again. Lifecycle operations are serialized; calling one from inside `apply`
+  or a dispose effect returns `Reentrant`.
+- Services: typed `ServiceKey<S>`; several named instances per service. A
+  mount `binding` selects an instance, otherwise the earliest-registered one
+  is used. A plugin may only provide services in its `provides` and inject
+  services in its `requires` or `optional`.
+- Hooks: typed `BailHook`, `WaterfallHook` and `SerialHook` chains, ordered by
+  priority then registration (for example `tool.before_invoke` as bail,
+  `model.before_request` as waterfall). A panicking handler yields
+  `HookError::Panicked`, which security callers treat as a denial.
+- Events: typed, synchronous, panic-isolated handlers; the kernel emits
+  `PluginStatusChanged` on every lifecycle transition.
+- Scopes: services, hooks and handlers registered in `apply` commit only if
+  `apply` succeeds. On dispose, owned tasks are cancelled and drained, then
+  dispose effects run in reverse order. Nothing outlives its owner.
 
 ### A turn
 
@@ -59,14 +67,15 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, phase P0)
+## Current state (transitional, after phase P1)
 
-The kernel does not exist yet. `master` still contains the legacy crates, which
-are transformed or removed phase by phase:
+`rah-kernel` is implemented (P1). `rah-api` and the first plugins arrive in P2.
+Until then `master` still contains the legacy crates, which are transformed or
+removed phase by phase:
 
 | Crate | Fate | Phase |
 |---|---|---|
-| `rah-protocol` | kept; gains model-event and session-log types | P1–P2 |
+| `rah-protocol` | kept; gains model-event and session-log types | P2 |
 | `rah-runtime-openai` | split into `model-openai-responses`, `model-llamacpp`, `loop-react` | P3 |
 | `rah-runtime`, `rah-model` | replaced by `rah-api` services and `model-mock` | P3 |
 | `rah-tools` | `Tool` moves to `rah-api`; tools split into `tools-builtin`, `tools-repo`, `tools-shell`; authorization becomes `policy-authority` | P4 |

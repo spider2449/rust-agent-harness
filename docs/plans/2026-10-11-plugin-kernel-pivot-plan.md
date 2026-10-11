@@ -260,9 +260,8 @@ frontend-web --(TurnRequest)--> loop-react
 
 ```text
 rah-protocol                         (dependency bottom：資料型別)
-   ^
-rah-kernel                           (生命週期 / service / hook / event / scope / config)
-   ^
+rah-kernel                           (生命週期 / service / hook / event / scope / config；不依賴任何 RAH crate)
+   ^           ^
 rah-api       -> rah-protocol, rah-kernel   (service trait：ModelProvider, AgentLoop, Tool, SessionLog, ...)
    ^
 plugins/*     -> rah-api（只依賴 rah-api；plugin 之間互不依賴）
@@ -308,9 +307,16 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - 驗收：workspace 仍可 build 和 test；CI 綠燈
 
 ### P1：`rah-kernel`
-- [ ] Plugin、Manifest、Scope、ServiceKey、生命週期狀態機、依賴解析、hook chain、event bus、config store
-- [ ] 測試：mount 和 unmount 順序；required service 消失 → 依賴者停止，恢復 → 重新啟動；dispose 會取消 spawn 的 task 並執行 effect；hook 的 bail、waterfall 語義；循環依賴偵測；同一 service 多實作的選擇
+- [x] Plugin、Manifest、Scope、ServiceKey、生命週期狀態機、依賴解析、hook chain、event bus、config store（2026-10-11 完成）
+- [x] 測試：mount 和 unmount 順序；required service 消失 → 依賴者停止，恢復 → 重新啟動；dispose 會取消 spawn 的 task 並執行 effect；hook 的 bail、waterfall 語義；循環依賴偵測；同一 service 多實作的選擇
 - 驗收：kernel < 2k 行（不含測試），不依賴任何 agent 領域型別
+- 實作備註（與第 3.3 節草案的差異）：
+  - `rah-kernel` 不依賴任何 RAH crate（連 `rah-protocol` 都不依賴），由架構測試強制。
+  - `kernel_api` 用單一整數 `KERNEL_API = 1`，不引入 `semver` 依賴；`version` 為字串。
+  - `config_schema` 會被保存但尚未驗證；設定以 `serde_json::Value` 傳入，`Scope::config_as::<T>()` 做型別化解析。Schema 驗證延到需要時再加。
+  - Hook 分成三個 typed trait：`BailHook`、`WaterfallHook`、`SerialHook`。handler panic 會回傳 `HookError::Panicked`，安全相關呼叫端必須視為拒絕（fail closed）。
+  - Service、hook、event handler 只能在 `apply` 期間註冊，`apply` 成功才一次 commit；task 和 dispose effect 綁在 scope 上。
+  - 在 `apply` 或 dispose effect 內呼叫 lifecycle 操作會回傳 `Reentrant`，不會 deadlock。巢狀 plugin（`scope.plugin(...)`）延後。
 
 ### P2：`rah-api`＋最小的端到端流程
 - [ ] service trait（第 4 節）

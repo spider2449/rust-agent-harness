@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phase P0)
+## Unreleased — plugin-kernel pivot (phases P0–P1)
+
+### P1: `rah-kernel`
+
+- New `rah-kernel` crate. It covers the plugin lifecycle (`Pending`,
+  `Starting`, `Active`, `Stopping`, `Failed`, `DependencyCycle`), typed
+  `ServiceKey<S>` services with named instances and mount bindings, and
+  manifest-enforced `provides`, `requires` and `optional` capability checks.
+  When a provider stops, its dependents stop first and restart automatically
+  once the service resolves again. Lifecycle operations are serialized, and
+  re-entrant calls are rejected.
+- Typed bail, waterfall and serial hook chains ordered by priority. A
+  panicking handler is reported as `HookError::Panicked`.
+- Typed, panic-isolated event bus, `PluginStatusChanged` events, and host
+  subscriptions.
+- Scoped resources: registrations commit only when `apply` succeeds. Owned
+  tasks are cancelled on dispose, then dispose effects run in LIFO order.
+  `update_config` and `restart` restart a plugin together with its dependents.
+- The kernel depends on no RAH crate and stays under 2,000 source lines; both
+  rules are enforced by architecture tests. 27 deterministic tests.
+
+### P0: freeze, ADR 0036, archive
 
 - Accept [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md):
   plugin kernel, everything is a plugin. It supersedes ADRs 0001, 0002, 0003,

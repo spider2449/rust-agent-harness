@@ -2,6 +2,7 @@
 members = [
     "crates/rah-cli",
     "crates/rah-desktop",
+    "crates/rah-kernel",
     "crates/rah-model",
     "crates/rah-profile-composition",
     "crates/rah-protocol",
@@ -17,6 +18,7 @@ members = [
 # still built and tested by `--workspace`, but not by a bare `cargo build`.
 default-members = [
     "crates/rah-cli",
+    "crates/rah-kernel",
     "crates/rah-model",
     "crates/rah-profile-composition",
     "crates/rah-protocol",
