@@ -19299,7 +19299,7 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
         .request_live(ToolRequest {
             session_id: lease.session_id.clone(),
             name: ToolName::new("repo.list"),
-            input: ToolInput(serde_json::json!({"path":"../outside"})),
+            input: ToolInput(serde_json::json!({"path":"missing-directory"})),
         })
         .await
         .unwrap_err();
@@ -19323,14 +19323,13 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
         if expected == "failed" {
             assert_eq!(evidence.len(), 1);
             assert_eq!(evidence[0]["authorized_dispatch_error"], "tool");
-            assert_eq!(evidence[0]["tool_error"], "invalid_input");
-            assert_eq!(evidence[0]["reason_category"], "unsafe_relative_path");
+            assert_eq!(evidence[0]["tool_error"], "execution");
             assert_eq!(evidence[0]["failure_stage"], "started");
             assert_eq!(
                 evidence[0]["tool_call_id"],
                 serde_json::json!(requested_call_id)
             );
-            assert!(!evidence[0].to_string().contains("../outside"));
+            assert!(!evidence[0].to_string().contains("missing-directory"));
         }
         match (expected, event.event()) {
             ("requested", AgentEvent::ToolRequested { tool_call, .. }) => {
@@ -19382,9 +19381,11 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
     );
     assert!(!super::handle_uncertain_repository_effects(app.handle(), &mut calls, true).await);
     assert!(calls.is_empty());
-    let events = observed.0.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    let payload: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+    let payload: serde_json::Value = {
+        let events = observed.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        serde_json::from_str(&events[0]).unwrap()
+    };
     assert_eq!(payload["kind"], "tool_interrupted");
     assert_eq!(payload["tool"], "repo.list");
     assert_eq!(payload["started"], true);
@@ -19392,13 +19393,62 @@ async fn task524a_failed_host_dispatch_closes_activity_without_claiming_a_result
     for forbidden in ["tool_call_id", "session_id", "input", "output", "result"] {
         assert!(payload.get(forbidden).is_none());
     }
-    drop(events);
     drop(lease);
     let next = port.admit_turn().await.unwrap();
     drop(next);
     scope.revoke();
     scope.drained().await;
     app.unlisten(observed.1);
+}
+
+#[tokio::test]
+async fn invalid_tool_input_is_a_correctable_result_not_a_terminal_failure() {
+    use rah_runtime::{experimental::ToolRequest, experimental_host::HostToolScope};
+
+    let fixture = TestRepository::new();
+    let registry = desktop_tool_registry(Some(&fixture.desktop_repository()), None).unwrap();
+    let scope = HostToolScope::new(registry, vec![PermissionLevel::Execute]);
+    let port = scope.port();
+    let mut lease = port.admit_turn().await.unwrap();
+    let output = port
+        .request_live(ToolRequest {
+            session_id: lease.session_id.clone(),
+            name: ToolName::new("repo.list"),
+            input: ToolInput(serde_json::json!({"path":"."})),
+        })
+        .await
+        .unwrap();
+    assert!(output.is_error);
+    let mut calls = HashMap::new();
+    let mut finished = None;
+    for expected in ["tool_requested", "tool_started", "tool_finished"] {
+        let event = tokio::time::timeout(Duration::from_secs(5), lease.events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(event.event()).unwrap()["type"],
+            expected
+        );
+        finished = activity_event_with_composition(
+            event.event(),
+            &mut calls,
+            &empty_composition_metadata(),
+            true,
+        );
+    }
+    let finished = serde_json::to_value(finished.unwrap().activity).unwrap();
+    assert_eq!(finished["kind"], "tool_finished");
+    assert_eq!(finished["result"], "failed");
+    scope.drained().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), lease.events.next())
+            .await
+            .is_err()
+    );
+    drop(lease);
+    scope.revoke();
+    scope.drained().await;
 }
 
 #[test]

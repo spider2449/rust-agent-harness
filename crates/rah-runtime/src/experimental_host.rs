@@ -7,10 +7,10 @@ use crate::{RuntimeEvent, RuntimeFailure, experimental::*};
 use async_trait::async_trait;
 use rah_protocol::{
     AgentErrorCode, AgentEvent, PermissionLevel, RuntimeDiagnostic, RuntimeFailureKind,
-    RuntimeOperation, SessionId, ToolCall, ToolCallId, ToolOutput,
+    RuntimeOperation, SessionId, ToolCall, ToolCallId, ToolContent, ToolOutput,
 };
 use rah_tools::{
-    AuthorizedDispatchError, ToolContext, ToolRegistry, authorize_tool_dispatch,
+    AuthorizedDispatchError, ToolContext, ToolError, ToolRegistry, authorize_tool_dispatch,
     authorized_tool_dispatch,
 };
 use std::sync::{Arc, Mutex, Weak};
@@ -278,6 +278,18 @@ impl HostToolPort for Port {
                 .await;
                 #[cfg(feature = "live-test-support")]
                 dispatch_mark("tool_execution_complete");
+                // A Tool's own input rejection is a completed, effect-free
+                // result the model can correct, not a terminal turn failure.
+                // Authorization rejections and execution failures stay terminal.
+                let result = match result {
+                    Err(AuthorizedDispatchError::Tool(ToolError::InvalidInput { message })) => {
+                        Ok(ToolOutput {
+                            content: vec![ToolContent::Text(format!("invalid input: {message}"))],
+                            is_error: true,
+                        })
+                    }
+                    other => other,
+                };
                 let result = match result {
                     Ok(output) => {
                         let _ = events.send(
@@ -419,20 +431,19 @@ mod tests {
                     .success()
             );
         }
-        for (input, allowed, category) in [
-            (serde_json::json!({}), true, None),
-            (serde_json::json!({"path":"nested"}), true, None),
+        // (input, allowed, terminal dispatch category, correctable input rejection)
+        for (input, allowed, category, rejected) in [
+            (serde_json::json!({}), true, None, false),
+            (serde_json::json!({"path":"nested"}), true, None, false),
+            (serde_json::json!({"path":""}), true, None, true),
+            (serde_json::json!({"path":"."}), true, None, true),
+            (serde_json::json!({"path":"../private"}), true, None, true),
             (
-                serde_json::json!({"path":""}),
-                true,
-                Some("tool_invalid_input"),
+                serde_json::json!({}),
+                false,
+                Some("permission_denied"),
+                false,
             ),
-            (
-                serde_json::json!({"path":"../private"}),
-                true,
-                Some("tool_invalid_input"),
-            ),
-            (serde_json::json!({}), false, Some("permission_denied")),
         ] {
             let mut registry = ToolRegistry::new();
             registry
@@ -490,7 +501,13 @@ mod tests {
                 );
             } else {
                 let output = result.unwrap();
-                assert!(!output.is_error);
+                assert_eq!(output.is_error, rejected);
+                if rejected {
+                    let [ToolContent::Text(text)] = output.content.as_slice() else {
+                        panic!("input rejection must be one text item")
+                    };
+                    assert!(text.starts_with("invalid input: "));
+                }
                 assert!(
                     !serde_json::to_string(&output)
                         .unwrap()

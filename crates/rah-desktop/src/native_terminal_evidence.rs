@@ -1,6 +1,8 @@
 //! Closed process-local terminal evidence; never format errors or event payloads.
 use rah_protocol::AgentEvent;
+use rah_runtime::experimental_host::dispatch_error_category;
 use rah_runtime::{RuntimeEvent, RuntimeFailure};
+use rah_tools::AuthorizedDispatchError;
 
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -33,6 +35,7 @@ impl Counters {
         let failure = event.failure();
         let (variant, status) = classify(failure);
         Some(serde_json::json!({
+            "dispatch_category": dispatch_category(failure),
             "event": "native_terminal",
             "chat_terminal": state,
             "model_requests": self.model_requests,
@@ -49,7 +52,19 @@ impl Counters {
     }
 }
 
+/// Closed host Tool dispatch category; a Tool failure is not a native adapter error.
+fn dispatch_category(failure: Option<&RuntimeFailure>) -> Option<&'static str> {
+    use std::error::Error;
+    failure
+        .and_then(|f| f.source())
+        .and_then(|s| s.downcast_ref::<AuthorizedDispatchError>())
+        .map(dispatch_error_category)
+}
+
 fn classify(failure: Option<&RuntimeFailure>) -> (&'static str, Option<u16>) {
+    if dispatch_category(failure).is_some() {
+        return ("AuthorizedDispatch", None);
+    }
     #[cfg(any(feature = "provider-openai", feature = "provider-llamacpp"))]
     {
         use rah_runtime_openai::OpenAiAdapterError as E;
@@ -144,6 +159,48 @@ mod tests {
             model_request_id: rah_protocol::ModelRequestId::new(),
         });
         assert_eq!(counters.model_requests, u64::MAX);
+    }
+
+    #[test]
+    fn tool_dispatch_failure_reports_closed_category_only() {
+        use rah_protocol::{RuntimeDiagnostic, RuntimeFailureKind};
+        use rah_tools::ToolError;
+        for (error, category) in [
+            (
+                ToolError::InvalidInput {
+                    message: "PRIVATE query path".into(),
+                },
+                "tool_invalid_input",
+            ),
+            (
+                ToolError::Execution {
+                    message: "PRIVATE query path".into(),
+                },
+                "tool_execution",
+            ),
+        ] {
+            let failure = RuntimeFailure::new(
+                RuntimeDiagnostic {
+                    operation: RuntimeOperation::Turn,
+                    kind: RuntimeFailureKind::Operation,
+                    rpc_code: None,
+                },
+                AuthorizedDispatchError::Tool(error),
+            );
+            assert_eq!(classify(Some(&failure)), ("AuthorizedDispatch", None));
+            let event = RuntimeEvent::failed(SessionId::new(), AgentErrorCode::Tool, failure);
+            let record = Counters::default().terminal(&event).unwrap();
+            assert_eq!(record["dispatch_category"], category);
+            assert_eq!(record["typed_source"], "AuthorizedDispatch");
+            assert!(!record.to_string().contains("PRIVATE"));
+        }
+        let native = RuntimeEvent::failed(
+            SessionId::new(),
+            AgentErrorCode::Model,
+            E::Protocol.into_runtime_failure(RuntimeOperation::Turn),
+        );
+        let record = Counters::default().terminal(&native).unwrap();
+        assert!(record["dispatch_category"].is_null());
     }
 
     #[test]
