@@ -280,11 +280,27 @@ impl HostToolPort for Port {
                 dispatch_mark("tool_execution_complete");
                 // A Tool's own input rejection is a completed, effect-free
                 // result the model can correct, not a terminal turn failure.
-                // Authorization rejections and execution failures stay terminal.
+                // So is an execution failure of a Tool whose dispatch permission
+                // is None or Read (e.g. fs.read of a missing file). Authorization
+                // rejections and Write/Execute execution failures stay terminal:
+                // their effect may be uncertain.
                 let result = match result {
                     Err(AuthorizedDispatchError::Tool(ToolError::InvalidInput { message })) => {
                         Ok(ToolOutput {
                             content: vec![ToolContent::Text(format!("invalid input: {message}"))],
+                            is_error: true,
+                        })
+                    }
+                    Err(AuthorizedDispatchError::Tool(ToolError::Execution { message }))
+                        if matches!(
+                            expected.permission,
+                            PermissionLevel::None | PermissionLevel::Read
+                        ) =>
+                    {
+                        Ok(ToolOutput {
+                            content: vec![ToolContent::Text(format!(
+                                "execution failed: {message}"
+                            ))],
                             is_error: true,
                         })
                     }
@@ -522,6 +538,88 @@ mod tests {
             assert!(lease.events.next().await.is_none());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct FailingTool(PermissionLevel);
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: ToolName::new("fake.failing"),
+                description: "always fails during execution".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                permission: self.0,
+            }
+        }
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            _context: ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Err(ToolError::Execution {
+                message: "file not found".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_failure_is_correctable_only_for_effect_free_permissions() {
+        for (permission, correctable) in [
+            (PermissionLevel::None, true),
+            (PermissionLevel::Read, true),
+            (PermissionLevel::Write, false),
+            (PermissionLevel::Execute, false),
+        ] {
+            let mut registry = ToolRegistry::new();
+            registry
+                .register(Arc::new(FailingTool(permission)))
+                .unwrap();
+            let scope = HostToolScope::new(Arc::new(registry), vec![permission]);
+            let port = scope.port();
+            let mut lease = port.admit_turn().await.unwrap();
+            let result = port
+                .request_live(ToolRequest {
+                    session_id: lease.session_id.clone(),
+                    name: ToolName::new("fake.failing"),
+                    input: ToolInput(serde_json::json!({})),
+                })
+                .await;
+            assert!(matches!(
+                lease.events.next().await.unwrap().event(),
+                AgentEvent::ToolRequested { .. }
+            ));
+            assert!(matches!(
+                lease.events.next().await.unwrap().event(),
+                AgentEvent::ToolStarted { .. }
+            ));
+            let terminal = lease.events.next().await.unwrap();
+            if correctable {
+                let output = result.unwrap();
+                assert!(output.is_error, "{permission:?}");
+                assert_eq!(
+                    output.content,
+                    vec![ToolContent::Text("execution failed: file not found".into())]
+                );
+                assert!(matches!(terminal.event(), AgentEvent::ToolFinished { .. }));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    dispatch_error_category(
+                        error
+                            .source()
+                            .unwrap()
+                            .downcast_ref::<AuthorizedDispatchError>()
+                            .unwrap()
+                    ),
+                    "tool_execution",
+                    "{permission:?}"
+                );
+                assert!(matches!(terminal.event(), AgentEvent::Failed { .. }));
+            }
+            scope.drained().await;
+            drop(lease.lifetime);
+            assert!(lease.events.next().await.is_none());
+        }
     }
     struct CountingTool {
         effects: Arc<AtomicUsize>,
