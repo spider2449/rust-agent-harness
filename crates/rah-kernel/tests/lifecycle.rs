@@ -482,3 +482,31 @@ async fn concurrent_lifecycle_operations_are_serialized() {
         Some("dispose:provider")
     );
 }
+
+#[tokio::test]
+async fn get_all_lists_instances_oldest_first_without_binding() {
+    let (kernel, log) = (Kernel::new(), Log::default());
+    kernel
+        .mount(provider("one", &log), MountOptions::default())
+        .await
+        .unwrap();
+    kernel
+        .mount(provider("two", &log), MountOptions::default())
+        .await
+        .unwrap();
+    let all: Vec<(String, String)> = kernel
+        .handle()
+        .get_all(GREETER)
+        .into_iter()
+        .map(|(instance, greeter)| (instance, greeter.greet()))
+        .collect();
+    assert_eq!(
+        all,
+        [
+            ("one".to_owned(), "one".to_owned()),
+            ("two".to_owned(), "two".to_owned())
+        ]
+    );
+    kernel.unmount(&id("one")).await.unwrap();
+    assert_eq!(kernel.handle().get_all(GREETER).len(), 1);
+}

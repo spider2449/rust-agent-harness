@@ -49,8 +49,10 @@ as constraints on `master` unless a plugin explicitly adopts their rules.
 - Plugin forms are static Rust, process (JSON-RPC 2.0 over stdio) and, later,
   WASM. Do not add dylib or `abi_stable` loading.
 - Do not introduce a new crate dependency edge without a task-owned reason.
-  Architecture tests enforce the `plugins/* -> rah-api, rah-protocol` rule once
-  those crates exist.
+  Plugin crates live in `plugins/`. Architecture tests enforce
+  `plugins/* -> rah-api, rah-protocol`, `rah-api -> rah-kernel, rah-protocol`
+  (`crates/rah-cli/tests/architecture.rs`) and a kernel with no RAH
+  dependencies (`crates/rah-kernel/tests/architecture.rs`).
 
 Before changing the kernel, a service contract in `rah-api` or the plugin
 protocol, read ADR 0036 and the pivot plan. If requested work conflicts with
@@ -63,9 +65,10 @@ change, in which case write or update an ADR.
 
 - Plugins mounted by the user's configuration are trusted code. Model output,
   tool-call arguments and provider metadata are untrusted requests.
-- Every model-originated tool call goes through the kernel-level `ToolInvoker`
-  and its `tool.before_invoke` hook chain. Do not add paths that let a loop or
-  model plugin call tool providers directly.
+- Every model-originated tool call goes through `rah_api::tools::ToolInvoker`
+  and its `tool.before_invoke` hook chain. Keep the tools service key private to
+  `rah-api`; do not add paths that let a loop or model plugin reach tool
+  providers directly.
 - A process plugin may call only the services in its own `requires`. The host
   enforces this.
 - The `default` preset mounts `policy-authority`. Under it, a missing permission
@@ -118,7 +121,8 @@ Unless explicitly requested, do not:
 - touch `.vscode/`.
 
 Legacy crates (`rah-desktop`, `rah-runtime`, `rah-model`, `rah-session`,
-`rah-profile-composition`, `rah-tools-plugin`, `rah-runtime-openai`) may receive
+`rah-profile-composition`, `rah-tools`, `rah-tools-mcp`, `rah-tools-plugin`,
+`rah-sandbox`, `rah-runtime-openai`) may receive
 only the minimal changes needed to keep the workspace building, until their
 pivot phase removes or transforms them.
 

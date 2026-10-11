@@ -169,3 +169,18 @@ async fn host_subscriptions_end_when_dropped() {
     handle.emit(&Ping(2));
     assert_eq!(log.take(), ["host:1"]);
 }
+
+#[tokio::test]
+async fn has_handlers_tracks_registered_hooks() {
+    let kernel = Kernel::new();
+    let handle = kernel.handle();
+    assert!(!handle.has_handlers::<Decide>());
+    let hooks = plugin(PluginManifest::new("hooks", "1"), |scope| {
+        scope.hook_bail::<Decide, _, _>(0, |_input: String| async { None });
+        Ok(())
+    });
+    kernel.mount(hooks, MountOptions::default()).await.unwrap();
+    assert!(handle.has_handlers::<Decide>());
+    kernel.unmount(&PluginId::new("hooks")).await.unwrap();
+    assert!(!handle.has_handlers::<Decide>());
+}

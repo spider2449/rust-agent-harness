@@ -9,13 +9,48 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 ## Status
 
-`master` has completed **phase P1** (the `rah-kernel` crate) of the
-[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md).
-The architecture decision is
-[ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The kernel
-exists; service contracts and plugins arrive from P2 on. The legacy crates still
-build and behave as in v0.35.0 while they are transformed phase by phase. See
-[Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
+`master` has completed **phase P2** of the
+[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md):
+the kernel, the service contracts (`rah-api`), the first plugins and the `rah`
+binary run end to end with a mock model. The architecture decision is
+[ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy
+crates still build and behave as in v0.35.0 while they are transformed phase by
+phase. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
+
+## Quick start
+
+```powershell
+cargo run -p rah-cli -- --preset dev
+```
+
+The `dev` preset mounts `session-jsonl` (logs in `.rah/sessions`),
+`tools-builtin` (`echo` and `fs.read` bounded to the current directory),
+`model-mock`, `loop-react` and `frontend-cli`. Type text to run a turn. Try
+`read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
+`/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
+`--session <id>` resumes a session. The `dev` preset mounts no policy plugin,
+so `rah` prints an `UNGUARDED` warning; a policy plugin arrives in P4.
+
+Compose your own plugins with a distribution file:
+
+```toml
+# rah.toml — run with: rah --config rah.toml
+[[plugin]]
+use = "session-jsonl"
+config = { dir = ".rah/sessions" }
+
+[[plugin]]
+use = "model-mock"
+id = "model-a"            # instance id; defaults to the `use` name
+config = { label = "A" }
+
+[[plugin]]
+use = "loop-react"
+config = { max_rounds = 8 }
+
+[[plugin]]
+use = "frontend-cli"
+```
 
 | Phase | Scope |
 |---|---|
@@ -63,7 +98,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The normal suite uses deterministic local fixtures and needs no network access,
-credentials, paid API or real model. Known issue: on some Windows hosts, 44
+credentials, paid API or real model. Known issue: on some Windows hosts, 43-44
 legacy `rah-desktop` tests fail with `RepositoryMemberStale`, a failure that is
 pre-existing since v0.34.0 (see the
 [v0.35 release gate](docs/legacy/RAH_V0.35_RELEASE_GATE.md)). CI runs on Linux,

@@ -2,6 +2,7 @@
 members = [
     "crates/rah-cli",
     "crates/rah-desktop",
+    "crates/rah-api",
     "crates/rah-kernel",
     "crates/rah-model",
     "crates/rah-profile-composition",
@@ -13,11 +14,17 @@ members = [
     "crates/rah-tools",
     "crates/rah-tools-mcp",
     "crates/rah-tools-plugin",
+    "plugins/frontend-cli",
+    "plugins/loop-react",
+    "plugins/model-mock",
+    "plugins/session-jsonl",
+    "plugins/tools-builtin",
 ]
 # rah-desktop is legacy and scheduled for removal (pivot plan phase P5); it is
 # still built and tested by `--workspace`, but not by a bare `cargo build`.
 default-members = [
     "crates/rah-cli",
+    "crates/rah-api",
     "crates/rah-kernel",
     "crates/rah-model",
     "crates/rah-profile-composition",
@@ -29,6 +36,11 @@ default-members = [
     "crates/rah-tools",
     "crates/rah-tools-mcp",
     "crates/rah-tools-plugin",
+    "plugins/frontend-cli",
+    "plugins/loop-react",
+    "plugins/model-mock",
+    "plugins/session-jsonl",
+    "plugins/tools-builtin",
 ]
 resolver = "3"
 

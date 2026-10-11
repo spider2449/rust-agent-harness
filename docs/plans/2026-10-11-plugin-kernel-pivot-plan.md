@@ -319,10 +319,19 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 在 `apply` 或 dispose effect 內呼叫 lifecycle 操作會回傳 `Reentrant`，不會 deadlock。巢狀 plugin（`scope.plugin(...)`）延後。
 
 ### P2：`rah-api`＋最小的端到端流程
-- [ ] service trait（第 4 節）
-- [ ] `model-mock`、`loop-react`、`tools-builtin`（echo、fs.read）、`session-jsonl`、`frontend-cli`
-- [ ] `rah` binary 讀 `rah.toml` 並組合
-- 驗收：`rah --preset dev` 用 mock model 完成「ToolCall → 結果 → 回覆」，session log 可以 resume 和 fork；**在執行中熱替換 model plugin** 的測試通過
+- [x] service trait（第 4 節）：`model`、`loop`、`session`、tools＋`ToolInvoker`、標準 hook（2026-10-11 完成）
+- [x] `model-mock`、`loop-react`、`tools-builtin`（echo、fs.read）、`session-jsonl`、`frontend-cli`
+- [x] `rah` binary 讀 `rah.toml` 並組合（`rah-cli` 改寫；legacy demo 移除）
+- 驗收：`rah --preset dev` 用 mock model 完成「ToolCall → 結果 → 回覆」，session log 可以 resume 和 fork；**在執行中熱替換 model plugin** 的測試通過（全部由 `crates/rah-cli/tests` 驗證）
+- 實作備註：
+  - 資料型別（`ContextItem`、`ModelRequest`、`ModelEvent`、`SessionEntry`、`ToolEffect` 等）放在 `rah-protocol`；service trait 放在 `rah-api`，並由 `rah-api` re-export kernel。
+  - **Tools 的 service key 是 `rah-api` 私有的**：tool provider 只能用 `provide_tools` 註冊，loop 只能透過 `ToolInvoker` 呼叫 tool，因此每次呼叫一定經過 `tool.before_invoke`。policy hook panic 一律視為拒絕；`Ask` 沒有 approver 也視為拒絕。
+  - 兩種使用 service 的方式：`inject` 是靜態綁定（provider 消失就重啟）；`KernelHandle::get` 是每次使用時解析。`loop-react` 每一輪才解析 model、`frontend-cli` 每次才解析 loop 和 session，所以換 model 不會重啟 loop 或 CLI。
+  - Kernel 新增 `get_all`（列出某 service 的所有 instance）和 `has_handlers`（判斷是否有 policy）。
+  - 每個 turn 是 `loop-react` scope 擁有的 task；loop 被卸載時 turn 會被取消，事件串流結束。
+  - Session log 重建 context 時，沒有結果的 tool call 會補上「結果未記錄、效果未知、不重放」的錯誤結果。
+  - `dev` preset 不掛 policy，啟動時印 `UNGUARDED` 警告；有 policy 的 `default` preset 在 P4。
+  - 尚未做：REPL 的 Ctrl-C 只會結束程式，不會只取消當前 turn；`ToolStarted` 事件在 tool 執行完後才送出（順序正確，但時間點延後）。
 
 ### P3：真實模型
 - [ ] `model-openai-responses`、`model-llamacpp`（從 `rah-runtime-openai` 拆出，fixture 測試沿用）

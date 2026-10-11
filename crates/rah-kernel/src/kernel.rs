@@ -280,6 +280,38 @@ impl KernelHandle {
         self.lookup(key, Some(&instance.to_owned()))
     }
 
+    /// Every registered instance of a service, oldest first, as
+    /// `(instance, service)` pairs. Lookups are not bindings: callers that
+    /// resolve per use are unaffected when providers come and go.
+    pub fn get_all<S: ?Sized + Send + Sync + 'static>(
+        &self,
+        key: ServiceKey<S>,
+    ) -> Vec<(String, Arc<S>)> {
+        let Some(inner) = self.inner.upgrade() else {
+            return Vec::new();
+        };
+        let state = inner.state();
+        let name = key.name();
+        let mut entries: Vec<&ServiceEntry> =
+            state.services.get(&name).into_iter().flatten().collect();
+        entries.sort_by_key(|e| e.seq);
+        entries
+            .into_iter()
+            .filter_map(|e| Some((e.instance.clone(), e.get::<S>(&name).ok()?)))
+            .collect()
+    }
+
+    /// Whether any handler is registered for hook `H`.
+    pub fn has_handlers<H: 'static>(&self) -> bool {
+        self.inner.upgrade().is_some_and(|inner| {
+            inner
+                .state()
+                .hooks
+                .get(&TypeId::of::<H>())
+                .is_some_and(|list| !list.is_empty())
+        })
+    }
+
     fn lookup<S: ?Sized + Send + Sync + 'static>(
         &self,
         key: ServiceKey<S>,

@@ -1,0 +1,12 @@
+[package]
+name = "rah-plugin-frontend-cli"
+version.workspace = true
+edition.workspace = true
+description = "Terminal REPL frontend plugin"
+
+[dependencies]
+futures.workspace = true
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util"] }

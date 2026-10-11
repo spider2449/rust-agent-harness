@@ -41,7 +41,9 @@ documented in [docs/legacy/SECURITY.md](legacy/SECURITY.md).
 
 ## Transitional note
 
-Until phase P4 delivers `policy-authority` and `ToolInvoker`, the legacy
-crates on `master` keep their v0.35.0 behavior. Model tool requests still go
-through the legacy host port, permission dispatch and `ToolRegistry`, as
-documented in the legacy security model.
+`ToolInvoker` and the hook chain exist (P2), but no policy plugin does yet. The
+`dev` preset therefore runs **unguarded**, and `rah` says so at startup.
+`policy-authority` and the `default` preset arrive in P4. Until then, the legacy
+crates still on `master` (notably `rah-desktop`) keep their v0.35.0 behavior:
+their model tool requests go through the legacy host port, permission dispatch
+and `ToolRegistry`, as documented in the legacy security model.

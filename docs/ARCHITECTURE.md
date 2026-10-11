@@ -67,15 +67,29 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, after phase P1)
+## Current state (transitional, after phase P2)
 
-`rah-kernel` is implemented (P1). `rah-api` and the first plugins arrive in P2.
-Until then `master` still contains the legacy crates, which are transformed or
-removed phase by phase:
+Implemented:
+
+- `rah-kernel` (P1) and `rah-api` (P2): service contracts `model`, `loop`,
+  `session`, tools with `ToolInvoker`, and the standard hooks
+  `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
+  `model.before_request`.
+- Plugins in `plugins/`: `model-mock`, `loop-react`, `tools-builtin` (`echo`,
+  workspace-bounded `fs.read`), `session-jsonl` and `frontend-cli`.
+- `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
+  `rah.toml` or the `dev` preset and warns `UNGUARDED` when no
+  `tool.before_invoke` handler is mounted.
+
+The tools service key is private to `rah-api`. Tool providers register with
+`provide_tools`, and the only way to call a tool is `ToolInvoker::invoke`.
+`loop-react` resolves the model on every round, and `frontend-cli` resolves the
+loop and session per use, so swapping a model plugin restarts neither.
+
+The remaining legacy crates are transformed or removed phase by phase:
 
 | Crate | Fate | Phase |
 |---|---|---|
-| `rah-protocol` | kept; gains model-event and session-log types | P2 |
 | `rah-runtime-openai` | split into `model-openai-responses`, `model-llamacpp`, `loop-react` | P3 |
 | `rah-runtime`, `rah-model` | replaced by `rah-api` services and `model-mock` | P3 |
 | `rah-tools` | `Tool` moves to `rah-api`; tools split into `tools-builtin`, `tools-repo`, `tools-shell`; authorization becomes `policy-authority` | P4 |
@@ -83,7 +97,6 @@ removed phase by phase:
 | `rah-tools-plugin` | generalized into `rah-plugin-host-process` | P4 |
 | `rah-sandbox` | becomes `sandbox-process` | P4 |
 | `rah-session`, `rah-profile-composition` | removed | P4 |
-| `rah-cli` | becomes the `rah` distribution binary and `frontend-cli` | P2 |
 | `rah-desktop` | legacy, excluded from default members; removed once `frontend-web` reaches parity | P5 |
 
 Removed in P0: `rah-runtime-codex` (the Codex adapter and its certification

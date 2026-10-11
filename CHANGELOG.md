@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P1)
+## Unreleased — plugin-kernel pivot (phases P0–P2)
+
+### P2: `rah-api`, first plugins and the `rah` binary
+
+- `rah-protocol`: provider-neutral `ContextItem`, `ModelRequest`, `ModelEvent`,
+  session log types (`SessionEntry`, `SessionRecord`, `ToolEffect`,
+  `ForkPoint`, `SessionInfo`) and `FromStr` for `SessionId`.
+- New `rah-api` crate, which re-exports the kernel. It defines the service
+  contracts `model`, `loop` and `session`, plus the tools contract. The tools
+  service key is private, so `ToolInvoker` is the only way to reach a tool,
+  and it always runs `tool.before_invoke`. A policy panic, an `Ask` with no
+  approver, or a post-processing failure all fail closed. Effects are
+  classified by tool permission, and uncertain effects are never retried.
+  Standard hooks: `tool.before_invoke`, `tool.approval`, `tool.after_invoke`
+  and `model.before_request`. `rebuild_context` replays a log without
+  re-executing tool calls.
+- Kernel: `KernelHandle::get_all` and `has_handlers`.
+- New plugins under `plugins/`:
+  - `model-mock`: deterministic and rule-based.
+  - `tools-builtin`: `echo`, and `fs.read` bounded to the workspace, with
+    traversal, absolute-path, escaping-symlink and size checks.
+  - `session-jsonl`: append-only, with forks that write only a header and
+    repair of a torn final line.
+  - `loop-react`: the model resolved per round, scope-owned turn tasks, and
+    cancellation.
+  - `frontend-cli`: a REPL with `/new`, `/sessions`, `/resume`, `/fork`,
+    `/history`, `/plugins`, plus single-prompt mode.
+- `rah-cli` is rewritten as the `rah` distribution binary: a plugin catalog,
+  `rah.toml` files, the `dev` preset, flag overrides and an `UNGUARDED`
+  warning when no policy is mounted. The legacy CLI demo and its tests are
+  removed.
+- Architecture tests enforce `plugins/* -> rah-api, rah-protocol` and
+  `rah-api -> rah-kernel, rah-protocol`. End-to-end tests cover the tool round
+  trip, workspace-bounded `fs.read`, resume across processes, forks,
+  hot-swapping the model plugin without restarting the loop, cancellation,
+  replacing the loop plugin, the REPL and the binary.
 
 ### P1: `rah-kernel`
 

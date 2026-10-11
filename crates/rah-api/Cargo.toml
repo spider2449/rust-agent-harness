@@ -1,0 +1,19 @@
+[package]
+name = "rah-api"
+version.workspace = true
+edition.workspace = true
+description = "RAH service contracts: model, loop, tools, session and hooks"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+rah-kernel = { path = "../rah-kernel" }
+rah-protocol = { path = "../rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
