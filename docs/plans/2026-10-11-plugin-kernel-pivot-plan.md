@@ -342,13 +342,13 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - [ ] `tools-repo-write`（patch、edit-files、create-file）
 - [ ] 第二種 loop（例如 plan-and-execute），證明 loop 確實可以替換
 
-## 9. 待決事項（需要人決定）
+## 9. 已決事項（2026-10-11 核准，記錄於 ADR 0036 第 5 節）
 
-1. **預設 preset 是否強制掛 `policy-authority`？** 建議：`default` 掛、`minimal` 不掛但大聲警告。
-2. **專案名稱**：沿用 RAH，還是更名以區隔 legacy？建議沿用，版本號直接跳到 `0.40.0` 代表新架構的起點。
-3. **Desktop**：建議 P5 只做 Web UI；Tauri 殼列為選配。
-4. **Repo 修改工具範圍**：P6 只搬 3 個（第 5.2 節），還是全部重做？
-5. **文件語言**：新的 ADR、AGENTS.md 維持英文（與既有文件一致），計畫類文件可以用中文？
+1. **預設 policy**：`default` preset 掛 `policy-authority`；`minimal` 不掛，但啟動時要大聲警告 *unguarded*。
+2. **名稱與版本**：沿用 RAH；新架構的第一個 release 是 `0.40.0`（workspace 版本在準備該 release 前維持 `0.35.0`）。
+3. **Frontend**：P5 只做 `frontend-web`；Tauri 殼列為選配。
+4. **Repo 修改工具**：只搬 `repo.patch`、`repo.edit-files`、`repo.create-file` 到 `tools-repo-write`（P6），其餘留在 legacy。
+5. **文件語言**：ADR、`AGENTS.md`、架構與安全文件用英文；計畫類文件可以用中文。
 
 ## 10. 風險
 

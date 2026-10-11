@@ -1,6 +1,6 @@
 # ADR 0008 — Process plugin adapter
 
-Status: Accepted
+Status: Legacy (authority-first line, see [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md)); applies on master only where a plugin explicitly adopts it. Original status: Accepted
 
 ## Context
 

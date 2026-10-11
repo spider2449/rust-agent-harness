@@ -1,6 +1,6 @@
 # ADR 0025: HostExplicit Reviewed File-Deletion Boundary
 
-Status: Accepted
+Status: Superseded by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) on master (2026-10-11); authoritative only for the `legacy/authority-first` line. Original status: Accepted
 
 Date: 2026-09-10
 

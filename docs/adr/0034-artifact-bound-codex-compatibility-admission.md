@@ -1,6 +1,6 @@
 # ADR 0034 — Artifact-bound deterministic Codex compatibility admission
 
-Status: Accepted (design decision; production implementation pending Task 510C2)
+Status: Superseded by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) on master (2026-10-11); authoritative only for the `legacy/authority-first` line. Original status: Accepted (design decision; production implementation pending Task 510C2)
 
 Date: 2026-10-06
 
@@ -34,9 +34,9 @@ fixture tests are complementary. A fake app-server proves adapter behavior;
 it cannot by itself admit a real executable. Model prompting, account state,
 quota and remote provider success are not compatibility evidence.
 
-The normative [V1 specification](../CODEX_COMPATIBILITY_CONTRACT_V1.md) defines
+The normative [V1 specification](../legacy/CODEX_COMPATIBILITY_CONTRACT_V1.md) defines
 the seven layers, typed surface, local behavioral witness and distribution
-discovery. The [C1 report/C2 matrix](../plans/2026-10-06-task-510c1-deterministic-compatibility-contract.md)
+discovery. The [C1 report/C2 matrix](../legacy/plans/2026-10-06-task-510c1-deterministic-compatibility-contract.md)
 defines implementation closure. These are part of this decision.
 
 ## Admission and evidence ownership

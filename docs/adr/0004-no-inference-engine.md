@@ -1,6 +1,6 @@
 # ADR 0004 — RAH does not implement model inference
 
-Status: Accepted
+Status: Accepted; reaffirmed by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) for the plugin-kernel architecture.
 
 ## Context
 

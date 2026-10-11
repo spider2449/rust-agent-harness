@@ -1,6 +1,6 @@
 # ADR 0005 — Codex uses the app-server process boundary
 
-Status: Accepted
+Status: Superseded by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) on master (2026-10-11); authoritative only for the `legacy/authority-first` line. Original status: Accepted
 
 Version-pinning disposition (2026-10-06): [ADR 0034](0034-artifact-bound-codex-compatibility-admission.md)
 supersedes decision 1's version pin and the version-check consequence for future

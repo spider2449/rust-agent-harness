@@ -54,26 +54,26 @@ security documentation, and accepted ADRs as authority:
 - Task 013 required direct execution, stdout/stderr/exit capture, timeout,
   cancellation readiness, cwd validation, and `Execute`; it explicitly rejected
   a shell-string primary API
-  ([`RAH_IMPLEMENTATION_V0.1.md:762`](../RAH_IMPLEMENTATION_V0.1.md#L762)).
+  ([`RAH_IMPLEMENTATION_V0.1.md:762`](RAH_IMPLEMENTATION_V0.1.md#L762)).
 - Stable boundary candidates include `AgentRuntime`, `Tool`, `AgentEvent`, tool
   DTOs, and `Sandbox`; security-model changes require an ADR
   ([`ARCHITECTURE_GUARDRAILS.md:47`](ARCHITECTURE_GUARDRAILS.md#L47),
   [`ARCHITECTURE_GUARDRAILS.md:163`](ARCHITECTURE_GUARDRAILS.md#L163)).
 - ADR 0003 makes `Tool`/`ToolRegistry` the common execution boundary
-  ([`0003-tools-are-extension-boundary.md:9`](adr/0003-tools-are-extension-boundary.md#L9)).
+  ([`0003-tools-are-extension-boundary.md:9`](../adr/0003-tools-are-extension-boundary.md#L9)).
 - ADR 0005 keeps Codex-owned command execution disabled unless it passes through
   RAH registry, permission, and sandbox policy; interactive Codex approvals are
   unsupported
-  ([`0005-codex-app-server-runtime.md:19`](adr/0005-codex-app-server-runtime.md#L19)).
+  ([`0005-codex-app-server-runtime.md:19`](../adr/0005-codex-app-server-runtime.md#L19)).
 - ADR 0006 makes Codex dynamic tools untrusted requests, keeps permission and
   execution authority in RAH, and requires Codex-owned shell/approval surfaces
   to remain disabled
-  ([`0006-codex-dynamic-tool-bridge.md:15`](adr/0006-codex-dynamic-tool-bridge.md#L15)).
+  ([`0006-codex-dynamic-tool-bridge.md:15`](../adr/0006-codex-dynamic-tool-bridge.md#L15)).
 - ADRs 0007 and 0008 establish best-effort cancellation, no uncertain replay,
   bounded process data, minimized environment, and truthful non-sandbox claims
   for external process boundaries
-  ([`0007-rah-mcp-tool-adapter.md:40`](adr/0007-rah-mcp-tool-adapter.md#L40),
-  [`0008-process-plugin-adapter.md:19`](adr/0008-process-plugin-adapter.md#L19)).
+  ([`0007-rah-mcp-tool-adapter.md:40`](../adr/0007-rah-mcp-tool-adapter.md#L40),
+  [`0008-process-plugin-adapter.md:19`](../adr/0008-process-plugin-adapter.md#L19)).
 - The current security document already says process supervision and path checks
   are not strong OS isolation
   ([`SECURITY.md:29`](SECURITY.md#L29)).
@@ -87,19 +87,19 @@ No accepted ADR authorizes arbitrary model-selected executable authority.
 `PermissionLevel` is a flat, provider-neutral enum. `Execute` means only
 "subprocess execution is required"; it carries no executable, argv, cwd,
 environment, network, filesystem, timeout, or approval policy
-([`tools.rs:80`](../crates/rah-protocol/src/tools.rs#L80)).
+([`tools.rs:80`](../../crates/rah-protocol/src/tools.rs#L80)).
 
 Both runtimes treat permission values as exact membership in a host-owned list:
 
 - `MinimalTestRuntime` defaults to `None`, adds values through `with_permission`,
   and checks the registered tool's current definition before dispatch
-  ([`minimal.rs:20`](../crates/rah-runtime/src/minimal.rs#L20),
-  [`minimal.rs:198`](../crates/rah-runtime/src/minimal.rs#L198)).
+  ([`minimal.rs:20`](../../crates/rah-runtime/src/minimal.rs#L20),
+  [`minimal.rs:198`](../../crates/rah-runtime/src/minimal.rs#L198)).
 - Generic Codex Tool Bridge receives `allowed_permissions` from its host
   constructor, re-reads the registered definition immediately before execution,
   and requires its permission to be in that list
-  ([`runtime.rs:81`](../crates/rah-runtime-codex/src/runtime.rs#L81),
-  [`bridge.rs:330`](../crates/rah-runtime-codex/src/bridge.rs#L330)).
+  ([`runtime.rs:81`](../../crates/rah-runtime-codex/src/runtime.rs#L81),
+  [`bridge.rs:330`](../../crates/rah-runtime-codex/src/bridge.rs#L330)).
 
 Therefore `Execute` is a broad first gate, not a complete process authorization.
 It must be combined with a host execution policy.
@@ -108,7 +108,7 @@ It must be combined with a host execution policy.
 
 The existing built-in is named `shell.exec`, but it does not invoke a shell. Its
 definition advertises direct execution and requires `Execute`
-([`shell_exec.rs:36`](../crates/rah-tools/src/shell_exec.rs#L36)). Its JSON input
+([`shell_exec.rs:36`](../../crates/rah-tools/src/shell_exec.rs#L36)). Its JSON input
 lets the model provide:
 
 ```json
@@ -122,14 +122,14 @@ lets the model provide:
 
 The parser rejects unknown fields, an empty program, non-string argv elements,
 and timeout values outside the tool's configured maximum
-([`shell_exec.rs:61`](../crates/rah-tools/src/shell_exec.rs#L61),
-[`shell_exec.rs:117`](../crates/rah-tools/src/shell_exec.rs#L117)). It then passes
+([`shell_exec.rs:61`](../../crates/rah-tools/src/shell_exec.rs#L61),
+[`shell_exec.rs:117`](../../crates/rah-tools/src/shell_exec.rs#L117)). It then passes
 the model-selected program, argv, and cwd unchanged to `Sandbox::execute`.
 
 On completion it lossily decodes all captured bytes and returns one JSON
 `ToolContent` containing stdout, stderr, optional exit code, and `timed_out`.
 `is_error` is always false, including timeout and non-zero exit
-([`shell_exec.rs:88`](../crates/rah-tools/src/shell_exec.rs#L88)).
+([`shell_exec.rs:88`](../../crates/rah-tools/src/shell_exec.rs#L88)).
 
 Current risks are:
 
@@ -144,20 +144,20 @@ Current risks are:
 
 The current unit tests prove only direct `rustc --version` execution, result
 capture, permission metadata, and rejection of a string in place of argv
-([`shell_exec.rs:218`](../crates/rah-tools/src/shell_exec.rs#L218)).
+([`shell_exec.rs:218`](../../crates/rah-tools/src/shell_exec.rs#L218)).
 
 ### 2.3 `ToolRegistry` and `ToolContext`
 
 `ToolRegistry` stores `ToolName -> Arc<dyn Tool>`, rejects duplicate names,
 returns sorted definitions, fails unknown lookup, and dispatches the untrusted
 input to `Tool::execute`
-([`rah-tools/src/lib.rs:54`](../crates/rah-tools/src/lib.rs#L54),
-[`rah-tools/src/lib.rs:68`](../crates/rah-tools/src/lib.rs#L68)). It intentionally
+([`rah-tools/src/lib.rs:54`](../../crates/rah-tools/src/lib.rs#L54),
+[`rah-tools/src/lib.rs:68`](../../crates/rah-tools/src/lib.rs#L68)). It intentionally
 does not implement permission checks; the runtime/bridge performs them.
 
 `ToolContext` is an empty struct. The `Tool::execute` contract receives no
 cancellation token, deadline, audit sink, session identity, or host capability
-resolver ([`rah-tools/src/lib.rs:21`](../crates/rah-tools/src/lib.rs#L21)).
+resolver ([`rah-tools/src/lib.rs:21`](../../crates/rah-tools/src/lib.rs#L21)).
 
 This is important: a tool cannot observe a typed cancellation request through
 the public contract. Current runtimes cancel tool work by dropping or aborting
@@ -169,22 +169,22 @@ reason or wait for a reported process-tree termination outcome.
 `SandboxPolicy` describes `ReadOnly`, `WorkspaceWrite`, and `FullAccess`.
 `CommandSpec` contains only program, argv, optional cwd, and optional timeout;
 `ExecutionResult` contains unbounded byte vectors, optional exit code, and a
-timeout flag ([`rah-sandbox/src/lib.rs:14`](../crates/rah-sandbox/src/lib.rs#L14)).
+timeout flag ([`rah-sandbox/src/lib.rs:14`](../../crates/rah-sandbox/src/lib.rs#L14)).
 There is no environment, stdin, output-limit, process-tree, or termination-result
 field.
 
 `ProcessSandbox` explicitly states that it is not OS isolation and accepts only
 `FullAccess`. Requests for `ReadOnly` or `WorkspaceWrite` fail because it cannot
 enforce them
-([`process.rs:11`](../crates/rah-sandbox/src/process.rs#L11),
-[`process.rs:51`](../crates/rah-sandbox/src/process.rs#L51)).
+([`process.rs:11`](../../crates/rah-sandbox/src/process.rs#L11),
+[`process.rs:51`](../../crates/rah-sandbox/src/process.rs#L51)).
 
 The cwd defaults to the canonical workspace root. A requested cwd is resolved as
 an existing path through `WorkspacePolicy` and must be a directory. The policy
 canonicalizes its root and candidate, resolves symlinks, and requires the result
 to start with the canonical root
-([`process.rs:27`](../crates/rah-sandbox/src/process.rs#L27),
-[`workspace.rs:43`](../crates/rah-sandbox/src/workspace.rs#L43)). Tests cover
+([`process.rs:27`](../../crates/rah-sandbox/src/process.rs#L27),
+[`workspace.rs:43`](../../crates/rah-sandbox/src/workspace.rs#L43)). Tests cover
 parent traversal, absolute outside paths, and symlink escape. On Windows,
 `std::fs::canonicalize` returns extended-length/verbatim paths, so policy and
 spawn code must consistently accept canonical `\\?\...` forms rather than
@@ -199,7 +199,7 @@ process token.
 `ProcessSandbox` constructs `tokio::process::Command::new(model_program)`, adds
 literal argv entries, sets the validated cwd, sets stdin to null, pipes stdout
 and stderr, enables `kill_on_drop`, and calls `output()`
-([`process.rs:64`](../crates/rah-sandbox/src/process.rs#L64)). Consequences:
+([`process.rs:64`](../../crates/rah-sandbox/src/process.rs#L64)). Consequences:
 
 - No `cmd.exe`, PowerShell, `sh`, or Bash is explicitly invoked.
 - `Command::new` searches for a non-absolute program. Rust documents that the
@@ -217,7 +217,7 @@ and stderr, enables `kill_on_drop`, and calls `output()`
   `kill_on_drop(true)` attempts to kill the direct child, and RAH immediately
   returns empty stdout/stderr, no exit code, and `timed_out: true`. It does not
   expose whether termination succeeded or whether the child was reaped
-  ([`process.rs:79`](../crates/rah-sandbox/src/process.rs#L79)). Tokio documents
+  ([`process.rs:79`](../../crates/rah-sandbox/src/process.rs#L79)). Tokio documents
   kill-on-drop as invoking a kill operation on the child wrapper and describes
   reaping after dropped child handles as best effort
   ([Tokio `Command`](https://docs.rs/tokio/latest/tokio/process/struct.Command.html)).
@@ -229,24 +229,24 @@ token, namespace, seccomp filter, Landlock domain, cgroup, or macOS sandbox.
 
 The public lifecycle provides `ToolRequested`, `ToolStarted`, and `ToolFinished`;
 terminal operation events are `Completed`, `Failed`, or `Cancelled`
-([`events.rs:38`](../crates/rah-protocol/src/events.rs#L38)). There is no event for
+([`events.rs:38`](../../crates/rah-protocol/src/events.rs#L38)). There is no event for
 process spawn, exit status, timeout, output truncation, or termination outcome.
 
 `MinimalTestRuntime` emits `ToolRequested`, checks the current registered
 permission, emits `ToolStarted`, and selects between cancellation and
 `ToolRegistry::execute`. If cancellation wins, the tool future is dropped and
 the runtime emits `Cancelled`; it does not await a tool cancellation handshake
-([`minimal.rs:198`](../crates/rah-runtime/src/minimal.rs#L198),
-[`minimal.rs:249`](../crates/rah-runtime/src/minimal.rs#L249)).
+([`minimal.rs:198`](../../crates/rah-runtime/src/minimal.rs#L198),
+[`minimal.rs:249`](../../crates/rah-runtime/src/minimal.rs#L249)).
 
 The Generic Codex Tool Bridge performs the same observable sequence. It runs
 registry execution in a Tokio task; turn cancellation aborts that task, responds
 to app-server with a cancellation error, and marks the call cancelled
-([`bridge.rs:360`](../crates/rah-runtime-codex/src/bridge.rs#L360),
-[`bridge.rs:449`](../crates/rah-runtime-codex/src/bridge.rs#L449)). The separately
+([`bridge.rs:360`](../../crates/rah-runtime-codex/src/bridge.rs#L360),
+[`bridge.rs:449`](../../crates/rah-runtime-codex/src/bridge.rs#L449)). The separately
 implemented `AgentRuntime::cancel` sends `turn/interrupt` and waits for Codex's
 terminal `interrupted` notification
-([`runtime.rs:255`](../crates/rah-runtime-codex/src/runtime.rs#L255)).
+([`runtime.rs:255`](../../crates/rah-runtime-codex/src/runtime.rs#L255)).
 
 Thus cancellation reaches `ShellExecTool` only as execution-future destruction.
 The direct child gets a best-effort kill through `kill_on_drop`; descendants are
@@ -259,22 +259,22 @@ Bridge mode remains explicitly opt-in. Codex is configured with
 `approvalPolicy: never`, read-only Codex sandbox settings, disabled shell and
 unified execution features, no MCP servers, and no Codex-owned file/web/app
 capabilities
-([`runtime.rs:203`](../crates/rah-runtime-codex/src/runtime.rs#L203),
-[`runtime.rs:305`](../crates/rah-runtime-codex/src/runtime.rs#L305)). These are
+([`runtime.rs:203`](../../crates/rah-runtime-codex/src/runtime.rs#L203),
+[`runtime.rs:305`](../../crates/rah-runtime-codex/src/runtime.rs#L305)). These are
 defense in depth; RAH policy is authoritative.
 
 The bridge validates thread/turn ownership and the advertised alias snapshot,
 then emits `ToolRequested`. Immediately before `ToolStarted` it re-reads the
 tool definition and checks current permission against the host list. Only then
 does it call `ToolRegistry::execute`
-([`bridge.rs:219`](../crates/rah-runtime-codex/src/bridge.rs#L219),
-[`bridge.rs:316`](../crates/rah-runtime-codex/src/bridge.rs#L316)).
+([`bridge.rs:219`](../../crates/rah-runtime-codex/src/bridge.rs#L219),
+[`bridge.rs:316`](../../crates/rah-runtime-codex/src/bridge.rs#L316)).
 
 Bridge call state is keyed by `(thread_id, turn_id, call_id)`. A duplicate with
 identical tool and arguments joins the in-flight call or receives the retained
 response without re-execution. Reuse with different content fails, aborts the
 task, and invalidates the call
-([`bridge.rs:257`](../crates/rah-runtime-codex/src/bridge.rs#L257)). These
+([`bridge.rs:257`](../../crates/rah-runtime-codex/src/bridge.rs#L257)). These
 at-most-once protections must remain exactly as implemented. They do not prove
 globally exactly-once side effects after host crash or ambiguous process state.
 
@@ -456,7 +456,7 @@ resolution because the executable path is already absolute.
 The existing process-plugin adapter provides a repository precedent: it
 canonicalizes a host program, uses an isolated cwd, calls `env_clear`, adds only
 `RAH_PLUGIN_PROTOCOL`, optional Windows `SystemRoot`, and explicit host values
-([`rah-tools-plugin/src/lib.rs:235`](../crates/rah-tools-plugin/src/lib.rs#L235)).
+([`rah-tools-plugin/src/lib.rs:235`](../../crates/rah-tools-plugin/src/lib.rs#L235)).
 
 ## 9. Stdin
 

@@ -5,7 +5,7 @@ Status: **FINAL RELEASE OF THE AUTHORITY-FIRST ARCHITECTURE (LEGACY LINE)**.
 v0.35.0 closes RAH's original "host-owned authority, fixed extension points"
 architecture. After this release, `master` pivots to a plugin kernel
 ("everything is a plugin"); see the
-[plugin-kernel pivot plan](plans/2026-10-11-plugin-kernel-pivot-plan.md).
+[plugin-kernel pivot plan](../plans/2026-10-11-plugin-kernel-pivot-plan.md).
 The legacy line is preserved at annotated tag `v0.35.0` and branch
 `legacy/authority-first`. That branch accepts reference use and critical fixes
 only; no feature work continues there.

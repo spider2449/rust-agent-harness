@@ -122,7 +122,7 @@ within Task 510C, not another Codex-version certification campaign.
 The historical classification C and all unrun implementation controls above
 remain accurate for Task 510C. [Task 510C1](2026-10-06-task-510c1-deterministic-compatibility-contract.md)
 now defines the deterministic local contract and accepts
-[ADR 0034](../adr/0034-artifact-bound-codex-compatibility-admission.md), explicitly
+[ADR 0034](../../adr/0034-artifact-bound-codex-compatibility-admission.md), explicitly
 superseding ADR 0030's exact-version admission authority in design. Typed
 schema, actual-executable scripted local lifecycle/Tool witnesses and bounded
 distribution discovery are required; the existing field-name probe is not

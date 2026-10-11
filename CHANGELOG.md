@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — plugin-kernel pivot (phase P0)
+
+- Accept [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md):
+  plugin kernel, everything is a plugin. It supersedes ADRs 0001, 0002, 0003,
+  0005, 0006, 0011, 0021–0026, 0030, 0033 and 0034 on `master`, reaffirms
+  ADR 0004, and marks the other ADRs as legacy.
+- Rewrite `AGENTS.md` for the plugin kernel. The previous instructions are in
+  `docs/legacy/AGENTS.authority-first.md`.
+- Archive the legacy README, architecture, security, guardrails, Codex
+  documents, release gates, roadmaps, audits and pre-pivot plans under
+  `docs/legacy/`. Add new transitional `docs/ARCHITECTURE.md` and
+  `docs/SECURITY.md`.
+- Remove `rah-runtime-codex` (the Codex adapter, certification harness and live
+  examples) and the empty `rah-core` crate. Remove the `provider-codex` and
+  `certification-harness` features and the Codex-only code from `rah-desktop`.
+  The default-build test set is unchanged apart from one Codex-only
+  architecture test.
+- Exclude `rah-desktop` from the workspace default members. It is still covered
+  by `--workspace`.
+
 ## v0.35.0 - final authority-first release (2026-10-11)
 
 > **LEGACY LINE: FINAL RELEASE OF THE AUTHORITY-FIRST ARCHITECTURE.**
@@ -33,7 +53,7 @@
 **DESKTOP_WINDOWS_TESTS_NOT_GREEN**: 44 local Windows `rah-desktop` tests fail
 (43 `RepositoryMemberStale`, reproduced unchanged at v0.34.0; 1 flaky); all other
 crates pass. Source-only release; no executable or installer assets.
-See [the release gate](docs/RAH_V0.35_RELEASE_GATE.md).
+See [the release gate](docs/legacy/RAH_V0.35_RELEASE_GATE.md).
 
 ## v0.34.0 - released (2026-10-09)
 
@@ -71,7 +91,7 @@ documented source-only waiver. Real Responses API acceptance is not certified;
 the waiver is not live PASS. **NSIS_INSTALLER_NOT_VERIFIED** remains; no
 executable or installer assets were uploaded, and cross-platform live behavior
 is not certified.
-See [the release gate](docs/RAH_V0.34_RELEASE_GATE.md) for validation and limits.
+See [the release gate](docs/legacy/RAH_V0.34_RELEASE_GATE.md) for validation and limits.
 
 
 ## v0.33.0 - released (2026-10-01)

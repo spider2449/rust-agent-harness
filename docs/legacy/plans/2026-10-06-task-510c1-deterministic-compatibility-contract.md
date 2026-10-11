@@ -20,7 +20,7 @@ versions, dependencies and authority implementation are outside C1.
 
 **A — DETERMINISTIC COMPATIBILITY CONTRACT DEFINED; ADR 0030 SUPERSEDED**
 
-[ADR 0034 — Artifact-bound deterministic Codex compatibility admission](../adr/0034-artifact-bound-codex-compatibility-admission.md)
+[ADR 0034 — Artifact-bound deterministic Codex compatibility admission](../../adr/0034-artifact-bound-codex-compatibility-admission.md)
 is Accepted as a design decision with C2 implementation pending. It explicitly
 supersedes ADR 0030's exact-version admission portions and corresponding pins
 in ADRs 0005/0006, while retaining process/Tool/security restrictions and immutable

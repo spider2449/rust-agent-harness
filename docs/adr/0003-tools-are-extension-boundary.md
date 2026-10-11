@@ -1,6 +1,6 @@
 # ADR 0003 — Tools are the initial extension boundary
 
-Status: Accepted
+Status: Superseded by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) on master (2026-10-11); authoritative only for the `legacy/authority-first` line. Original status: Accepted
 
 ## Context
 

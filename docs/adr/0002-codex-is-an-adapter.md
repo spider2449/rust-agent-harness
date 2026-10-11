@@ -1,6 +1,6 @@
 # ADR 0002 — Codex is an adapter, not the architecture
 
-Status: Accepted
+Status: Superseded by [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md) on master (2026-10-11); authoritative only for the `legacy/authority-first` line. Original status: Accepted
 
 ## Context
 

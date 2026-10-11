@@ -1,6 +1,6 @@
 # ADR 0035 — Host-observed conversation work-log memory
 
-Status: Accepted
+Status: Legacy (authority-first line, see [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md)); applies on master only where a plugin explicitly adopts it. Original status: Accepted
 
 Date: 2026-10-11
 

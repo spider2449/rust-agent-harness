@@ -1,6 +1,6 @@
 # ADR 0031 — Bounded untracked-file correction authority
 
-Status: Accepted for Task 484 implementation
+Status: Legacy (authority-first line, see [ADR 0036](0036-plugin-kernel-everything-is-a-plugin.md)); applies on master only where a plugin explicitly adopts it. Original status: Accepted for Task 484 implementation
 
 ## Context
 

@@ -1,6 +1,6 @@
 # CodexCompatibilityContractV1
 
-Normative design under [ADR 0034](adr/0034-artifact-bound-codex-compatibility-admission.md).
+Normative design under [ADR 0034](../adr/0034-artifact-bound-codex-compatibility-admission.md).
 Accepted 2026-10-06; not implemented by Task 510C1.
 
 ## Capabilities and layers
