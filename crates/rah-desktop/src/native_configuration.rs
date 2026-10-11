@@ -141,6 +141,6 @@ pub(super) fn native_configuration(state: State<'_, DesktopAppState>) -> Present
         credential_configured: std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
         openai_available: cfg!(feature = "provider-openai"),
         llamacpp_available: cfg!(feature = "provider-llamacpp"),
-        codex_available: cfg!(feature = "provider-codex"),
+        codex_available: false,
     }
 }

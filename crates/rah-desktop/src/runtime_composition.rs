@@ -171,8 +171,6 @@ mod tests {
         AgentEvent, AgentInput, AgentOptions, Message, MessageRole, RequestId, ToolInput, ToolName,
     };
     use rah_runtime::experimental::{Capabilities, HostToolPort, ModelDescriptor, ToolRequest};
-    #[cfg(feature = "provider-codex")]
-    use std::error::Error;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Fixture {
@@ -182,7 +180,6 @@ mod tests {
         sends: Arc<AtomicUsize>,
         port: Mutex<Option<Arc<dyn HostToolPort>>>,
         cancelled: Arc<AtomicBool>,
-        fault: AtomicBool,
     }
     impl Fixture {
         fn new() -> Arc<Self> {
@@ -193,7 +190,6 @@ mod tests {
                 sends: Arc::new(AtomicUsize::new(0)),
                 port: Mutex::new(None),
                 cancelled: Arc::new(AtomicBool::new(false)),
-                fault: AtomicBool::new(false),
             })
         }
     }
@@ -304,14 +300,6 @@ mod tests {
         }
         async fn discover_models(&self) -> Result<ModelDiscovery, RuntimeFailure> {
             self.discoveries.fetch_add(1, Ordering::SeqCst);
-            #[cfg(feature = "provider-codex")]
-            if self.fault.load(Ordering::SeqCst) {
-                return Err(rah_runtime_codex::CodexAdapterError::JsonRpc {
-                    code: -32001,
-                    message: "Authorization: Bearer SECRET".into(),
-                }
-                .into_runtime_failure(rah_protocol::RuntimeOperation::ModelDiscovery));
-            }
             Ok(ModelDiscovery::Catalog {
                 complete: true,
                 models: vec![ModelDescriptor {
@@ -462,36 +450,6 @@ mod tests {
             );
             runtime.shutdown().await.unwrap();
         }
-    }
-    #[tokio::test]
-    #[cfg(feature = "provider-codex")]
-    async fn task504_neutral_discovery_retains_typed_codex_failure() {
-        let fixture = Fixture::new();
-        fixture.fault.store(true, Ordering::SeqCst);
-        let (instance, outcome) = create_and_preflight(
-            &factory(fixture.clone()),
-            &ModelSelection::Explicit("advertised".into()),
-        )
-        .await
-        .unwrap();
-        let (view, gate) = crate::model_preflight::present(Some("advertised".into()), outcome);
-        assert!(gate.is_err());
-        assert_eq!(fixture.opens.load(Ordering::SeqCst), 0);
-        assert!(
-            view.failure
-                .as_ref()
-                .unwrap()
-                .source()
-                .unwrap()
-                .downcast_ref::<rah_runtime_codex::CodexAdapterError>()
-                .is_some()
-        );
-        assert!(
-            !serde_json::to_string(&view.presentation)
-                .unwrap()
-                .contains("SECRET")
-        );
-        instance.shutdown().await.unwrap();
     }
     #[tokio::test]
     async fn task504_unexpected_exit_withdraws_ready_and_revokes_production_port() {

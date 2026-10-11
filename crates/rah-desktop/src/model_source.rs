@@ -41,6 +41,9 @@ impl Context {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// Catalog variants were produced only by the removed Codex adapter; kept for the
+// legacy Desktop presentation contract until Desktop is removed (pivot P5).
+#[allow(dead_code)]
 pub(crate) enum SourceState {
     Loading,
     AdvertisedCatalog { models: Vec<String> },
@@ -353,64 +356,8 @@ async fn resolve(context: &Context) -> (Option<String>, SourceState) {
                 })
                 .unwrap_or(SourceState::Unavailable),
         ),
-        RuntimeAdapterIdentity::Codex => {
-            #[cfg(feature = "provider-codex")]
-            {
-                let result = resolve_codex(context).await;
-                result.unwrap_or((None, SourceState::Error))
-            }
-            #[cfg(not(feature = "provider-codex"))]
-            {
-                (None, SourceState::Unavailable)
-            }
-        }
+        RuntimeAdapterIdentity::Codex => (None, SourceState::Unavailable),
     }
-}
-#[cfg(feature = "provider-codex")]
-async fn resolve_codex(context: &Context) -> Result<(Option<String>, SourceState), FrontendError> {
-    use rah_runtime::experimental::ConfiguredRuntimeFactory;
-    use rah_runtime_codex::experimental::CodexFactory;
-    let (path, artifact) = tokio::task::spawn_blocking(|| {
-        let selection =
-            crate::resolve_codex_executable().map_err(|_| FrontendError::CodexBaselineInvalid)?;
-        CodexFactory::measured_artifact(std::path::Path::new(&selection.executable))
-            .map_err(|e| crate::runtime_selection::frontend_failure(&e))
-    })
-    .await
-    .map_err(|_| FrontendError::ModelCatalogUnavailable)??;
-    let factory = CodexFactory::new(path, rah_runtime_codex::CodexModelProvider::OpenAi);
-    if context
-        .selection
-        .as_ref()
-        .is_some_and(|s| s.provider == DesktopModelProvider::Inherit)
-    {
-        let instance = factory
-            .create()
-            .await
-            .map_err(|e| crate::runtime_selection::frontend_failure(&e))?;
-        instance
-            .shutdown()
-            .await
-            .map_err(|e| crate::runtime_selection::frontend_failure(&e))?;
-        let models = factory
-            .advertised_catalog()
-            .await
-            .map(|c| c.models)
-            .unwrap_or_default();
-        return Ok((Some(artifact), SourceState::RuntimeDefault { models }));
-    }
-    let catalog = factory
-        .advertised_catalog()
-        .await
-        .map_err(|e| crate::runtime_selection::frontend_failure(&e))?;
-    let source = if catalog.models.is_empty() {
-        SourceState::EmptyCatalog
-    } else {
-        SourceState::AdvertisedCatalog {
-            models: catalog.models,
-        }
-    };
-    Ok((Some(artifact), source))
 }
 
 pub(crate) fn precheck(state: &DesktopAppState, expected: &Snapshot) -> Result<(), FrontendError> {
@@ -431,28 +378,7 @@ pub(crate) fn precheck(state: &DesktopAppState, expected: &Snapshot) -> Result<(
 }
 
 pub(crate) async fn artifact_current(snapshot: &Snapshot) -> bool {
-    if snapshot.adapter != RuntimeAdapterIdentity::Codex {
-        return true;
-    }
-    #[cfg(feature = "provider-codex")]
-    {
-        let expected = snapshot.admitted_artifact_sha256.clone();
-        tokio::task::spawn_blocking(move || {
-            let Ok(selection) = crate::resolve_codex_executable() else {
-                return false;
-            };
-            rah_runtime_codex::experimental::CodexFactory::measured_artifact(std::path::Path::new(
-                &selection.executable,
-            ))
-            .is_ok_and(|(_, fingerprint)| Some(fingerprint) == expected)
-        })
-        .await
-        .unwrap_or(false)
-    }
-    #[cfg(not(feature = "provider-codex"))]
-    {
-        false
-    }
+    snapshot.adapter != RuntimeAdapterIdentity::Codex
 }
 
 // Caller holds lifecycle_coordination so configuration and source share one context.

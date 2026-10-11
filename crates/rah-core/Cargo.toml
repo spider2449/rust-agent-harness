@@ -1,6 +1,0 @@
-[package]
-name = "rah-core"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

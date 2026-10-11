@@ -45,16 +45,6 @@ pub(super) async fn connect_with_configuration(
             .model
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(feature = "provider-codex")]
-        if adapter == runtime_selection::ProductionAdapter::Codex
-            && let Err(error) = model.selection.codex_model_config()
-        {
-            *state
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = ConnectionState::Error(error);
-            return Err(error);
-        }
         (model.selection.clone(), model.generation)
     };
     // Injected deterministic factories do not resolve an external artifact.

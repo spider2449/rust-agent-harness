@@ -15,8 +15,6 @@ pub(crate) enum RuntimeAdapterIdentity {
 
 pub(crate) fn identity(adapter: Option<ProductionAdapter>) -> RuntimeAdapterIdentity {
     match adapter {
-        #[cfg(feature = "provider-codex")]
-        Some(ProductionAdapter::Codex) => RuntimeAdapterIdentity::Codex,
         #[cfg(feature = "provider-openai")]
         Some(ProductionAdapter::OpenAi) => RuntimeAdapterIdentity::OpenAi,
         #[cfg(feature = "provider-llamacpp")]
@@ -123,69 +121,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "provider-codex", feature = "provider-openai"))]
-    fn task509a_runtime_change_rejects_old_catalog_and_return_revalidates() {
-        use crate::{ConnectionState, FrontendError, model_preflight};
-        let directory =
-            std::env::temp_dir().join(format!("rah-task509a-{}", rah_protocol::SessionId::new()));
-        let mut desktop = crate::DesktopAppState::new(directory.clone());
-        desktop.runtime_adapter = Some(ProductionAdapter::Codex);
-        let preference = DesktopModelSelection {
-            provider: DesktopModelProvider::OpenAi,
-            model: Some("gpt-6.1-sol".into()),
-            model_selection_mode: Some(crate::ModelSelectionMode::Advertised),
-            llama_cpp_endpoint: None,
-        };
-        desktop.model.lock().unwrap().selection = preference.clone();
-        *desktop.connection.lock().unwrap() =
-            ConnectionState::Error(FrontendError::ModelNotAdvertised);
-        // Representative bounded fixture, not a permanent model/version prohibition.
-        let (state, gate) = model_preflight::present(
-            preference.model.clone(),
-            Ok(rah_runtime::ModelPreflight::NotAdvertised(
-                rah_runtime::ModelCatalog {
-                    models: vec!["gpt-6-astra".into()],
-                },
-            )),
-        );
-        assert_eq!(gate, Err(FrontendError::ModelNotAdvertised));
-        *desktop.model_preflight.lock().unwrap() = Some(model_preflight::ScopedModelPreflight {
-            adapter: RuntimeAdapterIdentity::Codex,
-            connection_generation: 0,
-            model_generation: 0,
-            state,
-        });
-        assert!(desktop.status().model_preflight.is_some());
-        desktop.runtime_adapter = Some(ProductionAdapter::OpenAi);
-        assert!(desktop.status().model_preflight.is_none());
-        assert_eq!(
-            desktop.status().runtime_adapter,
-            RuntimeAdapterIdentity::OpenAi
-        );
-        desktop.runtime_adapter = None;
-        assert!(!desktop.status().runtime_available);
-        assert!(matches!(
-            crate::runtime_selection::connect_unavailable(&desktop),
-            Err(FrontendError::RuntimeAdapterUnavailable)
-        ));
-        desktop.runtime_adapter = Some(ProductionAdapter::Codex);
-        *desktop.connection.lock().unwrap() = ConnectionState::NotConnected;
-        assert!(desktop.status().model_preflight.is_none());
-        assert_eq!(desktop.model.lock().unwrap().selection, preference);
-        // Recomposition must obtain fresh preflight; preference restore isn't validity.
-        assert!(!present(desktop.runtime_adapter, &preference, None).model_validated);
-        drop(desktop);
-        let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[test]
     fn task509a_identity_comes_from_composition() {
         assert_eq!(identity(None), RuntimeAdapterIdentity::None);
-        #[cfg(feature = "provider-codex")]
-        assert_eq!(
-            identity(Some(ProductionAdapter::Codex)),
-            RuntimeAdapterIdentity::Codex
-        );
         #[cfg(feature = "provider-openai")]
         assert_eq!(
             identity(Some(ProductionAdapter::OpenAi)),

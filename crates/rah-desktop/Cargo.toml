@@ -6,11 +6,9 @@ build = "build.rs"
 
 [features]
 default = ["provider-openai", "provider-llamacpp"]
-provider-codex = ["dep:rah-runtime-codex"]
 provider-openai = ["dep:rah-runtime-openai"]
 provider-llamacpp = ["dep:rah-runtime-openai"]
 openai-fixture = ["provider-openai", "rah-runtime-openai/fixture-support"]
-certification-harness = ["provider-codex", "rah-runtime-codex/certification-harness"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 tauri-build = { version = "2" }
@@ -20,7 +18,6 @@ futures.workspace = true
 rah-profile-composition = { path = "../rah-profile-composition" }
 rah-protocol = { path = "../rah-protocol" }
 rah-runtime = { path = "../rah-runtime" }
-rah-runtime-codex = { path = "../rah-runtime-codex", optional = true }
 rah-runtime-openai = { path = "../rah-runtime-openai", optional = true }
 rah-tools = { path = "../rah-tools" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
@@ -38,8 +35,3 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 tokio = { workspace = true, features = ["net", "io-util"] }
 async-trait.workspace = true
 rah-tools = { path = "../rah-tools", features = ["live-test-support"] }
-
-[[test]]
-name = "codex-certification"
-path = "src/main.rs"
-required-features = ["certification-harness"]

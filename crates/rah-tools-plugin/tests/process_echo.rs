@@ -510,26 +510,6 @@ async fn live_text_mode_emits_host_only_single_call_audit() {
     adapter.shutdown().await.expect("shutdown should succeed");
 }
 
-#[test]
-fn codex_bridge_has_no_production_plugin_dependency_or_plugin_specific_code() {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("plugin crate should be nested under workspace/crates")
-        .to_path_buf();
-    let manifest = std::fs::read_to_string(workspace.join("crates/rah-runtime-codex/Cargo.toml"))
-        .expect("Codex adapter manifest should be readable");
-    let production_manifest = manifest
-        .split("[dev-dependencies]")
-        .next()
-        .expect("manifest should have a production section");
-    assert!(!production_manifest.contains("rah-tools-plugin"));
-    let bridge = std::fs::read_to_string(workspace.join("crates/rah-runtime-codex/src/bridge.rs"))
-        .expect("generic bridge source should be readable");
-    assert!(!bridge.contains("PluginAdapter"));
-    assert!(!bridge.contains("plugin.test.echo"));
-}
-
 async fn wait_for_audit(
     tool: &Arc<dyn Tool>,
     executions: u64,

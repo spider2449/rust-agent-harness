@@ -1,14 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(all(target_os = "windows", feature = "provider-codex"))]
-mod codex_baseline;
-#[cfg(all(target_os = "windows", feature = "provider-codex"))]
-mod codex_composition;
-#[cfg(all(target_os = "windows", feature = "provider-codex", test))]
-use codex_composition::{
-    connect_prepared_codex, frontend_error, prepare_codex_connection,
-    resolve_prepare_and_connect_codex,
-};
 #[cfg(target_os = "windows")]
 mod native_configuration;
 #[cfg(target_os = "windows")]
@@ -54,8 +45,6 @@ mod trusted_profile_selection;
 #[cfg(target_os = "windows")]
 mod work_log;
 
-#[cfg(all(target_os = "windows", feature = "provider-codex"))]
-use codex_baseline::{BaselineError, resolve as resolve_codex_executable};
 #[cfg(target_os = "windows")]
 use conversation_persistence::{
     Persistence, Presentation as ConversationTranscriptPresentation, ResumeError, ResumePair,
@@ -1650,14 +1639,8 @@ pub(crate) enum FrontendError {
     LlamaServerUnreachable,
     LlamaServerLoading,
     LlamaResponseMalformed,
-    CodexNotFound,
-    CodexBaselineInvalid,
-    CodexHostUnsupported,
-    UnsupportedCodexVersion,
     ModelNotAdvertised,
     ModelCatalogUnavailable,
-    CodexSchemaIncompatible,
-    CodexStartFailed,
     CodexConnectionFailed,
     ToolRegistryFailed,
     ProfileInvalid,
@@ -5282,10 +5265,7 @@ fn apply_model_selection(
     if chat != ChatState::Idle {
         return Err(FrontendError::ModelConfigurationBusy);
     }
-    #[cfg(not(feature = "provider-codex"))]
     selection.validate()?;
-    #[cfg(feature = "provider-codex")]
-    selection.codex_model_config()?;
     if current.selection != selection {
         current.selection = selection;
         current.generation += 1;
@@ -10154,7 +10134,6 @@ fn conversation_transcript(
 
 #[cfg(target_os = "windows")]
 fn main() -> ExitCode {
-    #[cfg(not(feature = "provider-codex"))]
     if std::env::args().any(|argument| argument == "--runtime-composition-smoke") {
         return runtime_selection::smoke();
     }
@@ -10263,23 +10242,12 @@ fn main() {
 #[path = "main_tests.rs"]
 mod tests;
 
-#[cfg(all(test, target_os = "windows", feature = "certification-harness"))]
-mod certification_tests;
-
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn connect_codex(
     state: State<'_, DesktopAppState>,
 ) -> Result<ConnectionResult, FrontendError> {
     match state.selected_runtime_adapter() {
-        #[cfg(feature = "provider-codex")]
-        Some(runtime_selection::ProductionAdapter::Codex) => {
-            production_composition::connect_selected(
-                state.inner(),
-                runtime_selection::ProductionAdapter::Codex,
-            )
-            .await
-        }
         #[cfg(feature = "provider-openai")]
         Some(runtime_selection::ProductionAdapter::OpenAi) => {
             production_composition::connect_selected(
@@ -10297,7 +10265,7 @@ async fn connect_codex(
             .await
         }
         None => runtime_selection::connect_unavailable(state.inner()),
-        #[cfg(not(any(feature = "provider-codex", feature = "provider-openai")))]
+        #[cfg(not(feature = "provider-openai"))]
         Some(_) => runtime_selection::connect_unavailable(state.inner()),
     }
 }
