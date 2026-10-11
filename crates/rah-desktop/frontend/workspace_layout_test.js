@@ -10,12 +10,16 @@ for (const invalid of [{ ...layout.defaults(), left: -1 }, { ...layout.defaults(
 assert.equal(layout.bounds("left", -500, 1200, 340), 180);
 assert.equal(layout.bounds("right", 10000, 1200, 240), 628);
 assert.deepEqual(Object.keys(layout.validate({ ...layout.defaults(), repository: 'must not persist' })), Object.keys(layout.defaults()));
+for (const theme of ["system", "light", "dark"]) assert.equal(layout.validateTheme(theme), theme);
+for (const invalid of [null, "", "solarized", "<b>"]) assert.equal(layout.validateTheme(invalid), "system");
 const edge = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"]].map(p => path.join(p || "", "Microsoft/Edge/Application/msedge.exe")).find(fs.existsSync);
 assert.ok(edge, "Edge required");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rah-workspace-layout-"));
 const original = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
 const css = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
 const js = fs.readFileSync(path.join(__dirname, "layout.js"), "utf8");
+// light-dark() is unavailable on older WebView2 runtimes; theme tokens must not depend on it.
+assert.equal(css.includes("light-dark("), false);
 const checks = `
 try {
 const check = (v, message) => { if (!v) throw Error(message); };
@@ -29,6 +33,7 @@ if (sessionStorage.getItem('reloading') === 'yes') {
  const restored = JSON.parse(localStorage.getItem('rah.desktop.layout.v1'));
  check(restored.tab === 'authority', 'tab persisted after reload');
  check($('#tab-authority').getAttribute('aria-selected') === 'true', 'tab restored after reload');
+ check(document.documentElement.dataset.theme === 'dark' && $('#theme-select').value === 'dark', 'theme restored after reload');
  if (innerWidth >= 960) check($('#workspace-panel').getBoundingClientRect().width === 250, 'width restored after reload');
  document.body.dataset.result = 'PASS';
 } else {
@@ -70,6 +75,24 @@ check($('#tab-authority').getAttribute('aria-selected') === 'true', 'tab keyboar
 check(!$('#panel-authority').hidden, 'authority visible');
 check($('#effective-tools') && $('#authorize-commit') && $('#repository-close-confirmation'), 'review parity');
 check($('#codex-connection').closest('header'), 'connection toolbar');
+// Theme selection: dropdown popups must keep readable contrast in each theme.
+const luminance = color => { const [r, g, b] = color.match(/[\\d.]+/g).map(Number); return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255; };
+const chooseTheme = value => { $('#theme-select').value = value; $('#theme-select').dispatchEvent(new Event('change')); };
+check($('#theme-select').closest('header') && $('#theme-select').value === 'system' && !document.documentElement.dataset.theme, 'theme default system');
+for (const [value, dark] of [['dark', true], ['light', false]]) {
+ chooseTheme(value);
+ check(document.documentElement.dataset.theme === value && localStorage.getItem('rah.desktop.theme.v1') === value, 'theme persisted ' + value);
+ for (const node of [$('#native-provider'), $('#native-provider option')]) {
+  const style = getComputedStyle(node);
+  const bg = luminance(style.backgroundColor), fg = luminance(style.color);
+  check(style.backgroundColor.startsWith('rgb('), value + ' opaque dropdown background ' + node.tagName + ' ' + style.backgroundColor);
+  check(dark ? bg < 0.3 && fg > 0.7 : bg > 0.7 && fg < 0.3, value + ' dropdown contrast ' + node.tagName + ' ' + style.backgroundColor + ' / ' + style.color);
+ }
+ const status = luminance(getComputedStyle($('.backend-error')).color);
+ check(dark ? status > 0.5 : status < 0.5, value + ' status color readable');
+}
+chooseTheme('system'); check(!document.documentElement.dataset.theme, 'theme system clears override');
+chooseTheme('dark');
 // Section navigation exercises the actual production DOM and scroll containers.
 const nav = $('#workspace-panel .section-navigation');
 nav.querySelector('[data-expand="false"]').click();
@@ -127,6 +150,7 @@ $('#focus-chat').click(); check(document.activeElement.id === 'chat-panel', 'dis
 $('#chat-prompt').disabled = false;
 const composer = $('#chat-form').getBoundingClientRect(); check(composer.bottom <= innerHeight && composer.width > 0, 'composer visible');
 $('#reset-layout').click(); check(JSON.parse(localStorage.getItem('rah.desktop.layout.v1')).left === 240, 'reset');
+check(document.documentElement.dataset.theme === 'dark', 'reset layout keeps theme');
 check(document.documentElement.scrollWidth <= innerWidth, 'final overflow');
 if (innerWidth >= 960) $('#left-splitter').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
 $('#tab-authority').click();
@@ -143,5 +167,5 @@ try {
   assert.equal(result.error, undefined, result.stderr);
   assert.equal(result.stdout.match(/data-result="([^"]*)"/)?.[1], 'PASS', `width ${width}: ${result.stderr.slice(-300)}`);
  }
- console.log("Workspace production layout: PASS (1600/1200/626/476, bounds, keyboard, collapse, tabs, persistence, reset, composer)");
+ console.log("Workspace production layout: PASS (1600/1200/626/476, bounds, keyboard, collapse, tabs, persistence, reset, composer, theme)");
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

@@ -12,6 +12,13 @@ const DesktopLayout = (() => {
       || !tabs.includes(value.tab)) return defaults();
     return { version: 1, left: value.left, right: value.right, leftCollapsed: value.leftCollapsed, rightCollapsed: value.rightCollapsed, tab: value.tab };
   }
+  const themeKey = "rah.desktop.theme.v1";
+  const themes = ["system", "light", "dark"];
+  const validateTheme = (value) => themes.includes(value) ? value : "system";
+  function applyTheme(theme) {
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+  }
   function bounds(side, value, available, other) {
     const minimum = side === "left" ? 180 : 260;
     return Math.max(minimum, Math.min(value, side === "left" ? 480 : 640, available - other - 320 - 12));
@@ -27,6 +34,17 @@ const DesktopLayout = (() => {
     toolbar.className = "workspace-toolbar";
     toolbar.innerHTML = '<strong id="application-title">RAH</strong><span id="layout-repository"></span><span id="layout-runtime"></span><button id="toggle-workspace" type="button">Workspace</button><button id="toggle-inspector" type="button">Inspector</button><button id="focus-chat" type="button">Focus Chat</button><button id="reset-layout" type="button">Reset Layout</button>';
     document.body.prepend(toolbar);
+    let theme;
+    try { theme = validateTheme(localStorage.getItem(themeKey)); } catch { theme = "system"; }
+    applyTheme(theme);
+    const themeSelect = document.createElement("select"); themeSelect.id = "theme-select"; themeSelect.setAttribute("aria-label", "Theme");
+    for (const value of themes) themeSelect.append(new Option({ system: "System theme", light: "Light", dark: "Dark" }[value], value));
+    themeSelect.value = theme;
+    themeSelect.addEventListener("change", () => {
+      theme = validateTheme(themeSelect.value); applyTheme(theme);
+      try { localStorage.setItem(themeKey, theme); } catch { /* Theme remains usable without storage. */ }
+    });
+    toolbar.querySelector("#reset-layout").after(themeSelect);
     toolbar.append($("#codex-connection"));
     const left = document.createElement("aside"); left.id = "workspace-panel"; left.setAttribute("aria-label", "Workspace");
     const center = $(".chat"); center.id = "chat-panel";
@@ -210,7 +228,7 @@ const DesktopLayout = (() => {
     new MutationObserver(summary).observe($("#repository-path"), { subtree: true, childList: true, characterData: true });
     render(); summary();
   }
-  return { validate, bounds, defaults, install };
+  return { validate, validateTheme, bounds, defaults, install };
 })();
 if (typeof document !== "undefined") DesktopLayout.install();
 if (typeof module !== "undefined") module.exports = DesktopLayout;

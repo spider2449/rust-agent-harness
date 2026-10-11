@@ -3,6 +3,30 @@
   font-family: "Segoe UI", system-ui, sans-serif;
   background: Canvas;
   color: CanvasText;
+  --success: #16713d;
+  --warning: #8a5b00;
+  --danger: #a11b1b;
+  --info: #1260a6;
+}
+
+/* Explicit theme choice overrides the operating-system preference.
+   Dark tokens are repeated rather than using the light-dark function so older
+   WebView2 runtimes keep readable status colors. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --success: #5fd08f;
+  --warning: #e0b04a;
+  --danger: #ff8a80;
+  --info: #7ab8f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --success: #5fd08f;
+    --warning: #e0b04a;
+    --danger: #ff8a80;
+    --info: #7ab8f5;
+  }
 }
 
 * {
@@ -91,11 +115,11 @@ main {
 }
 
 .authority-status[data-state="current"] {
-  color: #16713d;
+  color: var(--success);
 }
 
 .authority-warning {
-  color: #8a5b00;
+  color: var(--warning);
   font-weight: 600;
 }
 
@@ -195,19 +219,19 @@ h3 {
 }
 
 .activity-entry[data-state="tool_requested"] span {
-  color: #8a5b00;
+  color: var(--warning);
 }
 
 .activity-entry[data-state="tool_started"] span {
-  color: #1260a6;
+  color: var(--info);
 }
 
 .activity-entry[data-state="success"] span {
-  color: #16713d;
+  color: var(--success);
 }
 
 .activity-entry[data-state="failed"] span {
-  color: #a11b1b;
+  color: var(--danger);
 }
 
 .chat-message {
@@ -258,6 +282,14 @@ input {
   background: transparent;
   color: inherit;
   font: inherit;
+}
+
+/* Native dropdown popups do not inherit a transparent control background. */
+select,
+option,
+optgroup {
+  background: Canvas;
+  color: CanvasText;
 }
 
 .model label {
@@ -330,21 +362,21 @@ dd {
 }
 
 dd[data-status="ready"] {
-  color: #16713d;
+  color: var(--success);
 }
 
 dd[data-status^="not "] {
-  color: #8a5b00;
+  color: var(--warning);
 }
 
 .backend-error {
   margin: 2rem 0 0;
-  color: #a11b1b;
+  color: var(--danger);
   font-weight: 700;
 }
 
 .connection-error {
-  color: #a11b1b;
+  color: var(--danger);
   font-weight: 600;
 }
 
@@ -355,7 +387,7 @@ dd[data-status^="not "] {
 }
 
 .context-usage[data-level="near"] {
-  color: #8a5a00;
+  color: var(--warning);
   opacity: 1;
 }
 
@@ -377,8 +409,8 @@ button:disabled {
 }
 
 .destructive-action {
-  border-color: #a11b1b;
-  color: #a11b1b;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 dialog {
@@ -428,6 +460,7 @@ main { display: block; padding: 0; min-height: 0; flex: 1; overflow: hidden; }
 .workspace-toolbar span { font-size: .75rem; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-toolbar #layout-runtime { flex: 1; }
 .workspace-toolbar button { margin: 0; padding: .35rem .5rem; font-size: .8rem; }
+.workspace-toolbar select { width: auto; margin: 0; padding: .3rem .4rem; font-size: .8rem; }
 .shell-notices { font-size: .75rem; padding: 0 .7rem; }
 .shell-notices p { margin: .15rem 0; }
 .status-card { display: grid; grid-template-columns: var(--left-width) 6px minmax(320px, 1fr) 6px var(--right-width); width: 100%; height: 100%; border: 0; border-radius: 0; padding: 0; }
