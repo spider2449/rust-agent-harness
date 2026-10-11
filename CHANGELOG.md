@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.35.0 - final authority-first release (2026-10-11)
+
+> **LEGACY LINE: FINAL RELEASE OF THE AUTHORITY-FIRST ARCHITECTURE.**
+> v0.35.0 is the last release of RAH's original "host-owned authority, fixed
+> extension points" architecture. Development then pivots to a plugin kernel
+> ("everything is a plugin", a Rust counterpart of DeepSeek Harness); see the
+> [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md).
+> Branch `legacy/authority-first` points at this release for reference and
+> critical fixes only. No further feature work lands on that line.
+
+### Changes since v0.34.0
+
+- Desktop shows a transient "Waiting for model..." / "Model is thinking..."
+  indicator with elapsed time (`AgentEvent::ModelReasoningStarted`); reasoning
+  content never crosses the adapter edge.
+- `repo.stats`: bounded, read-only tracked-file statistics observer.
+- Native Tool continuation no longer has an eight-round limit (#1).
+- Tool input rejections and effect-free (`None`/`Read`) execution failures are
+  returned to the model as correctable results instead of failing the turn;
+  `repo.list` and `repo.file-info` path errors are correctable (#2).
+- Desktop: sliding replay window, context usage, host-observed work-log memory
+  with repository paths of successful calls, activity correlation and chat
+  failure recovery, opt-in diagnostic log, Activity failure reasons, theme
+  switcher, refreshed UI with Enter-to-send, versioned title, and legacy
+  WebView2 fallbacks.
+- All 14 workspace packages, internal lock records and Tauri bundle metadata
+  aligned to 0.35.0. No dependency edge, ADR, authority category or HostExplicit
+  route changed; HostExplicit remains exactly 11.
+
+**OPENAI_LIVE_NOT_VERIFIED** and **NSIS_INSTALLER_NOT_VERIFIED** remain.
+**DESKTOP_WINDOWS_TESTS_NOT_GREEN**: 44 local Windows `rah-desktop` tests fail
+(43 `RepositoryMemberStale`, reproduced unchanged at v0.34.0; 1 flaky); all other
+crates pass. Source-only release; no executable or installer assets.
+See [the release gate](docs/RAH_V0.35_RELEASE_GATE.md).
+
 ## v0.34.0 - released (2026-10-09)
 
 ### Immutable publication record

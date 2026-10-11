@@ -1,4 +1,4 @@
-# RAH v0.34.0 Security Model - released source-only
+# RAH v0.35.0 Security Model - final authority-first release (source-only)
 
 MODEL REQUEST IS NOT AUTHORIZATION. Native model-selected Tool requests use
 revocable conversation/session leases, ToolRegistry and host permission dispatch.

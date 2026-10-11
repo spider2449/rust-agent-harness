@@ -1,5 +1,13 @@
 # RAH — Rust Agent Harness
 
+> **Status: v0.35.0 is the final release of the authority-first architecture
+> (legacy line).** RAH is pivoting to a plugin kernel in which model adapters,
+> tools, the agent loop, sessions, sandboxes, storage, scheduling and UI are all
+> plugins. See the
+> [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md).
+> The legacy line is preserved at tag `v0.35.0` and branch
+> `legacy/authority-first`.
+
 RAH is a model-provider-agnostic, runtime-pluggable agent harness written in Rust.
 It owns neutral runtime, model, event, session, tool, permission, and sandbox
 boundaries. RAH orchestrates inference providers; it is not an inference engine
@@ -54,15 +62,22 @@ environment requires restart.
 Reconnect revokes old Tool leases and creates fresh runtime/conversation handles
 without granting repository authority or claiming rollback.
 
-## Unreleased
+## RAH v0.35.0 released - final authority-first release
 
 - Desktop shows "Waiting for model…" / "Model is thinking…" with elapsed time
   while a model request is pending. Reasoning content is never displayed.
 - `repo.stats` counts tracked files recursively in the active repository (or a
   subdirectory), grouped by extension and direct child directory, with byte
   sizes. It reads no file contents and is a read-only repository observer.
+- Tool input rejections and effect-free failures are returned to the model as
+  correctable results; the eight-round Tool continuation limit is removed.
+- Desktop work-log memory, diagnostics and UI refinements.
 
-## RAH v0.34.0 released
+All 14 Cargo packages and the Tauri bundle use 0.35.0. Source-only release;
+**OPENAI_LIVE_NOT_VERIFIED** and **NSIS_INSTALLER_NOT_VERIFIED** remain. See the
+[v0.35 release gate](docs/RAH_V0.35_RELEASE_GATE.md).
+
+## Historical RAH v0.34.0 release
 
 The release covers native OpenAI and llama.cpp runtimes, provider-neutral
 runtime ownership with optional legacy Codex, native lifecycle/cancellation,

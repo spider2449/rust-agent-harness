@@ -1,4 +1,9 @@
-# RAH v0.34.0 Architecture - release preparation
+# RAH v0.35.0 Architecture - final authority-first release
+
+v0.35.0 is the final release of this architecture. Subsequent development
+pivots to a plugin kernel; see the
+[plugin-kernel pivot plan](plans/2026-10-11-plugin-kernel-pivot-plan.md).
+The sections below describe the released legacy line.
 
 The native production composition below preserves ADRs 0001/0002/0032/0033.
 RAH orchestrates inference and does not load weights or implement inference.
@@ -16,7 +21,7 @@ The 49-command Tauri surface and exactly 11 HostExplicit Tools are preserved.
 Actual OpenAI acceptance remains OPENAI_LIVE_NOT_VERIFIED; see the
 [v0.34 gate](RAH_V0.34_RELEASE_GATE.md).
 
-## Unreleased changes
+## v0.35.0 changes
 
 `AgentEvent::ModelReasoningStarted` is a provider-neutral, content-free
 progress signal: an adapter emits it at most once per model request when the
