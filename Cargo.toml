@@ -17,6 +17,7 @@ members = [
     "plugins/frontend-cli",
     "plugins/loop-react",
     "plugins/model-mock",
+    "plugins/model-responses",
     "plugins/session-jsonl",
     "plugins/tools-builtin",
 ]
@@ -39,6 +40,7 @@ default-members = [
     "plugins/frontend-cli",
     "plugins/loop-react",
     "plugins/model-mock",
+    "plugins/model-responses",
     "plugins/session-jsonl",
     "plugins/tools-builtin",
 ]

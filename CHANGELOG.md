@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P2)
+## Unreleased — plugin-kernel pivot (phases P0–P3)
+
+### P3: real model plugins
+
+- New crate `plugins/model-responses` with two plugins, `model-openai` and
+  `model-llamacpp`. The SSE framing, Responses event validation and llama.cpp
+  event normalizer are ported from `rah-runtime-openai`.
+- Neutral context is translated to Responses input (`store: false`), and
+  every streamed event is validated. Reasoning content never leaves the
+  plugin, and nothing is retried.
+- Tool names are encoded for the provider: function names are limited to
+  `[A-Za-z0-9_-]`, so `fs.read` is sent as `fs_read`, and calls are mapped
+  back to the original name. Collisions get a suffix.
+- `model-openai` reads its key from a backend environment variable (default
+  `OPENAI_API_KEY`) and sends it only to the official endpoint or a loopback
+  URL. A missing key leaves the plugin `Failed` with a clear message.
+- `model-llamacpp` accepts only loopback origins. It checks `/health` and
+  `/v1/models` lazily on the first request (cached, and cleared on transport
+  errors), so the plugin may start before the server. Its optional key comes
+  from `RAH_LLAMA_CPP_API_KEY` and never falls back to the OpenAI key.
+- `rah` gains the `llamacpp` and `openai` presets and a `--model` flag.
+- Verification uses deterministic loopback fixtures only: 13 plugin tests
+  plus an end-to-end loop, tool and session round trip through
+  `model-llamacpp`. Neither llama.cpp nor OpenAI is live-verified.
+- `rah-runtime-openai`, `rah-runtime` and `rah-model` remain until P5,
+  because the legacy Desktop still depends on them.
 
 ### P2: `rah-api`, first plugins and the `rah` binary
 

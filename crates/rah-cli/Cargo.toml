@@ -14,6 +14,7 @@ rah-api = { path = "../rah-api" }
 rah-plugin-frontend-cli = { path = "../../plugins/frontend-cli" }
 rah-plugin-loop-react = { path = "../../plugins/loop-react" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }
+rah-plugin-model-responses = { path = "../../plugins/model-responses" }
 rah-plugin-session-jsonl = { path = "../../plugins/session-jsonl" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
 serde.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "rah-plugin-model-responses"
+version.workspace = true
+edition.workspace = true
+description = "Responses API model plugins: model-openai and model-llamacpp"
+
+[dependencies]
+async-stream.workspace = true
+futures.workspace = true
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

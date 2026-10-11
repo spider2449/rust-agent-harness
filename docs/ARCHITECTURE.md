@@ -67,7 +67,7 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, after phase P2)
+## Current state (transitional, after phase P3)
 
 Implemented:
 
@@ -75,10 +75,11 @@ Implemented:
   `session`, tools with `ToolInvoker`, and the standard hooks
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`.
-- Plugins in `plugins/`: `model-mock`, `loop-react`, `tools-builtin` (`echo`,
-  workspace-bounded `fs.read`), `session-jsonl` and `frontend-cli`.
+- Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
+  (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
+  workspace-bounded `fs.read`); `session-jsonl`; and `frontend-cli`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
-  `rah.toml` or the `dev` preset and warns `UNGUARDED` when no
+  `rah.toml` or a preset (`dev`, `llamacpp`, `openai`) and warns `UNGUARDED` when no
   `tool.before_invoke` handler is mounted.
 
 The tools service key is private to `rah-api`. Tool providers register with
@@ -90,8 +91,8 @@ The remaining legacy crates are transformed or removed phase by phase:
 
 | Crate | Fate | Phase |
 |---|---|---|
-| `rah-runtime-openai` | split into `model-openai-responses`, `model-llamacpp`, `loop-react` | P3 |
-| `rah-runtime`, `rah-model` | replaced by `rah-api` services and `model-mock` | P3 |
+| `rah-runtime-openai` | ported to `model-responses` (P3); removed together with Desktop | P5 |
+| `rah-runtime`, `rah-model` | replaced by `rah-api` and the model plugins; removed together with Desktop | P5 |
 | `rah-tools` | `Tool` moves to `rah-api`; tools split into `tools-builtin`, `tools-repo`, `tools-shell`; authorization becomes `policy-authority` | P4 |
 | `rah-tools-mcp` | becomes `tools-mcp` | P4 |
 | `rah-tools-plugin` | generalized into `rah-plugin-host-process` | P4 |

@@ -2810,6 +2810,7 @@ dependencies = [
  "rah-plugin-frontend-cli",
  "rah-plugin-loop-react",
  "rah-plugin-model-mock",
+ "rah-plugin-model-responses",
  "rah-plugin-session-jsonl",
  "rah-plugin-tools-builtin",
  "rah-protocol",
@@ -2899,6 +2900,21 @@ dependencies = [
  "rah-protocol",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-model-responses"
+version = "0.35.0"
+dependencies = [
+ "async-stream",
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
 ]
 

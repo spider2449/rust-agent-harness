@@ -9,10 +9,11 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 ## Status
 
-`master` has completed **phase P2** of the
+`master` has completed **phase P3** of the
 [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md):
-the kernel, the service contracts (`rah-api`), the first plugins and the `rah`
-binary run end to end with a mock model. The architecture decision is
+the kernel, the service contracts (`rah-api`), the plugins and the `rah` binary
+run end to end with a mock model, and with OpenAI or llama.cpp through the
+Responses API. The architecture decision is
 [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy
 crates still build and behave as in v0.35.0 while they are transformed phase by
 phase. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
@@ -30,6 +31,21 @@ The `dev` preset mounts `session-jsonl` (logs in `.rah/sessions`),
 `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
 `--session <id>` resumes a session. The `dev` preset mounts no policy plugin,
 so `rah` prints an `UNGUARDED` warning; a policy plugin arrives in P4.
+
+Real models use the same composition with a different model plugin:
+
+```powershell
+# llama.cpp: start llama-server on http://127.0.0.1:8080 first (loopback only).
+cargo run -p rah-cli -- --preset llamacpp            # uses the sole served model
+cargo run -p rah-cli -- --preset llamacpp --model qwen
+
+# OpenAI: the key is read from the backend environment, never from config.
+$env:OPENAI_API_KEY = '...'
+cargo run -p rah-cli -- --preset openai --model your-model-id
+```
+
+The model plugins are verified against deterministic loopback fixtures only,
+not against a live llama-server or the live OpenAI API.
 
 Compose your own plugins with a distribution file:
 

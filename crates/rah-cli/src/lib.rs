@@ -7,6 +7,7 @@ use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::Kern
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
+use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use serde::Deserialize;
@@ -17,19 +18,30 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 5] = [
+    let entries: [(&'static str, Constructor); 7] = [
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
+        ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),
+        ("model-openai", |id| {
+            Arc::new(OpenAiResponsesPlugin::new(id))
+        }),
         ("session-jsonl", |id| Arc::new(JsonlSessionPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
     ];
     entries.into_iter().collect()
 }
 
-/// Development preset: mock model, built-in tools, JSONL sessions, the
-/// default loop and the terminal frontend. It mounts no policy plugin.
-pub const DEV_PRESET: &str = r#"
+/// Built-in presets and the model plugin each one mounts. All share built-in
+/// tools, JSONL sessions, the default loop and the terminal frontend, and none
+/// mounts a policy plugin yet.
+pub const PRESETS: [(&str, &str); 3] = [
+    ("dev", "model-mock"),
+    ("llamacpp", "model-llamacpp"),
+    ("openai", "model-openai"),
+];
+
+const PRESET_TEMPLATE: &str = r#"
 [[plugin]]
 use = "session-jsonl"
 config = { dir = ".rah/sessions" }
@@ -39,7 +51,7 @@ use = "tools-builtin"
 config = { root = "." }
 
 [[plugin]]
-use = "model-mock"
+use = "{MODEL}"
 
 [[plugin]]
 use = "loop-react"
@@ -52,7 +64,7 @@ use = "frontend-cli"
 pub enum BootError {
     #[error("invalid distribution: {0}")]
     Parse(String),
-    #[error("unknown preset `{0}`; available: dev")]
+    #[error("unknown preset `{0}`; available: dev, llamacpp, openai")]
     UnknownPreset(String),
     #[error("unknown plugin `{0}`; available: {1}")]
     UnknownPlugin(String, String),
@@ -96,10 +108,11 @@ impl Distribution {
     }
 
     pub fn preset(name: &str) -> Result<Self, BootError> {
-        match name {
-            "dev" => Self::parse(DEV_PRESET),
-            other => Err(BootError::UnknownPreset(other.to_owned())),
-        }
+        let (_, model) = PRESETS
+            .iter()
+            .find(|(preset, _)| *preset == name)
+            .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
+        Self::parse(&PRESET_TEMPLATE.replace("{MODEL}", model))
     }
 
     /// Sets `key` in the configuration of every plugin of `kind`. Returns

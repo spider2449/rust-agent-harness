@@ -334,9 +334,17 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 尚未做：REPL 的 Ctrl-C 只會結束程式，不會只取消當前 turn；`ToolStarted` 事件在 tool 執行完後才送出（順序正確，但時間點延後）。
 
 ### P3：真實模型
-- [ ] `model-openai-responses`、`model-llamacpp`（從 `rah-runtime-openai` 拆出，fixture 測試沿用）
-- [ ] 刪除 `rah-runtime-openai`、`rah-model`、`rah-runtime`
+- [x] `model-openai`、`model-llamacpp`（2026-10-11 完成；同一個 crate `plugins/model-responses`，從 `rah-runtime-openai` 移植 SSE、Responses 驗證和 llama.cpp normalizer）
+- [ ] 刪除 `rah-runtime-openai`、`rah-model`、`rah-runtime` → **延到 P5**（2026-10-11 決定：legacy Desktop 仍依賴這三個 crate，和 Desktop 一起移除）
 - 驗收：fixture 測試全綠；本機 llama-server 手動驗證（不進 CI）
+- 結果：fixture 測試全綠（plugin 13 個、`rah-cli` e2e 2 個）。**本機 llama-server 尚未手動驗證**：這台機器上沒有在執行的 llama-server；未啟動時 `rah --preset llamacpp` 會回報 unreachable 並以 exit code 1 結束。OpenAI 同樣只有 fixture 驗證（`OPENAI_LIVE_NOT_VERIFIED`）。
+- 實作備註：
+  - 兩個 plugin 共用 Responses 傳輸，所以放在同一個 crate，避免 plugin 之間互相依賴。
+  - **Tool 名稱編碼**：OpenAI function name 只接受 `[A-Za-z0-9_-]`，所以 `fs.read` 送出時是 `fs_read`，回來時對應回原名；名稱衝突會加數字後綴。legacy adapter 直接送原名，對真的 OpenAI 會被拒。
+  - `model-openai` 只能把金鑰送到官方 endpoint 或 loopback URL；金鑰在 `apply` 時從環境變數讀取（預設 `OPENAI_API_KEY`），缺少時 plugin 為 `Failed`。
+  - `model-llamacpp` 只接受 loopback origin；`/health` 和 `/v1/models` 延到第一個請求才檢查並快取，所以 plugin 可以比 server 先啟動；傳輸錯誤會清掉快取。沒有指定 model 時只接受「剛好一個」served model。選用金鑰預設 `RAH_LLAMA_CPP_API_KEY`，不會退回用 OpenAI 金鑰。
+  - Context 用 `store: false` 重送；reasoning 內容不跨出 plugin，只送 `ReasoningStarted`。不重試任何請求。
+  - `rah` 新增 `llamacpp`、`openai` preset 和 `--model` flag。
 
 ### P4：policy、tools、sandbox、process plugin
 - [ ] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask、in-flight 上限）
@@ -348,7 +356,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）
 - [ ] `context-default`（sliding window、記憶）
-- [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）
+- [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）
 - 驗收：功能上可以取代 desktop 的日常使用；**在 UI 上切換 model 和 loop plugin 不需要重啟**
 
 ### P6：生態擴充

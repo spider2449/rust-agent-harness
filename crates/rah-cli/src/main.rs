@@ -12,9 +12,12 @@ use serde_json::Value;
 #[derive(Debug, Parser)]
 #[command(name = "rah", version)]
 struct Args {
-    /// Built-in preset to run (ignored with --config).
+    /// Built-in preset to run (ignored with --config): dev, llamacpp, openai.
     #[arg(long, default_value = "dev")]
     preset: String,
+    /// Model id (model-openai, model-llamacpp).
+    #[arg(long)]
+    model: Option<String>,
     /// Distribution file listing the plugins to mount.
     #[arg(long)]
     config: Option<PathBuf>,
@@ -74,6 +77,14 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             return Err(format!(
                 "--{key} needs a `{kind}` plugin in the distribution"
             ));
+        }
+    }
+    if let Some(model) = &args.model {
+        let openai = distribution.set_config("model-openai", "model", Value::String(model.clone()));
+        let llama =
+            distribution.set_config("model-llamacpp", "model", Value::String(model.clone()));
+        if !openai && !llama {
+            return Err("--model needs a `model-openai` or `model-llamacpp` plugin".into());
         }
     }
     Ok(distribution)
