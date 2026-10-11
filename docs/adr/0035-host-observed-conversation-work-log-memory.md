@@ -34,11 +34,35 @@ chat turn reaches a terminal state, the host appends one entry built only from:
   closed result (`success`, `failed`, `outcome_unknown`, `not_started`), plus a
   verified commit object id only for a `repo.commit` result classified
   `committed_verified`. At most 32 Tool records per entry; the remainder is
-  counted only.
+  counted only;
+- for a **successful** call of a known path-taking Tool, the repository paths
+  named in its input (see "Repository paths" below).
 
-Entries never contain Tool input, Tool output, file paths, diffs, credentials,
+Entries never contain any other Tool input, Tool output, diffs, credentials,
 review/authorization material, HostExplicit tickets, repository identity, or
 generations. The model has no way to write, edit, or delete entries.
+
+## Repository paths
+
+A successful Tool record may carry up to 4 repository-relative paths, taken
+from a host-owned field table and never from arbitrary input fields:
+
+| Tool | Input fields |
+| --- | --- |
+| `fs.read`, `repo.list`, `repo.file-info`, `repo.patch`, `repo.edit-untracked-file`, `repo.create-file`, `repo.delete-file`, `repo.create-directory` | `path` |
+| `repo.rename-file` | `source_path`, `destination_path` |
+| `repo.edit-files` | `targets[].path` |
+
+These paths are model-supplied request data that the Tool accepted. A path is
+recorded only if it is a nonempty relative path of at most 256 UTF-8 bytes
+with no leading `/`, empty, `.`, `..`, or `.git` component, and no control
+character, `\`, `:`, or `"`; any other value is only counted. Paths of failed,
+outcome-unknown, or not-started calls are not recorded. An entry whose Tool
+record would exceed the 8 KiB bound drops that record's paths, then the
+record itself, keeping only counts. The memory message renders paths
+JSON-quoted. A recorded path is a description of an earlier request; it is
+not a repository identity, a currentness claim, or a selector the host acts
+on.
 
 On each send, Desktop renders the newest entries that fit 4 KiB into one
 host-authored `System` message placed before the replayed history. The message
@@ -83,5 +107,5 @@ is already part of the replayed transcript.
 
 This ADR adds no Tool, permission, model-writable memory, summarization model
 call, cross-namespace memory, cloud sync, encryption claim, or replay of
-uncertain effects. Recording Tool arguments such as paths would require a
-separate decision.
+uncertain effects. Recording any Tool argument other than the repository paths
+in the table above requires a separate decision.

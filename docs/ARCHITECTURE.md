@@ -1277,8 +1277,9 @@ transcript. Per
 [ADR 0035](adr/0035-host-observed-conversation-work-log-memory.md), the same
 database (schema `2`) keeps a bounded per-namespace work log of host-observed
 turn outcomes and closed Tool results, replayed as one host-authored `System`
-memory message. The work log is descriptive data, never authority, and
-contains no Tool input, output, or paths.
+memory message. The work log is descriptive data, never authority. Apart from
+validated repository paths of successful calls to a fixed set of path-taking
+Tools, it contains no Tool input and no Tool output.
 
 The v0.14 Desktop workflow retains the v0.13 bounded capabilities and adds
 the separately authorized deletion capability without collapsing authority

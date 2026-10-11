@@ -1009,6 +1009,7 @@ mod tests {
             "repo.patch",
             crate::work_log::WorkLogToolResult::Success,
             None,
+            crate::work_log::ToolPaths::default(),
         );
         turn.finish(WorkLogOutcome::Completed, Some("patched"))
     }

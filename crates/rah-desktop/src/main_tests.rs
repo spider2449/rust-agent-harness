@@ -19690,6 +19690,43 @@ fn task524a_unresolved_activity_is_correlated_and_drained_once() {
 }
 
 #[test]
+fn work_log_paths_follow_the_call_from_request_to_finish() {
+    let session = SessionId::new();
+    let mut pending = HashMap::new();
+    let id = ToolCallId::new();
+    let requested = AgentEvent::ToolRequested {
+        session_id: session.clone(),
+        tool_call: ToolCall {
+            id: id.clone(),
+            name: ToolName::new("repo.patch"),
+            input: ToolInput(serde_json::json!({
+                "path": "src/lib.rs",
+                "replacement_text": "PRIVATE"
+            })),
+        },
+    };
+    assert_eq!(
+        super::work_log_input_paths(&requested, &mut pending),
+        crate::work_log::ToolPaths::default()
+    );
+    let finished = AgentEvent::ToolFinished {
+        session_id: session,
+        tool_call_id: id,
+        output: ToolOutput {
+            content: vec![],
+            is_error: false,
+        },
+    };
+    let paths = super::work_log_input_paths(&finished, &mut pending);
+    assert_eq!(paths.paths, ["src/lib.rs"]);
+    assert!(pending.is_empty());
+    assert!(!format!("{paths:?}").contains("PRIVATE"));
+    assert_eq!(
+        super::work_log_input_paths(&finished, &mut pending),
+        crate::work_log::ToolPaths::default()
+    );
+}
+#[test]
 fn work_log_records_only_host_observed_tool_results() {
     use crate::work_log::{WorkLogOutcome, WorkLogToolResult, WorkLogTurn};
     let session = SessionId::new();
@@ -19706,6 +19743,7 @@ fn work_log_records_only_host_observed_tool_results() {
                 commit_oid: Some(oid.clone()),
             }),
         },
+        crate::work_log::ToolPaths::default(),
     );
     super::record_finished_work_log(
         &mut work_log,
@@ -19714,6 +19752,7 @@ fn work_log_records_only_host_observed_tool_results() {
             result: ActivityResult::Failed,
             commit: None,
         },
+        crate::work_log::ToolPaths::default(),
     );
     // Requested/started events alone are not results.
     super::record_finished_work_log(
@@ -19721,6 +19760,7 @@ fn work_log_records_only_host_observed_tool_results() {
         &ActivityEvent::Started {
             tool: "repo.read".to_owned(),
         },
+        crate::work_log::ToolPaths::default(),
     );
     for started in [true, false] {
         let id = ToolCallId::new();

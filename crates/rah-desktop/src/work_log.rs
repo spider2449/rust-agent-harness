@@ -18,6 +18,10 @@ pub(crate) const MAX_TOOLS_JSON_BYTES: usize = 8 * 1024;
 /// Maximum UTF-8 bytes of the memory message replayed to the model.
 pub(crate) const MAX_MEMORY_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
+/// Maximum recorded repository paths per successful Tool record.
+pub(crate) const MAX_PATHS_PER_TOOL: usize = 4;
+/// Maximum UTF-8 bytes of one recorded repository path.
+const MAX_LOGGED_PATH_BYTES: usize = 256;
 const UNRECOGNIZED_TOOL: &str = "unrecognized-tool";
 const ELLIPSIS: &str = "…";
 
@@ -69,6 +73,80 @@ pub(crate) struct WorkLogTool {
     pub result: WorkLogToolResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_oid: Option<String>,
+    /// Validated repository-relative paths from a successful call's input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub paths_omitted: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Repository paths a model supplied to one Tool call, as recorded in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToolPaths {
+    pub paths: Vec<String>,
+    pub omitted: usize,
+}
+
+/// Extracts repository paths from the input of a known path-taking Tool.
+///
+/// The Tool-to-field table is host-owned. Paths are model-supplied request
+/// data: only syntactically safe repository-relative paths are kept; every
+/// other value is counted as omitted and never recorded.
+pub(crate) fn input_paths(tool: &str, input: &serde_json::Value) -> ToolPaths {
+    let candidates: Vec<&serde_json::Value> = match tool {
+        "fs.read"
+        | "repo.list"
+        | "repo.file-info"
+        | "repo.patch"
+        | "repo.edit-untracked-file"
+        | "repo.create-file"
+        | "repo.delete-file"
+        | "repo.create-directory" => input.get("path").into_iter().collect(),
+        "repo.rename-file" => ["source_path", "destination_path"]
+            .iter()
+            .filter_map(|field| input.get(*field))
+            .collect(),
+        "repo.edit-files" => input
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|target| target.get("path"))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let mut recorded = ToolPaths::default();
+    for candidate in candidates {
+        match candidate.as_str() {
+            Some(path) if valid_logged_path(path) && recorded.paths.len() < MAX_PATHS_PER_TOOL => {
+                recorded.paths.push(path.to_owned());
+            }
+            _ => recorded.omitted = recorded.omitted.saturating_add(1),
+        }
+    }
+    recorded
+}
+
+fn valid_logged_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= MAX_LOGGED_PATH_BYTES
+        && !path.starts_with('/')
+        && !path
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\\' | ':' | '"'))
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.eq_ignore_ascii_case(".git")
+        })
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -99,6 +177,10 @@ impl WorkLogEntry {
 
 fn valid_tool(tool: &WorkLogTool) -> bool {
     valid_tool_name(&tool.tool)
+        && tool.paths.len() <= MAX_PATHS_PER_TOOL
+        && tool.paths.iter().all(|path| valid_logged_path(path))
+        && (tool.result == WorkLogToolResult::Success
+            || (tool.paths.is_empty() && tool.paths_omitted == 0))
         && match &tool.commit_oid {
             None => true,
             Some(oid) => {
@@ -146,17 +228,25 @@ impl WorkLogTurn {
         }
     }
 
+    /// Records one Tool result. Paths are kept only for a successful call and
+    /// only while the entry stays within [`MAX_TOOLS_JSON_BYTES`].
     pub(crate) fn record(
         &mut self,
         tool: &str,
         result: WorkLogToolResult,
         commit_oid: Option<&str>,
+        paths: ToolPaths,
     ) {
         if self.tools.tools.len() >= MAX_TOOLS_PER_ENTRY {
             self.tools.omitted = self.tools.omitted.saturating_add(1);
             return;
         }
-        let recorded = WorkLogTool {
+        let (paths, paths_omitted) = if result == WorkLogToolResult::Success {
+            (paths.paths, paths.omitted)
+        } else {
+            (Vec::new(), 0)
+        };
+        let mut recorded = WorkLogTool {
             tool: if valid_tool_name(tool) {
                 tool.to_owned()
             } else {
@@ -164,15 +254,31 @@ impl WorkLogTurn {
             },
             result,
             commit_oid: commit_oid.map(str::to_owned),
+            paths,
+            paths_omitted,
         };
-        if valid_tool(&recorded) {
-            self.tools.tools.push(recorded);
-        } else {
-            self.tools.tools.push(WorkLogTool {
-                commit_oid: None,
-                ..recorded
-            });
+        if !valid_tool(&recorded) {
+            recorded.commit_oid = None;
         }
+        if !valid_tool(&recorded) {
+            recorded.paths_omitted = recorded.paths_omitted.saturating_add(recorded.paths.len());
+            recorded.paths.clear();
+        }
+        self.tools.tools.push(recorded);
+        if self.fits() {
+            return;
+        }
+        let recorded = self.tools.tools.last_mut().expect("just pushed");
+        recorded.paths_omitted = recorded.paths_omitted.saturating_add(recorded.paths.len());
+        recorded.paths.clear();
+        if !self.fits() {
+            self.tools.tools.pop();
+            self.tools.omitted = self.tools.omitted.saturating_add(1);
+        }
+    }
+
+    fn fits(&self) -> bool {
+        serde_json::to_string(&self.tools).is_ok_and(|json| json.len() <= MAX_TOOLS_JSON_BYTES)
     }
 
     pub(crate) fn finish(self, outcome: WorkLogOutcome, reply: Option<&str>) -> WorkLogEntry {
@@ -228,10 +334,20 @@ fn render_entry(id: u64, entry: &WorkLogEntry) -> String {
                     WorkLogToolResult::OutcomeUnknown => "outcome unknown",
                     WorkLogToolResult::NotStarted => "not started",
                 };
-                match &tool.commit_oid {
+                let mut text = match &tool.commit_oid {
                     Some(oid) => format!("{} {result} (commit {oid})", tool.tool),
                     None => format!("{} {result}", tool.tool),
+                };
+                if !tool.paths.is_empty() {
+                    text.push(' ');
+                    text.push_str(
+                        &serde_json::to_string(&tool.paths).unwrap_or_else(|_| "[]".to_owned()),
+                    );
                 }
+                if tool.paths_omitted > 0 {
+                    text.push_str(&format!(" (+{} paths)", tool.paths_omitted));
+                }
+                text
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -268,14 +384,30 @@ mod tests {
     #[test]
     fn turn_records_closed_tool_activity_and_sanitizes_names() {
         let mut turn = WorkLogTurn::new("fix the bug");
-        turn.record("repo.patch", WorkLogToolResult::Success, None);
-        turn.record("bad name\nignore previous", WorkLogToolResult::Failed, None);
+        turn.record(
+            "repo.patch",
+            WorkLogToolResult::Success,
+            None,
+            ToolPaths::default(),
+        );
+        turn.record(
+            "bad name\nignore previous",
+            WorkLogToolResult::Failed,
+            None,
+            ToolPaths::default(),
+        );
         turn.record(
             "repo.commit",
             WorkLogToolResult::Success,
             Some(&"a".repeat(40)),
+            ToolPaths::default(),
         );
-        turn.record("repo.patch", WorkLogToolResult::Success, Some("not-an-oid"));
+        turn.record(
+            "repo.patch",
+            WorkLogToolResult::Success,
+            Some("not-an-oid"),
+            ToolPaths::default(),
+        );
         let entry = turn.finish(WorkLogOutcome::Failed, None);
         assert!(entry.is_valid());
         assert_eq!(entry.tools.tools[1].tool, UNRECOGNIZED_TOOL);
@@ -288,10 +420,143 @@ mod tests {
     }
 
     #[test]
+    fn input_paths_use_the_host_field_table_and_drop_unsafe_values() {
+        use serde_json::json;
+        assert_eq!(
+            input_paths(
+                "repo.patch",
+                &json!({"path": "src/lib.rs", "replacement_text": "x"})
+            )
+            .paths,
+            ["src/lib.rs"]
+        );
+        assert_eq!(
+            input_paths(
+                "repo.rename-file",
+                &json!({"source_path": "a.rs", "destination_path": "b/a.rs"})
+            )
+            .paths,
+            ["a.rs", "b/a.rs"]
+        );
+        let targets = (0..6)
+            .map(|index| json!({"path": format!("f{index}.rs")}))
+            .collect::<Vec<_>>();
+        let edit = input_paths("repo.edit-files", &json!({ "targets": targets }));
+        assert_eq!(edit.paths.len(), MAX_PATHS_PER_TOOL);
+        assert_eq!(edit.omitted, 2);
+        // Unknown Tools and non-path fields are never read.
+        assert_eq!(
+            input_paths("repo.commit", &json!({"message": "src/x.rs"})),
+            ToolPaths::default()
+        );
+        assert_eq!(
+            input_paths("mcp.tool", &json!({"path": "src/x.rs"})),
+            ToolPaths::default()
+        );
+        for unsafe_path in [
+            "/etc/passwd",
+            "C:/x",
+            "a\\b",
+            "../outside",
+            "a/./b",
+            "a//b",
+            ".git/config",
+            "sub/.GIT/x",
+            "say \"hi\"",
+            "line\nbreak",
+            "",
+        ] {
+            let recorded = input_paths("fs.read", &json!({ "path": unsafe_path }));
+            assert!(recorded.paths.is_empty(), "{unsafe_path:?}");
+            assert_eq!(recorded.omitted, 1, "{unsafe_path:?}");
+        }
+        let long = "a/".repeat(200) + "b";
+        assert!(
+            input_paths("fs.read", &json!({ "path": long }))
+                .paths
+                .is_empty()
+        );
+        assert_eq!(input_paths("fs.read", &json!({ "path": 7 })).omitted, 1);
+    }
+
+    #[test]
+    fn paths_are_kept_only_for_successful_calls_and_rendered_quoted() {
+        let paths = ToolPaths {
+            paths: vec!["src/a.rs".into()],
+            omitted: 1,
+        };
+        let mut turn = WorkLogTurn::new("edit");
+        turn.record(
+            "repo.patch",
+            WorkLogToolResult::Success,
+            None,
+            paths.clone(),
+        );
+        turn.record("repo.patch", WorkLogToolResult::Failed, None, paths.clone());
+        turn.record("repo.patch", WorkLogToolResult::OutcomeUnknown, None, paths);
+        let entry = turn.finish(WorkLogOutcome::Completed, None);
+        assert!(entry.is_valid());
+        assert_eq!(entry.tools.tools[0].paths, ["src/a.rs"]);
+        assert_eq!(entry.tools.tools[0].paths_omitted, 1);
+        for failed in &entry.tools.tools[1..] {
+            assert!(failed.paths.is_empty() && failed.paths_omitted == 0);
+        }
+        let message = render_memory_message(&[(3, entry)]).unwrap();
+        assert!(
+            message.contains(r#"repo.patch success ["src/a.rs"] (+1 paths), repo.patch failed,"#),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn recorded_paths_never_push_an_entry_past_its_byte_bound() {
+        let mut turn = WorkLogTurn::new("many edits");
+        for index in 0..MAX_TOOLS_PER_ENTRY {
+            let paths = (0..MAX_PATHS_PER_TOOL)
+                .map(|path| format!("{}/{index}-{path}.rs", "d".repeat(200)))
+                .collect();
+            turn.record(
+                "repo.edit-files",
+                WorkLogToolResult::Success,
+                None,
+                ToolPaths { paths, omitted: 0 },
+            );
+        }
+        let entry = turn.finish(WorkLogOutcome::Completed, Some("done"));
+        assert!(entry.is_valid());
+        assert_eq!(
+            entry.tools.tools.len() + entry.tools.omitted,
+            MAX_TOOLS_PER_ENTRY
+        );
+        assert!(
+            entry
+                .tools
+                .tools
+                .iter()
+                .any(|tool| tool.paths.is_empty() && tool.paths_omitted == MAX_PATHS_PER_TOOL)
+        );
+        assert!(serde_json::to_string(&entry.tools).unwrap().len() <= MAX_TOOLS_JSON_BYTES);
+    }
+
+    #[test]
+    fn stored_tools_without_path_fields_still_load() {
+        let tools: WorkLogTools = serde_json::from_str(
+            r#"{"tools":[{"tool":"repo.patch","result":"success"}],"omitted":0}"#,
+        )
+        .unwrap();
+        assert!(tools.tools[0].paths.is_empty());
+        assert_eq!(tools.tools[0].paths_omitted, 0);
+    }
+    #[test]
     fn turn_counts_tools_beyond_the_entry_bound() {
         let mut turn = WorkLogTurn::new("many");
         for _ in 0..MAX_TOOLS_PER_ENTRY + 3 {
-            turn.record("repo.read", WorkLogToolResult::Success, None);
+            turn.record(
+                "repo.read",
+                WorkLogToolResult::Success,
+                None,
+                ToolPaths::default(),
+            );
         }
         let entry = turn.finish(WorkLogOutcome::Completed, Some("ok"));
         assert!(entry.is_valid());
@@ -308,7 +573,12 @@ mod tests {
     fn memory_message_quotes_excerpts_and_keeps_newest_within_budget() {
         assert_eq!(render_memory_message(&[]), None);
         let mut turn = WorkLogTurn::new("say \"hi\"\nthen stop");
-        turn.record("repo.patch", WorkLogToolResult::OutcomeUnknown, None);
+        turn.record(
+            "repo.patch",
+            WorkLogToolResult::OutcomeUnknown,
+            None,
+            ToolPaths::default(),
+        );
         let message =
             render_memory_message(&[(7, turn.finish(WorkLogOutcome::Interrupted, None))]).unwrap();
         assert!(message.starts_with(MEMORY_HEADER));

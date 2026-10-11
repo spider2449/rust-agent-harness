@@ -9286,6 +9286,7 @@ async fn run_chat(
     let mut retain_model_owner = false;
     let mut tool_calls = HashMap::new();
     let mut work_log = Some(work_log::WorkLogTurn::new(&prompt));
+    let mut work_log_paths = HashMap::new();
     let mut repo_list_evidence = HashMap::new();
     let mut native_terminal_counters = native_terminal_evidence::Counters::default();
     let mut events = handle.events;
@@ -9340,7 +9341,8 @@ async fn run_chat(
             if outcome.invalidate_review {
                 invalidate_repository_commit_review(app.state::<DesktopAppState>().inner()).await;
             }
-            record_finished_work_log(&mut work_log, &outcome.activity);
+            let paths = work_log_input_paths(&event, &mut work_log_paths);
+            record_finished_work_log(&mut work_log, &outcome.activity, paths);
             emit_activity_event(
                 &app,
                 ActivityNotification {
@@ -9594,11 +9596,37 @@ async fn run_chat(
     }
 }
 
-/// Records host-observed Tool results; never Tool inputs or model text.
+/// Remembers validated repository paths of each requested call and returns
+/// them when that call finishes. Never retains other input values.
+#[cfg(target_os = "windows")]
+fn work_log_input_paths(
+    event: &AgentEvent,
+    pending: &mut HashMap<rah_protocol::ToolCallId, work_log::ToolPaths>,
+) -> work_log::ToolPaths {
+    match event {
+        AgentEvent::ToolRequested { tool_call, .. } => {
+            if pending.len() < MAX_TURN_TOOL_CALLS {
+                pending.insert(
+                    tool_call.id.clone(),
+                    work_log::input_paths(tool_call.name.as_str(), &tool_call.input.0),
+                );
+            }
+            work_log::ToolPaths::default()
+        }
+        AgentEvent::ToolFinished { tool_call_id, .. } => {
+            pending.remove(tool_call_id).unwrap_or_default()
+        }
+        _ => work_log::ToolPaths::default(),
+    }
+}
+
+/// Records host-observed Tool results and, for successful calls, validated
+/// repository paths; never other Tool input, Tool output, or model text.
 #[cfg(target_os = "windows")]
 fn record_finished_work_log(
     work_log: &mut Option<work_log::WorkLogTurn>,
     activity: &ActivityEvent,
+    paths: work_log::ToolPaths,
 ) {
     let (
         Some(turn),
@@ -9622,6 +9650,7 @@ fn record_finished_work_log(
             ActivityResult::Failed => work_log::WorkLogToolResult::Failed,
         },
         commit_oid,
+        paths,
     );
 }
 
@@ -9645,6 +9674,7 @@ fn record_unresolved_work_log(
                 work_log::WorkLogToolResult::NotStarted
             },
             None,
+            work_log::ToolPaths::default(),
         );
     }
 }
