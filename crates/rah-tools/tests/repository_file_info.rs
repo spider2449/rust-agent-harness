@@ -302,3 +302,22 @@ async fn unix_symlink_executable_and_case_sensitive_paths_are_semantic() {
         observe(&git, &root, "case.txt").await["content"]
     );
 }
+
+#[tokio::test]
+async fn file_ancestor_is_a_correctable_input_rejection() {
+    let (_base, git, root) = repository("ancestor-file");
+    let tool = RepositoryFileInfoTool::new(&git, &root).unwrap();
+    let error = tool
+        .execute(
+            ToolInput(json!({"path": "tracked.txt/child"})),
+            ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ToolError::InvalidInput {
+            message: "worktree path ancestor is not a directory".into()
+        }
+    );
+}

@@ -105,3 +105,21 @@ async fn real_repo_a_and_nested_repo_b_are_rejected_before_observation() {
     let diff_staged = RepositoryDiffStagedTool::new(&fixture.git, &fixture.root).unwrap();
     rejected(&diff_staged, json!({})).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn file_ancestor_inside_nested_repo_b_stays_a_terminal_boundary_rejection() {
+    let fixture = Fixture::nested_repository();
+    let file_info = RepositoryFileInfoTool::new(&fixture.git, &fixture.root).unwrap();
+    let error = file_info
+        .execute(
+            ToolInput(json!({"path":"nested/secret.txt/child"})),
+            ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    // Never a correctable result: that would reveal repository B's file.
+    assert!(
+        matches!(error, rah_tools::ToolError::Execution { .. }),
+        "{error:?}"
+    );
+}

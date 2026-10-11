@@ -1,4 +1,9 @@
-use std::{fs, io::Read, path::Path, time::Instant};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput};
@@ -8,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Tool, ToolContext, ToolError,
     git_support::git_error,
+    repository_boundary::is_reparse_point,
     repository_observer::{ObserverCommand, RepositoryObserver, reject_link_or_reparse},
 };
 
@@ -68,7 +74,20 @@ impl Tool for RepositoryFileInfoTool {
             .observer
             .root()
             .join(request.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        self.observer.validate_target(&target)?;
+        if let Err(error) = self.observer.validate_target(&target) {
+            return Err(
+                match regular_file_ancestor(self.observer.root(), &request.path) {
+                    // The boundary reports a non-directory ancestor before it
+                    // checks nested markers. Only once the file's own ancestry
+                    // passes the boundary is the rejection safe to return to the
+                    // model as a correctable input error.
+                    Some(file) if self.observer.validate_target(&file).is_ok() => {
+                        invalid("worktree path ancestor is not a directory")
+                    }
+                    _ => error,
+                },
+            );
+        }
         let started = Instant::now();
 
         let index = required_output(
@@ -363,6 +382,28 @@ struct Worktree {
     kind: Option<&'static str>,
     size: Option<u64>,
     digest: Option<Value>,
+}
+
+/// The first ancestor of `logical_path` that is an ordinary regular file,
+/// reached only through ordinary directories. Links, reparse points, and
+/// missing components yield `None`.
+fn regular_file_ancestor(root: &Path, logical_path: &str) -> Option<PathBuf> {
+    let components = logical_path.split('/').collect::<Vec<_>>();
+    let mut path = root.to_owned();
+    for component in &components[..components.len().saturating_sub(1)] {
+        path.push(component);
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return None;
+        }
+        if metadata.is_file() {
+            return Some(path);
+        }
+        if !metadata.is_dir() {
+            return None;
+        }
+    }
+    None
 }
 
 fn observe_worktree(root: &Path, logical_path: &str) -> Result<Worktree, ToolError> {
