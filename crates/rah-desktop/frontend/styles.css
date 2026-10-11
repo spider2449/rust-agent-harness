@@ -219,6 +219,7 @@ h3 {
 
 .activity-entry {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.65rem 0.75rem;
@@ -244,6 +245,26 @@ h3 {
 
 .activity-entry[data-state="failed"] span {
   color: var(--danger);
+}
+
+.activity-reason {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.diagnostic-log-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.diagnostic-log-path {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
 }
 
 .chat-message {

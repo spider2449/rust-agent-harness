@@ -15455,6 +15455,7 @@ fn serialized_activity_events_expose_only_tool_lifecycle() {
         tool: DESKTOP_TOOL_NAME.to_owned(),
         result: ActivityResult::Success,
         commit: None,
+        reason: None,
     };
     let serialized = serde_json::to_string(&event).expect("activity event serializes");
 
@@ -15525,6 +15526,7 @@ fn activity_uses_actual_tool_name_and_hides_internal_call_identity() {
                 tool: "repo.edit-files".to_owned(),
                 result: ActivityResult::Failed,
                 commit: None,
+                reason: None,
             },
             true,
         ))
@@ -15534,6 +15536,81 @@ fn activity_uses_actual_tool_name_and_hides_internal_call_identity() {
         serialized,
         r#"{"kind":"tool_requested","tool":"repo.edit-files"}"#
     );
+}
+
+#[test]
+fn failed_activity_presents_correctable_rejection_reason() {
+    let id = ToolCallId::new();
+    let requested = AgentEvent::ToolRequested {
+        session_id: SessionId::new(),
+        tool_call: ToolCall {
+            id: id.clone(),
+            name: ToolName::new("repo.search"),
+            input: ToolInput(
+                serde_json::json!({"mode": "path", "query": "x", "path_prefix": "docs/"}),
+            ),
+        },
+    };
+    let finished = AgentEvent::ToolFinished {
+        session_id: SessionId::new(),
+        tool_call_id: id,
+        output: ToolOutput {
+            content: vec![ToolContent::Text(
+                "invalid input: `path_prefix` contains a forbidden path component".to_owned(),
+            )],
+            is_error: true,
+        },
+    };
+    let mut calls = HashMap::new();
+    activity_event(&requested, &mut calls).expect("requested activity");
+    let (finished, _) = activity_event(&finished, &mut calls).expect("finished activity");
+    assert_eq!(
+        serde_json::to_string(&finished).expect("activity serializes"),
+        r#"{"kind":"tool_finished","tool":"repo.search","result":"failed","reason":"invalid input: `path_prefix` contains a forbidden path component"}"#
+    );
+}
+
+#[test]
+fn activity_failure_reason_is_bounded_and_host_generated_only() {
+    let error = |content: Vec<ToolContent>| ToolOutput {
+        content,
+        is_error: true,
+    };
+    let text = |value: &str| vec![ToolContent::Text(value.to_owned())];
+
+    assert_eq!(
+        super::activity_failure_reason(&error(text("execution failed: file\nmissing"))),
+        Some("execution failed: file missing".to_owned())
+    );
+    // Possible native paths are reduced to the category.
+    assert_eq!(
+        super::activity_failure_reason(&error(text(
+            r"execution failed: failed to open `C:\repo\secret.txt`"
+        ))),
+        Some("execution failed".to_owned())
+    );
+    let long = super::activity_failure_reason(&error(text(&format!(
+        "invalid input: {}",
+        "x".repeat(1000)
+    ))))
+    .expect("reason");
+    assert_eq!(long.chars().count(), 240);
+    assert!(long.ends_with('…'));
+
+    for output in [
+        error(text("provider said: something")),
+        error(text("invalid inputs: no separator")),
+        error(vec![ToolContent::Json(
+            serde_json::json!({"status": "invalid_input"}),
+        )]),
+        error(vec![]),
+        ToolOutput {
+            content: text("invalid input: not an error"),
+            is_error: false,
+        },
+    ] {
+        assert_eq!(super::activity_failure_reason(&output), None);
+    }
 }
 
 #[test]
@@ -19742,6 +19819,7 @@ fn work_log_records_only_host_observed_tool_results() {
                 status: super::CommitActivityStatus::CommittedVerified,
                 commit_oid: Some(oid.clone()),
             }),
+            reason: None,
         },
         crate::work_log::ToolPaths::default(),
     );
@@ -19751,6 +19829,7 @@ fn work_log_records_only_host_observed_tool_results() {
             tool: "repo.patch".to_owned(),
             result: ActivityResult::Failed,
             commit: None,
+            reason: None,
         },
         crate::work_log::ToolPaths::default(),
     );

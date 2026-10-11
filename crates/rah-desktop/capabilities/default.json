@@ -21,6 +21,8 @@
     "allow-commit-identity",
     "allow-set-commit-identity",
     "allow-desktop-preferences-warning",
+    "allow-diagnostic-log-status",
+    "allow-set-diagnostic-log-enabled",
     "allow-test-llama-cpp-endpoint",
     "allow-choose-repository",
     "allow-remembered-workspace-catalog",

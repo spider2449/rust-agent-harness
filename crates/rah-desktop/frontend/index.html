@@ -104,6 +104,13 @@
           <input id="commit-identity-email" type="text" maxlength="1024" />
           <button id="save-commit-identity" type="button">Save Identity</button>
         </section>
+        <section class="diagnostic-log" aria-labelledby="diagnostic-log-title">
+          <h2 id="diagnostic-log-title">Diagnostic log</h2>
+          <label class="diagnostic-log-toggle"><input id="diagnostic-log-enabled" type="checkbox" /> Write diagnostic log</label>
+          <p class="model-hint">Records Activity and chat result events in the system temporary directory. It never records tool input or output. Off at each start.</p>
+          <p id="diagnostic-log-path" class="diagnostic-log-path" hidden></p>
+          <p id="diagnostic-log-error" class="connection-error" hidden></p>
+        </section>
         <section class="repository" aria-labelledby="repository-title">
           <h2 id="repository-title">Repository</h2>
           <p id="repository-error" class="connection-error" hidden></p>

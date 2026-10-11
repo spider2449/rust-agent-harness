@@ -118,6 +118,15 @@ function activityClosure() {
   emit("denied", "tool_interrupted", { started: false });
   assert.equal(entries.children.at(-1).children[1].textContent, "Not started");
   assert.ok(!entries.children.at(-1).children[1].textContent.includes("Completed"));
+  emit("rejected", "tool_finished", { result: "failed", reason: "invalid input: `path` <b>bad</b>" });
+  const rejected = entries.children.at(-1);
+  assert.equal(rejected.children[1].textContent, "Failed");
+  assert.equal(rejected.children[2].className, "activity-reason");
+  assert.equal(rejected.children[2].textContent, "invalid input: `path` <b>bad</b>", "reason is plain text");
+  emit("plain", "tool_finished", { result: "failed" });
+  assert.equal(entries.children.at(-1).children.length, 2, "a failure without a reason stays status-only");
+  emit("ok", "tool_finished", { result: "success", reason: "ignored" });
+  assert.equal(entries.children.at(-1).children.length, 2, "success never shows a reason");
 }
 (async () => {
   activityClosure();

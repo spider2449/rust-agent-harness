@@ -89,7 +89,7 @@ const DesktopLayout = (() => {
     const sections = {
       runtime: [$("#runtime-status-title").closest("section"), $("#legacy-model-configuration")],
       authority: [$(".authority-review")], activity: [$(".activity")], repository: [repo],
-      settings: [$(".profile"), $(".commit-identity"), $("#application-status-title").closest("section")],
+      settings: [$(".profile"), $(".commit-identity"), $(".diagnostic-log"), $("#application-status-title").closest("section")],
     };
     for (const tab of tabs) {
       const button = document.createElement("button"); button.type = "button"; button.id = "tab-" + tab;

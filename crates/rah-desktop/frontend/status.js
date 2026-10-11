@@ -208,6 +208,7 @@ function errorMessage(error) {
     host_invocation_precondition_changed: "A reviewed precondition changed. Prepare a fresh review.",
     host_invocation_review_too_large: "The complete backend review is too large to display safely.",
     preferences_save_failed: "Model preferences could not be saved.",
+    diagnostic_log_unavailable: "Diagnostic log could not be created in the temporary directory.",
   };
   return messages[error] ?? "Desktop frontend unavailable";
 }
@@ -2114,6 +2115,12 @@ function appendActivity(payload) {
   tool.textContent = payload.tool;
   state.textContent = labels[payload.kind] ?? "Unknown";
   entry.append(tool, state);
+  if (payload.kind === "tool_finished" && payload.result === "failed" && typeof payload.reason === "string") {
+    const reason = document.createElement("p");
+    reason.className = "activity-reason";
+    reason.textContent = payload.reason;
+    entry.append(reason);
+  }
   if (payload.commit) {
     const commit = document.createElement("span");
     const commitLabels = {
@@ -2431,6 +2438,32 @@ async function toggleCodexConnection(invoke) {
   }
 }
 
+function renderDiagnosticLog(status) {
+  document.querySelector("#diagnostic-log-enabled").checked = status.enabled;
+  const path = document.querySelector("#diagnostic-log-path");
+  path.textContent = status.enabled && status.path ? `Writing to ${status.path}` : "";
+  path.hidden = !path.textContent;
+}
+
+async function initializeDiagnosticLog(invoke) {
+  const toggle = document.querySelector("#diagnostic-log-enabled");
+  const error = document.querySelector("#diagnostic-log-error");
+  renderDiagnosticLog(await invoke("diagnostic_log_status"));
+  toggle.addEventListener("change", async () => {
+    error.hidden = true;
+    toggle.disabled = true;
+    try {
+      renderDiagnosticLog(await invoke("set_diagnostic_log_enabled", { enabled: toggle.checked }));
+    } catch (logError) {
+      error.textContent = errorMessage(logError);
+      error.hidden = false;
+      renderDiagnosticLog(await invoke("diagnostic_log_status").catch(() => ({ enabled: false })));
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+}
+
 async function initializeNativeConfiguration(invoke) {
   const native = await invoke("native_configuration");
   const nativeProvider = document.querySelector("#native-provider");
@@ -2462,6 +2495,7 @@ async function initializeDesktop() {
   const { listen } = tauri.event;
 
   await initializeNativeConfiguration(invoke);
+  await initializeDiagnosticLog(invoke);
 
   await listen("chat_event", (event) => handleChatEvent(invoke, event));
   await listen("activity_event", (event) => appendActivity(event.payload));

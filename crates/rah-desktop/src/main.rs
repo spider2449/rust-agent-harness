@@ -32,6 +32,8 @@ mod desktop_preferences_commands;
 #[cfg(target_os = "windows")]
 mod desktop_status_commands;
 #[cfg(target_os = "windows")]
+mod diagnostic_log;
+#[cfg(target_os = "windows")]
 mod effective_authority;
 #[cfg(target_os = "windows")]
 mod git_discovery;
@@ -468,6 +470,8 @@ struct DesktopAppState {
     conversation: Mutex<DesktopConversationState>,
     persistence: Mutex<Persistence>,
     close_started: AtomicBool,
+    /// Opt-in presentation-safe diagnostic log; grants nothing.
+    diagnostic_log: diagnostic_log::DiagnosticLog,
     #[cfg(test)]
     activation_test_hook: Mutex<Option<Arc<ActivationTestHook>>>,
     #[cfg(test)]
@@ -662,6 +666,7 @@ impl DesktopAppState {
             conversation: Mutex::new(DesktopConversationState::default()),
             persistence: Mutex::new(persistence),
             close_started: AtomicBool::new(false),
+            diagnostic_log: diagnostic_log::DiagnosticLog::default(),
             #[cfg(test)]
             activation_test_hook: Mutex::new(None),
             #[cfg(test)]
@@ -1719,6 +1724,7 @@ pub(crate) enum FrontendError {
     HostInvocationInvalidTarget,
     HostInvocationPreconditionChanged,
     HostInvocationReviewTooLarge,
+    DiagnosticLogUnavailable,
 }
 
 #[cfg(target_os = "windows")]
@@ -2047,6 +2053,9 @@ enum ActivityEvent {
         result: ActivityResult,
         #[serde(skip_serializing_if = "Option::is_none")]
         commit: Option<CommitActivityPresentation>,
+        /// Bounded host-generated correctable rejection text only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     #[serde(rename = "tool_interrupted")]
     Interrupted { tool: String, started: bool },
@@ -2894,6 +2903,9 @@ fn host_tool_definition(
 
 #[cfg(target_os = "windows")]
 fn emit_host_activity(app: &AppHandle, event: HostActivityEvent) {
+    app.state::<DesktopAppState>()
+        .diagnostic_log
+        .append("host_activity", &event);
     if let Err(error) = app.emit("host_activity_event", event) {
         tracing::warn!(error = %error, "failed to emit explicit host activity");
     }
@@ -8537,6 +8549,9 @@ fn emit_chat_event(app: &AppHandle, event: ChatEvent) {
         _ => None,
     };
     let state = app.state::<DesktopAppState>();
+    if terminal_kind.is_some() {
+        state.diagnostic_log.append("chat_terminal", &event);
+    }
     let session_generation = terminal_kind.and_then(|_| {
         state
             .active_chat
@@ -8675,6 +8690,9 @@ fn activity_event_with_composition(
             let commit = (activity.tool == "repo.commit")
                 .then(|| commit_activity_presentation(output))
                 .flatten();
+            let reason = (!activity.external && activity.tool != "repo.commit")
+                .then(|| activity_failure_reason(output))
+                .flatten();
             ActivityOutcome {
                 activity_id: activity.activity_id,
                 activity: ActivityEvent::Finished {
@@ -8685,6 +8703,7 @@ fn activity_event_with_composition(
                         ActivityResult::Success
                     },
                     commit,
+                    reason,
                 },
                 invalidate_review: refresh_reason.is_some(),
                 refresh_reason,
@@ -8692,6 +8711,47 @@ fn activity_event_with_composition(
         }),
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+const MAX_ACTIVITY_REASON_CHARS: usize = 240;
+
+/// Presents only the host-generated correctable rejection text that the model
+/// already received. Other error shapes stay status-only, and text that may
+/// carry a native path is reduced to its category.
+#[cfg(target_os = "windows")]
+fn activity_failure_reason(output: &rah_protocol::ToolOutput) -> Option<String> {
+    let [ToolContent::Text(text)] = output.content.as_slice() else {
+        return None;
+    };
+    if !output.is_error {
+        return None;
+    }
+    let category = ["invalid input", "execution failed"]
+        .into_iter()
+        .find(|category| {
+            text.strip_prefix(category)
+                .is_some_and(|rest| rest.starts_with(": "))
+        })?;
+    if text.contains('\\') {
+        return Some(category.to_owned());
+    }
+    let mut reason = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_ACTIVITY_REASON_CHARS + 1)
+        .collect::<String>();
+    if reason.chars().count() > MAX_ACTIVITY_REASON_CHARS {
+        reason = reason.chars().take(MAX_ACTIVITY_REASON_CHARS - 1).collect();
+        reason.push('…');
+    }
+    Some(reason)
 }
 
 #[cfg(target_os = "windows")]
@@ -8882,6 +8942,9 @@ fn commit_activity_presentation(
 
 #[cfg(target_os = "windows")]
 fn emit_activity_event(app: &AppHandle, event: ActivityNotification) {
+    app.state::<DesktopAppState>()
+        .diagnostic_log
+        .append("activity", &event);
     if let Err(error) = app.emit("activity_event", event) {
         tracing::warn!(error = %error, "failed to emit desktop activity event");
     }
@@ -9634,6 +9697,7 @@ fn record_finished_work_log(
             tool,
             result,
             commit,
+            ..
         },
     ) = (work_log.as_mut(), activity)
     else {
@@ -10089,6 +10153,8 @@ fn main() -> ExitCode {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_status_commands::app_status,
+            diagnostic_log::diagnostic_log_status,
+            diagnostic_log::set_diagnostic_log_enabled,
             trusted_profile_selection,
             choose_trusted_profile,
             restore_trusted_profile,

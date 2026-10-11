@@ -17,6 +17,8 @@ fn main() {
             "commit_identity",
             "set_commit_identity",
             "desktop_preferences_warning",
+            "diagnostic_log_status",
+            "set_diagnostic_log_enabled",
             "test_llama_cpp_endpoint",
             "choose_repository",
             "remembered_workspace_catalog",
@@ -88,6 +90,8 @@ fn validate_task120_capability() {
         "cancel_chat",
         "reset_model_preferences",
         "desktop_preferences_warning",
+        "diagnostic_log_status",
+        "set_diagnostic_log_enabled",
     ];
     let capability_path = "capabilities/default.json";
     println!("cargo:rerun-if-changed={capability_path}");
