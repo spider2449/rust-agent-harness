@@ -2,6 +2,18 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P6)
 
+### P6: `loop-plan`
+
+- New plugin `loop-plan`, a second `loop`: one tool-free model request
+  writes a numbered plan (recorded as an assistant message), then each step
+  (`max_steps`, 8) runs as a bounded model and tool loop
+  (`max_rounds_per_step`, 16) with the plan and current step in a system
+  item. It follows the same contract as `loop-react`: `model.before_request`,
+  `ToolInvoker`, log-before-continue, per-request model resolution and
+  scope-owned turns.
+- Tests run it from configuration and swap it in for `loop-react` at runtime
+  on an existing session.
+
 ### P6: `skills-fs`
 
 - New plugin `skills-fs`: skills are `<dir>/<name>/SKILL.md` files with

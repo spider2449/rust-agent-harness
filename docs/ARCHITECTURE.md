@@ -78,7 +78,8 @@ Implemented:
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`.
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
-  (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
+  (crate `model-responses`); `loop-react` and `loop-plan` (plan-and-execute;
+  either can replace the other at runtime); `tools-builtin` (`echo` and
   workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`;
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`);

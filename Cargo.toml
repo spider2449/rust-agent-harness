@@ -8,6 +8,7 @@ members = [
     "plugins/context-default",
     "plugins/frontend-cli",
     "plugins/frontend-web",
+    "plugins/loop-plan",
     "plugins/loop-react",
     "plugins/model-mock",
     "plugins/model-responses",

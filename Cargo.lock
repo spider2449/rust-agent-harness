@@ -1067,6 +1067,7 @@ dependencies = [
  "rah-plugin-frontend-cli",
  "rah-plugin-frontend-web",
  "rah-plugin-host-process",
+ "rah-plugin-loop-plan",
  "rah-plugin-loop-react",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
@@ -1148,6 +1149,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-loop-plan"
+version = "0.35.0"
+dependencies = [
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

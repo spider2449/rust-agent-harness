@@ -14,6 +14,7 @@ use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::Kern
 use rah_plugin_context_default::ContextPlugin;
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
+use rah_plugin_loop_plan::PlanLoopPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
@@ -34,10 +35,11 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 16] = [
+    let entries: [(&'static str, Constructor); 17] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
+        ("loop-plan", |id| Arc::new(PlanLoopPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),

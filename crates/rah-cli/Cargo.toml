@@ -15,6 +15,7 @@ rah-plugin-host-process = { path = "../rah-plugin-host-process" }
 rah-plugin-context-default = { path = "../../plugins/context-default" }
 rah-plugin-frontend-cli = { path = "../../plugins/frontend-cli" }
 rah-plugin-frontend-web = { path = "../../plugins/frontend-web" }
+rah-plugin-loop-plan = { path = "../../plugins/loop-plan" }
 rah-plugin-loop-react = { path = "../../plugins/loop-react" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }
 rah-plugin-model-responses = { path = "../../plugins/model-responses" }

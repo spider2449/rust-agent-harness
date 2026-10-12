@@ -160,7 +160,7 @@ id = "model-a"            # instance id; defaults to the `use` name
 config = { label = "A" }
 
 [[plugin]]
-use = "loop-react"
+use = "loop-react"            # or "loop-plan": plan first, then execute step by step
 config = { max_rounds = 8 }
 
 [[plugin]]
