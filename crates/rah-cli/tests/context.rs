@@ -26,7 +26,14 @@ async fn the_window_limits_the_model_context_but_not_the_log() {
 #[tokio::test]
 async fn memory_notes_are_part_of_every_request() {
     let dir = TempDir::new("context-memory");
-    std::fs::write(dir.0.join("memory.md"), "- the user likes tea\n").unwrap();
+    // The presets keep one memory file per workspace, named after the
+    // sandbox root (the workspace directory).
+    let root = std::fs::canonicalize(dir.workspace()).unwrap();
+    let root = root.display().to_string();
+    let root = root.strip_prefix(r"\\?\").unwrap_or(&root);
+    let name = rah_plugin_context_default::workspace_file_name(std::path::Path::new(root));
+    std::fs::create_dir_all(dir.0.join("memory")).unwrap();
+    std::fs::write(dir.0.join("memory").join(name), "- the user likes tea\n").unwrap();
     let kernel = kernel(&headless(&dir)).await;
     let handle = kernel.handle();
     let session = new_session(&handle).await;

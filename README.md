@@ -52,8 +52,10 @@ directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 `repo.diff`, `repo.list` and `repo.search` over Git), `tools-repo-write`
 (`repo.create-file`, `repo.edit-files` and `repo.patch`, each asking for
 approval), `context-default` (a
-sliding history window and memory notes in `.rah/memory.md`, which the model
-can extend with `memory.remember` after you approve), `skills-fs` (skills in
+sliding history window and memory notes kept per workspace in
+`.rah/memory/<folder>-<hash>.md`, which the model can extend with
+`memory.remember` after you approve), `skills-fs` (skills, shared by all
+workspaces, in
 `.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
 `skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
 hand a task to a subagent in its own session), `model-mock`,
@@ -233,6 +235,9 @@ process-plugin example runs only when a Python 3 interpreter is on PATH. The
 Web UI browser tests run only when `RAH_TEST_BROWSER` names a Chromium-based
 browser (Chrome, Chromium or Edge), for example
 `$env:RAH_TEST_BROWSER = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`.
+
+Open problems, local-only test failures and notes for setting up another
+development machine are in [Known issues](docs/KNOWN_ISSUES.md).
 
 ## Contributing
 

@@ -16,7 +16,13 @@
   switches the workspace to it, so a session's history and its tool calls
   always refer to the same files. Switching the workspace closes the open
   session of the folder left.
-- The memory file and skills stay shared across workspaces for now.
+- Memory follows the workspace: `context-default` gains `memory_dir`, one
+  memory file per workspace (`<folder>-<hash>.md`, named from the `sandbox`
+  root on every request, so switching the workspace switches the notes and
+  `memory.remember` writes to the current project's file). It excludes
+  `memory_file`, which still sets one file for everything. The presets use
+  `memory_dir = ".rah/memory"`; an existing `.rah/memory.md` is no longer
+  read and can be moved to a project's file by hand. Skills stay shared.
 
 ### Fix: programs found the user's configuration
 

@@ -207,3 +207,153 @@ async fn remembered_notes_reach_later_requests() {
         "- first note with a newline\n- second note\n- third note\n"
     );
 }
+
+#[test]
+fn workspace_memory_files_are_named_after_the_folder_and_its_path() {
+    let a = workspace_file_name(Path::new(r"D:\work\My Repo"));
+    assert!(a.starts_with("My_Repo-") && a.ends_with(".md"), "{a}");
+    // Same folder name elsewhere: another file.
+    assert_ne!(a, workspace_file_name(Path::new(r"E:\other\My Repo")));
+    // Stable across calls.
+    assert_eq!(a, workspace_file_name(Path::new(r"D:\work\My Repo")));
+    if cfg!(windows) {
+        assert_eq!(a, workspace_file_name(Path::new(r"d:\WORK\My Repo")));
+    }
+    assert!(workspace_file_name(Path::new("/")).starts_with("workspace-"));
+}
+
+/// A sandbox whose root the test moves, as switching the workspace does.
+struct MovableRoot(std::sync::Mutex<PathBuf>);
+
+#[async_trait]
+impl rah_api::sandbox::ExecEnv for MovableRoot {
+    fn root(&self) -> Option<PathBuf> {
+        Some(self.0.lock().unwrap().clone())
+    }
+
+    async fn run(
+        &self,
+        _spec: rah_api::sandbox::ProgramSpec,
+        _cancel: CancellationToken,
+    ) -> Result<rah_api::sandbox::ExecOutput, rah_api::sandbox::ExecError> {
+        Err(rah_api::sandbox::ExecError::InvalidSpec(
+            "not in this test".into(),
+        ))
+    }
+}
+
+struct SandboxPlugin(PluginManifest, Arc<MovableRoot>);
+
+#[async_trait]
+impl Plugin for SandboxPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        scope.provide(
+            SANDBOX,
+            self.1.clone() as Arc<dyn rah_api::sandbox::ExecEnv>,
+        )?;
+        Ok(())
+    }
+}
+
+async fn remember(kernel: &Kernel, note: &str) {
+    let outcome = ToolInvoker::new(kernel.handle())
+        .invoke(
+            Invocation {
+                session: SessionId::new(),
+                call: ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("memory.remember"),
+                    input: ToolInput(json!({ "note": note })),
+                },
+                cancel: CancellationToken::new(),
+            },
+            || {},
+        )
+        .await;
+    assert!(!outcome.output.is_error, "{:?}", outcome.output);
+}
+
+async fn notes(kernel: &Kernel) -> Vec<String> {
+    kernel
+        .handle()
+        .waterfall::<ModelBeforeRequest>(request(vec![user("hi")]))
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            ContextItem::System { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn each_workspace_keeps_its_own_memory() {
+    let dir = TempDir(std::env::temp_dir().join(format!("rah-context-ws-{}", std::process::id())));
+    let root = Arc::new(MovableRoot(std::sync::Mutex::new(PathBuf::from(
+        r"D:\work\alpha",
+    ))));
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(SandboxPlugin(
+                PluginManifest::new("sandbox", "1").provides(["sandbox"]),
+                root.clone(),
+            )),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::with_config(json!({ "memory_dir": dir.0.join("memory") })),
+        )
+        .await
+        .unwrap();
+
+    remember(&kernel, "alpha uses tabs").await;
+    assert_eq!(
+        notes(&kernel).await,
+        ["Notes saved with memory.remember:\n- alpha uses tabs"]
+    );
+
+    // Another workspace starts without notes and keeps its own.
+    *root.0.lock().unwrap() = PathBuf::from(r"D:\work\beta");
+    assert!(notes(&kernel).await.is_empty());
+    remember(&kernel, "beta is Python").await;
+    assert_eq!(
+        notes(&kernel).await,
+        ["Notes saved with memory.remember:\n- beta is Python"]
+    );
+
+    // Back in the first one, only its notes return.
+    *root.0.lock().unwrap() = PathBuf::from(r"D:\work\alpha");
+    assert_eq!(
+        notes(&kernel).await,
+        ["Notes saved with memory.remember:\n- alpha uses tabs"]
+    );
+    let files = std::fs::read_dir(dir.0.join("memory")).unwrap().count();
+    assert_eq!(files, 2);
+}
+
+#[tokio::test]
+async fn a_memory_file_and_a_memory_dir_are_exclusive() {
+    let kernel = Kernel::new();
+    let status = kernel
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::with_config(json!({ "memory_file": "a.md", "memory_dir": "b" })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(status, rah_api::PluginStatus::Failed { ref message } if message.contains("not both")),
+        "{status:?}"
+    );
+}

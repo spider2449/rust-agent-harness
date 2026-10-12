@@ -146,7 +146,9 @@ git diff --check
 ```
 
 Do not claim validation passed unless the commands were actually executed.
-Report known failing tests explicitly.
+Report known failing tests explicitly. Record open problems that outlive a
+task (intermittent failures, environment-only failures) in
+`docs/KNOWN_ISSUES.md`, and remove the entry when it is fixed.
 
 ## Commit and completion discipline
 

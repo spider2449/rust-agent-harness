@@ -204,7 +204,8 @@ impl Page {
             }
             if Instant::now() >= deadline {
                 let snapshot = self.eval(SNAPSHOT).await;
-                panic!("timed out waiting for {what}; page: {snapshot:#}");
+                let errors = self.errors();
+                panic!("timed out waiting for {what}; page: {snapshot:#}; errors: {errors:#?}");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -292,6 +293,8 @@ const SNAPSHOT: &str = r#"(async () => ({
   approvals: document.getElementById('approvals')?.textContent,
   live: document.getElementById('live')?.textContent,
   transcript: [...document.querySelectorAll('#transcript .entry')].map((entry) => entry.textContent),
+  session: { current: state.current, running: state.running, starting: !!state.starting, workspace: state.workspace, title: document.getElementById('session-title')?.textContent },
+  sessions: [...document.querySelectorAll('#sessions li.session')].map((item) => item.dataset.id + ' ' + item.textContent),
 }))()"#;
 
 struct Web {
@@ -970,7 +973,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         )
         .await;
     assert_eq!(context["system"], "Be brief.", "{context}");
-    assert!(context["memory_file"].is_string(), "{context}");
+    assert!(context["memory_dir"].is_string(), "{context}");
 
     // Tools: turn `echo` off; the default choice shows what applies.
     page.eval(&TAB.replace("{tab}", "tools")).await;

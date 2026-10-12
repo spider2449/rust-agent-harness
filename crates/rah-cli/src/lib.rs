@@ -83,7 +83,7 @@ pub struct Preset {
 
 /// Built-in presets. All share built-in tools, read-only repository tools
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
-/// and memory notes in `.rah/memory.md`), `skills-fs` (`.rah/skills`), `scheduler-basic`
+/// and memory notes per workspace in `.rah/memory`), `skills-fs` (`.rah/skills`), `scheduler-basic`
 /// (background jobs and `agent.delegate`), the default loop and the terminal
 /// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
@@ -143,7 +143,7 @@ config = { root = "." }
 
 [[plugin]]
 use = "context-default"
-config = { memory_file = ".rah/memory.md" }
+config = { memory_dir = ".rah/memory" }
 
 [[plugin]]
 use = "skills-fs"

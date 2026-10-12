@@ -91,7 +91,9 @@ Implemented:
   workspace-bounded `fs.read`); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;
   `context-default` (system prompt, sliding history window and file-backed
-  memory notes through `model.before_request`, plus `memory.remember`);
+  memory notes through `model.before_request`, plus `memory.remember`; with
+  `memory_dir` one file per workspace, chosen from the sandbox root on every
+  request);
   `skills-fs` (skills listed through `model.before_request`, loaded with
   `skills.load`); `sandbox-process` (supervised processes, not an OS
   sandbox); `tools-repo`

@@ -713,6 +713,26 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
     // The same socket and session; tools now work in the other folder.
     let (_, text) = run_turn(&mut socket, &session, "read note.txt", None).await;
     assert_eq!(text, "[model-mock] fs.read returned: from the other folder");
+
+    // The memory notes are the new folder's own: a new session there sees
+    // them (one system item before the message).
+    let root = switched["root"].as_str().unwrap();
+    let memory = web.dir.0.join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        memory.join(rah_plugin_context_default::workspace_file_name(
+            std::path::Path::new(root),
+        )),
+        "- the other folder uses tabs\n",
+    )
+    .unwrap();
+    let fresh = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, text) = run_turn(&mut socket, &fresh, "/notool hi", None).await;
+    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+
     let status_line = web.json(web.get("/api/status")).await;
     assert!(
         status_line["workspace"]["root"]

@@ -50,8 +50,8 @@ pub fn headless(dir: &TempDir) -> Distribution {
     distribution.set_config("skills-fs", "dir", json!(path(&dir.0.join("skills"))));
     distribution.set_config(
         "context-default",
-        "memory_file",
-        json!(path(&dir.0.join("memory.md"))),
+        "memory_dir",
+        json!(path(&dir.0.join("memory"))),
     );
     distribution
 }

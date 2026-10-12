@@ -24,7 +24,8 @@
 ## U2c:Session 屬於工作目錄
 
 - [x] Session 記錄建立時的工作目錄(header 的 `workspace`，由 `session-jsonl` 從 sandbox root 取得;fork 沿用父 session)。清單預設只顯示目前資料夾，另有「All folders」;打開或在別的資料夾的 session 裡送出訊息時，先自動切換工作目錄。
-- 決定(使用者選擇):集中存放、依目錄篩選，不把 session 放進各 repo 的 `.rah/`。記憶檔和 skills 暫時共用。
+- 決定(使用者選擇):集中存放、依目錄篩選，不把 session 放進各 repo 的 `.rah/`。
+- 決定(使用者選擇):記憶跟著工作目錄(`context-default` 的 `memory_dir`，集中在 `.rah/memory/`，每個資料夾一個檔);skills 維持全域共用。
 - 起因:切換工作目錄後沿用同一個 session，模型看到的歷史紀錄是 A 專案，工具卻在 B 專案執行。
 - 同時修正:sandbox 沒有傳 `HOME`/`USERPROFILE`，git 讀不到 `~/.gitconfig`，`safe.directory` 失效。
 

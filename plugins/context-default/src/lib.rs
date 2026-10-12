@@ -7,20 +7,28 @@
 //!   a tool call is never separated from its result, and the current turn is
 //!   always kept whole. Omitted items are replaced by one short note. The
 //!   session log itself is unchanged.
-//! - `memory_file`: notes injected after the system prompt (at most
-//!   `max_memory_bytes`, read on every request). With a memory file the plugin
-//!   also provides `memory.remember {note}` (`write` permission), which
-//!   appends one line to it.
+//! - Memory notes, injected after the system prompt (at most
+//!   `max_memory_bytes`, read on every request). With memory the plugin also
+//!   provides `memory.remember {note}` (`write` permission), which appends one
+//!   line. Either `memory_dir`: one file per workspace in that directory,
+//!   chosen on every request from the `sandbox` service's root (so a project
+//!   keeps its own notes, and switching the workspace switches them), or
+//!   `memory_file`: one file for everything.
 //!
 //! Configuration (all optional): `{ "system": "...", "max_items": 200,
-//! "max_chars": 200000, "memory_file": ".rah/memory.md",
-//! "max_memory_bytes": 16384 }`.
+//! "max_chars": 200000, "memory_dir": ".rah/memory",
+//! "max_memory_bytes": 16384 }`, or `"memory_file": ".rah/memory.md"`
+//! instead of `memory_dir`.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use rah_api::{
-    Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
+    KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::ModelBeforeRequest,
+    sandbox::SANDBOX,
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
 };
 use rah_protocol::{
@@ -55,6 +63,7 @@ pub struct ContextConfig {
     pub max_items: Option<usize>,
     pub max_chars: Option<usize>,
     pub memory_file: Option<PathBuf>,
+    pub memory_dir: Option<PathBuf>,
     pub max_memory_bytes: Option<u64>,
 }
 
@@ -74,9 +83,20 @@ impl Plugin for ContextPlugin {
             max_items: config.max_items.unwrap_or(DEFAULT_MAX_ITEMS).max(1),
             max_chars: config.max_chars.unwrap_or(DEFAULT_MAX_CHARS).max(1),
         };
-        let memory = config.memory_file.clone().map(|path| {
+        let location = match (config.memory_file.clone(), config.memory_dir.clone()) {
+            (Some(_), Some(_)) => {
+                return Err("set either `memory_file` or `memory_dir`, not both".into());
+            }
+            (Some(path), None) => Some(Location::File(path)),
+            (None, Some(dir)) => Some(Location::PerWorkspace {
+                dir,
+                kernel: scope.kernel(),
+            }),
+            (None, None) => None,
+        };
+        let memory = location.map(|location| {
             Arc::new(Memory {
-                path,
+                location,
                 max_bytes: config.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES),
                 write: Mutex::new(()),
             })
@@ -187,17 +207,72 @@ pub fn shape(
     request
 }
 
+/// Where memory notes live.
+enum Location {
+    File(PathBuf),
+    /// One file per workspace in `dir`, named after the sandbox root.
+    PerWorkspace {
+        dir: PathBuf,
+        kernel: KernelHandle,
+    },
+}
+
 struct Memory {
-    path: PathBuf,
+    location: Location,
     max_bytes: u64,
     /// Serializes appends.
     write: Mutex<()>,
 }
 
+/// The memory file name for a workspace: its folder name (made safe) and a
+/// hash of its path, so two folders with one name stay apart. Windows paths
+/// ignore case.
+pub fn workspace_file_name(root: &Path) -> String {
+    let path = root.display().to_string();
+    let key = if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.clone()
+    };
+    // FNV-1a: stable across runs and platforms, unlike the std hasher.
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    let name: String = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let name = if name.is_empty() { "workspace" } else { &name };
+    format!("{name}-{:08x}.md", hash >> 32)
+}
+
 impl Memory {
+    /// The file for the current workspace.
+    fn path(&self) -> PathBuf {
+        match &self.location {
+            Location::File(path) => path.clone(),
+            Location::PerWorkspace { dir, kernel } => {
+                match kernel.get(SANDBOX).and_then(|sandbox| sandbox.root()) {
+                    Some(root) => dir.join(workspace_file_name(&root)),
+                    None => dir.join("default.md"),
+                }
+            }
+        }
+    }
+
     /// The newest `max_bytes` of the file, if it exists.
     async fn read(&self) -> Option<String> {
-        let bytes = tokio::fs::read(&self.path).await.ok()?;
+        let bytes = tokio::fs::read(self.path()).await.ok()?;
         let keep = (self.max_bytes as usize).min(bytes.len());
         let tail = &bytes[bytes.len() - keep..];
         // Start at a line boundary when the head was cut.
@@ -220,9 +295,17 @@ impl Tool for Remember {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new("memory.remember"),
-            description: "Saves a short note that will be shown at the start of later requests, \
-                          also in new sessions."
-                .into(),
+            description: match self.0.location {
+                Location::File(_) => {
+                    "Saves a short note that will be shown at the start of later requests, \
+                     also in new sessions."
+                }
+                Location::PerWorkspace { .. } => {
+                    "Saves a short note about this project that will be shown at the start of \
+                     later requests in this workspace, also in new sessions."
+                }
+            }
+            .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": { "note": { "type": "string", "minLength": 1, "maxLength": MAX_NOTE_CHARS } },
@@ -246,7 +329,8 @@ impl Tool for Remember {
             )));
         }
         let _guard = self.0.write.lock().await;
-        if let Some(parent) = self.0.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let path = self.0.path();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|error| ToolError::NotStarted(format!("memory directory: {error}")))?;
@@ -254,7 +338,7 @@ impl Tool for Remember {
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.0.path)
+            .open(&path)
             .await
             .map_err(|error| ToolError::NotStarted(format!("memory file: {error}")))?;
         file.write_all(format!("- {note}\n").as_bytes())
