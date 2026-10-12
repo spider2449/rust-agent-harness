@@ -143,7 +143,10 @@ with titles the model generates after the first turn; you can rename, delete
 (moved to `.rah/sessions/deleted/`), export (Markdown or JSON) and fork them,
 regenerate the last answer or edit an earlier message and send it again (both
 in a new branch, so the original is kept). It streams turns and asks you to
-allow or deny tool calls the policy marks `Ask`. Its Plugins panel
+allow or deny tool calls the policy marks `Ask`. A status line shows the
+workspace root, its Git branch and pending changes, the model and loop in
+use, and whether a policy guards tool calls. Click the workspace path to
+switch the folder the tools work in, without restarting. Its Plugins panel
 adds, configures, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
 effect on the next turn without a restart. It listens on loopback only and

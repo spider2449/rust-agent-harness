@@ -12,6 +12,13 @@
 //! API:
 //!
 //! - `GET /api/info`: tools and whether a policy guards them.
+//! - `GET /api/status`: the workspace root and its Git state (through the
+//!   `sandbox` service), the model and loop the next turn uses, and whether
+//!   a policy guards tools.
+//! - With an `admin` service: `PUT /api/workspace {root}` points the
+//!   workspace plugins at another directory. `GET /api/fs/dirs?path=` lists
+//!   a directory's subdirectories (names, and whether each is a Git
+//!   repository) for the folder picker.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -44,6 +51,8 @@ mod approvals;
 mod export;
 mod jobs;
 mod manage;
+mod status;
+mod workspace;
 mod ws;
 
 use std::{str::FromStr, sync::Arc, time::Duration};
@@ -158,6 +167,9 @@ impl Plugin for WebFrontendPlugin {
 fn router(shared: AppState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
+        .route("/status", get(status::status))
+        .route("/workspace", put(workspace::set))
+        .route("/fs/dirs", get(workspace::list))
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/catalog", get(manage::catalog))

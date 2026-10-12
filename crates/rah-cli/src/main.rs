@@ -95,10 +95,11 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     }
     if let Some(root) = &args.root {
         let root = Value::String(root.display().to_string());
-        let tools = distribution.set_config("tools-builtin", "root", root.clone());
-        let sandbox = distribution.set_config("sandbox-process", "root", root.clone());
-        let write = distribution.set_config("tools-repo-write", "root", root);
-        if !tools && !sandbox && !write {
+        let mut matched = false;
+        for kind in rah_cli::WORKSPACE_PLUGINS {
+            matched |= distribution.set_config(kind, "root", root.clone());
+        }
+        if !matched {
             return Err("--root needs a `tools-builtin` or `sandbox-process` plugin".into());
         }
     }

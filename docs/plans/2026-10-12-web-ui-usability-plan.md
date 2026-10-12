@@ -13,8 +13,13 @@
 
 ## U2:狀態列
 
-- [ ] 顯示工作目錄、git 分支(和是否有未提交的變更)、目前的 model 和 loop plugin、policy 狀態。
-- 需要一個能回報工作目錄和 git 狀態的來源。plugin 不能互相依賴，所以要經過 service 或現有工具(例如 `repo.status`)取得。
+- [x] 顯示工作目錄、git 分支(和是否有未提交的變更)、目前的 model 和 loop plugin、policy 狀態。
+- 決定:`ExecEnv` 新增 `root()`(只用於顯示);git 狀態由 `frontend-web` 透過 `sandbox` 服務執行唯讀的 `git status` 取得，不經過 tool，也不直接開程序。沒有 sandbox 時，狀態列就不顯示工作目錄。
+
+## U2b:切換工作目錄
+
+- [x] 點狀態列上的路徑開啟資料夾選擇視窗(輸入路徑、上一層、磁碟、最近用過、子資料夾，git repo 有標記)，選定後不必重啟。
+- 決定:由 distribution 實作 `PluginAdmin::set_workspace`，使用和 `--root` 同一份 plugin 清單;session、記憶和 skills 不跟著換目錄。
 
 ## U3:設定頁
 

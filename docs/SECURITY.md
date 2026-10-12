@@ -141,6 +141,18 @@ composition. The UI warns before unmounting the policy, and the header shows
 `UNGUARDED` whenever no `tool.before_invoke` handler is mounted. The admin
 service refuses to unmount or reconfigure the `distribution` plugin itself.
 
+Behind the same token and checks, and likewise unreachable from tools:
+
+- `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
+  `tools-builtin`, `tools-repo-write`) at another existing directory, as
+  `rah --root` does at start. It widens what tools can reach to that folder,
+  which is the user's choice; a policy still decides every call.
+- `GET /api/fs/dirs` lists the subdirectory names of any host directory the
+  user's account can read, for the folder picker. It returns no file names
+  or contents.
+- `GET /api/status` runs one read-only `git status` in the workspace
+  through the `sandbox` service.
+
 Any local process that can read the printed URL can use the API with the
 user's authority; the token protects against other users' browsers and
 websites, not against code already running as the user.

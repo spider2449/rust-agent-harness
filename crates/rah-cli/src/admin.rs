@@ -3,19 +3,20 @@
 
 use std::{
     collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
 };
 
 use rah_api::{
     KernelHandle, MountOptions, Plugin, PluginError, PluginId, PluginManifest, PluginStatus, Scope,
-    admin::{ADMIN, AdminError, MountRequest, PluginAdmin, PluginInstance},
+    admin::{ADMIN, AdminError, MountRequest, PluginAdmin, PluginInstance, Workspace},
     async_trait,
 };
 use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
-use crate::{PROCESS_PLUGIN, WASM_PLUGIN, catalog};
+use crate::{PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog};
 
 /// The id `rah` mounts the distribution plugin under.
 pub const DISTRIBUTION_PLUGIN: &str = "distribution";
@@ -239,5 +240,52 @@ impl PluginAdmin for Admin {
         self.kernel.unmount(old).await.map_err(failed)?;
         self.registry.lock().remove(old);
         Ok((id, status))
+    }
+
+    async fn set_workspace(&self, root: &Path) -> Result<Workspace, AdminError> {
+        let canonical = tokio::fs::canonicalize(root)
+            .await
+            .map_err(|error| failed(format!("`{}`: {error}", root.display())))?;
+        if !canonical.is_dir() {
+            return Err(failed(format!("`{}` is not a directory", root.display())));
+        }
+        let root = plain_path(canonical);
+        let value = Value::String(root.display().to_string());
+        // Every mounted instance of a workspace kind, sandbox first.
+        let targets: Vec<(PluginId, Value)> = WORKSPACE_PLUGINS
+            .iter()
+            .flat_map(|kind| {
+                self.registry
+                    .lock()
+                    .iter()
+                    .filter(|(_, (instance_kind, _))| instance_kind == kind)
+                    .map(|(id, (_, config))| (id.clone(), config.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if targets.is_empty() {
+            return Err(failed("no plugin that works in a workspace is mounted"));
+        }
+        let mut plugins = Vec::new();
+        for (id, config) in targets {
+            let mut config = match config {
+                Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            config.insert("root".to_owned(), value.clone());
+            let status = self.configure(&id, Value::Object(config)).await?;
+            plugins.push((id, status));
+        }
+        Ok(Workspace { root, plugins })
+    }
+}
+
+/// A canonical path without Windows' verbatim `\\?\` prefix, which other
+/// programs (Git among them) and people do not expect.
+fn plain_path(path: PathBuf) -> PathBuf {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
     }
 }

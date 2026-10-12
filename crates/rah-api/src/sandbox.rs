@@ -145,6 +145,12 @@ pub trait ProcessHandle: Send + Sync {
 
 #[async_trait]
 pub trait ExecEnv: Send + Sync {
+    /// The directory programs run in by default, when the environment has
+    /// one on the host file system. For display; it grants nothing.
+    fn root(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Runs one program to completion, termination or cancellation. Dropping
     /// the future must stop the program as well.
     async fn run(

@@ -238,6 +238,10 @@ impl ProcessEnv {
 
 #[async_trait]
 impl ExecEnv for ProcessEnv {
+    fn root(&self) -> Option<PathBuf> {
+        Some(self.root.clone())
+    }
+
     async fn run(
         &self,
         spec: ProgramSpec,

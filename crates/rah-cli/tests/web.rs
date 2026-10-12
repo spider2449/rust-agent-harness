@@ -16,7 +16,7 @@ struct Web {
     kernel: Kernel,
     address: String,
     token: String,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
 async fn start(name: &str, adjust: impl FnOnce(&mut Distribution)) -> Web {
@@ -50,7 +50,7 @@ config = { bind = "127.0.0.1:0" }
         kernel,
         address: address.to_owned(),
         token: token.to_owned(),
-        _dir: dir,
+        dir,
     }
 }
 
@@ -614,4 +614,125 @@ async fn sessions_are_titled_renamed_exported_and_deleted_over_http() {
             .0,
         404
     );
+}
+
+#[tokio::test]
+async fn the_status_line_reports_the_workspace_git_state_and_providers() {
+    let web = start("web-status", |_| {}).await;
+    let status = web.json(web.get("/api/status")).await;
+    assert_eq!(status["model"]["plugin"], "model-mock", "{status}");
+    assert_eq!(status["model"]["kind"], "model-mock");
+    assert_eq!(status["loop"]["plugin"], "loop-react");
+    assert_eq!(status["guarded"], true);
+    assert!(status["tools"].as_u64().unwrap() > 0);
+    let root = status["workspace"]["root"].as_str().unwrap().to_owned();
+    assert!(
+        !root.starts_with(r"\?\") && root.ends_with("workspace"),
+        "{root}"
+    );
+    // The temporary workspace is not a Git repository yet.
+    assert!(status["workspace"]["git"]["error"].is_string(), "{status}");
+
+    let workspace = std::path::PathBuf::from(&root);
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "-q", "-b", "trunk"]);
+    std::fs::write(workspace.join("notes.txt"), "draft").unwrap();
+    let git_state = web.json(web.get("/api/status")).await["workspace"]["git"].clone();
+    assert_eq!(git_state["branch"], "trunk", "{git_state}");
+    assert_eq!(git_state["untracked"], 1, "{git_state}");
+    assert_eq!(git_state["changed"], 0);
+    assert_eq!(git_state["upstream"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_workspace_is_browsed_and_switched_without_a_restart() {
+    use reqwest::Method;
+    let web = start("web-workspace", |_| {}).await;
+    let other = web.dir.0.join("other");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    std::fs::write(other.join("note.txt"), "from the other folder").unwrap();
+
+    // The folder browser lists subdirectories and marks Git repositories.
+    let base = web.dir.0.display().to_string();
+    let listing = web
+        .json(web.get(&format!(
+            "/api/fs/dirs?path={}",
+            base.replace('\\', "%5C").replace(':', "%3A")
+        )))
+        .await;
+    let dirs = listing["dirs"].as_array().unwrap();
+    let entry = |name: &str| dirs.iter().find(|dir| dir["name"] == name).cloned();
+    assert_eq!(entry("other").unwrap()["git"], true, "{listing}");
+    assert_eq!(entry("workspace").unwrap()["git"], false);
+    assert!(listing["parent"].is_string());
+    assert!(!listing["roots"].as_array().unwrap().is_empty());
+    // Without a path it starts at the current workspace.
+    let current = web.json(web.get("/api/fs/dirs")).await;
+    assert!(
+        current["path"].as_str().unwrap().ends_with("workspace"),
+        "{current}"
+    );
+
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+    let (status, switched) = web
+        .status(
+            web.request(Method::PUT, "/api/workspace")
+                .json(&json!({ "root": other.display().to_string() })),
+        )
+        .await;
+    assert_eq!(status, 200, "{switched}");
+    assert!(
+        !switched["root"].as_str().unwrap().starts_with(r"\?\"),
+        "{switched}"
+    );
+    let changed: Vec<&str> = switched["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|plugin| {
+            assert_eq!(plugin["state"], "active", "{switched}");
+            plugin["id"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        changed,
+        ["sandbox-process", "tools-builtin", "tools-repo-write"]
+    );
+
+    // The same socket and session; tools now work in the other folder.
+    let (_, text) = run_turn(&mut socket, &session, "read note.txt", None).await;
+    assert_eq!(text, "[model-mock] fs.read returned: from the other folder");
+    let status_line = web.json(web.get("/api/status")).await;
+    assert!(
+        status_line["workspace"]["root"]
+            .as_str()
+            .unwrap()
+            .ends_with("other"),
+        "{status_line}"
+    );
+
+    for bad in [
+        json!({ "root": web.dir.0.join("missing").display().to_string() }),
+        json!({ "root": other.join("note.txt").display().to_string() }),
+        json!({ "root": " " }),
+    ] {
+        assert_eq!(
+            web.status(web.request(Method::PUT, "/api/workspace").json(&bad))
+                .await
+                .0,
+            400,
+            "{bad}"
+        );
+    }
 }

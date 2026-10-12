@@ -22,8 +22,9 @@ use rah_cli::{Distribution, boot};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-/// How long a page condition may take.
-const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a page condition may take. Generous: the first run after a
+/// build is much slower on Windows.
+const TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a DevTools command may take. The first page load after a build
 /// took over 20 seconds on Windows (likely a scan of the new test binary).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(90);
@@ -276,7 +277,7 @@ const SNAPSHOT: &str = r#"(async () => ({
 struct Web {
     _kernel: Kernel,
     url: String,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
 async fn start(name: &str) -> Web {
@@ -311,7 +312,7 @@ config = { bind = "127.0.0.1:0" }
     Web {
         _kernel: kernel,
         url,
-        _dir: dir,
+        dir,
     }
 }
 
@@ -331,6 +332,33 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.wait("the page to connect", "connected()").await;
     assert_eq!(page.eval("location.hash").await, "");
     assert_eq!(page.eval("byId('guard').textContent").await, "guarded");
+
+    // The status line: workspace, Git state (not a repository here) and
+    // the providers the next turn uses.
+    page.wait(
+        "the status line",
+        "shown(byId('status')) && byId('status-model').textContent === 'model: model-mock'",
+    )
+    .await;
+    let status = page
+        .eval(
+            "['status-root', 'status-git', 'status-loop', 'status-policy'] \
+             .map((id) => byId(id).textContent)",
+        )
+        .await;
+    assert!(
+        status[0].as_str().unwrap().ends_with("workspace"),
+        "{status}"
+    );
+    assert_eq!(
+        status.as_array().unwrap()[1..],
+        [
+            json!("no git repository"),
+            json!("loop: loop-react"),
+            json!("guarded")
+        ],
+        "{status}"
+    );
     assert_eq!(page.eval("byId('input').disabled").await, true);
     assert_eq!(page.eval("shown(byId('notice'))").await, false);
 
@@ -502,6 +530,11 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.wait(
         "the replacement model",
         "!shown(byId('editor')) && !!rowOf('model-mock-2') && !rowOf('model-mock')",
+    )
+    .await;
+    page.wait(
+        "the status line to follow the replacement",
+        "byId('status-model').textContent === 'model: model-mock-2'",
     )
     .await;
     page.send_message("/notool after replace").await;
@@ -716,4 +749,43 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     )
     .await;
     assert_eq!(page.eval("sessionItems().length").await, 2);
+
+    // Switch the workspace with the folder picker.
+    std::fs::create_dir_all(web.dir.0.join("other").join(".git")).unwrap();
+    page.eval("byId('status-root').click(); true").await;
+    page.wait(
+        "the folder picker",
+        "byId('workspace-dialog').open && byId('ws-path').value.endsWith('workspace')",
+    )
+    .await;
+    page.eval("byId('ws-up').click(); true").await;
+    page.wait(
+        "the parent folder",
+        "[...document.querySelectorAll('#ws-dirs button')].some((b) => \n         b.querySelector('.name').textContent === 'other' && !!b.querySelector('.tag'))",
+    )
+    .await;
+    page.eval(
+        "[...document.querySelectorAll('#ws-dirs button')] \n         .find((b) => b.querySelector('.name').textContent === 'other').click(); true",
+    )
+    .await;
+    page.wait(
+        "the chosen folder",
+        "byId('ws-path').value.endsWith('other')",
+    )
+    .await;
+    page.eval("byId('ws-use').click(); true").await;
+    page.wait(
+        "the switched workspace",
+        "!byId('workspace-dialog').open && byId('status-root').textContent.endsWith('other')",
+    )
+    .await;
+    // The picker remembers it.
+    page.eval("byId('status-root').click(); true").await;
+    page.wait(
+        "the recent folders",
+        "shown(byId('ws-recent-block')) && byId('ws-recent').textContent.endsWith('other')",
+    )
+    .await;
+    page.eval("byId('ws-cancel').click(); true").await;
+    assert_eq!(page.eval("byId('workspace-dialog').open").await, false);
 }

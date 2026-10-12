@@ -34,7 +34,7 @@ rah-plugin-tools-shell = { path = "../../plugins/tools-shell" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal", "sync"] }
 toml = "1"
 
 [dev-dependencies]

@@ -4,7 +4,10 @@
 //! plugin kinds it can build. A frontend that exposes it must restrict it to
 //! the local user; it is never reachable from model output.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use rah_kernel::{PluginId, PluginStatus, ServiceKey};
@@ -82,4 +85,22 @@ pub trait PluginAdmin: Send + Sync {
         old: &PluginId,
         replacement: MountRequest,
     ) -> Result<(PluginId, PluginStatus), AdminError>;
+
+    /// Points the plugins that work in a workspace directory at `root` (an
+    /// existing directory) and restarts them with their dependents. Returns
+    /// the canonical root and the plugins changed with their status. Only
+    /// the distribution knows which plugins take a workspace root.
+    async fn set_workspace(&self, root: &Path) -> Result<Workspace, AdminError> {
+        let _ = root;
+        Err(AdminError::Failed(
+            "this distribution cannot switch workspaces".into(),
+        ))
+    }
+}
+
+/// The result of [`PluginAdmin::set_workspace`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub root: PathBuf,
+    pub plugins: Vec<(PluginId, PluginStatus)>,
 }

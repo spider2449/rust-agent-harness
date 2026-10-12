@@ -72,6 +72,51 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
 .title-input { width: 100%; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--accent); background: var(--bg); color: var(--text); }
 
+.status {
+  display: flex; align-items: center; gap: 14px; padding: 3px 12px; min-height: 24px;
+  border-top: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  font-size: 12px; white-space: nowrap; overflow: hidden;
+}
+.status .item { overflow: hidden; text-overflow: ellipsis; }
+.status button.link {
+  font: inherit; border: none; background: none; color: var(--text); padding: 0 4px;
+  border-radius: 4px; cursor: pointer; white-space: nowrap;
+}
+.status button.link:hover { background: var(--tool); color: var(--accent); }
+
+.dialog {
+  width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 16px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+.dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.dialog h2 { margin: 0 0 4px; font-size: 16px; }
+.dialog h3 { margin: 12px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.dialog .hint { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.dialog .notice { margin: 8px 0 0; }
+.dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.path-row { display: flex; gap: 6px; }
+.path-row input {
+  flex: 1; font: 13px/1.4 ui-monospace, Consolas, monospace; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.ws-nav { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ws-nav button { font-size: 12px; padding: 1px 8px; }
+.dirs { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
+.dirs:empty { display: none; }
+.dirs li button {
+  display: flex; width: 100%; gap: 8px; align-items: center; text-align: left; font: inherit; font-size: 13px;
+  padding: 5px 10px; border: none; border-radius: 0; background: none; color: var(--text); cursor: pointer;
+}
+.dirs li + li button { border-top: 1px solid var(--line); }
+.dirs li button:hover, .dirs li button:focus-visible { background: var(--tool); }
+.dirs .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dirs .tag { font-size: 11px; color: var(--good); border: 1px solid var(--good); border-radius: 999px; padding: 0 6px; }
+.status .path { min-width: 0; max-width: 45%; }
+.status .dirty { color: var(--warn); }
+.status .bad { color: var(--bad); }
+.status .good { color: var(--good); }
+
 .session-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
 .session-head h1 { flex: 1; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-head h1.untitled { color: var(--muted); font-weight: normal; }

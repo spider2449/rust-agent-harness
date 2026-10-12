@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Status line
+
+- `rah-api` `ExecEnv`: new `root()` (default `None`), the directory programs
+  run in, for display only; `sandbox-process` reports its canonical root.
+- `frontend-web`: `GET /api/status` reports the workspace root, its Git state
+  from one read-only `git --no-optional-locks status --porcelain=v2 --branch`
+  run through the `sandbox` service (branch or detached HEAD, upstream,
+  ahead and behind, changed, untracked and conflicting files, or why Git
+  failed), the model and loop providers the next turn uses (with kind and
+  configured model), the number of tools and whether a policy guards them.
+- The Web UI shows these in a status line at the bottom, refreshed at start,
+  after every turn and plugin change, and every 30 seconds while visible.
+
+### Switching the workspace
+
+- `rah-api` `PluginAdmin`: new `set_workspace(root)` (default: unsupported)
+  returning `Workspace { root, plugins }`. The distribution implements it
+  with the plugins `rah --root` sets (`rah_cli::WORKSPACE_PLUGINS`:
+  `sandbox-process`, `tools-builtin`, `tools-repo-write`, sandbox first):
+  it checks that the directory exists, sets their `root` and restarts them
+  with their dependents. Sessions, memory and skills stay where they are.
+- `frontend-web`: `PUT /api/workspace {root}`, and `GET /api/fs/dirs?path=`
+  (subdirectory names, Git repositories marked, and the drives or `/` to
+  start from) for a folder picker.
+- The Web UI opens the picker from the workspace path in the status line:
+  type a path or browse (up, drives, folders, recently used folders), then
+  use the folder. The picker refuses while a turn runs in its tab; a turn
+  running elsewhere can see a tool call fail while the tools restart.
+
 ### Scripts
 
 - `scripts/start.ps1` (run `rah`, Web UI by default, opening the tokenized

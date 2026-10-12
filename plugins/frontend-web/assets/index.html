@@ -75,6 +75,38 @@
       <ul id="tools" class="tools"></ul>
     </aside>
   </main>
+  <footer id="status" class="status" aria-label="Status">
+    <button id="status-root" type="button" class="item path link" title="Change the workspace folder"></button>
+    <span id="status-git" class="item"></span>
+    <span class="spacer"></span>
+    <span id="status-model" class="item"></span>
+    <span id="status-loop" class="item"></span>
+    <span id="status-tools" class="item"></span>
+    <span id="status-policy" class="item"></span>
+  </footer>
+  <dialog id="workspace-dialog" class="dialog" aria-labelledby="workspace-title">
+    <h2 id="workspace-title">Workspace folder</h2>
+    <p class="hint">File, Git and shell tools work inside this folder. Sessions are kept where they are.</p>
+    <div class="path-row">
+      <input id="ws-path" aria-label="Folder path" spellcheck="false">
+      <button id="ws-go" type="button" class="ghost">Go</button>
+    </div>
+    <div class="ws-nav">
+      <button id="ws-up" type="button" class="ghost">↑ Up</button>
+      <span id="ws-roots"></span>
+    </div>
+    <div id="ws-error" class="notice" hidden></div>
+    <div id="ws-recent-block" hidden>
+      <h3>Recent</h3>
+      <ul id="ws-recent" class="dirs"></ul>
+    </div>
+    <h3 id="ws-here"></h3>
+    <ul id="ws-dirs" class="dirs"></ul>
+    <div class="buttons">
+      <button id="ws-cancel" type="button" class="ghost">Cancel</button>
+      <button id="ws-use" type="button">Use this folder</button>
+    </div>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

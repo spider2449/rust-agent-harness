@@ -420,6 +420,7 @@ function onEvent(session, event) {
       if (event.type === "failed") showNotice(`Turn failed: ${event.message}`);
       setRunning(false);
       loadTranscript().catch((error) => showNotice(error.message));
+      refreshStatus();
       loadSessions()
         .then(() => {
           if (event.type === "completed") awaitTitle();
@@ -505,6 +506,7 @@ async function manage(path, method, body) {
   } else {
     showNotice("");
   }
+  refreshStatus();
   await loadPlugins();
   return result;
 }
@@ -601,6 +603,171 @@ async function loadPlugins() {
   guard.className = `badge ${info.guarded ? "good" : "bad"}`;
 }
 
+// ---- Status line ----------------------------------------------------------
+
+function statusItem(id, text, title, className) {
+  const node = $(id);
+  node.textContent = text;
+  node.title = title || text;
+  node.className = `item${className ? ` ${className}` : ""}${id === "status-root" ? " path link" : ""}`;
+  node.hidden = !text;
+}
+
+function gitText(git) {
+  if (!git) return ["", ""];
+  if (git.error) return ["no git repository", git.error];
+  const parts = [`⎇ ${git.detached ? "detached HEAD" : git.branch}`];
+  const dirty = git.changed + git.untracked;
+  if (dirty) parts.push(`● ${dirty}`);
+  if (git.conflicts) parts.push(`⚠ ${git.conflicts} conflicts`);
+  if (git.ahead) parts.push(`↑${git.ahead}`);
+  if (git.behind) parts.push(`↓${git.behind}`);
+  const title = [
+    git.detached ? "Detached HEAD" : `Branch ${git.branch}`,
+    git.upstream ? `tracking ${git.upstream} (ahead ${git.ahead}, behind ${git.behind})` : "no upstream",
+    `${git.changed} changed, ${git.untracked} untracked, ${git.conflicts} conflicts`,
+  ].join("\n");
+  return [parts.join(" "), title];
+}
+
+function providerText(label, provider) {
+  if (!provider) return [`no ${label}`, `No ${label} plugin is mounted`];
+  const kind = provider.kind && provider.kind !== provider.plugin ? ` (${provider.kind})` : "";
+  const model = provider.model ? ` · ${provider.model}` : "";
+  return [`${label}: ${provider.plugin}${model}`, `${label} plugin ${provider.plugin}${kind}${model}`];
+}
+
+async function loadStatus() {
+  const status = await api("/status");
+  const workspace = status.workspace || {};
+  state.workspace = workspace.root || null;
+  statusItem(
+    "status-root",
+    workspace.root || "Choose a workspace…",
+    workspace.root ? `Workspace: ${workspace.root}\nClick to change` : "Choose the folder tools work in",
+  );
+  const [git, gitTitle] = gitText(workspace.git);
+  const dirty = workspace.git && !workspace.git.error && workspace.git.changed + workspace.git.untracked > 0;
+  statusItem("status-git", git, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
+  const [model, modelTitle] = providerText("model", status.model);
+  statusItem("status-model", model, modelTitle, status.model ? "" : "bad");
+  const [loop, loopTitle] = providerText("loop", status.loop);
+  statusItem("status-loop", loop, loopTitle, status.loop ? "" : "bad");
+  statusItem("status-tools", `${status.tools} tools`, "Tools offered to the model");
+  statusItem(
+    "status-policy",
+    status.guarded ? "guarded" : "UNGUARDED",
+    status.guarded ? "A policy plugin decides every tool call" : "No policy plugin: tool calls run without checks",
+    status.guarded ? "good" : "bad",
+  );
+}
+
+function refreshStatus() {
+  loadStatus().catch(() => {});
+}
+
+// ---- Workspace picker -----------------------------------------------------
+
+const RECENT_KEY = "rah-recent-workspaces";
+
+// Browser storage is a convenience: it may be unavailable.
+function recentWorkspaces() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberWorkspace(path) {
+  const list = [path, ...recentWorkspaces().filter((item) => item !== path)].slice(0, 8);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    // Not remembered; nothing else depends on it.
+  }
+}
+
+function folderButton(label, path, git, onClick) {
+  const item = el("li");
+  const button = el("button");
+  button.type = "button";
+  button.title = path;
+  button.append(el("span", "name", label));
+  if (git) button.append(el("span", "tag", "git"));
+  button.addEventListener("click", onClick);
+  item.append(button);
+  return item;
+}
+
+function workspaceError(message) {
+  $("ws-error").textContent = message || "";
+  $("ws-error").hidden = !message;
+}
+
+async function browse(path) {
+  workspaceError("");
+  let listing;
+  try {
+    listing = await api(`/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+  } catch (error) {
+    workspaceError(error.message);
+    return;
+  }
+  state.browsing = listing;
+  $("ws-path").value = listing.path;
+  $("ws-up").disabled = !listing.parent;
+  $("ws-here").textContent = listing.git ? "Folders (this folder is a Git repository)" : "Folders";
+  $("ws-roots").replaceChildren(
+    ...listing.roots.map((root) => {
+      const button = el("button", "ghost", root);
+      button.type = "button";
+      button.addEventListener("click", () => browse(root));
+      return button;
+    }),
+  );
+  const dirs = listing.dirs.map((dir) => folderButton(dir.name, dir.path, dir.git, () => browse(dir.path)));
+  if (listing.truncated) dirs.push(el("li", "group", "…more folders not shown"));
+  $("ws-dirs").replaceChildren(...dirs);
+}
+
+async function openWorkspacePicker() {
+  const recent = recentWorkspaces();
+  $("ws-recent-block").hidden = recent.length === 0;
+  $("ws-recent").replaceChildren(
+    ...recent.map((path) => folderButton(path, path, false, () => browse(path))),
+  );
+  $("workspace-dialog").showModal();
+  await browse(state.workspace);
+}
+
+async function useWorkspace() {
+  const path = $("ws-path").value.trim();
+  if (!path) return;
+  if (state.running) {
+    workspaceError("Wait for the running turn to finish or cancel it first.");
+    return;
+  }
+  $("ws-use").disabled = true;
+  try {
+    const result = await api("/workspace", { method: "PUT", body: JSON.stringify({ root: path }) });
+    const failed = result.plugins.filter((plugin) => plugin.state !== "active");
+    if (failed.length) {
+      workspaceError(`Switched, but not every plugin started: ${failed.map((p) => `${p.id} (${p.state})`).join(", ")}`);
+    } else {
+      $("workspace-dialog").close();
+    }
+    rememberWorkspace(result.root);
+    await loadPlugins().catch(report);
+    await loadStatus().catch(report);
+  } catch (error) {
+    workspaceError(error.message);
+  } finally {
+    $("ws-use").disabled = false;
+  }
+}
+
 async function start() {
   state.token = readToken();
   if (!state.token) {
@@ -614,6 +781,19 @@ async function start() {
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   $("session-search").addEventListener("input", renderSessions);
+  $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
+  $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));
+  $("ws-path").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      browse($("ws-path").value.trim());
+    }
+  });
+  $("ws-up").addEventListener("click", () => {
+    if (state.browsing?.parent) browse(state.browsing.parent);
+  });
+  $("ws-cancel").addEventListener("click", () => $("workspace-dialog").close());
+  $("ws-use").addEventListener("click", () => useWorkspace());
   $("session-rename").addEventListener("click", () => {
     const info = currentInfo();
     if (info) editTitle($("session-title"), info);
@@ -635,9 +815,16 @@ async function start() {
   $("editor-cancel").addEventListener("click", () => {
     $("editor").hidden = true;
   });
+  setInterval(() => {
+    if (!document.hidden) refreshStatus();
+  }, 30000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshStatus();
+  });
   try {
     await loadCatalog();
     await loadPlugins();
+    refreshStatus();
     await loadSessions();
     if (state.sessions.length > 0) await openSession(state.sessions[0].id);
   } catch (error) {
