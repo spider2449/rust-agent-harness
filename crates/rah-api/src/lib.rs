@@ -15,6 +15,7 @@ pub mod agent_loop;
 pub mod hooks;
 pub mod host;
 pub mod model;
+pub mod sandbox;
 pub mod session;
 pub mod tools;
 

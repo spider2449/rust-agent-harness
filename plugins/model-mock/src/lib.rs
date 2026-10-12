@@ -5,6 +5,8 @@
 //! - a user message starting with `/notool `: reply with the text and the
 //!   number of earlier context items (useful to observe resumed history);
 //! - a user message `read <path>` when `fs.read` is offered: request it;
+//! - a user message `/call <tool> <json>` when `<tool>` is offered: request
+//!   that tool with the JSON arguments;
 //! - any other user message when `echo` is offered: request `echo`;
 //! - otherwise: reply `[label] you said: <text> (<n> earlier items)`.
 //!
@@ -98,7 +100,18 @@ impl MockModel {
                         .count()
                         + 1
                 );
-                if let Some(rest) = input.strip_prefix("/notool ") {
+                if let Some(rest) = input.strip_prefix("/call ") {
+                    let (name, arguments) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                    match serde_json::from_str(arguments) {
+                        Ok(arguments) if offers(name) => vec![ModelEvent::ToolCall {
+                            call_id,
+                            name: ToolName::new(name),
+                            arguments,
+                        }],
+                        Ok(_) => text(format!("[{label}] tool `{name}` is not offered")),
+                        Err(error) => text(format!("[{label}] invalid arguments: {error}")),
+                    }
+                } else if let Some(rest) = input.strip_prefix("/notool ") {
                     text(format!(
                         "[{label}] you said: {rest} ({earlier} earlier items)"
                     ))
@@ -240,5 +253,27 @@ mod tests {
             joined(&model.respond(&request)),
             "[B] you said: hi (2 earlier items)"
         );
+    }
+
+    #[test]
+    fn call_requests_an_offered_tool_with_json_arguments() {
+        let model = MockModel::new("C");
+        let respond = |text: &str| {
+            model.respond(&ModelRequest {
+                items: vec![ContextItem::User { text: text.into() }],
+                tools: vec![tool("echo"), tool("shell.exec")],
+                ..ModelRequest::default()
+            })
+        };
+        assert!(matches!(
+            &respond(r#"/call shell.exec {"program":"git"}"#)[0],
+            ModelEvent::ToolCall { name, arguments, .. }
+                if name.as_str() == "shell.exec" && arguments["program"] == "git"
+        ));
+        assert_eq!(
+            joined(&respond("/call missing {}")),
+            "[C] tool `missing` is not offered"
+        );
+        assert!(joined(&respond("/call echo {")).starts_with("[C] invalid arguments"));
     }
 }

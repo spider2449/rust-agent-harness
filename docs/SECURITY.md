@@ -52,12 +52,39 @@ The policy decides each call from its own configuration only:
   `ask`, and denied otherwise. A level listed in both is a configuration error.
 - An invalid configuration fails the plugin, and `rah` then refuses to boot
   instead of running unguarded.
-- `Ask` needs a `tool.approval` handler. None ships yet, so `Ask` is a denial
-  until a frontend provides confirmation.
+- `Ask` needs a `tool.approval` handler; without one it is a denial.
+  `frontend-cli` shows the call and its arguments on the terminal and
+  approves only an explicit `y` or `yes`. End of input or any other answer
+  denies.
 
 The policy registers at hook priority 0. A mounted plugin with a higher
 priority runs first and can pre-empt it; mounting such a plugin is a trust
 decision. The legacy in-flight limit is not carried over yet.
+
+## `sandbox-process` and `tools-shell`
+
+`sandbox-process` provides the `sandbox` service. It is **process supervision,
+not an OS sandbox**: a program runs with the authority of the RAH process, and
+there is no filesystem or network isolation. It guarantees:
+
+- a fixed program and argument vector, never a shell string;
+- a working directory inside the configured root (relative, no `..`,
+  canonicalized);
+- a cleared environment refilled only from `inherit_env` (a short platform
+  list by default) and the caller's spec;
+- null stdin, per-stream output limits and a timeout capped by the plugin;
+- termination of the process tree (a kill-on-close Job Object on Windows, a
+  process group on Unix) on timeout, output overflow, cancellation, unmount
+  of the plugin or a dropped call. Descendants still holding the output pipes
+  2 s after the program exits are killed too. On Windows the child joins its
+  Job Object right after spawn, so a process it starts before that can
+  escape; on Unix a descendant that leaves the process group can escape.
+
+`tools-shell` provides `shell.exec` with `execute` permission and requires
+`sandbox`. It accepts `program`, `args`, `cwd` and `timeout_ms` only, and can
+be restricted further with `allow_programs`. A program terminated by the
+sandbox, or a supervision failure, is reported as an error, which the
+`ToolInvoker` records as an `uncertain` effect; it is never retried.
 
 ## Transitional note
 

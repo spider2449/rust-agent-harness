@@ -2812,8 +2812,10 @@ dependencies = [
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
  "rah-plugin-policy-authority",
+ "rah-plugin-sandbox-process",
  "rah-plugin-session-jsonl",
  "rah-plugin-tools-builtin",
+ "rah-plugin-tools-shell",
  "rah-protocol",
  "serde",
  "serde_json",
@@ -2931,6 +2933,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rah-plugin-sandbox-process"
+version = "0.35.0"
+dependencies = [
+ "libc",
+ "rah-api",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rah-plugin-session-jsonl"
 version = "0.35.0"
 dependencies = [
@@ -2943,6 +2957,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-builtin"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tools-shell"
 version = "0.35.0"
 dependencies = [
  "rah-api",

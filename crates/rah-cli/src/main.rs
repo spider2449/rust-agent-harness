@@ -31,7 +31,8 @@ struct Args {
     /// Session log directory (session-jsonl).
     #[arg(long)]
     session_dir: Option<PathBuf>,
-    /// Workspace root for file tools (tools-builtin).
+    /// Workspace root for file tools and processes (tools-builtin,
+    /// sandbox-process).
     #[arg(long)]
     root: Option<PathBuf>,
 }
@@ -63,13 +64,6 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
                 .as_ref()
                 .map(|p| Value::String(p.display().to_string())),
         ),
-        (
-            "tools-builtin",
-            "root",
-            args.root
-                .as_ref()
-                .map(|p| Value::String(p.display().to_string())),
-        ),
     ];
     for (kind, key, value) in overrides {
         if let Some(value) = value
@@ -78,6 +72,14 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             return Err(format!(
                 "--{key} needs a `{kind}` plugin in the distribution"
             ));
+        }
+    }
+    if let Some(root) = &args.root {
+        let root = Value::String(root.display().to_string());
+        let tools = distribution.set_config("tools-builtin", "root", root.clone());
+        let sandbox = distribution.set_config("sandbox-process", "root", root);
+        if !tools && !sandbox {
+            return Err("--root needs a `tools-builtin` or `sandbox-process` plugin".into());
         }
     }
     if let Some(model) = &args.model {

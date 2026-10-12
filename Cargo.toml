@@ -19,7 +19,9 @@ members = [
     "plugins/model-mock",
     "plugins/model-responses",
     "plugins/policy-authority",
+    "plugins/sandbox-process",
     "plugins/session-jsonl",
+    "plugins/tools-shell",
     "plugins/tools-builtin",
 ]
 # rah-desktop is legacy and scheduled for removal (pivot plan phase P5); it is
@@ -43,7 +45,9 @@ default-members = [
     "plugins/model-mock",
     "plugins/model-responses",
     "plugins/policy-authority",
+    "plugins/sandbox-process",
     "plugins/session-jsonl",
+    "plugins/tools-shell",
     "plugins/tools-builtin",
 ]
 resolver = "3"

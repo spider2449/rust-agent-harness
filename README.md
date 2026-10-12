@@ -42,9 +42,31 @@ turn. Try `read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
 `policy-authority` denies every tool without a host permission assignment in
 its own configuration; tool metadata can only make a decision stricter. The
 presets assign `echo` (`none`) and `fs.read` (`read`), allow `none` and `read`,
-and ask for `write` and `execute`. No frontend approves `Ask` yet, so those
-calls are denied. If a configured policy plugin fails to start, `rah` refuses
-to run.
+and ask for `write` and `execute`. `frontend-cli` asks on the terminal and
+approves only an explicit `y`; end of input denies. If a configured policy
+plugin fails to start, `rah` refuses to run.
+
+Program execution is opt-in. Add `sandbox-process` (process supervision, not
+an OS sandbox) and `tools-shell` to a distribution file, and assign
+`shell.exec` in the policy:
+
+```toml
+[[plugin]]
+use = "policy-authority"
+config = { tools = { echo = "none", "fs.read" = "read", "shell.exec" = "execute" } }
+
+[[plugin]]
+use = "sandbox-process"
+config = { root = "." }            # cwd bound; cleared environment
+
+[[plugin]]
+use = "tools-shell"
+config = { allow_programs = ["git", "cargo"] }   # optional allow list
+```
+
+`shell.exec` runs one program with an argument vector (no shell syntax), with
+a timeout, bounded output and process-tree termination. With the mock model,
+`/call shell.exec {"program":"git","args":["status"]}` exercises it.
 
 Real models use the same composition with a different model plugin:
 

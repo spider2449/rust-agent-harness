@@ -16,8 +16,10 @@ rah-plugin-loop-react = { path = "../../plugins/loop-react" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }
 rah-plugin-model-responses = { path = "../../plugins/model-responses" }
 rah-plugin-policy-authority = { path = "../../plugins/policy-authority" }
+rah-plugin-sandbox-process = { path = "../../plugins/sandbox-process" }
 rah-plugin-session-jsonl = { path = "../../plugins/session-jsonl" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
+rah-plugin-tools-shell = { path = "../../plugins/tools-shell" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

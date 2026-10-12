@@ -9,4 +9,4 @@ futures.workspace = true
 rah-api = { path = "../../crates/rah-api" }
 rah-protocol = { path = "../../crates/rah-protocol" }
 serde.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "sync"] }

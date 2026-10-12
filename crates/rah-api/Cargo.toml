@@ -2,7 +2,7 @@
 name = "rah-api"
 version.workspace = true
 edition.workspace = true
-description = "RAH service contracts: model, loop, tools, session and hooks"
+description = "RAH service contracts: model, loop, tools, session, sandbox and hooks"
 
 [dependencies]
 async-trait.workspace = true

@@ -72,13 +72,16 @@ re-reads entries and never re-executes tool calls. Tool results carry
 Implemented:
 
 - `rah-kernel` (P1) and `rah-api` (P2): service contracts `model`, `loop`,
-  `session`, tools with `ToolInvoker`, and the standard hooks
+  `session`, `sandbox` (`ExecEnv`), tools with `ToolInvoker`, and the standard
+  hooks
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`.
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
-  workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`; and
-  `frontend-cli`.
+  workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`;
+  `sandbox-process` (supervised processes, not an OS sandbox); `tools-shell`
+  (opt-in `shell.exec`, requires `sandbox`); and `frontend-cli`, which also
+  answers `tool.approval` on the terminal.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
   `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
   except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
@@ -96,10 +99,10 @@ The remaining legacy crates are transformed or removed phase by phase:
 |---|---|---|
 | `rah-runtime-openai` | ported to `model-responses` (P3); removed together with Desktop | P5 |
 | `rah-runtime`, `rah-model` | replaced by `rah-api` and the model plugins; removed together with Desktop | P5 |
-| `rah-tools` | `Tool` moves to `rah-api`; tools split into `tools-builtin`, `tools-repo`, `tools-shell`; authorization becomes `policy-authority` | P4 |
+| `rah-tools` | `Tool` moves to `rah-api`; tools split into `tools-builtin`, `tools-repo`, `tools-shell` (done); authorization becomes `policy-authority` (done) | P4 |
 | `rah-tools-mcp` | becomes `tools-mcp` | P4 |
 | `rah-tools-plugin` | generalized into `rah-plugin-host-process` | P4 |
-| `rah-sandbox` | becomes `sandbox-process` | P4 |
+| `rah-sandbox` | ported to `sandbox-process` (P4); removed with the legacy tools and Desktop | P5 |
 | `rah-session`, `rah-profile-composition` | removed | P4 |
 | `rah-desktop` | legacy, excluded from default members; removed once `frontend-web` reaches parity | P5 |
 

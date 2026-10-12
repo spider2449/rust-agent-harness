@@ -348,7 +348,8 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 
 ### P4：policy、tools、sandbox、process plugin
 - [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限未搬，見下方備註）
-- [ ] `sandbox-process`、`tools-mcp`、`tools-repo`（唯讀）、`tools-shell`（opt-in）
+- [x] `sandbox-process`、`tools-shell`（opt-in）＋ CLI 的 `Ask` 確認（2026-10-12 完成）
+- [ ] `tools-mcp`、`tools-repo`（唯讀）
 - [ ] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（例如 Python 寫的 tool）
 - [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition`、`rah-session`
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
@@ -357,7 +358,15 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 決策只看 policy 自己的設定：沒有指派 → Deny；有效 level 取「指派」和「tool 自報」中較嚴格者，所以 tool metadata 只能收緊、不能授權（legacy 的 external permission 指派規則推廣到所有 tool）。
   - Preset 改為 `default`（llama.cpp，也是 `--preset` 的預設值）、`openai`、`dev`（mock）、`minimal`（mock，不掛 policy，印 `UNGUARDED`）。`llamacpp` preset 改名為 `default`。除了 `minimal`，policy 都是第一個掛載。
   - 設定了 `policy-authority` 但它沒有變成 Active 時，`rah` 會在掛載後續 plugin 前中止啟動（exit 2），不會退化成 unguarded 執行。
-  - 尚未做：frontend 還沒有 `tool.approval` handler，所以 `Ask` 目前等於拒絕（隨 `tools-shell` 一起做 CLI 確認）。legacy 的 in-flight 上限沒有搬：只靠 hook 無法可靠地在拒絕、取消和 Ask 失敗時釋放計數，之後若需要，改由 `ToolInvoker` 或獨立 hook 處理。
+  - legacy 的 in-flight 上限沒有搬：只靠 hook 無法可靠地在拒絕、取消和 Ask 失敗時釋放計數，之後若需要，改由 `ToolInvoker` 或獨立 hook 處理。
+
+- 實作備註（sandbox-process、tools-shell，2026-10-12）：
+  - `rah-api` 新增 `sandbox` service。與第 4 節草案不同：`ExecEnv::run(ProgramSpec, cancel) -> ExecOutput` 一次跑到結束，不回傳 `SupervisedChild`；串流輸出等真的需要時再加。
+  - `sandbox-process` 移植 `rah-sandbox` 的 Job Object／process group 監督。監督在呼叫端的 future 裡完成，沒有 detached reader task；dispose（unmount）、取消、逾時、輸出超限或 drop future 都會終止整個 process tree。程式結束後仍佔用 pipe 的子孫程序在 2 秒後被終止。這仍然只是 process supervision，不是 OS sandbox。
+  - `tools-shell` 的 `shell.exec` 宣告 `execute`。被 sandbox 終止或監督失敗回報為錯誤，`ToolInvoker` 記為 `uncertain`；無法啟動或輸入被拒記為 `none`。
+  - `frontend-cli` 註冊 `tool.approval`：turn 執行中在終端機詢問，只接受 `y`／`yes`，EOF 視為拒絕。`--prompt` 模式也會詢問。
+  - `model-mock` 新增 `/call <tool> <json>`，讓測試能驅動任意 tool。
+  - `tools-shell` 不在任何 preset 中，要用設定檔掛載（README 有範例）。
 
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）

@@ -2,6 +2,27 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P4)
 
+### P4: `sandbox-process`, `tools-shell` and terminal approval
+
+- `rah-api` gains the `sandbox` service: `ExecEnv::run(ProgramSpec, cancel)`
+  runs one program to completion with an argument vector, a cwd relative to
+  the environment root, extra environment, a timeout and per-stream output
+  limits, and reports any `Termination` (timed out, output limit, cancelled).
+- New plugin `sandbox-process` (process supervision, not an OS sandbox): a
+  cleared environment refilled from `inherit_env`, null stdin, bounded
+  output, a capped timeout and process-tree termination (Job Object on
+  Windows, process group on Unix), ported from `rah-sandbox`. Supervision
+  runs inside the caller's future with no detached tasks, and unmounting the
+  plugin cancels running programs.
+- New opt-in plugin `tools-shell` with `shell.exec` (`execute` permission,
+  requires `sandbox`, optional `allow_programs`). Terminated programs and
+  supervision failures are recorded as `uncertain`; spawn failures and
+  rejected input as `none`.
+- `frontend-cli` answers `tool.approval` on the terminal: only `y` or `yes`
+  approves, and end of input denies. `run_repl` takes the approval receiver.
+- `model-mock` gains `/call <tool> <json>` to request any offered tool.
+- `rah --root` now also sets the `sandbox-process` root.
+
 ### P4: `policy-authority` and guarded presets
 
 - New plugin `plugins/policy-authority`. It registers a `tool.before_invoke`

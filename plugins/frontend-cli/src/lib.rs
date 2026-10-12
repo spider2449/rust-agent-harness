@@ -6,6 +6,10 @@
 //!
 //! Configuration: `{ "session": "<id>", "prompt": "<text>" }`. With `session`
 //! the REPL resumes that session; with `prompt` it runs one turn and exits.
+//!
+//! The plugin answers `tool.approval`: while a turn runs, a policy `Ask` is
+//! shown on the terminal and approved only by an explicit `y` or `yes`. End
+//! of input, any other answer, or a REPL that is no longer running denies it.
 
 use std::str::FromStr;
 
@@ -15,12 +19,19 @@ use rah_api::{
     Scope,
     agent_loop::{LOOP, TurnRequest},
     async_trait,
+    hooks::{ApprovalRequest, ToolApproval},
     host::ExitRequested,
     session::{SESSION, SessionLog},
 };
 use rah_protocol::{AgentEvent, SessionEntry, SessionId, ToolContent, ToolOutput};
 use serde::Deserialize;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines},
+    sync::{mpsc, oneshot},
+};
+
+/// A pending `Ask` confirmation and where to send the answer.
+pub type ApprovalPrompt = (ApprovalRequest, oneshot::Sender<bool>);
 
 pub struct CliFrontendPlugin {
     manifest: PluginManifest,
@@ -58,9 +69,19 @@ impl Plugin for CliFrontendPlugin {
             scope.config_as()?
         };
         let kernel = scope.kernel();
+        let (prompts, approvals) = mpsc::channel::<ApprovalPrompt>(1);
+        scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
+            let prompts = prompts.clone();
+            async move {
+                let (reply, answer) = oneshot::channel();
+                prompts.send((request, reply)).await.ok()?;
+                Some(answer.await.unwrap_or(false))
+            }
+        });
         scope.spawn(async move {
             let stdin = BufReader::new(tokio::io::stdin());
-            let code = match run_repl(&kernel, stdin, tokio::io::stdout(), options).await {
+            let stdout = tokio::io::stdout();
+            let code = match run_repl(&kernel, stdin, stdout, options, Some(approvals)).await {
                 Ok(code) => code,
                 Err(error) => {
                     eprintln!("rah: terminal I/O failed: {error}");
@@ -87,11 +108,14 @@ commands:
 ";
 
 /// Runs the REPL until EOF or `/quit`. Returns the process exit code.
+/// `approvals` delivers `Ask` confirmations, answered from `input` while a
+/// turn runs.
 pub async fn run_repl<R, W>(
     kernel: &KernelHandle,
     input: R,
     mut out: W,
     options: ReplOptions,
+    mut approvals: Option<mpsc::Receiver<ApprovalPrompt>>,
 ) -> std::io::Result<i32>
 where
     R: AsyncBufRead + Unpin,
@@ -120,12 +144,17 @@ where
     };
     line(&mut out, &format!("session {current}")).await?;
 
+    let mut lines = input.lines();
     if let Some(prompt) = &options.prompt {
-        let completed = turn(kernel, &current, prompt, &mut out).await?;
+        let mut terminal = Terminal {
+            out: &mut out,
+            lines: &mut lines,
+            approvals: &mut approvals,
+        };
+        let completed = turn(kernel, &current, prompt, &mut terminal).await?;
         return Ok(if completed { 0 } else { 1 });
     }
 
-    let mut lines = input.lines();
     loop {
         out.write_all(b"> ").await?;
         out.flush().await?;
@@ -196,7 +225,13 @@ where
                 line(&mut out, &format!("unknown command {command}; try /help")).await?;
             }
             _ => {
-                turn(kernel, &current, text, &mut out).await?;
+                let text = text.to_owned();
+                let mut terminal = Terminal {
+                    out: &mut out,
+                    lines: &mut lines,
+                    approvals: &mut approvals,
+                };
+                turn(kernel, &current, &text, &mut terminal).await?;
             }
         }
     }
@@ -218,15 +253,61 @@ async fn line<W: AsyncWrite + Unpin>(out: &mut W, text: &str) -> std::io::Result
     out.flush().await
 }
 
+/// What a running turn needs from the terminal.
+struct Terminal<'a, R, W> {
+    out: &'a mut W,
+    lines: &'a mut Lines<R>,
+    approvals: &'a mut Option<mpsc::Receiver<ApprovalPrompt>>,
+}
+
+/// The next confirmation request; pending forever once there is none.
+async fn next_prompt(approvals: &mut Option<mpsc::Receiver<ApprovalPrompt>>) -> ApprovalPrompt {
+    if let Some(receiver) = approvals {
+        if let Some(prompt) = receiver.recv().await {
+            return prompt;
+        }
+        *approvals = None;
+    }
+    std::future::pending().await
+}
+
+/// Asks the user to confirm one tool call. Only `y` or `yes` approves.
+async fn confirm<R, W>(
+    terminal: &mut Terminal<'_, R, W>,
+    request: &ApprovalRequest,
+) -> std::io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let call = &request.request.call;
+    let question = format!(
+        "[approve] {} {} ({}). Allow? [y/N] ",
+        call.name, call.input.0, request.reason
+    );
+    terminal.out.write_all(question.as_bytes()).await?;
+    terminal.out.flush().await?;
+    let answer = terminal.lines.next_line().await?.unwrap_or_default();
+    let approved = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !approved {
+        line(terminal.out, "[denied]").await?;
+    }
+    Ok(approved)
+}
+
 /// Runs one turn and renders its events. Returns whether it completed.
-async fn turn<W: AsyncWrite + Unpin>(
+async fn turn<R, W>(
     kernel: &KernelHandle,
     session: &SessionId,
     input: &str,
-    out: &mut W,
-) -> std::io::Result<bool> {
+    terminal: &mut Terminal<'_, R, W>,
+) -> std::io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let Some(agent_loop) = kernel.get(LOOP) else {
-        line(out, "error: no agent loop is mounted").await?;
+        line(terminal.out, "error: no agent loop is mounted").await?;
         return Ok(false);
     };
     let mut events = agent_loop.run_turn(TurnRequest {
@@ -234,7 +315,19 @@ async fn turn<W: AsyncWrite + Unpin>(
         input: input.to_owned(),
         cancel: CancellationToken::new(),
     });
-    while let Some(event) = events.next().await {
+    loop {
+        let event = tokio::select! {
+            event = events.next() => event,
+            (request, reply) = next_prompt(terminal.approvals) => {
+                let approved = confirm(terminal, &request).await?;
+                let _ = reply.send(approved);
+                continue;
+            }
+        };
+        let Some(event) = event else {
+            break;
+        };
+        let out = &mut *terminal.out;
         match event {
             AgentEvent::ModelDelta { delta, .. } => {
                 out.write_all(delta.as_bytes()).await?;
@@ -268,7 +361,7 @@ async fn turn<W: AsyncWrite + Unpin>(
         }
     }
     line(
-        out,
+        terminal.out,
         "\n[error] the agent loop stopped before the turn ended",
     )
     .await?;

@@ -224,9 +224,15 @@ async fn repl_runs_turns_and_commands() {
     let kernel = kernel(&headless(&dir)).await;
     let input: &[u8] = b"hello\n/history\n/plugins\n/fork 5\n/sessions\n/bogus\n/quit\n";
     let mut output = Vec::new();
-    let code = run_repl(&kernel.handle(), input, &mut output, ReplOptions::default())
-        .await
-        .unwrap();
+    let code = run_repl(
+        &kernel.handle(),
+        input,
+        &mut output,
+        ReplOptions::default(),
+        None,
+    )
+    .await
+    .unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(code, 0);
     for expected in [
