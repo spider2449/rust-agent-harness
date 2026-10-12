@@ -22,6 +22,7 @@ use rah_plugin_policy_authority::PolicyAuthorityPlugin;
 use rah_plugin_sandbox_process::SandboxProcessPlugin;
 use rah_plugin_scheduler_basic::SchedulerPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
+use rah_plugin_session_titles::SessionTitlesPlugin;
 use rah_plugin_skills_fs::SkillsPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use rah_plugin_tools_mcp::McpToolsPlugin;
@@ -36,7 +37,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 18] = [
+    let entries: [(&'static str, Constructor); 19] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
@@ -55,6 +56,9 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         }),
         ("scheduler-basic", |id| Arc::new(SchedulerPlugin::new(id))),
         ("session-jsonl", |id| Arc::new(JsonlSessionPlugin::new(id))),
+        ("session-titles", |id| {
+            Arc::new(SessionTitlesPlugin::new(id))
+        }),
         ("skills-fs", |id| Arc::new(SkillsPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
@@ -118,6 +122,9 @@ const PRESET_TEMPLATE: &str = r#"
 [[plugin]]
 use = "session-jsonl"
 config = { dir = ".rah/sessions" }
+
+[[plugin]]
+use = "session-titles"
 
 [[plugin]]
 use = "tools-builtin"

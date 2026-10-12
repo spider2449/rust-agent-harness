@@ -171,6 +171,9 @@ impl SessionLog for Sessions {
             id: self.0.clone(),
             parent: None,
             created: 7,
+            title: None,
+            updated: 7,
+            preview: None,
         }])
     }
 }

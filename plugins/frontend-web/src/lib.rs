@@ -21,8 +21,10 @@
 //!   (mounts the replacement, then unmounts `{id}` once it is active).
 //! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
 //!   delay_secs, every_secs}` and `DELETE /api/jobs/{id}`.
-//! - `GET|POST /api/sessions`, `GET /api/sessions/{id}`,
-//!   `POST /api/sessions/{id}/fork {at}`.
+//! - `GET|POST /api/sessions`, `GET|DELETE /api/sessions/{id}`,
+//!   `POST /api/sessions/{id}/fork {at}`, `PUT /api/sessions/{id}/title
+//!   {title}` (`null` clears it) and `GET /api/sessions/{id}/export?format=md|json`
+//!   (a download).
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
 //!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve}`. Server
 //!   messages: `{type: "event", session, event}`, `approval_required`,
@@ -39,6 +41,7 @@
 
 mod access;
 mod approvals;
+mod export;
 mod jobs;
 mod manage;
 mod ws;
@@ -164,8 +167,10 @@ fn router(shared: AppState) -> Router {
         .route("/plugins/{id}/config", put(manage::configure))
         .route("/plugins/{id}/replace", post(manage::replace))
         .route("/sessions", get(list_sessions).post(create_session))
-        .route("/sessions/{id}", get(read_session))
+        .route("/sessions/{id}", get(read_session).delete(delete_session))
         .route("/sessions/{id}/fork", post(fork_session))
+        .route("/sessions/{id}/title", put(rename_session))
+        .route("/sessions/{id}/export", get(export_session))
         .route("/ws", get(ws::upgrade))
         .layer(middleware::from_fn_with_state(
             shared.clone(),
@@ -247,7 +252,11 @@ impl From<SessionError> for ApiError {
     fn from(error: SessionError) -> Self {
         let status = match error {
             SessionError::NotFound(_) => StatusCode::NOT_FOUND,
-            SessionError::InvalidFork { .. } => StatusCode::BAD_REQUEST,
+            SessionError::InvalidFork { .. } | SessionError::InvalidTitle => {
+                StatusCode::BAD_REQUEST
+            }
+            SessionError::HasForks { .. } => StatusCode::CONFLICT,
+            SessionError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
             SessionError::Corrupt { .. } | SessionError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self(status, error.to_string())
@@ -329,4 +338,79 @@ async fn fork_session(
     Json(fork): Json<Fork>,
 ) -> ApiResult {
     to_json(sessions(&shared)?.fork(&session_id(&id)?, fork.at).await?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    title: Option<String>,
+}
+
+async fn rename_session(
+    State(shared): State<AppState>,
+    Path(id): Path<String>,
+    Json(rename): Json<Rename>,
+) -> ApiResult {
+    to_json(
+        sessions(&shared)?
+            .rename(&session_id(&id)?, rename.title)
+            .await?,
+    )
+}
+
+async fn delete_session(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    sessions(&shared)?.delete(&session_id(&id)?).await?;
+    Ok(Json(json!({ "id": id, "deleted": true })))
+}
+
+#[derive(Deserialize)]
+struct Export {
+    format: Option<String>,
+}
+
+/// `GET /api/sessions/{id}/export?format=md|json`, as a download.
+async fn export_session(
+    State(shared): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(export): axum::extract::Query<Export>,
+) -> Result<Response, ApiError> {
+    let id = session_id(&id)?;
+    let log = sessions(&shared)?;
+    let records = log.read(&id).await?;
+    let info = log
+        .list()
+        .await?
+        .into_iter()
+        .find(|info| info.id == id)
+        .ok_or_else(|| SessionError::NotFound(id.clone()))?;
+    let (body, content_type, extension) = match export.format.as_deref().unwrap_or("md") {
+        "md" | "markdown" => (
+            export::markdown(&info, &records),
+            "text/markdown; charset=utf-8",
+            "md",
+        ),
+        "json" => (
+            export::json(&info, &records),
+            "application/json; charset=utf-8",
+            "json",
+        ),
+        other => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown export format `{other}`; use md or json"),
+            ));
+        }
+    };
+    // The file name uses only the session id, never the (untrusted) title.
+    let disposition = format!("attachment; filename=\"rah-session-{id}.{extension}\"");
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+        ],
+        body,
+    )
+        .into_response())
 }

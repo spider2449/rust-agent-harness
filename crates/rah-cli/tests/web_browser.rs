@@ -39,8 +39,8 @@ struct Browser {
 }
 
 impl Browser {
-    fn launch(program: PathBuf) -> Self {
-        let profile = TempDir::new("web-browser-profile");
+    fn launch(program: PathBuf, name: &str) -> Self {
+        let profile = TempDir::new(&format!("{name}-profile"));
         let mut command = Command::new(program);
         command
             .arg("--headless=new")
@@ -244,6 +244,10 @@ window.approval = () => document.querySelector('#approvals .approval');
 window.answer = (label) => [...approval().querySelectorAll('button')]
   .find((button) => button.textContent === label).click();
 window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(byId('live'));
+window.sessionItems = () => [...document.querySelectorAll('#sessions li.session')];
+window.headTitle = () => byId('session-title').textContent;
+window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta button')]
+  .filter((button) => button.textContent === label);
 // Every notice the page shows, even one that is replaced right away.
 window.notices = [];
 document.addEventListener('DOMContentLoaded', () => {
@@ -275,8 +279,8 @@ struct Web {
     _dir: TempDir,
 }
 
-async fn start() -> Web {
-    let dir = TempDir::new("web-browser");
+async fn start(name: &str) -> Web {
+    let dir = TempDir::new(name);
     let mut distribution = headless(&dir);
     distribution.plugin.push(
         Distribution::parse(
@@ -317,8 +321,8 @@ async fn the_web_ui_works_in_a_real_browser() {
         eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
         return;
     };
-    let web = start().await;
-    let browser = Browser::launch(PathBuf::from(program));
+    let web = start("web-browser").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser");
     let mut page = browser.page().await;
 
     // Opening the printed URL: the token leaves the address bar and the
@@ -334,7 +338,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.eval("byId('new-session').click(); true").await;
     page.wait(
         "the new session",
-        "document.querySelectorAll('#sessions li').length === 1 && !byId('input').disabled",
+        "document.querySelectorAll('#sessions li.session').length === 1 && !byId('input').disabled",
     )
     .await;
     page.send_message("hello").await;
@@ -370,11 +374,10 @@ async fn the_web_ui_works_in_a_real_browser() {
     let original = page
         .eval("document.querySelector('#sessions li.current').title")
         .await;
-    page.eval("entries()[0].querySelector('.fork').click(); true")
-        .await;
+    page.eval("metaAction('fork here')[0].click(); true").await;
     page.wait(
         "the fork",
-        "document.querySelectorAll('#sessions li').length === 2 && entries().length === 1",
+        "document.querySelectorAll('#sessions li.session').length === 2 && entries().length === 1",
     )
     .await;
     let current = page
@@ -386,13 +389,13 @@ async fn the_web_ui_works_in_a_real_browser() {
             .await
             .as_str()
             .unwrap()
-            .starts_with("fork of ")
+            .contains("fork of ")
     );
 
     // Back to the original session.
     let original_text = serde_json::to_string(&original).unwrap();
     page.eval(&format!(
-        "[...document.querySelectorAll('#sessions li')].find((item) => item.title === {original_text}).click(); true"
+        "[...document.querySelectorAll('#sessions li.session')].find((item) => item.title === {original_text}).click(); true"
     ))
     .await;
     page.wait("the original transcript", "entries().length === 6")
@@ -432,10 +435,10 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.wait("the editor", "shown(byId('editor'))").await;
     assert_eq!(page.eval("shown(byId('editor-kind-row'))").await, false);
     page.eval(
-        "const config = JSON.parse(byId('editor-config').value); \
+        "{ const config = JSON.parse(byId('editor-config').value); \
          config.tools = { ...config.tools, echo: 'write' }; \
          byId('editor-config').value = JSON.stringify(config); \
-         byId('editor-save').click(); true",
+         byId('editor-save').click(); true }",
     )
     .await;
     page.wait(
@@ -544,7 +547,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     )
     .await;
     assert_eq!(
-        page.eval("document.querySelectorAll('#sessions li').length")
+        page.eval("document.querySelectorAll('#sessions li.session').length")
             .await,
         2
     );
@@ -567,4 +570,150 @@ async fn the_web_ui_works_in_a_real_browser() {
          byId('notice').textContent.includes('no session service is mounted')",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let web = start("web-browser-sessions").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-sessions");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    assert_eq!(page.eval("shown(byId('session-head'))").await, false);
+
+    // The first turn gets a generated title (the mock model's reply line).
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "the new session",
+        "sessionItems().length === 1 && !byId('input').disabled",
+    )
+    .await;
+    page.send_message("hello").await;
+    page.wait(
+        "the generated title",
+        "idle() && headTitle().includes('you said: User: hello') && \
+         sessionItems()[0].querySelector('.name').textContent === headTitle()",
+    )
+    .await;
+
+    // Rename from the header; the next turn keeps the title.
+    page.eval("byId('session-rename').click(); true").await;
+    page.eval(
+        "{ const input = document.querySelector('#session-title .title-input'); \
+         input.value = 'Kyoto trip'; \
+         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); true }",
+    )
+    .await;
+    page.wait("the new title", "headTitle() === 'Kyoto trip'")
+        .await;
+    page.send_message("/notool second").await;
+    page.wait(
+        "the second reply",
+        "idle() && transcript().includes('you said: second')",
+    )
+    .await;
+    assert_eq!(page.eval("headTitle()").await, "Kyoto trip");
+    let original = page.eval("state.current").await;
+
+    // Regenerate the last answer: a new branch with the same title.
+    assert_eq!(page.eval("metaAction('regenerate').length").await, 1);
+    page.eval("metaAction('regenerate')[0].click(); true").await;
+    page.wait(
+        "the regenerated answer",
+        "idle() && sessionItems().length === 2 && entries().length === 6 && \
+         transcript().includes('you said: second') && headTitle() === 'Kyoto trip'",
+    )
+    .await;
+    assert_ne!(page.eval("state.current").await, original);
+
+    // Edit the first message and send it again in a new branch.
+    page.eval("metaAction('edit')[0].click(); true").await;
+    page.eval(
+        "{ const editor = document.querySelector('#transcript .edit'); \
+         editor.querySelector('textarea').value = '/notool edited'; \
+         [...editor.querySelectorAll('button')].find((b) => b.textContent === 'Send').click(); true }",
+    )
+    .await;
+    page.wait(
+        "the edited branch",
+        "idle() && sessionItems().length === 3 && entries().length === 2 && \
+         transcript().includes('you said: edited')",
+    )
+    .await;
+
+    // Search filters the list.
+    page.eval(
+        "byId('session-search').value = 'no-such-session'; \
+         byId('session-search').dispatchEvent(new Event('input')); true",
+    )
+    .await;
+    assert_eq!(page.eval("sessionItems().length").await, 0);
+    assert_eq!(
+        page.eval("byId('sessions').textContent.includes('No matching sessions')")
+            .await,
+        true
+    );
+    page.eval(
+        "byId('session-search').value = 'KYOTO'; \
+         byId('session-search').dispatchEvent(new Event('input')); true",
+    )
+    .await;
+    assert_eq!(page.eval("sessionItems().length").await, 3);
+    page.eval(
+        "byId('session-search').value = ''; \
+         byId('session-search').dispatchEvent(new Event('input')); true",
+    )
+    .await;
+
+    // Export: the download is produced, and its Markdown starts with the title.
+    let markdown = page
+        .eval(
+            "fetch(`/api/sessions/${state.current}/export?format=md`, \
+             { headers: { Authorization: `Bearer ${state.token}` } }).then((r) => r.text())",
+        )
+        .await;
+    assert!(
+        markdown.as_str().unwrap().starts_with("# Kyoto trip\n"),
+        "{markdown}"
+    );
+    // The buttons' handler, awaited so the downloads finish before the delete.
+    assert_eq!(
+        page.eval("shown(byId('export-md')) && shown(byId('export-json'))")
+            .await,
+        true
+    );
+    page.eval("Promise.all([exportSession('md'), exportSession('json')]).then(() => true)")
+        .await;
+
+    // Delete the current branch from the header.
+    page.eval("window.confirm = () => true; byId('session-delete').click(); true")
+        .await;
+    page.wait(
+        "the deleted branch",
+        "sessionItems().length === 2 && !shown(byId('session-head')) && byId('input').disabled",
+    )
+    .await;
+    page.eval("true").await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+    let notices = page.eval("notices").await;
+    assert_eq!(notices, json!([]));
+
+    // A session with forks cannot be deleted; the reason is shown.
+    let original_text = serde_json::to_string(&original).unwrap();
+    page.eval(&format!(
+        "sessionItems().find((item) => item.dataset.id === {original_text}) \
+         .querySelector('[aria-label=\"Delete session\"]').click(); true"
+    ))
+    .await;
+    page.wait(
+        "the refusal",
+        "shown(byId('notice')) && byId('notice').textContent.includes('has forks')",
+    )
+    .await;
+    assert_eq!(page.eval("sessionItems().length").await, 2);
 }

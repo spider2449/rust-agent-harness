@@ -4,7 +4,13 @@
 //! per record. A fork writes only a header naming its parent and fork point;
 //! reading a fork concatenates the parent prefix with the fork's own records.
 //! A torn final line (no trailing newline, as after a crash) is ignored when
-//! reading and removed before the next append.
+//! reading and removed before the next write.
+//!
+//! Titles are metadata lines (`{"type":"title","title":...}`) appended like
+//! records; the last one wins, and records are never rewritten. Deleting a
+//! session moves its file to `<dir>/deleted/`, so it can be recovered by
+//! moving it back; a session with forks cannot be deleted. Every append emits
+//! [`SessionAppended`].
 //!
 //! Configuration: `{ "dir": "<path>" }`, default `.rah/sessions`.
 
@@ -16,15 +22,19 @@ use std::{
 };
 
 use rah_api::{
-    Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
-    session::{SESSION, SessionError, SessionLog},
+    KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
+    session::{SESSION, SessionAppended, SessionError, SessionLog},
 };
-use rah_protocol::{ForkPoint, SessionEntry, SessionId, SessionInfo, SessionRecord};
+use rah_protocol::{
+    ForkPoint, SessionEntry, SessionId, SessionInfo, SessionRecord, normalize_title,
+};
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, sync::Mutex};
 
 const FORMAT_VERSION: u32 = 1;
 const MAX_FORK_DEPTH: usize = 64;
+const PREVIEW_CHARS: usize = 120;
+const DELETED_DIR: &str = "deleted";
 
 pub struct JsonlSessionPlugin {
     manifest: PluginManifest,
@@ -60,7 +70,8 @@ impl Plugin for JsonlSessionPlugin {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|error| format!("session directory `{}`: {error}", dir.display()))?;
-        scope.provide(SESSION, Arc::new(JsonlSessions::new(dir)))?;
+        let sessions = JsonlSessions::new(dir).with_events(scope.kernel());
+        scope.provide(SESSION, Arc::new(sessions))?;
         Ok(())
     }
 }
@@ -78,6 +89,9 @@ enum Line {
         seq: u64,
         entry: SessionEntry,
     },
+    Title {
+        title: Option<String>,
+    },
 }
 
 struct Parsed {
@@ -92,6 +106,7 @@ pub struct JsonlSessions {
     dir: PathBuf,
     /// Next sequence number per session, loaded lazily.
     next_seq: Mutex<HashMap<SessionId, u64>>,
+    events: Option<KernelHandle>,
 }
 
 impl JsonlSessions {
@@ -99,7 +114,14 @@ impl JsonlSessions {
         Self {
             dir,
             next_seq: Mutex::new(HashMap::new()),
+            events: None,
         }
+    }
+
+    /// Emits [`SessionAppended`] through `kernel` after each append.
+    pub fn with_events(mut self, kernel: KernelHandle) -> Self {
+        self.events = Some(kernel);
+        self
     }
 
     fn path(&self, session: &SessionId) -> PathBuf {
@@ -107,7 +129,8 @@ impl JsonlSessions {
     }
 
     async fn parse(&self, session: &SessionId) -> Result<Parsed, SessionError> {
-        let text = match tokio::fs::read_to_string(self.path(session)).await {
+        let path = self.path(session);
+        let text = match tokio::fs::read_to_string(&path).await {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(SessionError::NotFound(session.clone()));
@@ -124,7 +147,7 @@ impl JsonlSessions {
         let header = lines
             .next()
             .ok_or_else(|| corrupt("missing header".into()))?;
-        let info = match serde_json::from_str(header) {
+        let mut info = match serde_json::from_str(header) {
             Ok(Line::Header {
                 version: FORMAT_VERSION,
                 session: id,
@@ -134,6 +157,9 @@ impl JsonlSessions {
                 id,
                 parent,
                 created,
+                title: None,
+                updated: created,
+                preview: None,
             },
             _ => return Err(corrupt("invalid header".into())),
         };
@@ -141,14 +167,55 @@ impl JsonlSessions {
         for (index, line) in lines.enumerate() {
             match serde_json::from_str(line) {
                 Ok(Line::Record { seq, entry }) => records.push(SessionRecord { seq, entry }),
+                Ok(Line::Title { title }) => info.title = title,
                 _ => return Err(corrupt(format!("invalid record line {}", index + 2))),
             }
+        }
+        if let Some(modified) = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        {
+            info.updated = info.updated.max(modified.as_secs());
         }
         Ok(Parsed {
             info,
             records,
             torn_at,
         })
+    }
+
+    /// Parses a session and removes a torn tail, so a new line can follow.
+    async fn repair(&self, session: &SessionId) -> Result<Parsed, SessionError> {
+        let parsed = self.parse(session).await?;
+        if let Some(length) = parsed.torn_at {
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(self.path(session))
+                .await
+                .map_err(|e| SessionError::Io(e.to_string()))?;
+            file.set_len(length)
+                .await
+                .map_err(|e| SessionError::Io(e.to_string()))?;
+        }
+        Ok(parsed)
+    }
+
+    async fn write_line(&self, session: &SessionId, line: &Line) -> Result<(), SessionError> {
+        let mut text = serde_json::to_string(line).map_err(|e| SessionError::Io(e.to_string()))?;
+        text.push('\n');
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(self.path(session))
+            .await
+            .map_err(|_| SessionError::NotFound(session.clone()))?;
+        file.write_all(text.as_bytes())
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))
     }
 
     /// Visible records, following fork parents.
@@ -179,6 +246,43 @@ impl JsonlSessions {
             }
         }
         Ok(chain.into_iter().rev().flatten().collect())
+    }
+
+    /// Session info with the preview of its first user message.
+    async fn described(&self, session: &SessionId) -> Result<SessionInfo, SessionError> {
+        let mut info = self.parse(session).await?.info;
+        info.preview = self
+            .visible(session)
+            .await?
+            .iter()
+            .find_map(|record| match &record.entry {
+                SessionEntry::TurnStarted { input, .. } => normalize_title(input)
+                    .map(|line| line.chars().take(PREVIEW_CHARS).collect::<String>()),
+                _ => None,
+            });
+        Ok(info)
+    }
+
+    /// Ids of the sessions stored in the directory (not deleted ones).
+    async fn ids(&self) -> Result<Vec<SessionId>, SessionError> {
+        let mut entries = tokio::fs::read_dir(&self.dir)
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        let mut ids = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(id) = name
+                .strip_suffix(".jsonl")
+                .and_then(|stem| stem.parse::<SessionId>().ok())
+            {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     async fn write_new(&self, info: &SessionInfo) -> Result<(), SessionError> {
@@ -212,15 +316,23 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+fn new_info(parent: Option<ForkPoint>) -> SessionInfo {
+    let created = now();
+    SessionInfo {
+        id: SessionId::new(),
+        parent,
+        created,
+        title: None,
+        updated: created,
+        preview: None,
+    }
+}
+
 #[async_trait]
 impl SessionLog for JsonlSessions {
     async fn create(&self) -> Result<SessionInfo, SessionError> {
         let mut next = self.next_seq.lock().await;
-        let info = SessionInfo {
-            id: SessionId::new(),
-            parent: None,
-            created: now(),
-        };
+        let info = new_info(None);
         self.write_new(&info).await?;
         next.insert(info.id.clone(), 1);
         Ok(info)
@@ -231,17 +343,7 @@ impl SessionLog for JsonlSessions {
         let seq = match next.get(session) {
             Some(seq) => *seq,
             None => {
-                let parsed = self.parse(session).await?;
-                if let Some(length) = parsed.torn_at {
-                    let file = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .open(self.path(session))
-                        .await
-                        .map_err(|e| SessionError::Io(e.to_string()))?;
-                    file.set_len(length)
-                        .await
-                        .map_err(|e| SessionError::Io(e.to_string()))?;
-                }
+                let parsed = self.repair(session).await?;
                 let last = parsed
                     .records
                     .last()
@@ -251,21 +353,20 @@ impl SessionLog for JsonlSessions {
                 last + 1
             }
         };
-        let mut line = serde_json::to_string(&Line::Record { seq, entry })
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        line.push('\n');
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(self.path(session))
-            .await
-            .map_err(|_| SessionError::NotFound(session.clone()))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        file.flush()
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
+        let line = Line::Record {
+            seq,
+            entry: entry.clone(),
+        };
+        self.write_line(session, &line).await?;
         next.insert(session.clone(), seq + 1);
+        drop(next);
+        if let Some(kernel) = &self.events {
+            kernel.emit(&SessionAppended {
+                session: session.clone(),
+                seq,
+                entry,
+            });
+        }
         Ok(seq)
     }
 
@@ -288,14 +389,10 @@ impl SessionLog for JsonlSessions {
                 last,
             });
         }
-        let info = SessionInfo {
-            id: SessionId::new(),
-            parent: Some(ForkPoint {
-                session: session.clone(),
-                at,
-            }),
-            created: now(),
-        };
+        let info = new_info(Some(ForkPoint {
+            session: session.clone(),
+            at,
+        }));
         self.write_new(&info).await?;
         next.insert(info.id.clone(), at + 1);
         Ok(info)
@@ -303,28 +400,81 @@ impl SessionLog for JsonlSessions {
 
     async fn list(&self) -> Result<Vec<SessionInfo>, SessionError> {
         let _guard = self.next_seq.lock().await;
-        let mut entries = tokio::fs::read_dir(&self.dir)
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
         let mut sessions = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?
-        {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(id) = name
-                .strip_suffix(".jsonl")
-                .and_then(|stem| stem.parse::<SessionId>().ok())
-            else {
-                continue;
-            };
-            if let Ok(parsed) = self.parse(&id).await {
-                sessions.push(parsed.info);
+        for id in self.ids().await? {
+            if let Ok(info) = self.described(&id).await {
+                sessions.push(info);
             }
         }
         sessions.sort_by_key(|info| (info.created, info.id.to_string()));
         Ok(sessions)
+    }
+
+    async fn rename(
+        &self,
+        session: &SessionId,
+        title: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let title = match title {
+            Some(title) => Some(normalize_title(&title).ok_or(SessionError::InvalidTitle)?),
+            None => None,
+        };
+        let _guard = self.next_seq.lock().await;
+        self.repair(session).await?;
+        self.write_line(session, &Line::Title { title }).await?;
+        self.described(session).await
+    }
+
+    async fn rename_if_untitled(
+        &self,
+        session: &SessionId,
+        title: String,
+    ) -> Result<bool, SessionError> {
+        let title = normalize_title(&title).ok_or(SessionError::InvalidTitle)?;
+        let _guard = self.next_seq.lock().await;
+        if self.repair(session).await?.info.title.is_some() {
+            return Ok(false);
+        }
+        self.write_line(session, &Line::Title { title: Some(title) })
+            .await?;
+        Ok(true)
+    }
+
+    async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
+        let mut next = self.next_seq.lock().await;
+        let path = self.path(session);
+        if !tokio::fs::try_exists(&path)
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?
+        {
+            return Err(SessionError::NotFound(session.clone()));
+        }
+        let mut forks = Vec::new();
+        for id in self.ids().await? {
+            if let Ok(parsed) = self.parse(&id).await
+                && parsed
+                    .info
+                    .parent
+                    .is_some_and(|parent| parent.session == *session)
+            {
+                forks.push(id);
+            }
+        }
+        if !forks.is_empty() {
+            return Err(SessionError::HasForks {
+                session: session.clone(),
+                forks,
+            });
+        }
+        let deleted = self.dir.join(DELETED_DIR);
+        tokio::fs::create_dir_all(&deleted)
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        tokio::fs::rename(&path, deleted.join(format!("{session}.jsonl")))
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        next.remove(session);
+        Ok(())
     }
 }
 
@@ -382,7 +532,13 @@ mod tests {
             inputs(&reopened.read(&info.id).await.unwrap()),
             [(1, "a".into()), (2, "b".into()), (3, "c".into())]
         );
-        assert_eq!(reopened.list().await.unwrap(), [info]);
+        let listed = reopened.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (&listed[0].id, listed[0].preview.as_deref()),
+            (&info.id, Some("a"))
+        );
+        assert!(listed[0].updated >= info.created);
     }
 
     #[tokio::test]
@@ -417,7 +573,14 @@ mod tests {
             log.fork(&parent.id, 9).await,
             Err(SessionError::InvalidFork { last: 3, .. })
         ));
-        assert_eq!(log.list().await.unwrap().len(), 3);
+        let listed = log.list().await.unwrap();
+        assert_eq!(listed.len(), 3);
+        // A fork previews the first message of its parent prefix.
+        assert!(
+            listed
+                .iter()
+                .all(|info| info.preview.as_deref() == Some("a"))
+        );
     }
 
     #[tokio::test]
@@ -456,6 +619,14 @@ mod tests {
             log.append(&missing, started("a")).await,
             Err(SessionError::NotFound(_))
         ));
+        assert!(matches!(
+            log.rename(&missing, Some("x".into())).await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            log.delete(&missing).await,
+            Err(SessionError::NotFound(_))
+        ));
         let info = log.create().await.unwrap();
         let path = dir.0.join(format!("{}.jsonl", info.id));
         let mut file = std::fs::OpenOptions::new()
@@ -467,5 +638,81 @@ mod tests {
             log.read(&info.id).await,
             Err(SessionError::Corrupt { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn titles_are_appended_metadata_and_survive_reopening() {
+        let dir = TempDir::new("title");
+        let log = JsonlSessions::new(dir.0.clone());
+        let info = log.create().await.unwrap();
+        log.append(&info.id, started("a")).await.unwrap();
+        let renamed = log
+            .rename(&info.id, Some("  Plan\nthe   trip ".into()))
+            .await
+            .unwrap();
+        assert_eq!(renamed.title.as_deref(), Some("Plan the trip"));
+        // Records keep their sequence around a title line.
+        assert_eq!(log.append(&info.id, started("b")).await.unwrap(), 2);
+        assert_eq!(
+            log.rename(&info.id, Some(" \n ".into())).await,
+            Err(SessionError::InvalidTitle)
+        );
+
+        let reopened = JsonlSessions::new(dir.0.clone());
+        assert_eq!(
+            reopened.list().await.unwrap()[0].title.as_deref(),
+            Some("Plan the trip")
+        );
+        assert_eq!(reopened.append(&info.id, started("c")).await.unwrap(), 3);
+        assert_eq!(reopened.read(&info.id).await.unwrap().len(), 3);
+        assert_eq!(
+            reopened
+                .rename_if_untitled(&info.id, "Generated".into())
+                .await,
+            Ok(false)
+        );
+        let cleared = reopened.rename(&info.id, None).await.unwrap();
+        assert_eq!(cleared.title, None);
+        assert_eq!(
+            reopened
+                .rename_if_untitled(&info.id, "Generated".into())
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            reopened.list().await.unwrap()[0].title.as_deref(),
+            Some("Generated")
+        );
+        let long = "x".repeat(500);
+        let renamed = reopened.rename(&info.id, Some(long)).await.unwrap();
+        assert_eq!(
+            renamed.title.map(|t| t.chars().count()),
+            Some(rah_protocol::MAX_TITLE_CHARS)
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_moves_the_log_aside_and_refuses_parents_of_forks() {
+        let dir = TempDir::new("delete");
+        let log = JsonlSessions::new(dir.0.clone());
+        let parent = log.create().await.unwrap();
+        log.append(&parent.id, started("a")).await.unwrap();
+        let fork = log.fork(&parent.id, 1).await.unwrap();
+
+        match log.delete(&parent.id).await {
+            Err(SessionError::HasForks { forks, .. }) => {
+                assert_eq!(forks, std::slice::from_ref(&fork.id))
+            }
+            other => panic!("expected HasForks, got {other:?}"),
+        }
+        log.delete(&fork.id).await.unwrap();
+        log.delete(&parent.id).await.unwrap();
+        assert!(log.list().await.unwrap().is_empty());
+        assert!(matches!(
+            log.read(&parent.id).await,
+            Err(SessionError::NotFound(_))
+        ));
+        let kept = dir.0.join(DELETED_DIR).join(format!("{}.jsonl", parent.id));
+        assert!(kept.exists(), "the deleted log is kept for recovery");
     }
 }

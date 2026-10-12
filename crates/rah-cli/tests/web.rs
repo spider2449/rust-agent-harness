@@ -503,3 +503,115 @@ async fn background_jobs_are_submitted_listed_and_cancelled() {
         400
     );
 }
+
+#[tokio::test]
+async fn sessions_are_titled_renamed_exported_and_deleted_over_http() {
+    use reqwest::Method;
+    let web = start("web-session-ops", |_| {}).await;
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+    run_turn(&mut socket, &session, "hello", None).await;
+
+    // `session-titles` names the session after its first turn.
+    let find = |list: &Value| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|info| info["id"] == session.as_str())
+            .cloned()
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let titled = loop {
+        let info = find(&web.json(web.get("/api/sessions")).await);
+        if info["title"].is_string() {
+            break info;
+        }
+        assert!(std::time::Instant::now() < deadline, "no title: {info}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        titled["title"], "[model-mock] you said: User: hello",
+        "{titled}"
+    );
+    assert_eq!(titled["preview"], "hello");
+    assert!(titled["updated"].as_u64().unwrap() >= titled["created"].as_u64().unwrap());
+
+    let path = format!("/api/sessions/{session}/title");
+    let (status, renamed) = web
+        .status(
+            web.request(Method::PUT, &path)
+                .json(&json!({ "title": "  Kyoto\n trip " })),
+        )
+        .await;
+    assert_eq!(
+        (status, renamed["title"].as_str()),
+        (200, Some("Kyoto trip"))
+    );
+    assert_eq!(
+        web.status(
+            web.request(Method::PUT, &path)
+                .json(&json!({ "title": " " }))
+        )
+        .await
+        .0,
+        400
+    );
+
+    let export = web
+        .get(&format!("/api/sessions/{session}/export?format=md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(export.status().as_u16(), 200);
+    assert_eq!(
+        export.headers()["content-disposition"],
+        format!("attachment; filename=\"rah-session-{session}.md\"").as_str()
+    );
+    assert!(export.text().await.unwrap().starts_with("# Kyoto trip\n"));
+    let json_export = web
+        .json(web.get(&format!("/api/sessions/{session}/export?format=json")))
+        .await;
+    assert_eq!(json_export["session"]["title"], "Kyoto trip");
+    assert_eq!(json_export["records"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        web.status(web.get(&format!("/api/sessions/{session}/export?format=pdf")))
+            .await
+            .0,
+        400
+    );
+
+    // A parent with forks is kept; deleting the fork first allows it.
+    let fork = web
+        .json(
+            web.post(&format!("/api/sessions/{session}/fork"))
+                .json(&json!({ "at": 1 })),
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, refused) = web
+        .status(web.request(Method::DELETE, &format!("/api/sessions/{session}")))
+        .await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains(&fork));
+    for id in [&fork, &session] {
+        assert_eq!(
+            web.status(web.request(Method::DELETE, &format!("/api/sessions/{id}")))
+                .await
+                .0,
+            200
+        );
+    }
+    assert_eq!(web.json(web.get("/api/sessions")).await, json!([]));
+    assert_eq!(
+        web.status(web.request(Method::DELETE, &format!("/api/sessions/{session}")))
+            .await
+            .0,
+        404
+    );
+}

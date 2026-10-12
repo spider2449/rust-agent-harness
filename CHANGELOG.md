@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Session management
+
+- `rah-protocol`: `SessionInfo` gains `title`, `updated` and `preview`
+  (additive; old readers ignore them), plus `normalize_title`.
+- `rah-api` `SessionLog`: new `rename`, `rename_if_untitled` and `delete`
+  (default implementations report `Unsupported`), errors `HasForks`,
+  `InvalidTitle` and `Unsupported`, and the event `SessionAppended`, which
+  providers emit after each append.
+- `session-jsonl`: titles are appended `title` metadata lines (the last one
+  wins; records are never rewritten). `delete` moves the log to
+  `<dir>/deleted/` and is refused while forks of the session exist. `list`
+  reports the last change (file time) and a preview of the first message.
+  Logs with title lines cannot be read by 0.40.0.
+- New plugin `session-titles`, mounted by every preset: after a session's
+  first completed turn it asks the model, in one tool-free request without
+  `model.before_request` hooks, for a short title, and stores one cleaned line
+  (`<think>` blocks, quotes, `Title:` prefixes and final punctuation removed)
+  only if the session is still untitled. Without a usable reply it uses the
+  start of the first message.
+- `frontend-web`: `PUT /api/sessions/{id}/title`, `DELETE /api/sessions/{id}`
+  and `GET /api/sessions/{id}/export?format=md|json` (a download named after
+  the session id). The UI lists sessions by last activity, grouped by day,
+  with titles, a search box, and rename and delete actions; the conversation
+  header renames, exports and deletes; user messages can be edited and sent
+  again, and the last answer regenerated, each in a new branch that keeps the
+  title.
+- `frontend-cli`: `/rename [title]`; `/sessions` shows titles or previews.
+
 ### WASM: cancelled calls are interrupted
 
 - `rah-plugin-host-wasm` enables wasmtime epoch interruption. Dropping a

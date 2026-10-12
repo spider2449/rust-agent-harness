@@ -22,6 +22,53 @@ pub trait SessionLog: Send + Sync {
     async fn fork(&self, session: &SessionId, at: u64) -> Result<SessionInfo, SessionError>;
 
     async fn list(&self) -> Result<Vec<SessionInfo>, SessionError>;
+
+    /// Sets or, with `None`, clears the session's title. Records are never
+    /// rewritten; providers store the title as metadata.
+    async fn rename(
+        &self,
+        session: &SessionId,
+        title: Option<String>,
+    ) -> Result<SessionInfo, SessionError> {
+        let _ = (session, title);
+        Err(SessionError::Unsupported("rename"))
+    }
+
+    /// Sets `title` only if the session has none, so a generated title never
+    /// replaces one set meanwhile. Returns whether it was set. Providers
+    /// should check and write atomically; this default does not.
+    async fn rename_if_untitled(
+        &self,
+        session: &SessionId,
+        title: String,
+    ) -> Result<bool, SessionError> {
+        let untitled = self
+            .list()
+            .await?
+            .iter()
+            .any(|info| info.id == *session && info.title.is_none());
+        if untitled {
+            self.rename(session, Some(title)).await?;
+        }
+        Ok(untitled)
+    }
+
+    /// Removes the session from the list. Refused while forks of it exist,
+    /// since they read its records. Providers should keep the data
+    /// recoverable rather than destroy it.
+    async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
+        let _ = session;
+        Err(SessionError::Unsupported("delete"))
+    }
+}
+
+/// Emitted by a session provider after each successful append. Plugins that
+/// react to session progress (titles, indexing) subscribe to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionAppended {
+    pub session: SessionId,
+    pub seq: u64,
+    pub entry: SessionEntry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -38,6 +85,15 @@ pub enum SessionError {
     Corrupt { session: SessionId, detail: String },
     #[error("session storage failed: {0}")]
     Io(String),
+    #[error("session `{session}` has forks; delete them first: {}", forks.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))]
+    HasForks {
+        session: SessionId,
+        forks: Vec<SessionId>,
+    },
+    #[error("the title is empty")]
+    InvalidTitle,
+    #[error("this session provider does not support `{0}`")]
+    Unsupported(&'static str),
 }
 
 /// Text recorded for a tool call whose result was never logged.

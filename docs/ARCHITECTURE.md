@@ -68,6 +68,13 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
+A session also has metadata: a title (`rename`, stored as an appended
+metadata line, last one wins; records are never rewritten), its last change
+(`updated`) and a preview of its first message. `delete` removes a session
+from the list (`session-jsonl` moves the file to `deleted/`) and is refused
+while forks of it exist. The provider emits `SessionAppended` after every
+append; `session-titles` uses it to name a session after its first turn.
+
 ## Current state (after phase P5)
 
 Implemented:
@@ -81,7 +88,8 @@ Implemented:
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `loop-react` and `loop-plan` (plan-and-execute;
   either can replace the other at runtime); `tools-builtin` (`echo` and
-  workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`;
+  workspace-bounded `fs.read`); `session-jsonl`; `session-titles` (asks the
+  model for a title after a session's first turn); `policy-authority`;
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`);
   `skills-fs` (skills listed through `model.before_request`, loaded with

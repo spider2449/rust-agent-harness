@@ -1439,6 +1439,7 @@ dependencies = [
  "rah-plugin-sandbox-process",
  "rah-plugin-scheduler-basic",
  "rah-plugin-session-jsonl",
+ "rah-plugin-session-titles",
  "rah-plugin-skills-fs",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-mcp",
@@ -1620,6 +1621,18 @@ dependencies = [
 name = "rah-plugin-session-jsonl"
 version = "0.40.0"
 dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-session-titles"
+version = "0.40.0"
+dependencies = [
+ "futures",
  "rah-api",
  "rah-protocol",
  "serde",

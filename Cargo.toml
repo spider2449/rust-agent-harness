@@ -17,6 +17,7 @@ members = [
     "plugins/sandbox-process",
     "plugins/scheduler-basic",
     "plugins/session-jsonl",
+    "plugins/session-titles",
     "plugins/skills-fs",
     "plugins/tools-builtin",
     "plugins/tools-mcp",

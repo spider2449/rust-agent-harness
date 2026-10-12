@@ -55,19 +55,173 @@ function renderContent(output) {
 
 // ---- Sessions -------------------------------------------------------------
 
+// Session titles come from the model or the user: untrusted, text only.
+function sessionName(info) {
+  return info.title || info.preview || "New session";
+}
+
+function dayGroup(seconds) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const day = new Date(seconds * 1000);
+  day.setHours(0, 0, 0, 0);
+  const days = Math.round((today - day) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  return "Older";
+}
+
+function timeLabel(seconds) {
+  const when = new Date(seconds * 1000);
+  return dayGroup(seconds) === "Today"
+    ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : when.toLocaleDateString();
+}
+
+function currentInfo() {
+  return state.sessions.find((info) => info.id === state.current);
+}
+
 async function loadSessions() {
   state.sessions = await api("/sessions");
-  state.sessions.sort((a, b) => b.created - a.created);
+  state.sessions.sort((a, b) => (b.updated || b.created) - (a.updated || a.created));
+  renderSessions();
+  renderHeader();
+}
+
+function renderSessions() {
+  const query = $("session-search").value.trim().toLowerCase();
   const list = $("sessions");
   list.replaceChildren();
+  let group = null;
   for (const info of state.sessions) {
-    const item = el("li", info.id === state.current ? "current" : "", info.id.slice(0, 8));
-    const when = new Date(info.created * 1000).toLocaleString();
-    item.append(el("small", "", info.parent ? `fork of ${info.parent.session.slice(0, 8)} @${info.parent.at} · ${when}` : when));
-    item.title = info.id;
-    item.addEventListener("click", () => openSession(info.id));
-    list.append(item);
+    const haystack = `${info.title || ""} ${info.preview || ""} ${info.id}`.toLowerCase();
+    if (query && !haystack.includes(query)) continue;
+    const label = dayGroup(info.updated || info.created);
+    if (label !== group) {
+      group = label;
+      list.append(el("li", "group", label));
+    }
+    list.append(sessionItem(info));
   }
+  if (!list.children.length) {
+    list.append(el("li", "group", query ? "No matching sessions" : "No sessions yet"));
+  }
+}
+
+function sessionItem(info) {
+  const item = el("li", info.id === state.current ? "session current" : "session");
+  item.title = info.id;
+  item.dataset.id = info.id;
+  const name = el("span", "name", sessionName(info));
+  const meta = [timeLabel(info.updated || info.created)];
+  if (info.parent) meta.push(`fork of ${info.parent.session.slice(0, 8)}`);
+  const actions = el("span", "item-actions");
+  for (const [label, text, handler] of [
+    ["Rename", "✎", () => editTitle(name, info)],
+    ["Delete", "✕", () => deleteSession(info)],
+  ]) {
+    const button = el("button", "ghost icon", text);
+    button.type = "button";
+    button.title = label;
+    button.setAttribute("aria-label", `${label} session`);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      handler();
+    });
+    actions.append(button);
+  }
+  item.append(name, actions, el("small", "", meta.join(" · ")));
+  item.addEventListener("click", () => openSession(info.id).catch(report));
+  return item;
+}
+
+function renderHeader() {
+  const info = currentInfo();
+  $("session-head").hidden = !info;
+  if (!info) return;
+  $("session-title").textContent = sessionName(info);
+  $("session-title").classList.toggle("untitled", !info.title);
+}
+
+// Edits a title in place: Enter saves, Escape or leaving the field cancels.
+function editTitle(host, info) {
+  const input = el("input", "title-input");
+  input.value = info.title || "";
+  input.placeholder = sessionName(info);
+  input.maxLength = 120;
+  input.setAttribute("aria-label", "Session title");
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    if (save) {
+      const title = input.value.trim();
+      try {
+        await api(`/sessions/${info.id}/title`, { method: "PUT", body: JSON.stringify({ title: title || null }) });
+      } catch (error) {
+        report(error);
+      }
+    }
+    await loadSessions().catch(report);
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("blur", () => finish(false));
+  host.replaceChildren(input);
+  input.focus();
+  input.select();
+}
+
+async function deleteSession(info) {
+  if (!window.confirm(`Delete "${sessionName(info)}"?\n\nThe log is moved to the sessions' deleted folder.`)) return;
+  try {
+    await api(`/sessions/${info.id}`, { method: "DELETE" });
+  } catch (error) {
+    report(error);
+    return;
+  }
+  if (info.id === state.current) {
+    state.current = null;
+    $("transcript").replaceChildren();
+    $("input").disabled = true;
+    $("send").disabled = true;
+  }
+  await loadSessions();
+}
+
+// Downloads go through fetch, since the API needs the token header.
+async function exportSession(format) {
+  const response = await fetch(`/api/sessions/${state.current}/export?format=${format}`, {
+    headers: { Authorization: `Bearer ${state.token}` },
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const name = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "");
+  const url = URL.createObjectURL(await response.blob());
+  const link = el("a");
+  link.href = url;
+  link.download = name ? name[1] : `rah-session.${format}`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// A generated title arrives after the turn; poll briefly until it does.
+function awaitTitle() {
+  clearTimeout(state.titleTimer);
+  let tries = 0;
+  const check = async () => {
+    const info = currentInfo();
+    if (!info || info.title || tries++ >= 15) return;
+    await loadSessions().catch(() => {});
+    state.titleTimer = setTimeout(check, 2000);
+  };
+  state.titleTimer = setTimeout(check, 1000);
 }
 
 async function openSession(id) {
@@ -88,11 +242,61 @@ async function newSession() {
 async function fork(at) {
   const info = await api(`/sessions/${state.current}/fork`, { method: "POST", body: JSON.stringify({ at }) });
   await openSession(info.id);
+  return info;
+}
+
+// Sends `input` again in a fork that ends before the turn at `seq`. The
+// original session is kept; the fork takes over its title.
+async function resend(seq, input) {
+  if (state.running) return;
+  const title = currentInfo()?.title;
+  const info = await api(`/sessions/${state.current}/fork`, { method: "POST", body: JSON.stringify({ at: seq - 1 }) });
+  if (title) {
+    await api(`/sessions/${info.id}/title`, { method: "PUT", body: JSON.stringify({ title }) }).catch(() => {});
+  }
+  await openSession(info.id);
+  startTurn(input);
+}
+
+function editMessage(node, seq, input) {
+  const body = node.querySelector("pre");
+  const editor = el("div", "edit");
+  const area = el("textarea");
+  area.value = input;
+  area.rows = Math.min(10, input.split("\n").length + 1);
+  const buttons = el("div", "buttons");
+  const cancel = el("button", "ghost", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => editor.replaceWith(body));
+  const save = el("button", "", "Send");
+  save.type = "button";
+  save.title = "Send the edited message in a new branch; this session is kept";
+  save.addEventListener("click", () => {
+    const text = area.value.trim();
+    if (text) resend(seq, text).catch(report);
+  });
+  buttons.append(cancel, save);
+  editor.append(area, buttons);
+  body.replaceWith(editor);
+  area.focus();
+}
+
+function metaButton(label, title, handler) {
+  const button = el("button", "ghost fork", label);
+  button.type = "button";
+  button.title = title;
+  button.addEventListener("click", () => {
+    Promise.resolve()
+      .then(handler)
+      .catch(report);
+  });
+  return button;
 }
 
 function entryNode(record) {
   const entry = record.entry;
   const node = el("li", "entry");
+  node.dataset.seq = record.seq;
   const meta = el("div", "meta");
   const body = el("pre");
   switch (entry.kind) {
@@ -102,6 +306,7 @@ function entryNode(record) {
       body.textContent = entry.input;
       break;
     case "assistant_message":
+      node.classList.add("assistant");
       meta.append(el("span", "", "assistant"));
       body.textContent = entry.text;
       break;
@@ -129,11 +334,10 @@ function entryNode(record) {
   }
   meta.append(el("span", "spacer"));
   meta.append(el("span", "", `#${record.seq}`));
-  const forkButton = el("button", "ghost fork", "fork here");
-  forkButton.type = "button";
-  forkButton.title = `Start a new session continuing after record ${record.seq}`;
-  forkButton.addEventListener("click", () => fork(record.seq).catch((error) => showNotice(error.message)));
-  meta.append(forkButton);
+  if (entry.kind === "turn_started") {
+    meta.append(metaButton("edit", "Edit this message and send it in a new branch", () => editMessage(node, record.seq, entry.input)));
+  }
+  meta.append(metaButton("fork here", `Start a new session continuing after record ${record.seq}`, () => fork(record.seq)));
   node.append(meta, body);
   return node;
 }
@@ -143,6 +347,13 @@ async function loadTranscript() {
   const records = await api(`/sessions/${state.current}`);
   const list = $("transcript");
   list.replaceChildren(...records.map(entryNode).filter(Boolean));
+  // Regenerate the last turn: send its message again in a new branch.
+  const last = [...records].reverse().find((record) => record.entry.kind === "turn_started");
+  const answer = [...list.querySelectorAll(".entry.assistant, .entry.failed")].pop();
+  if (last && answer && Number(answer.dataset.seq) > last.seq) {
+    const button = metaButton("regenerate", "Answer the last message again in a new branch; this session is kept", () => resend(last.seq, last.entry.input));
+    answer.querySelector(".meta").insertBefore(button, answer.querySelector(".meta .fork"));
+  }
   list.scrollTop = list.scrollHeight;
 }
 
@@ -175,15 +386,17 @@ function send(message) {
   return false;
 }
 
+function startTurn(input) {
+  if (!input || !state.current || state.running) return false;
+  if (!send({ type: "turn", session: state.current, input })) return false;
+  setRunning(true);
+  showLive(`you: ${input}\n`);
+  return true;
+}
+
 function submit(event) {
   event.preventDefault();
-  const input = $("input").value.trim();
-  if (!input || !state.current || state.running) return;
-  if (send({ type: "turn", session: state.current, input })) {
-    $("input").value = "";
-    setRunning(true);
-    showLive(`you: ${input}\n`);
-  }
+  if (startTurn($("input").value.trim())) $("input").value = "";
 }
 
 function onEvent(session, event) {
@@ -207,6 +420,11 @@ function onEvent(session, event) {
       if (event.type === "failed") showNotice(`Turn failed: ${event.message}`);
       setRunning(false);
       loadTranscript().catch((error) => showNotice(error.message));
+      loadSessions()
+        .then(() => {
+          if (event.type === "completed") awaitTitle();
+        })
+        .catch(report);
       break;
     default:
       break;
@@ -395,6 +613,19 @@ async function start() {
   });
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
+  $("session-search").addEventListener("input", renderSessions);
+  $("session-rename").addEventListener("click", () => {
+    const info = currentInfo();
+    if (info) editTitle($("session-title"), info);
+  });
+  $("session-title").addEventListener("dblclick", () => $("session-rename").click());
+  $("session-delete").addEventListener("click", () => {
+    const info = currentInfo();
+    if (info) deleteSession(info).catch(report);
+  });
+  for (const format of ["md", "json"]) {
+    $(`export-${format}`).addEventListener("click", () => exportSession(format).catch(report));
+  }
   $("toggle-plugins").addEventListener("click", () => {
     $("plugins-panel").hidden = !$("plugins-panel").hidden;
   });

@@ -72,4 +72,24 @@ pub struct SessionInfo {
     pub parent: Option<ForkPoint>,
     /// Creation time in seconds since the Unix epoch.
     pub created: u64,
+    /// A human-readable name, set by the user or generated; `None` until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Last change (record or title) in seconds since the Unix epoch.
+    #[serde(default)]
+    pub updated: u64,
+    /// The start of the first user message, for lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+/// The longest session title, in characters.
+pub const MAX_TITLE_CHARS: usize = 120;
+
+/// A title as stored: one line, trimmed, at most [`MAX_TITLE_CHARS`]
+/// characters; `None` when nothing is left.
+pub fn normalize_title(title: &str) -> Option<String> {
+    let line = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title: String = line.chars().take(MAX_TITLE_CHARS).collect();
+    (!title.is_empty()).then_some(title)
 }

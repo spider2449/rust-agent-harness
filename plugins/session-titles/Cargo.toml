@@ -1,0 +1,16 @@
+[package]
+name = "rah-plugin-session-titles"
+version.workspace = true
+edition.workspace = true
+description = "Names sessions: asks the model for a short title after the first turn"
+
+[dependencies]
+futures.workspace = true
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

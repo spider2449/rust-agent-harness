@@ -101,6 +101,7 @@ commands:
   /sessions         list sessions
   /resume <id>      switch to a session
   /fork <seq>       fork the current session after record <seq> and switch to it
+  /rename [title]   rename the current session (no title clears it)
   /history          show the current session log
   /plugins          show plugin status
   /help             show this help
@@ -182,7 +183,12 @@ where
                             .parent
                             .map(|p| format!(" (fork of {} at {})", p.session, p.at))
                             .unwrap_or_default();
-                        line(&mut out, &format!("{marker} {}{parent}", info.id)).await?;
+                        let title = info
+                            .title
+                            .or(info.preview)
+                            .map(|title| format!("  {title}"))
+                            .unwrap_or_default();
+                        line(&mut out, &format!("{marker} {}{parent}{title}", info.id)).await?;
                     }
                 }
                 Err(error) => line(&mut out, &format!("error: {error}")).await?,
@@ -204,6 +210,17 @@ where
                 },
                 Err(_) => line(&mut out, "usage: /fork <seq>").await?,
             },
+            "/rename" => {
+                let title = argument.trim();
+                let title = (!title.is_empty()).then(|| title.to_owned());
+                match sessions.rename(&current, title).await {
+                    Ok(info) => {
+                        let shown = info.title.as_deref().unwrap_or("(no title)");
+                        line(&mut out, &format!("session {current}: {shown}")).await?;
+                    }
+                    Err(error) => line(&mut out, &format!("error: {error}")).await?,
+                }
+            }
             "/history" => match sessions.read(&current).await {
                 Ok(records) => {
                     for record in records {

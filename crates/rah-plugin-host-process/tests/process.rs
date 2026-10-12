@@ -59,6 +59,9 @@ impl SessionLog for Sessions {
             id: self.0.clone(),
             parent: None,
             created: 0,
+            title: None,
+            updated: 0,
+            preview: None,
         }])
     }
 }

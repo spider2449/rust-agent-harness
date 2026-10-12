@@ -9,8 +9,9 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 ## Status
 
-`master` has completed **phase P5** of the
-[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md):
+`master` has completed phases P0 to P6 of the
+[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
+(release 0.40.0):
 the kernel, the service contracts (`rah-api`), the plugins and the `rah` binary
 run end to end with a mock model, and with OpenAI or llama.cpp through the
 Responses API. Tool calls are guarded by the fail-closed `policy-authority`
@@ -27,7 +28,8 @@ cargo run -p rah-cli -- --preset dev
 ```
 
 The `dev` preset mounts `policy-authority`, `session-jsonl` (logs in
-`.rah/sessions`), `tools-builtin` (`echo` and `fs.read` bounded to the current
+`.rah/sessions`), `session-titles` (names each session from its first turn),
+`tools-builtin` (`echo` and `fs.read` bounded to the current
 directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 `repo.diff`, `repo.list` and `repo.search` over Git), `tools-repo-write`
 (`repo.create-file`, `repo.edit-files` and `repo.patch`, each asking for
@@ -39,7 +41,7 @@ can extend with `memory.remember` after you approve), `skills-fs` (skills in
 hand a task to a subagent in its own session), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
-`/sessions`, `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
+`/sessions`, `/resume <id>`, `/rename [title]` and `/plugins`. `--prompt <text>` runs one turn and exits, and
 `--session <id>` resumes a session.
 
 | Preset | Model plugin | Policy |
@@ -118,8 +120,12 @@ cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
 ```
 
 `rah` prints the address with a per-start access token; open exactly that
-URL. The UI lists, opens, creates and forks sessions, streams turns, and asks
-you to allow or deny tool calls the policy marks `Ask`. Its Plugins panel
+URL. The UI lists sessions by last activity, grouped by day and searchable,
+with titles the model generates after the first turn; you can rename, delete
+(moved to `.rah/sessions/deleted/`), export (Markdown or JSON) and fork them,
+regenerate the last answer or edit an earlier message and send it again (both
+in a new branch, so the original is kept). It streams turns and asks you to
+allow or deny tool calls the policy marks `Ask`. Its Plugins panel
 adds, configures, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
 effect on the next turn without a restart. It listens on loopback only and
@@ -199,7 +205,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 The normal suite uses deterministic local fixtures and needs no network access,
 credentials, paid API or real model. Some tests need `git` on PATH; the Python
-process-plugin example runs only when a Python 3 interpreter is on PATH.
+process-plugin example runs only when a Python 3 interpreter is on PATH. The
+Web UI browser tests run only when `RAH_TEST_BROWSER` names a Chromium-based
+browser (Chrome, Chromium or Edge), for example
+`$env:RAH_TEST_BROWSER = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`.
 
 ## Contributing
 

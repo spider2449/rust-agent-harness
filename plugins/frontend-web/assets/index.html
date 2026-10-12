@@ -21,10 +21,20 @@
   <main class="layout">
     <nav class="sidebar" aria-label="Sessions">
       <button id="new-session" type="button">New session</button>
+      <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
       <ul id="sessions" class="sessions"></ul>
     </nav>
 
     <section class="conversation" aria-label="Conversation">
+      <div id="session-head" class="session-head" hidden>
+        <h1 id="session-title" title="Double-click to rename"></h1>
+        <span class="head-actions">
+          <button id="session-rename" type="button" class="ghost">Rename</button>
+          <button id="export-md" type="button" class="ghost" title="Download as Markdown">Export .md</button>
+          <button id="export-json" type="button" class="ghost" title="Download as JSON">Export .json</button>
+          <button id="session-delete" type="button" class="ghost danger">Delete</button>
+        </span>
+      </div>
       <div id="notice" class="notice" hidden></div>
       <ol id="transcript" class="transcript"></ol>
       <div id="live" class="live" hidden></div>

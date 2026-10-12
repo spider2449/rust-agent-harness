@@ -222,7 +222,8 @@ async fn the_loop_plugin_can_be_replaced_without_losing_sessions() {
 async fn repl_runs_turns_and_commands() {
     let dir = TempDir::new("repl");
     let kernel = kernel(&headless(&dir)).await;
-    let input: &[u8] = b"hello\n/history\n/plugins\n/fork 5\n/sessions\n/bogus\n/quit\n";
+    let input: &[u8] =
+        b"hello\n/history\n/plugins\n/rename  My trip \n/fork 5\n/sessions\n/bogus\n/quit\n";
     let mut output = Vec::new();
     let code = run_repl(
         &kernel.handle(),
@@ -242,8 +243,12 @@ async fn repl_runs_turns_and_commands() {
         "   1 user: hello",
         "   3 tool result (None): hello",
         "loop-react: active",
+        ": My trip",
         "(forked at 5)",
         "(fork of ",
+        // `/sessions` names the renamed session; the fork shows its preview.
+        "  My trip",
+        "  hello",
         "unknown command /bogus",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in:\n{text}");

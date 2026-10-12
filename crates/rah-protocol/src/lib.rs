@@ -11,7 +11,10 @@ pub use agent::{AgentOutput, Message, MessageRole};
 pub use events::{AgentErrorCode, AgentEvent, ApprovalRequest};
 pub use identifiers::{ApprovalId, ModelRequestId, RequestId, SessionId, ToolCallId};
 pub use model::{ContextItem, ModelEvent, ModelRequest};
-pub use session::{ForkPoint, SessionEntry, SessionInfo, SessionRecord, ToolEffect};
+pub use session::{
+    ForkPoint, MAX_TITLE_CHARS, SessionEntry, SessionInfo, SessionRecord, ToolEffect,
+    normalize_title,
+};
 pub use tools::{
     PermissionLevel, ToolCall, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
