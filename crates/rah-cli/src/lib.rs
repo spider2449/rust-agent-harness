@@ -11,6 +11,7 @@ use admin::{BuildError, construct};
 pub use admin::{DISTRIBUTION_PLUGIN, DistributionPlugin, Registry};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
+use rah_plugin_context_default::ContextPlugin;
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
@@ -31,7 +32,8 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 13] = [
+    let entries: [(&'static str, Constructor); 14] = [
+        ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
@@ -66,7 +68,8 @@ pub struct Preset {
 }
 
 /// Built-in presets. All share built-in tools, read-only repository tools
-/// over `sandbox-process`, JSONL sessions, the default loop and the terminal
+/// over `sandbox-process`, JSONL sessions, `context-default` (history window
+/// and memory notes in `.rah/memory.md`), the default loop and the terminal
 /// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
 pub const PRESETS: [Preset; 4] = [
@@ -97,7 +100,7 @@ pub const PRESETS: [Preset; 4] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read", "memory.*" = "write" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -115,6 +118,10 @@ config = { root = "." }
 
 [[plugin]]
 use = "tools-repo"
+
+[[plugin]]
+use = "context-default"
+config = { memory_file = ".rah/memory.md" }
 
 [[plugin]]
 use = "{MODEL}"

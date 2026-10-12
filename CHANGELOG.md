@@ -2,6 +2,18 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P5)
 
+### P5: `context-default`
+
+- New plugin `context-default`, a `model.before_request` handler: an
+  optional system prompt; a sliding window over the history (`max_items`,
+  `max_chars`) that starts only at a user message, so tool calls and results
+  stay paired, always keeps the current turn and notes how many items were
+  omitted; and memory notes from `memory_file`, injected on every request.
+  With a memory file it provides `memory.remember` (`write` permission),
+  which appends one line. The session log is never changed.
+- Every preset mounts it with `memory_file = ".rah/memory.md"`, and the
+  preset policy assigns `memory.*` = `write` (Ask).
+
 ### P5: plugin management
 
 - `rah-api`: new `admin` service (`PluginAdmin`: `kinds`, `instance`,

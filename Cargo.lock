@@ -2879,6 +2879,7 @@ dependencies = [
  "clap",
  "futures",
  "rah-api",
+ "rah-plugin-context-default",
  "rah-plugin-frontend-cli",
  "rah-plugin-frontend-web",
  "rah-plugin-host-process",
@@ -2947,6 +2948,17 @@ dependencies = [
  "futures",
  "rah-protocol",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rah-plugin-context-default"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

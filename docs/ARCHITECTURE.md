@@ -80,6 +80,8 @@ Implemented:
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
   workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`;
+  `context-default` (system prompt, sliding history window and file-backed
+  memory notes through `model.before_request`, plus `memory.remember`);
   `sandbox-process` (supervised processes, not an OS sandbox); `tools-repo`
   (read-only Git tools, requires `sandbox`); `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
