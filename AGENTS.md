@@ -120,11 +120,8 @@ Unless explicitly requested, do not:
 - modify host configuration or install system-wide dependencies;
 - touch `.vscode/`.
 
-Legacy crates (`rah-desktop`, `rah-runtime`, `rah-model`,
-`rah-profile-composition`, `rah-tools`, `rah-tools-mcp`, `rah-tools-plugin`,
-`rah-sandbox`, `rah-runtime-openai`) may receive only the minimal changes
-needed to keep the workspace building, until their pivot phase removes or
-transforms them.
+The legacy crates were removed from `master` in phase P5. Do not restore them;
+port a capability as a plugin instead.
 
 On Windows, use native PowerShell-safe commands. Avoid placeholder syntax such
 as `<file>` in commands meant for direct pasting, and quote Windows paths

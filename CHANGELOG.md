@@ -2,6 +2,22 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P5)
 
+### P5: legacy removal
+
+- Removed the legacy Desktop (`rah-desktop`) and the crates only it used:
+  `rah-runtime`, `rah-runtime-openai`, `rah-model`, `rah-tools`,
+  `rah-tools-mcp`, `rah-tools-plugin`, `rah-sandbox` and
+  `rah-profile-composition`. The Web UI (`rah --web`) replaces Desktop. The
+  workspace no longer needs `default-members`, and 311 locked packages are
+  gone.
+- Removed the legacy test scripts (`scripts/`), the Desktop CI steps and the
+  Desktop `.gitattributes` rule, plus the unused workspace dependencies
+  `anyhow`, `sha2`, `tracing` and `tracing-subscriber`.
+- `rah-protocol`: removed `live_evidence`, `RuntimeDiagnostic` and the
+  unused `AgentInput`, `AgentRequest` and `AgentOptions`.
+- The full workspace test suite now passes on Windows; the 43 legacy
+  `RepositoryMemberStale` failures left with Desktop.
+
 ### P5: `context-default`
 
 - New plugin `context-default`, a `model.before_request` handler: an

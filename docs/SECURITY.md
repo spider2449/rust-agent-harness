@@ -186,9 +186,3 @@ linked worktree can point elsewhere. Configured filter drivers can run
 programs during `status` or `diff`. The tools are therefore only as inert as
 the configured repository, which is the user's choice; the legacy layout and
 ownership checks are not ported.
-
-## Transitional note
-
-The legacy crates still on `master` (notably `rah-desktop`) keep their v0.35.0
-behavior: their model tool requests go through the legacy host port, permission
-dispatch and `ToolRegistry`, as documented in the legacy security model.

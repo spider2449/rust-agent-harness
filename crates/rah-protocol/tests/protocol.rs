@@ -1,8 +1,7 @@
 use rah_protocol::{
-    AgentErrorCode, AgentEvent, AgentInput, AgentOptions, AgentOutput, AgentRequest, ApprovalId,
-    ApprovalRequest, Message, MessageRole, ModelRequestId, PermissionLevel, RAH_PROTOCOL_VERSION,
-    RequestId, SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolInput, ToolName,
-    ToolOutput,
+    AgentErrorCode, AgentEvent, AgentOutput, ApprovalId, ApprovalRequest, ContextItem, Message,
+    MessageRole, ModelRequest, ModelRequestId, PermissionLevel, RAH_PROTOCOL_VERSION, RequestId,
+    SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
 };
 use serde_json::{Value, json};
 
@@ -117,12 +116,12 @@ fn tool_calls_accept_arbitrary_json_arguments() {
 
 #[test]
 fn protocol_messages_require_no_provider_specific_fields() {
-    let request = AgentRequest {
-        request_id: RequestId::new(),
-        input: AgentInput {
-            messages: vec![message(MessageRole::User, "hello")],
-        },
-        options: AgentOptions::default(),
+    let request = ModelRequest {
+        model: None,
+        items: vec![ContextItem::User {
+            text: "hello".into(),
+        }],
+        tools: Vec::new(),
     };
     let definition = ToolDefinition {
         name: ToolName::new("example.tool"),

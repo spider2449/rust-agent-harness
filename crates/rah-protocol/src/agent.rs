@@ -1,29 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::RequestId;
-
-/// Input supplied to an agent runtime.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AgentInput {
-    /// Conversation messages available to the agent.
-    pub messages: Vec<Message>,
-}
-
-/// A request to start an agent operation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AgentRequest {
-    /// Correlates the request with its events and output.
-    pub request_id: RequestId,
-    /// User and conversation input for the operation.
-    pub input: AgentInput,
-    /// Runtime-level execution options.
-    pub options: AgentOptions,
-}
-
-/// Provider-neutral controls for an agent operation.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AgentOptions {}
-
 /// Final output produced by an agent operation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentOutput {

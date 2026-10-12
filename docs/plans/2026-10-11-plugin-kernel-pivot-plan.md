@@ -395,13 +395,13 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）
 - [x] `context-default`（sliding window、記憶；2026-10-12 完成）
-- [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）、`rah-profile-composition`、`rah-tools-plugin`、`rah-tools-mcp`、`rah-tools`、`rah-sandbox`（從 P4 延後）
+- [x] 刪除 `rah-desktop`（2026-10-12；不做 `frontend-tauri` 殼）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）、`rah-profile-composition`、`rah-tools-plugin`、`rah-tools-mcp`、`rah-tools`、`rah-sandbox`（從 P4 延後）
 - 驗收：功能上可以取代 desktop 的日常使用；**在 UI 上切換 model 和 loop plugin 不需要重啟**
 - 切片（2026-10-12 決定）：
   - P5a：`frontend-web` 核心——HTTP＋WebSocket server、存取控制、session 列表／讀取／建立／fork、經 WebSocket 串流的 turn 和取消、`Ask` 確認、唯讀 plugin 狀態、最小 Web UI。**2026-10-12 完成**。
   - P5b：plugin 管理——`rah-api` 新增 plugin catalog service（由 distribution 提供，因為 plugin 不能依賴 `rah-cli`），UI 可以掛載、卸載、重啟、改設定，並在不重啟的情況下切換 model 和 loop。**2026-10-12 完成**。
   - P5c：`context-default`（sliding window、記憶）。**2026-10-12 完成**：不新增 `context` service，而是掛在 `model.before_request` hook 上（loop 不需要改）。記憶是一個檔案（預設 `.rah/memory.md`），每次請求注入；model 用 `memory.remember`（`write`，preset 中為 Ask）新增一行。legacy 的 work-log 記憶沒有移植。
-  - P5d：刪除 Desktop 和延後的 legacy crate，更新文件。
+  - P5d：刪除 Desktop 和延後的 legacy crate，更新文件。**2026-10-12 完成**：另外刪除 `scripts/`（legacy 和 Codex 測試腳本）、CI 的 Desktop 步驟、`.gitattributes`、沒用到的 workspace 依賴，以及 `rah-protocol` 的 `live_evidence`、`RuntimeDiagnostic` 和沒用到的 `AgentInput`／`AgentRequest`／`AgentOptions`。
 - 設計決定（2026-10-12）：
   - Server 用 `axum` 0.8（含 `ws`）。新依賴的理由：Web frontend 需要 HTTP 和 WebSocket server；`hyper`、`tower` 已經在依賴樹中。
   - 只綁 loopback（`127.0.0.1`、`::1`、`localhost`），設定成其他位址是錯誤。

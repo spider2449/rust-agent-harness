@@ -1,19 +1,10 @@
 [workspace]
 members = [
-    "crates/rah-cli",
-    "crates/rah-desktop",
     "crates/rah-api",
+    "crates/rah-cli",
     "crates/rah-kernel",
     "crates/rah-plugin-host-process",
-    "crates/rah-model",
-    "crates/rah-profile-composition",
     "crates/rah-protocol",
-    "crates/rah-runtime",
-    "crates/rah-runtime-openai",
-    "crates/rah-sandbox",
-    "crates/rah-tools",
-    "crates/rah-tools-mcp",
-    "crates/rah-tools-plugin",
     "plugins/context-default",
     "plugins/frontend-cli",
     "plugins/frontend-web",
@@ -23,40 +14,10 @@ members = [
     "plugins/policy-authority",
     "plugins/sandbox-process",
     "plugins/session-jsonl",
-    "plugins/tools-shell",
     "plugins/tools-builtin",
     "plugins/tools-mcp",
     "plugins/tools-repo",
-]
-# rah-desktop is legacy and scheduled for removal (pivot plan phase P5); it is
-# still built and tested by `--workspace`, but not by a bare `cargo build`.
-default-members = [
-    "crates/rah-cli",
-    "crates/rah-api",
-    "crates/rah-kernel",
-    "crates/rah-plugin-host-process",
-    "crates/rah-model",
-    "crates/rah-profile-composition",
-    "crates/rah-protocol",
-    "crates/rah-runtime",
-    "crates/rah-runtime-openai",
-    "crates/rah-sandbox",
-    "crates/rah-tools",
-    "crates/rah-tools-mcp",
-    "crates/rah-tools-plugin",
-    "plugins/context-default",
-    "plugins/frontend-cli",
-    "plugins/frontend-web",
-    "plugins/loop-react",
-    "plugins/model-mock",
-    "plugins/model-responses",
-    "plugins/policy-authority",
-    "plugins/sandbox-process",
-    "plugins/session-jsonl",
     "plugins/tools-shell",
-    "plugins/tools-builtin",
-    "plugins/tools-mcp",
-    "plugins/tools-repo",
 ]
 resolver = "3"
 
@@ -65,17 +26,13 @@ version = "0.35.0"
 edition = "2024"
 
 [workspace.dependencies]
-anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
 clap = { version = "4.0", features = ["derive"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
 thiserror = "2.0"
 tokio = "1.0"
 tokio-util = "0.7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.0", features = ["serde", "v4"] }

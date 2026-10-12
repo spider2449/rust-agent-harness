@@ -67,7 +67,7 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, phase P5 in progress)
+## Current state (after phase P5)
 
 Implemented:
 
@@ -110,24 +110,13 @@ The tools service key is private to `rah-api`. Tool providers register with
 `loop-react` resolves the model on every round, and `frontend-cli` resolves the
 loop and session per use, so swapping a model plugin restarts neither.
 
-The remaining legacy crates are transformed or removed phase by phase:
-
-| Crate | Fate | Phase |
-|---|---|---|
-| `rah-runtime-openai` | ported to `model-responses` (P3); removed together with Desktop | P5 |
-| `rah-runtime`, `rah-model` | replaced by `rah-api` and the model plugins; removed together with Desktop | P5 |
-| `rah-tools` | `Tool` moved to `rah-api`; read-only tools ported to `tools-builtin`, `tools-repo` and `tools-shell`, authorization to `policy-authority`; the crate is removed with Desktop | P5 |
-| `rah-tools-mcp` | ported to `tools-mcp` (P4); removed together with Desktop | P5 |
-| `rah-tools-plugin` | generalized into `rah-plugin-host-process` (P4); removed together with Desktop | P5 |
-| `rah-sandbox` | ported to `sandbox-process` (P4); removed with the legacy tools and Desktop | P5 |
-| `rah-profile-composition` | removed together with Desktop, which still composes the legacy profile with it | P5 |
-
-`rah-session` was removed in P4.
-| `rah-desktop` | legacy, excluded from default members; removed once `frontend-web` reaches parity | P5 |
+The legacy crates are gone from `master`: `rah-session` (P4), and
+`rah-desktop`, `rah-runtime`, `rah-runtime-openai`, `rah-model`, `rah-tools`,
+`rah-tools-mcp`, `rah-tools-plugin`, `rah-sandbox` and
+`rah-profile-composition` (P5). Their capabilities live on as plugins:
+`model-responses`, `loop-react`, `tools-builtin`, `tools-repo`, `tools-shell`,
+`tools-mcp`, `sandbox-process`, `policy-authority`, `rah-plugin-host-process`
+and `frontend-web`. The v0.35.0 tag keeps the legacy line.
 
 Removed in P0: `rah-runtime-codex` (the Codex adapter and its certification
 harness) and `rah-core` (empty).
-
-The legacy runtime still works as released in v0.35.0. Desktop uses the
-native OpenAI and llama.cpp adapters, and model tool requests go through the
-legacy host port, permission dispatch and `ToolRegistry`.
