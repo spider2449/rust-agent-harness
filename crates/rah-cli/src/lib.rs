@@ -252,6 +252,10 @@ impl Distribution {
 /// says how to start them.
 pub const PROCESS_PLUGIN: &str = "process";
 
+/// The `use` name of WebAssembly component plugins; their `config` names the
+/// component.
+pub const WASM_PLUGIN: &str = "wasm";
+
 /// Mounts the `distribution` plugin, then every plugin in order, and returns
 /// the resulting statuses. A configured `policy-authority` that does not
 /// become active aborts the boot before any later plugin (such as a
@@ -269,10 +273,11 @@ pub async fn boot(
         )
         .await?;
     for spec in &distribution.plugin {
-        if spec.kind == PROCESS_PLUGIN && spec.id.is_none() {
-            return Err(BootError::Process(
-                "a `process` plugin needs an `id`".to_owned(),
-            ));
+        if (spec.kind == PROCESS_PLUGIN || spec.kind == WASM_PLUGIN) && spec.id.is_none() {
+            return Err(BootError::Process(format!(
+                "a `{}` plugin needs an `id`",
+                spec.kind
+            )));
         }
         let plugin = construct(&spec.kind, spec.plugin_id(), &spec.config)
             .await
@@ -281,7 +286,7 @@ pub async fn boot(
                     let names: Vec<&str> = catalog().keys().copied().collect();
                     BootError::UnknownPlugin(
                         kind,
-                        format!("{}, {PROCESS_PLUGIN}", names.join(", ")),
+                        format!("{}, {PROCESS_PLUGIN}, {WASM_PLUGIN}", names.join(", ")),
                     )
                 }
                 BuildError::Process(message) => BootError::Process(message),

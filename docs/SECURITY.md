@@ -12,7 +12,7 @@ documented in [docs/legacy/SECURITY.md](legacy/SECURITY.md).
 |---|---|
 | Plugins mounted by the user's configuration (static or process) | Trusted code, comparable to a dependency |
 | Process plugins calling host services | Limited to the services in their own `requires`, enforced by the host |
-| WASM plugins (planned) | Capability-isolated |
+| WASM plugins | Capability-isolated: no WASI imports; host services only from their own `requires`; fuel and memory bounded per call ([WASM plugins](WASM_PLUGINS.md)) |
 | Model output, tool-call arguments, provider and tool metadata | Untrusted requests |
 | Frontend presentation | Grants nothing by itself; Ask confirmations come from the user |
 

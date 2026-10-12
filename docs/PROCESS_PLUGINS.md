@@ -132,4 +132,4 @@ a service while it handles a `tools/call`.
 ## Not yet available
 
 Hooks (for example a `tool.before_invoke` policy in another language),
-providing services other than `tools`, events, and WASM plugins (phase P6).
+providing services other than `tools`, and events. For capability-isolated plugins see [WASM plugins](WASM_PLUGINS.md).

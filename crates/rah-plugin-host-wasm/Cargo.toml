@@ -1,0 +1,17 @@
+[package]
+name = "rah-plugin-host-wasm"
+version.workspace = true
+edition.workspace = true
+description = "WASM plugin host: capability-isolated WebAssembly components (WIT world rah:plugin)"
+
+[dependencies]
+rah-api = { path = "../rah-api" }
+rah-protocol = { path = "../rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+# Component model and compiler; WASI is deliberately not enabled.
+wasmtime = { version = "36.0.17", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }

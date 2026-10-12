@@ -12,9 +12,10 @@ use rah_api::{
     async_trait,
 };
 use rah_plugin_host_process::ProcessPlugin;
+use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
-use crate::{PROCESS_PLUGIN, catalog};
+use crate::{PROCESS_PLUGIN, WASM_PLUGIN, catalog};
 
 /// The id `rah` mounts the distribution plugin under.
 pub const DISTRIBUTION_PLUGIN: &str = "distribution";
@@ -32,6 +33,12 @@ pub(crate) async fn construct(
     id: PluginId,
     config: &Value,
 ) -> Result<Arc<dyn Plugin>, BuildError> {
+    if kind == WASM_PLUGIN {
+        let plugin = WasmPlugin::load(id, config)
+            .await
+            .map_err(BuildError::Process)?;
+        return Ok(Arc::new(plugin));
+    }
     if kind == PROCESS_PLUGIN {
         let plugin = ProcessPlugin::describe(id, config)
             .await
@@ -134,8 +141,8 @@ impl Admin {
         id: PluginId,
         request: MountRequest,
     ) -> Result<PluginStatus, AdminError> {
-        if request.kind == PROCESS_PLUGIN && request.id.is_none() {
-            return Err(failed("a `process` plugin needs an `id`"));
+        if (request.kind == PROCESS_PLUGIN || request.kind == WASM_PLUGIN) && request.id.is_none() {
+            return Err(failed(format!("a `{}` plugin needs an `id`", request.kind)));
         }
         let plugin = construct(&request.kind, id.clone(), &request.config)
             .await
@@ -158,6 +165,7 @@ impl PluginAdmin for Admin {
     fn kinds(&self) -> Vec<String> {
         let mut kinds: Vec<String> = catalog().keys().map(|kind| (*kind).to_owned()).collect();
         kinds.push(PROCESS_PLUGIN.to_owned());
+        kinds.push(WASM_PLUGIN.to_owned());
         kinds.sort();
         kinds
     }

@@ -22,6 +22,7 @@ plugins/*                            depend only on rah-api and rah-protocol
    policy-authority, context-default, skills-fs, scheduler-basic
    frontend-cli, frontend-web
 rah-plugin-host-process              process plugin protocol v2 (JSON-RPC over stdio)
+rah-plugin-host-wasm                 WASM components (wasmtime, WIT world rah:plugin), no WASI
 rah (bin)                            distribution: reads rah.toml, mounts plugins
 ```
 
@@ -109,6 +110,12 @@ Implemented:
   stdio ([protocol v2](PROCESS_PLUGINS.md)). They may provide `tools` and call
   the host's `session` service only if it is in their `requires`. `rah` mounts
   them with `use = "process"`.
+- `rah-plugin-host-wasm`: WebAssembly components of the WIT world
+  `rah:plugin/wasm-plugin` ([WASM plugins](WASM_PLUGINS.md)), run in-process
+  by wasmtime without WASI. They provide `tools`; their only import is
+  `call-service`, limited to their `requires` (currently `session`). Each call
+  runs in a fresh store with a fuel and memory budget. `rah` mounts them with
+  `use = "wasm"`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
   `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
   except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`

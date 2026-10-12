@@ -53,6 +53,17 @@ fn the_process_host_depends_only_on_the_api_and_protocol() {
 }
 
 #[test]
+fn the_wasm_host_depends_only_on_the_api_and_protocol() {
+    let manifest = workspace().join("crates/rah-plugin-host-wasm/Cargo.toml");
+    for dependency in rah_dependencies(&manifest) {
+        assert!(
+            ["rah-api", "rah-protocol"].contains(&dependency.as_str()),
+            "rah-plugin-host-wasm depends on {dependency}"
+        );
+    }
+}
+
+#[test]
 fn api_depends_only_on_kernel_and_protocol() {
     for dependency in rah_dependencies(&workspace().join("crates/rah-api/Cargo.toml")) {
         assert!(
