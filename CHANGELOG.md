@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Scripts
+
+- `scripts/start.ps1` (run `rah`, Web UI by default, opening the tokenized
+  URL; warns when llama-server is down), `scripts/install.ps1`,
+  `scripts/check.ps1` (the validation suite, with browser tests when Edge or
+  Chrome is found) and `scripts/sessions.ps1` (list, restore or purge deleted
+  sessions). Windows PowerShell 5.1 compatible.
+
 ### Session management
 
 - `rah-protocol`: `SessionInfo` gains `title`, `updated` and `preview`

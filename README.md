@@ -24,6 +24,24 @@ it. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
 ## Quick start
 
 ```powershell
+.\scripts\start.ps1              # Web UI with llama.cpp; opens the browser
+.\scripts\start.ps1 -Preset dev  # Web UI with the mock model, no model server
+.\scripts\start.ps1 -Cli         # terminal REPL instead
+```
+
+Scripts (Windows PowerShell 5.1 or later; if scripts are blocked, run them
+as `powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1`):
+
+| Script | Does |
+|---|---|
+| `scripts\start.ps1` | Builds and runs `rah`. Web UI by default, opening the printed URL with its token; `-Cli` for the REPL. Options: `-Preset`, `-Config`, `-Model`, `-Root`, `-SessionDir`, `-Bind`, `-Release`, `-NoBrowser`. Warns when llama-server does not answer. |
+| `scripts\install.ps1` | `cargo install` of `rah`, so `rah --web` works anywhere. Run it again after updating; `-Uninstall` removes it. |
+| `scripts\check.ps1` | The validation suite (fmt, check, test, clippy, `git diff --check`), with the browser tests when Edge or Chrome is found. `-Quick`, `-Fix`, `-NoBrowser`, `-Browser <path>`. |
+| `scripts\sessions.ps1` | Lists deleted sessions, `-Restore <id prefix>` moves one back, `-Purge [-OlderThanDays n]` removes them for good. |
+
+Without the scripts:
+
+```powershell
 cargo run -p rah-cli -- --preset dev
 ```
 
