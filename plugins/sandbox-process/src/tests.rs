@@ -64,6 +64,8 @@ fn helper_report() {
         "cargo_env_present={}",
         std::env::var_os("CARGO_MANIFEST_DIR").is_some()
     );
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    println!("home={:?}", std::env::var_os(home));
     eprintln!("to-stderr");
     std::process::exit(3);
 }
@@ -114,6 +116,12 @@ async fn runs_a_program_with_a_cleared_environment_and_bounded_cwd() {
     assert_eq!(output.termination, None);
     assert!(text.contains("var=Some(\"42\")"), "{text}");
     assert!(text.contains("cargo_env_present=false"), "{text}");
+    // The home directory reaches programs, so they find the user's own
+    // configuration (Git's `safe.directory` among it).
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    if let Some(value) = std::env::var_os(home) {
+        assert!(text.contains(&format!("home={:?}", Some(value))), "{text}");
+    }
     let cwd = text
         .lines()
         .find_map(|line| line.strip_prefix("cwd="))

@@ -62,6 +62,7 @@ impl SessionLog for Sessions {
             title: None,
             updated: 0,
             preview: None,
+            workspace: None,
         }])
     }
 }

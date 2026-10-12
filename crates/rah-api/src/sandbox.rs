@@ -146,7 +146,9 @@ pub trait ProcessHandle: Send + Sync {
 #[async_trait]
 pub trait ExecEnv: Send + Sync {
     /// The directory programs run in by default, when the environment has
-    /// one on the host file system. For display; it grants nothing.
+    /// one on the host file system, in a form people recognize (on Windows
+    /// without the verbatim `\\?\` prefix). For display and for recording
+    /// where work happened; it grants nothing.
     fn root(&self) -> Option<PathBuf> {
         None
     }

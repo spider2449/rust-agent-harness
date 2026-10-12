@@ -29,6 +29,10 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// took over 20 seconds on Windows (likely a scan of the new test binary).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// One browser test at a time: several headless browsers and kernels at once
+/// slowed a fresh build's first run on Windows past the timeouts.
+static ONE_BROWSER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -338,6 +342,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
         return;
     };
+    let _one = ONE_BROWSER.lock().await;
     let web = start("web-browser").await;
     let browser = Browser::launch(PathBuf::from(program), "web-browser");
     let mut page = browser.page().await;
@@ -627,6 +632,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
         eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
         return;
     };
+    let _one = ONE_BROWSER.lock().await;
     let web = start("web-browser-sessions").await;
     let browser = Browser::launch(PathBuf::from(program), "web-browser-sessions");
     let mut page = browser.page().await;
@@ -804,6 +810,36 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     .await;
     page.eval("byId('ws-cancel').click(); true").await;
     assert_eq!(page.eval("byId('workspace-dialog').open").await, false);
+
+    // Sessions belong to their folder: the new folder has none, and the open
+    // session of the old folder was closed.
+    page.wait(
+        "the empty folder",
+        "sessionItems().length === 0 && \
+         byId('sessions').textContent.includes('No sessions in this folder yet') && \
+         byId('input').disabled",
+    )
+    .await;
+    // All folders lists them with their folder; opening one switches back.
+    page.eval(
+        "byId('session-scope').value = 'all'; \
+         byId('session-scope').dispatchEvent(new Event('change')); true",
+    )
+    .await;
+    page.wait(
+        "every folder's sessions",
+        "sessionItems().length === 2 && \
+         sessionItems().every((item) => item.textContent.includes('in workspace'))",
+    )
+    .await;
+    page.eval("sessionItems()[0].click(); true").await;
+    page.wait(
+        "the session's own folder",
+        "byId('status-root').textContent.endsWith('workspace') && \
+         byId('notice').textContent.includes('Switched the workspace') && \
+         !byId('input').disabled && entries().length > 0",
+    )
+    .await;
 }
 
 /// Standard base64 (as DevTools returns screenshots), without a dependency.
@@ -852,6 +888,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
         return;
     };
+    let _one = ONE_BROWSER.lock().await;
     let web = start("web-browser-settings").await;
     let browser = Browser::launch(PathBuf::from(program), "web-browser-settings");
     let mut page = browser.page().await;

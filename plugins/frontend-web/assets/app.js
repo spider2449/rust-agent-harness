@@ -90,14 +90,35 @@ async function loadSessions() {
   renderHeader();
 }
 
+// Folders as the server reports them; Windows paths ignore case.
+function sameFolder(a, b) {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+
+function folderName(path) {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+}
+
+// "here": sessions of the current workspace, then those without a recorded
+// one. "all": every session, with its folder.
+function sessionScope() {
+  return $("session-scope").value;
+}
+
 function renderSessions() {
   const query = $("session-search").value.trim().toLowerCase();
+  const scoped = sessionScope() === "here" && state.workspace;
   const list = $("sessions");
   list.replaceChildren();
+  const visible = state.sessions.filter((info) => {
+    const haystack = `${info.title || ""} ${info.preview || ""} ${info.id} ${info.workspace || ""}`.toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    return !scoped || !info.workspace || sameFolder(info.workspace, state.workspace);
+  });
+  const here = visible.filter((info) => !scoped || info.workspace);
+  const unrecorded = scoped ? visible.filter((info) => !info.workspace) : [];
   let group = null;
-  for (const info of state.sessions) {
-    const haystack = `${info.title || ""} ${info.preview || ""} ${info.id}`.toLowerCase();
-    if (query && !haystack.includes(query)) continue;
+  for (const info of here) {
     const label = dayGroup(info.updated || info.created);
     if (label !== group) {
       group = label;
@@ -105,8 +126,29 @@ function renderSessions() {
     }
     list.append(sessionItem(info));
   }
+  if (unrecorded.length) {
+    list.append(el("li", "group", "No folder recorded"));
+    for (const info of unrecorded) list.append(sessionItem(info));
+  }
   if (!list.children.length) {
-    list.append(el("li", "group", query ? "No matching sessions" : "No sessions yet"));
+    const empty = query ? "No matching sessions" : scoped ? "No sessions in this folder yet" : "No sessions yet";
+    list.append(el("li", "group", empty));
+  }
+}
+
+// Before working in a session, use the folder it belongs to, so its history
+// and its tool calls refer to the same files.
+async function ensureWorkspace(info) {
+  if (!info?.workspace || !state.workspace || sameFolder(info.workspace, state.workspace)) return true;
+  try {
+    const result = await api("/workspace", { method: "PUT", body: JSON.stringify({ root: info.workspace }) });
+    rememberWorkspace(result.root);
+    await loadStatus().catch(() => {});
+    showNotice(`Switched the workspace to ${result.root}, where this session's work happened.`);
+    return true;
+  } catch (error) {
+    showNotice(`This session belongs to ${info.workspace}, which cannot be used now: ${error.message}`);
+    return false;
   }
 }
 
@@ -117,6 +159,8 @@ function sessionItem(info) {
   const name = el("span", "name", sessionName(info));
   const meta = [timeLabel(info.updated || info.created)];
   if (info.parent) meta.push(`fork of ${info.parent.session.slice(0, 8)}`);
+  if (info.workspace && !sameFolder(info.workspace, state.workspace)) meta.push(`in ${folderName(info.workspace)}`);
+  if (info.workspace) name.title = info.workspace;
   const actions = el("span", "item-actions");
   for (const [label, text, handler] of [
     ["Rename", "✎", () => editTitle(name, info)],
@@ -177,6 +221,14 @@ function editTitle(host, info) {
   input.select();
 }
 
+function closeSession() {
+  state.current = null;
+  $("transcript").replaceChildren();
+  $("input").disabled = true;
+  $("send").disabled = true;
+  renderHeader();
+}
+
 async function deleteSession(info) {
   if (!window.confirm(`Delete "${sessionName(info)}"?\n\nThe log is moved to the sessions' deleted folder.`)) return;
   try {
@@ -185,12 +237,7 @@ async function deleteSession(info) {
     report(error);
     return;
   }
-  if (info.id === state.current) {
-    state.current = null;
-    $("transcript").replaceChildren();
-    $("input").disabled = true;
-    $("send").disabled = true;
-  }
+  if (info.id === state.current) closeSession();
   await loadSessions();
 }
 
@@ -227,6 +274,7 @@ function awaitTitle() {
 async function openSession(id) {
   state.current = id;
   setRunning(false);
+  await ensureWorkspace(state.sessions.find((info) => info.id === id));
   await loadSessions();
   await loadTranscript();
   $("input").disabled = false;
@@ -386,17 +434,25 @@ function send(message) {
   return false;
 }
 
-function startTurn(input) {
-  if (!input || !state.current || state.running) return false;
-  if (!send({ type: "turn", session: state.current, input })) return false;
-  setRunning(true);
-  showLive(`you: ${input}\n`);
-  return true;
+async function startTurn(input) {
+  if (!input || !state.current || state.running || state.starting) return false;
+  state.starting = true;
+  try {
+    // Another tab may have moved the workspace since the session was opened.
+    if (!(await ensureWorkspace(currentInfo()))) return false;
+    if (!send({ type: "turn", session: state.current, input })) return false;
+    setRunning(true);
+    showLive(`you: ${input}\n`);
+    return true;
+  } finally {
+    state.starting = false;
+  }
 }
 
-function submit(event) {
+async function submit(event) {
   event.preventDefault();
-  if (startTurn($("input").value.trim())) $("input").value = "";
+  const input = $("input").value.trim();
+  if (await startTurn(input)) $("input").value = "";
 }
 
 function onEvent(session, event) {
@@ -761,6 +817,10 @@ async function useWorkspace() {
     rememberWorkspace(result.root);
     await loadPlugins().catch(report);
     await loadStatus().catch(report);
+    // The open session belongs to the folder just left; close it.
+    const info = currentInfo();
+    if (info?.workspace && !sameFolder(info.workspace, result.root)) closeSession();
+    await loadSessions().catch(report);
   } catch (error) {
     workspaceError(error.message);
   } finally {
@@ -782,6 +842,19 @@ async function start() {
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   setupSettings();
   $("session-search").addEventListener("input", renderSessions);
+  try {
+    $("session-scope").value = localStorage.getItem("rah-session-scope") === "all" ? "all" : "here";
+  } catch {
+    // Storage unavailable: the default scope applies.
+  }
+  $("session-scope").addEventListener("change", () => {
+    try {
+      localStorage.setItem("rah-session-scope", sessionScope());
+    } catch {
+      // Not remembered.
+    }
+    renderSessions();
+  });
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));
   $("ws-path").addEventListener("keydown", (event) => {
@@ -825,9 +898,11 @@ async function start() {
   try {
     await loadCatalog();
     await loadPlugins();
-    refreshStatus();
+    // The workspace decides which sessions are listed and opened first.
+    await loadStatus().catch(() => {});
     await loadSessions();
-    if (state.sessions.length > 0) await openSession(state.sessions[0].id);
+    const first = state.sessions.find((info) => !state.workspace || sameFolder(info.workspace, state.workspace));
+    if (first) await openSession(first.id);
   } catch (error) {
     showNotice(error.message);
   }

@@ -81,6 +81,10 @@ pub struct SessionInfo {
     /// The start of the first user message, for lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The workspace folder the session was created in (forks keep their
+    /// parent's), when one was known. Its tool calls ran there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// The longest session title, in characters.

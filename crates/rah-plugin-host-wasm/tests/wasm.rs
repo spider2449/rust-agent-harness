@@ -174,6 +174,7 @@ impl SessionLog for Sessions {
             title: None,
             updated: 7,
             preview: None,
+            workspace: None,
         }])
     }
 }

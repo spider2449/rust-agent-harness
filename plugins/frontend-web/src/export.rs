@@ -98,6 +98,7 @@ mod tests {
             title: Some("Kyoto trip".into()),
             updated: 0,
             preview: None,
+            workspace: None,
         };
         let records = [
             SessionRecord {

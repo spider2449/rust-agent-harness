@@ -21,6 +21,13 @@
 - [x] 點狀態列上的路徑開啟資料夾選擇視窗(輸入路徑、上一層、磁碟、最近用過、子資料夾，git repo 有標記)，選定後不必重啟。
 - 決定:由 distribution 實作 `PluginAdmin::set_workspace`，使用和 `--root` 同一份 plugin 清單;session、記憶和 skills 不跟著換目錄。
 
+## U2c:Session 屬於工作目錄
+
+- [x] Session 記錄建立時的工作目錄(header 的 `workspace`，由 `session-jsonl` 從 sandbox root 取得;fork 沿用父 session)。清單預設只顯示目前資料夾，另有「All folders」;打開或在別的資料夾的 session 裡送出訊息時，先自動切換工作目錄。
+- 決定(使用者選擇):集中存放、依目錄篩選，不把 session 放進各 repo 的 `.rah/`。記憶檔和 skills 暫時共用。
+- 起因:切換工作目錄後沿用同一個 session，模型看到的歷史紀錄是 A 專案，工具卻在 B 專案執行。
+- 同時修正:sandbox 沒有傳 `HOME`/`USERPROFILE`，git 讀不到 `~/.gitconfig`，`safe.directory` 失效。
+
 ## U3:設定頁
 
 - [x] 工具權限:列出每個工具，用表單設定 allow／ask／deny，寫回 `policy-authority` 的設定。

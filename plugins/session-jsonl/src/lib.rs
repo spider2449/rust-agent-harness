@@ -23,6 +23,7 @@ use std::{
 
 use rah_api::{
     KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
+    sandbox::SANDBOX,
     session::{SESSION, SessionAppended, SessionError, SessionLog},
 };
 use rah_protocol::{
@@ -84,6 +85,8 @@ enum Line {
         session: SessionId,
         parent: Option<ForkPoint>,
         created: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
     },
     Record {
         seq: u64,
@@ -107,6 +110,8 @@ pub struct JsonlSessions {
     /// Next sequence number per session, loaded lazily.
     next_seq: Mutex<HashMap<SessionId, u64>>,
     events: Option<KernelHandle>,
+    /// A fixed workspace for new sessions, instead of the sandbox root.
+    workspace: Option<String>,
 }
 
 impl JsonlSessions {
@@ -115,13 +120,29 @@ impl JsonlSessions {
             dir,
             next_seq: Mutex::new(HashMap::new()),
             events: None,
+            workspace: None,
         }
     }
 
-    /// Emits [`SessionAppended`] through `kernel` after each append.
+    /// Emits [`SessionAppended`] through `kernel` after each append, and
+    /// records the `sandbox` service's root as the workspace of new
+    /// sessions.
     pub fn with_events(mut self, kernel: KernelHandle) -> Self {
         self.events = Some(kernel);
         self
+    }
+
+    /// Records `workspace` for new sessions instead of the sandbox root.
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
+        self.workspace = Some(workspace.into());
+        self
+    }
+
+    fn current_workspace(&self) -> Option<String> {
+        self.workspace.clone().or_else(|| {
+            let root = self.events.as_ref()?.get(SANDBOX)?.root()?;
+            Some(root.display().to_string())
+        })
     }
 
     fn path(&self, session: &SessionId) -> PathBuf {
@@ -153,6 +174,7 @@ impl JsonlSessions {
                 session: id,
                 parent,
                 created,
+                workspace,
             }) if id == *session => SessionInfo {
                 id,
                 parent,
@@ -160,6 +182,7 @@ impl JsonlSessions {
                 title: None,
                 updated: created,
                 preview: None,
+                workspace,
             },
             _ => return Err(corrupt("invalid header".into())),
         };
@@ -291,6 +314,7 @@ impl JsonlSessions {
             session: info.id.clone(),
             parent: info.parent.clone(),
             created: info.created,
+            workspace: info.workspace.clone(),
         };
         let mut line =
             serde_json::to_string(&header).map_err(|e| SessionError::Io(e.to_string()))?;
@@ -316,7 +340,7 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn new_info(parent: Option<ForkPoint>) -> SessionInfo {
+fn new_info(parent: Option<ForkPoint>, workspace: Option<String>) -> SessionInfo {
     let created = now();
     SessionInfo {
         id: SessionId::new(),
@@ -325,6 +349,7 @@ fn new_info(parent: Option<ForkPoint>) -> SessionInfo {
         title: None,
         updated: created,
         preview: None,
+        workspace,
     }
 }
 
@@ -332,7 +357,7 @@ fn new_info(parent: Option<ForkPoint>) -> SessionInfo {
 impl SessionLog for JsonlSessions {
     async fn create(&self) -> Result<SessionInfo, SessionError> {
         let mut next = self.next_seq.lock().await;
-        let info = new_info(None);
+        let info = new_info(None, self.current_workspace());
         self.write_new(&info).await?;
         next.insert(info.id.clone(), 1);
         Ok(info)
@@ -389,10 +414,15 @@ impl SessionLog for JsonlSessions {
                 last,
             });
         }
-        let info = new_info(Some(ForkPoint {
-            session: session.clone(),
-            at,
-        }));
+        // A fork continues the parent's work, in the parent's workspace.
+        let workspace = self.parse(session).await?.info.workspace;
+        let info = new_info(
+            Some(ForkPoint {
+                session: session.clone(),
+                at,
+            }),
+            workspace.or_else(|| self.current_workspace()),
+        );
         self.write_new(&info).await?;
         next.insert(info.id.clone(), at + 1);
         Ok(info)
@@ -689,6 +719,36 @@ mod tests {
             renamed.title.map(|t| t.chars().count()),
             Some(rah_protocol::MAX_TITLE_CHARS)
         );
+    }
+
+    #[tokio::test]
+    async fn sessions_record_their_workspace_and_forks_keep_it() {
+        let dir = TempDir::new("workspace");
+        let first = JsonlSessions::new(dir.0.clone()).with_workspace(r"D:\work\alpha");
+        let info = first.create().await.unwrap();
+        assert_eq!(info.workspace.as_deref(), Some(r"D:\work\alpha"));
+        first.append(&info.id, started("a")).await.unwrap();
+
+        // Another process, now in another workspace: the fork stays where
+        // its parent's work happened; a new session takes the new one.
+        let second = JsonlSessions::new(dir.0.clone()).with_workspace(r"D:\work\beta");
+        let fork = second.fork(&info.id, 1).await.unwrap();
+        assert_eq!(fork.workspace.as_deref(), Some(r"D:\work\alpha"));
+        let other = second.create().await.unwrap();
+        assert_eq!(other.workspace.as_deref(), Some(r"D:\work\beta"));
+
+        let listed = second.list().await.unwrap();
+        let workspace = |id: &SessionId| {
+            listed
+                .iter()
+                .find(|listed| listed.id == *id)
+                .and_then(|listed| listed.workspace.clone())
+        };
+        assert_eq!(workspace(&fork.id).as_deref(), Some(r"D:\work\alpha"));
+        assert_eq!(workspace(&other.id).as_deref(), Some(r"D:\work\beta"));
+        // Without a sandbox or a fixed workspace, none is recorded.
+        let unknown = JsonlSessions::new(dir.0.clone()).create().await.unwrap();
+        assert_eq!(unknown.workspace, None);
     }
 
     #[tokio::test]

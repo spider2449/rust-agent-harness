@@ -45,12 +45,26 @@ use rah_api::{
 use serde::Deserialize;
 use tokio::process::Command;
 
-/// Variables copied from the RAH process environment by default.
+/// Variables copied from the RAH process environment by default. The home
+/// directory variables let programs find the user's own configuration (Git
+/// reads `safe.directory` and the identity from `~/.gitconfig` and fails
+/// with "$HOME not set" without them; rustup finds its toolchains through
+/// them). They name a directory; they carry no secret.
 #[cfg(windows)]
-pub const DEFAULT_INHERIT_ENV: &[&str] =
-    &["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"];
+pub const DEFAULT_INHERIT_ENV: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+];
 #[cfg(not(windows))]
-pub const DEFAULT_INHERIT_ENV: &[&str] = &["PATH", "LANG", "TMPDIR"];
+pub const DEFAULT_INHERIT_ENV: &[&str] = &["PATH", "LANG", "TMPDIR", "HOME"];
 
 const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -239,7 +253,11 @@ impl ProcessEnv {
 #[async_trait]
 impl ExecEnv for ProcessEnv {
     fn root(&self) -> Option<PathBuf> {
-        Some(self.root.clone())
+        let text = self.root.display().to_string();
+        Some(match text.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+            _ => self.root.clone(),
+        })
     }
 
     async fn run(

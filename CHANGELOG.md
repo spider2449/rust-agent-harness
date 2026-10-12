@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Sessions belong to a workspace
+
+- `rah-protocol`: `SessionInfo` gains `workspace` (additive).
+- `session-jsonl` records the `sandbox` service's root as the workspace of
+  a new session (in its header); a fork keeps its parent's workspace.
+  Sessions created before this have none. `ExecEnv::root()` now reports the
+  root without Windows' verbatim prefix, so recorded folders compare
+  equal.
+- Web UI: the list shows the sessions of the current workspace, then those
+  without a recorded one; "All folders" lists every session with its
+  folder. Opening a session of another folder, or sending in one, first
+  switches the workspace to it, so a session's history and its tool calls
+  always refer to the same files. Switching the workspace closes the open
+  session of the folder left.
+- The memory file and skills stay shared across workspaces for now.
+
+### Fix: programs found the user's configuration
+
+- `sandbox-process` now passes the home directory variables by default
+  (`HOME`, and on Windows `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`). Without
+  them Git could not read `~/.gitconfig` ("$HOME not set"), so
+  `safe.directory` entries were ignored and repositories owned by another
+  account failed with "dubious ownership" in the repository tools and the
+  status line. They name a directory and carry no secret.
+- The browser tests run one at a time.
+
 ### Settings (U3)
 
 - `policy-authority`: new `decisions` (`allow`, `ask` or `deny` by tool name
