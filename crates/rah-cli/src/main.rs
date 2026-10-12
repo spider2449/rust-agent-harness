@@ -12,8 +12,9 @@ use serde_json::Value;
 #[derive(Debug, Parser)]
 #[command(name = "rah", version)]
 struct Args {
-    /// Built-in preset to run (ignored with --config): dev, llamacpp, openai.
-    #[arg(long, default_value = "dev")]
+    /// Built-in preset to run (ignored with --config): default (llama.cpp),
+    /// dev (mock model), minimal (mock model, no policy), openai.
+    #[arg(long, default_value = "default")]
     preset: String,
     /// Model id (model-openai, model-llamacpp).
     #[arg(long)]

@@ -39,11 +39,28 @@ documented in [docs/legacy/SECURITY.md](legacy/SECURITY.md).
    They never come from model output and never travel through frontend
    channels.
 
+## `policy-authority`
+
+The policy decides each call from its own configuration only:
+
+- A tool needs a host assignment (`tools`, by exact name or a `prefix*`
+  pattern; exact names win, then the longest prefix). No assignment means
+  Deny.
+- The effective level is the stricter of the assigned level and the level the
+  tool declares, so tool metadata can tighten but never grant.
+- The effective level is allowed when listed in `allow`, asked when listed in
+  `ask`, and denied otherwise. A level listed in both is a configuration error.
+- An invalid configuration fails the plugin, and `rah` then refuses to boot
+  instead of running unguarded.
+- `Ask` needs a `tool.approval` handler. None ships yet, so `Ask` is a denial
+  until a frontend provides confirmation.
+
+The policy registers at hook priority 0. A mounted plugin with a higher
+priority runs first and can pre-empt it; mounting such a plugin is a trust
+decision. The legacy in-flight limit is not carried over yet.
+
 ## Transitional note
 
-`ToolInvoker` and the hook chain exist (P2), but no policy plugin does yet. The
-`dev` preset therefore runs **unguarded**, and `rah` says so at startup.
-`policy-authority` and the `default` preset arrive in P4. Until then, the legacy
-crates still on `master` (notably `rah-desktop`) keep their v0.35.0 behavior:
-their model tool requests go through the legacy host port, permission dispatch
-and `ToolRegistry`, as documented in the legacy security model.
+The legacy crates still on `master` (notably `rah-desktop`) keep their v0.35.0
+behavior: their model tool requests go through the legacy host port, permission
+dispatch and `ToolRegistry`, as documented in the legacy security model.

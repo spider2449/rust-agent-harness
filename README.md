@@ -10,10 +10,11 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 ## Status
 
 `master` has completed **phase P3** of the
-[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md):
-the kernel, the service contracts (`rah-api`), the plugins and the `rah` binary
-run end to end with a mock model, and with OpenAI or llama.cpp through the
-Responses API. The architecture decision is
+[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
+and is working through P4: the kernel, the service contracts (`rah-api`), the
+plugins and the `rah` binary run end to end with a mock model, and with OpenAI
+or llama.cpp through the Responses API. Tool calls are guarded by the
+fail-closed `policy-authority` plugin. The architecture decision is
 [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy
 crates still build and behave as in v0.35.0 while they are transformed phase by
 phase. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
@@ -24,20 +25,33 @@ phase. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md)
 cargo run -p rah-cli -- --preset dev
 ```
 
-The `dev` preset mounts `session-jsonl` (logs in `.rah/sessions`),
-`tools-builtin` (`echo` and `fs.read` bounded to the current directory),
-`model-mock`, `loop-react` and `frontend-cli`. Type text to run a turn. Try
-`read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
+The `dev` preset mounts `policy-authority`, `session-jsonl` (logs in
+`.rah/sessions`), `tools-builtin` (`echo` and `fs.read` bounded to the current
+directory), `model-mock`, `loop-react` and `frontend-cli`. Type text to run a
+turn. Try `read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
 `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
-`--session <id>` resumes a session. The `dev` preset mounts no policy plugin,
-so `rah` prints an `UNGUARDED` warning; a policy plugin arrives in P4.
+`--session <id>` resumes a session.
+
+| Preset | Model plugin | Policy |
+|---|---|---|
+| `default` (the default) | `model-llamacpp` | `policy-authority` |
+| `openai` | `model-openai` | `policy-authority` |
+| `dev` | `model-mock` | `policy-authority` |
+| `minimal` | `model-mock` | none: `rah` prints an `UNGUARDED` warning |
+
+`policy-authority` denies every tool without a host permission assignment in
+its own configuration; tool metadata can only make a decision stricter. The
+presets assign `echo` (`none`) and `fs.read` (`read`), allow `none` and `read`,
+and ask for `write` and `execute`. No frontend approves `Ask` yet, so those
+calls are denied. If a configured policy plugin fails to start, `rah` refuses
+to run.
 
 Real models use the same composition with a different model plugin:
 
 ```powershell
 # llama.cpp: start llama-server on http://127.0.0.1:8080 first (loopback only).
-cargo run -p rah-cli -- --preset llamacpp            # uses the sole served model
-cargo run -p rah-cli -- --preset llamacpp --model qwen
+cargo run -p rah-cli                                 # default preset, sole served model
+cargo run -p rah-cli -- --model qwen
 
 # OpenAI: the key is read from the backend environment, never from config.
 $env:OPENAI_API_KEY = '...'
@@ -52,8 +66,15 @@ Compose your own plugins with a distribution file:
 ```toml
 # rah.toml — run with: rah --config rah.toml
 [[plugin]]
+use = "policy-authority"
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read" } }
+
+[[plugin]]
 use = "session-jsonl"
 config = { dir = ".rah/sessions" }
+
+[[plugin]]
+use = "tools-builtin"
 
 [[plugin]]
 use = "model-mock"

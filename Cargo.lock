@@ -2811,6 +2811,7 @@ dependencies = [
  "rah-plugin-loop-react",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
+ "rah-plugin-policy-authority",
  "rah-plugin-session-jsonl",
  "rah-plugin-tools-builtin",
  "rah-protocol",
@@ -2915,6 +2916,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-policy-authority"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

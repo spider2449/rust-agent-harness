@@ -67,7 +67,7 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, after phase P3)
+## Current state (transitional, phase P4 in progress)
 
 Implemented:
 
@@ -77,10 +77,13 @@ Implemented:
   `model.before_request`.
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
-  workspace-bounded `fs.read`); `session-jsonl`; and `frontend-cli`.
+  workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`; and
+  `frontend-cli`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
-  `rah.toml` or a preset (`dev`, `llamacpp`, `openai`) and warns `UNGUARDED` when no
-  `tool.before_invoke` handler is mounted.
+  `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
+  except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
+  when no `tool.before_invoke` handler is mounted, and aborts the boot when a
+  configured `policy-authority` does not become active.
 
 The tools service key is private to `rah-api`. Tool providers register with
 `provide_tools`, and the only way to call a tool is `ToolInvoker::invoke`.

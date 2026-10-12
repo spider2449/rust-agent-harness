@@ -347,11 +347,17 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - `rah` 新增 `llamacpp`、`openai` preset 和 `--model` flag。
 
 ### P4：policy、tools、sandbox、process plugin
-- [ ] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask、in-flight 上限）
+- [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限未搬，見下方備註）
 - [ ] `sandbox-process`、`tools-mcp`、`tools-repo`（唯讀）、`tools-shell`（opt-in）
 - [ ] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（例如 Python 寫的 tool）
 - [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition`、`rah-session`
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
+- 實作備註（policy-authority，2026-10-12）：
+  - 設定：`allow`、`ask`（permission level 清單，預設 `["none","read"]`、`["write","execute"]`）和 `tools`（tool 名稱或結尾 `*` 的前綴 → level）。同一 level 同時出現在 `allow` 和 `ask` 是設定錯誤，plugin 為 `Failed`。
+  - 決策只看 policy 自己的設定：沒有指派 → Deny；有效 level 取「指派」和「tool 自報」中較嚴格者，所以 tool metadata 只能收緊、不能授權（legacy 的 external permission 指派規則推廣到所有 tool）。
+  - Preset 改為 `default`（llama.cpp，也是 `--preset` 的預設值）、`openai`、`dev`（mock）、`minimal`（mock，不掛 policy，印 `UNGUARDED`）。`llamacpp` preset 改名為 `default`。除了 `minimal`，policy 都是第一個掛載。
+  - 設定了 `policy-authority` 但它沒有變成 Active 時，`rah` 會在掛載後續 plugin 前中止啟動（exit 2），不會退化成 unguarded 執行。
+  - 尚未做：frontend 還沒有 `tool.approval` handler，所以 `Ask` 目前等於拒絕（隨 `tools-shell` 一起做 CLI 確認）。legacy 的 in-flight 上限沒有搬：只靠 hook 無法可靠地在拒絕、取消和 Ask 失敗時釋放計數，之後若需要，改由 `ToolInvoker` 或獨立 hook 處理。
 
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）

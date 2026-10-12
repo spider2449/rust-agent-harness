@@ -8,6 +8,7 @@ use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
+use rah_plugin_policy_authority::PolicyAuthorityPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use serde::Deserialize;
@@ -18,7 +19,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 7] = [
+    let entries: [(&'static str, Constructor); 8] = [
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
@@ -26,20 +27,58 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("model-openai", |id| {
             Arc::new(OpenAiResponsesPlugin::new(id))
         }),
+        ("policy-authority", |id| {
+            Arc::new(PolicyAuthorityPlugin::new(id))
+        }),
         ("session-jsonl", |id| Arc::new(JsonlSessionPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
     ];
     entries.into_iter().collect()
 }
 
-/// Built-in presets and the model plugin each one mounts. All share built-in
-/// tools, JSONL sessions, the default loop and the terminal frontend, and none
-/// mounts a policy plugin yet.
-pub const PRESETS: [(&str, &str); 3] = [
-    ("dev", "model-mock"),
-    ("llamacpp", "model-llamacpp"),
-    ("openai", "model-openai"),
+/// A built-in preset: a named composition of catalog plugins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preset {
+    pub name: &'static str,
+    /// The model plugin it mounts.
+    pub model: &'static str,
+    /// Whether it mounts `policy-authority`.
+    pub guarded: bool,
+}
+
+/// Built-in presets. All share built-in tools, JSONL sessions, the default
+/// loop and the terminal frontend. Every preset except `minimal` mounts
+/// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
+pub const PRESETS: [Preset; 4] = [
+    Preset {
+        name: "default",
+        model: "model-llamacpp",
+        guarded: true,
+    },
+    Preset {
+        name: "dev",
+        model: "model-mock",
+        guarded: true,
+    },
+    Preset {
+        name: "minimal",
+        model: "model-mock",
+        guarded: false,
+    },
+    Preset {
+        name: "openai",
+        model: "model-openai",
+        guarded: true,
+    },
 ];
+
+/// Mounted first, so no tool call can run before the policy is in place.
+/// Every built-in tool has an explicit assignment; anything else is denied.
+const POLICY_TEMPLATE: &str = r#"
+[[plugin]]
+use = "policy-authority"
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read" } }
+"#;
 
 const PRESET_TEMPLATE: &str = r#"
 [[plugin]]
@@ -64,10 +103,12 @@ use = "frontend-cli"
 pub enum BootError {
     #[error("invalid distribution: {0}")]
     Parse(String),
-    #[error("unknown preset `{0}`; available: dev, llamacpp, openai")]
+    #[error("unknown preset `{0}`; available: default, dev, minimal, openai")]
     UnknownPreset(String),
     #[error("unknown plugin `{0}`; available: {1}")]
     UnknownPlugin(String, String),
+    #[error("policy plugin `{0}` is not active ({1}); refusing to run unguarded")]
+    PolicyInactive(PluginId, String),
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -108,11 +149,15 @@ impl Distribution {
     }
 
     pub fn preset(name: &str) -> Result<Self, BootError> {
-        let (_, model) = PRESETS
+        let preset = PRESETS
             .iter()
-            .find(|(preset, _)| *preset == name)
+            .find(|preset| preset.name == name)
             .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
-        Self::parse(&PRESET_TEMPLATE.replace("{MODEL}", model))
+        let policy = if preset.guarded { POLICY_TEMPLATE } else { "" };
+        Self::parse(&format!(
+            "{policy}{}",
+            PRESET_TEMPLATE.replace("{MODEL}", preset.model)
+        ))
     }
 
     /// Sets `key` in the configuration of every plugin of `kind`. Returns
@@ -132,7 +177,9 @@ impl Distribution {
     }
 }
 
-/// Mounts every plugin in order and returns the resulting statuses.
+/// Mounts every plugin in order and returns the resulting statuses. A
+/// configured `policy-authority` that does not become active aborts the boot
+/// before any later plugin (such as a frontend) is mounted.
 pub async fn boot(
     kernel: &Kernel,
     distribution: &Distribution,
@@ -147,7 +194,13 @@ pub async fn boot(
         for (service, instance) in &spec.bind {
             options = options.bind(service.as_str(), instance.clone());
         }
-        kernel.mount(constructor(spec.plugin_id()), options).await?;
+        let status = kernel.mount(constructor(spec.plugin_id()), options).await?;
+        if spec.kind == "policy-authority" && status != PluginStatus::Active {
+            return Err(BootError::PolicyInactive(
+                spec.plugin_id(),
+                format!("{status:?}"),
+            ));
+        }
     }
     Ok(kernel.plugins())
 }

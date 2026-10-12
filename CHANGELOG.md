@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P3)
+## Unreleased — plugin-kernel pivot (phases P0–P4)
+
+### P4: `policy-authority` and guarded presets
+
+- New plugin `plugins/policy-authority`. It registers a `tool.before_invoke`
+  handler that decides from its own configuration only. A tool without a host
+  assignment (exact name, or a `prefix*` pattern) is denied. The effective
+  level is the stricter of the assigned and the declared level, so tool
+  metadata can tighten a decision but never grant one. Levels map to Allow
+  (`allow`), Ask (`ask`) or Deny. Invalid configuration fails the plugin.
+- Presets are now `default` (llama.cpp, and the new default of `--preset`),
+  `openai`, `dev` (mock model) and `minimal` (mock model, no policy). Every
+  preset except `minimal` mounts `policy-authority` first, assigning `echo`
+  and `fs.read`. The `llamacpp` preset is renamed `default`.
+- `rah` aborts the boot when a configured `policy-authority` does not become
+  active, before any later plugin mounts, instead of running unguarded.
+  `minimal` still starts with the `UNGUARDED` warning.
+- No frontend answers `tool.approval` yet, so `Ask` is a denial. The legacy
+  in-flight limit is not carried over.
 
 ### P3: real model plugins
 

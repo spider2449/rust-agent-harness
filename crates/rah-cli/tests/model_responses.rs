@@ -192,7 +192,7 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
     assert!(stdout.contains("no model provider is mounted"), "{stdout}");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .args(["--model", "x", "--prompt", "hi"])
+        .args(["--preset", "dev", "--model", "x", "--prompt", "hi"])
         .stdin(Stdio::null())
         .output()
         .unwrap();

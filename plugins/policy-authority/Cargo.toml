@@ -1,0 +1,14 @@
+[package]
+name = "rah-plugin-policy-authority"
+version.workspace = true
+edition.workspace = true
+description = "Fail-closed tool policy plugin: host-assigned permissions, Allow / Deny / Ask"
+
+[dependencies]
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -24,7 +24,7 @@ fn jsonl_files(dir: &std::path::Path) -> usize {
 }
 
 #[test]
-fn dev_preset_runs_a_prompt_and_warns_that_it_is_unguarded() {
+fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
     let dir = TempDir::new("bin-dev");
     let output = rah()
         .args(["--preset", "dev", "--prompt", "hello", "--session-dir"])
@@ -44,7 +44,7 @@ fn dev_preset_runs_a_prompt_and_warns_that_it_is_unguarded() {
         stdout.contains("[model-mock] echo returned: hello"),
         "{stdout}"
     );
-    assert!(stderr.contains("UNGUARDED"), "{stderr}");
+    assert!(!stderr.contains("UNGUARDED"), "{stderr}");
     assert_eq!(jsonl_files(&dir.sessions()), 1);
 
     // Resume the same session from a new process.
@@ -55,6 +55,8 @@ fn dev_preset_runs_a_prompt_and_warns_that_it_is_unguarded() {
         .to_owned();
     let output = rah()
         .args([
+            "--preset",
+            "dev",
             "--prompt",
             "/notool again",
             "--session",
@@ -73,6 +75,50 @@ fn dev_preset_runs_a_prompt_and_warns_that_it_is_unguarded() {
         "{stdout}"
     );
     assert_eq!(jsonl_files(&dir.sessions()), 1);
+}
+
+#[test]
+fn minimal_preset_warns_that_it_is_unguarded() {
+    let dir = TempDir::new("bin-minimal");
+    let output = rah()
+        .args(["--preset", "minimal", "--prompt", "hello", "--session-dir"])
+        .arg(dir.sessions())
+        .arg("--root")
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "{stdout}
+{stderr}"
+    );
+    assert!(stderr.contains("UNGUARDED"), "{stderr}");
+    assert!(stdout.contains("echo returned: hello"), "{stdout}");
+}
+
+#[test]
+fn an_invalid_policy_refuses_to_start() {
+    let dir = TempDir::new("bin-bad-policy");
+    let config = dir.0.join("rah.toml");
+    std::fs::write(
+        &config,
+        r#"
+[[plugin]]
+use = "policy-authority"
+config = { tools = { "a*b" = "read" } }
+
+[[plugin]]
+use = "frontend-cli"
+config = { prompt = "hello" }
+"#,
+    )
+    .unwrap();
+    let output = rah().arg("--config").arg(&config).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("refusing to run unguarded"), "{stderr}");
 }
 
 #[test]
