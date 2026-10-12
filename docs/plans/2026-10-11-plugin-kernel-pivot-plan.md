@@ -424,7 +424,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 ### P6：生態擴充
 - [ ] WASM plugin host（wasmtime＋WIT）
 - [x] `skills-fs`（2026-10-12 完成。沒有另設 `SkillSource` service：plugin 用 `model.before_request` 列出 skill，並提供 `skills.load` tool 按需載入全文）
-- [ ] `scheduler-basic`（含 subagent：loop 也是 service，可以巢狀呼叫）
+- [x] `scheduler-basic`（含 subagent；2026-10-12 完成。`rah-api` 新增 `scheduler` service；subagent 是 `agent.delegate` tool，在新 session 中巢狀執行一個 turn，有深度上限；`frontend-web` 提供 `/api/jobs`）
 - [x] `tools-repo-write`（patch、edit-files、create-file；2026-10-12 完成。不移植 legacy 的 HostExplicit 審核流程，改由 policy `Ask` 確認；`repo.patch` 透過 sandbox 執行 `git apply --check` 和 `git apply`）
 - [x] 第二種 loop（`loop-plan`，plan-and-execute；2026-10-12 完成。從設定掛載和執行中替換 `loop-react` 都有端到端測試）
 

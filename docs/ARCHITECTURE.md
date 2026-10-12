@@ -100,6 +100,11 @@ Implemented:
   catalog; `frontend-web` exposes it to the local user. `replace` mounts the
   new plugin and unmounts the old one only once the new one is active, so
   consumers that resolve services per use switch without a restart.
+- `scheduler` service (`rah-api::scheduler`), provided by `scheduler-basic`:
+  background and repeating turns run through the `loop` service; the same
+  plugin provides `agent.delegate`, which nests a subagent turn inside a tool
+  call (the loop is a service, so loops compose). `frontend-web` exposes jobs
+  at `/api/jobs`.
 - `rah-plugin-host-process`: out-of-process plugins over JSON-RPC 2.0 on
   stdio ([protocol v2](PROCESS_PLUGINS.md)). They may provide `tools` and call
   the host's `session` service only if it is in their `requires`. `rah` mounts

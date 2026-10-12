@@ -14,6 +14,7 @@ members = [
     "plugins/model-responses",
     "plugins/policy-authority",
     "plugins/sandbox-process",
+    "plugins/scheduler-basic",
     "plugins/session-jsonl",
     "plugins/skills-fs",
     "plugins/tools-builtin",

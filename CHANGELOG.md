@@ -2,6 +2,18 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P6)
 
+### P6: `scheduler-basic` and subagents
+
+- `rah-api`: new `scheduler` service (`submit`, `list`, `cancel` of
+  `JobSpec { input, session, delay, every }`).
+- New plugin `scheduler-basic`: jobs run a turn through the `loop` service
+  after a delay, once or repeatedly, with a concurrency limit, as tasks of
+  its scope; jobs can also come from its configuration. It provides
+  `agent.delegate {task}` (`read`), which runs a subagent turn in a new
+  session and returns the answer and session id, with a depth limit.
+- Every preset mounts it; the preset policy assigns `agent.*` = `read`.
+- `frontend-web`: `GET|POST /api/jobs` and `DELETE /api/jobs/{id}`.
+
 ### P6: `loop-plan`
 
 - New plugin `loop-plan`, a second `loop`: one tool-free model request

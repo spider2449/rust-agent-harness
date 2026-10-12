@@ -35,7 +35,8 @@ approval), `context-default` (a
 sliding history window and memory notes in `.rah/memory.md`, which the model
 can extend with `memory.remember` after you approve), `skills-fs` (skills in
 `.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
-`skills.load`), `model-mock`,
+`skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
+hand a task to a subagent in its own session), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
 `/sessions`, `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and

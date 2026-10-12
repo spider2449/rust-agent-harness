@@ -19,6 +19,8 @@
 //!   `POST /api/plugins/{id}/restart`, `PUT /api/plugins/{id}/config
 //!   {config}` and `POST /api/plugins/{id}/replace {kind, id, config, bind}`
 //!   (mounts the replacement, then unmounts `{id}` once it is active).
+//! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
+//!   delay_secs, every_secs}` and `DELETE /api/jobs/{id}`.
 //! - `GET|POST /api/sessions`, `GET /api/sessions/{id}`,
 //!   `POST /api/sessions/{id}/fork {at}`.
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
@@ -37,6 +39,7 @@
 
 mod access;
 mod approvals;
+mod jobs;
 mod manage;
 mod ws;
 
@@ -152,6 +155,8 @@ impl Plugin for WebFrontendPlugin {
 fn router(shared: AppState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
+        .route("/jobs", get(jobs::list).post(jobs::submit))
+        .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))

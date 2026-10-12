@@ -464,3 +464,42 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
         .unwrap();
     assert_eq!(unauthorized.status().as_u16(), 401);
 }
+
+#[tokio::test]
+async fn background_jobs_are_submitted_listed_and_cancelled() {
+    use reqwest::Method;
+    let web = start("web-jobs", |_| {}).await;
+    let job = web
+        .json(
+            web.post("/api/jobs")
+                .json(&json!({ "input": "/notool later", "delay_secs": 3600 })),
+        )
+        .await;
+    assert_eq!(job["state"], "waiting", "{job}");
+    let id = job["id"].as_str().unwrap().to_owned();
+    let jobs = web.json(web.get("/api/jobs")).await;
+    assert!(
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["id"] == id.as_str())
+    );
+    assert_eq!(
+        web.status(web.request(Method::DELETE, &format!("/api/jobs/{id}")))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        web.status(web.request(Method::DELETE, &format!("/api/jobs/{id}")))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        web.status(web.post("/api/jobs").json(&json!({ "input": "" })))
+            .await
+            .0,
+        400
+    );
+}

@@ -1073,6 +1073,7 @@ dependencies = [
  "rah-plugin-model-responses",
  "rah-plugin-policy-authority",
  "rah-plugin-sandbox-process",
+ "rah-plugin-scheduler-basic",
  "rah-plugin-session-jsonl",
  "rah-plugin-skills-fs",
  "rah-plugin-tools-builtin",
@@ -1224,6 +1225,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rah-plugin-scheduler-basic"
+version = "0.35.0"
+dependencies = [
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

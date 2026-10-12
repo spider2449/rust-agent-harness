@@ -164,6 +164,16 @@ trusted code like any mounted plugin. The host:
 The tools a process plugin provides still pass through `ToolInvoker` and the
 policy like any other tool.
 
+## `scheduler-basic`
+
+Background jobs and subagents run ordinary turns: every tool call they make
+passes through `ToolInvoker` and the policy, and an `Ask` reaches the
+frontend's approver (without one it is denied). `agent.delegate` declares
+`read`; the subagent's tool effects are recorded in the subagent's session,
+not in the parent's. Delegation depth is limited (`max_depth`, 2), job
+concurrency is limited (`max_concurrent`, 2), repeating jobs run at most once
+per second, and unmounting the plugin cancels every job.
+
 ## `tools-repo-write`
 
 `repo.create-file`, `repo.edit-files` and `repo.patch` declare `write`, so

@@ -1,0 +1,17 @@
+[package]
+name = "rah-plugin-scheduler-basic"
+version.workspace = true
+edition.workspace = true
+description = "Scheduler plugin: background and repeating turns, and subagents through agent.delegate"
+
+[dependencies]
+futures.workspace = true
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
