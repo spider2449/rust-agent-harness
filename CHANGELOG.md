@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P6)
+## v0.40.0 - first plugin-kernel release (2026-10-12)
+
+> First release of the plugin-kernel architecture ("everything is a plugin"),
+> phases P0-P6 of the pivot plan. The authority-first line ended at v0.35.0.
 
 ### P6: `scheduler-basic` and subagents
 

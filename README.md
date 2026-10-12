@@ -178,7 +178,7 @@ use = "frontend-cli"
 | P5 | `frontend-web` replaces the legacy Desktop |
 | P6 | WASM plugins, skills, scheduler and subagents, repository write tools |
 
-The first release of the plugin-kernel architecture will be `0.40.0`.
+The first release of the plugin-kernel architecture is `0.40.0`.
 
 ## Legacy line
 

@@ -80,8 +80,8 @@ ABI.
    and Ask outcomes. The `minimal` preset mounts no policy and must emit a
    prominent "unguarded" warning at startup.
 2. **Name and version.** The project keeps the name RAH. The first release of
-   the plugin-kernel architecture is `0.40.0`. The workspace version stays at
-   `0.35.0` until that release is prepared.
+   the plugin-kernel architecture is `0.40.0`. The workspace version stayed at
+   `0.35.0` until that release was prepared (2026-10-12).
 3. **Frontend.** The primary frontend is `frontend-web` (HTTP and WebSocket plus
    a Web UI). A Tauri shell that embeds the Web UI is optional and is not
    required for parity.
