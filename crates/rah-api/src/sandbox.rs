@@ -2,13 +2,16 @@
 //!
 //! An [`ExecEnv`] runs one program with a fixed argument vector (never a
 //! shell string), an explicit working directory and environment, a timeout,
-//! bounded output and cancellation. Implementations must state honestly what
-//! isolation they provide; process supervision is not an OS sandbox.
+//! bounded output and cancellation ([`ExecEnv::run`]), or keeps one running
+//! with piped stdin and stdout for a protocol such as MCP
+//! ([`ExecEnv::spawn`]). Implementations must state honestly what isolation
+//! they provide; process supervision is not an OS sandbox.
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
 use rah_kernel::ServiceKey;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
 pub const SANDBOX: ServiceKey<dyn ExecEnv> = ServiceKey::new("sandbox");
@@ -93,6 +96,53 @@ pub enum ExecError {
     Supervision(String),
 }
 
+/// A long-running program with piped stdin and stdout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpawnSpec {
+    /// As in [`ProgramSpec::program`].
+    pub program: String,
+    pub args: Vec<String>,
+    /// Relative to the environment's root; `None` is the root itself.
+    pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    /// Bytes of the most recent stderr output kept for diagnostics.
+    pub stderr_bytes: usize,
+}
+
+impl SpawnSpec {
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            cwd: None,
+            env: BTreeMap::new(),
+            stderr_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// A spawned program. Dropping [`Spawned::process`] terminates it.
+pub struct Spawned {
+    pub stdin: Box<dyn AsyncWrite + Send + Unpin>,
+    pub stdout: Box<dyn AsyncRead + Send + Unpin>,
+    pub process: Box<dyn ProcessHandle>,
+}
+
+/// Supervision of a spawned program. The environment also terminates it when
+/// the environment itself goes away.
+#[async_trait]
+pub trait ProcessHandle: Send + Sync {
+    /// Waits until the program has ended. Returns its exit code when it
+    /// exited on its own and the platform reported one.
+    async fn wait(&self) -> Option<i32>;
+
+    /// Terminates the program and its descendants. Idempotent.
+    fn terminate(&self);
+
+    /// The retained tail of the program's stderr.
+    fn stderr(&self) -> String;
+}
+
 #[async_trait]
 pub trait ExecEnv: Send + Sync {
     /// Runs one program to completion, termination or cancellation. Dropping
@@ -102,4 +152,13 @@ pub trait ExecEnv: Send + Sync {
         spec: ProgramSpec,
         cancel: CancellationToken,
     ) -> Result<ExecOutput, ExecError>;
+
+    /// Starts a long-running program. Environments that cannot supervise one
+    /// refuse.
+    async fn spawn(&self, spec: SpawnSpec) -> Result<Spawned, ExecError> {
+        Err(ExecError::InvalidSpec(format!(
+            "this sandbox cannot spawn long-running programs (`{}`)",
+            spec.program
+        )))
+    }
 }

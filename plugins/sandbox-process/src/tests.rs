@@ -275,3 +275,109 @@ async fn invalid_configuration_fails_the_plugin() {
         kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
     }
 }
+
+/// Echoes stdin lines as `echo:<line>` until end of input.
+#[test]
+#[ignore = "helper program"]
+fn helper_echo() {
+    use std::io::{BufRead, Write};
+    eprintln!("echo-ready");
+    let mut out = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { return };
+        writeln!(out, "echo:{line}").unwrap();
+        out.flush().unwrap();
+    }
+}
+
+fn spawn_spec(helper_name: &str) -> SpawnSpec {
+    let spec = helper(helper_name, Duration::from_secs(1));
+    SpawnSpec::new(spec.program, spec.args)
+}
+
+async fn mounted(dir: &TempDir) -> (Kernel, Arc<dyn ExecEnv>) {
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(SandboxProcessPlugin::new("sandbox")),
+            MountOptions::with_config(serde_json::json!({ "root": dir.0 })),
+        )
+        .await
+        .unwrap();
+    let sandbox = kernel.handle().get(SANDBOX).unwrap();
+    (kernel, sandbox)
+}
+
+/// Reads stdout until a line starting with `prefix`, or end of output.
+async fn read_line_starting(
+    stdout: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    prefix: &str,
+) -> Option<String> {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await.ok()? {
+        if line.starts_with(prefix) {
+            return Some(line);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn spawned_programs_talk_over_pipes_and_report_their_exit() {
+    use tokio::io::AsyncWriteExt;
+    let dir = TempDir::new("spawn-echo");
+    let (_kernel, sandbox) = mounted(&dir).await;
+    let mut spawned = sandbox.spawn(spawn_spec("helper_echo")).await.unwrap();
+    spawned.stdin.write_all(b"hello\n").await.unwrap();
+    spawned.stdin.flush().await.unwrap();
+    let line = read_line_starting(spawned.stdout.as_mut(), "echo:").await;
+    assert_eq!(line.as_deref(), Some("echo:hello"));
+    drop(spawned.stdin);
+    let code = tokio::time::timeout(Duration::from_secs(20), spawned.process.wait())
+        .await
+        .unwrap();
+    assert_eq!(code, Some(0));
+    assert!(spawned.process.stderr().contains("echo-ready"));
+}
+
+#[tokio::test]
+async fn spawned_programs_end_on_terminate_drop_and_unmount() {
+    let dir = TempDir::new("spawn-stop");
+    let (kernel, sandbox) = mounted(&dir).await;
+
+    let spawned = sandbox.spawn(spawn_spec("helper_sleep")).await.unwrap();
+    spawned.process.terminate();
+    let code = tokio::time::timeout(Duration::from_secs(10), spawned.process.wait())
+        .await
+        .unwrap();
+    assert_eq!(code, None);
+
+    // Dropping the handle ends the program: its stdout reaches end of input.
+    let mut spawned = sandbox.spawn(spawn_spec("helper_sleep")).await.unwrap();
+    drop(spawned.process);
+    let eof = tokio::time::timeout(
+        Duration::from_secs(10),
+        read_line_starting(spawned.stdout.as_mut(), "never"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(eof, None);
+
+    let spawned = sandbox.spawn(spawn_spec("helper_sleep")).await.unwrap();
+    kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+    let code = tokio::time::timeout(Duration::from_secs(10), spawned.process.wait())
+        .await
+        .unwrap();
+    assert_eq!(code, None);
+    assert!(sandbox.spawn(spawn_spec("helper_echo")).await.is_err());
+}
+
+#[tokio::test]
+async fn an_environment_without_a_scope_refuses_to_spawn() {
+    let dir = TempDir::new("spawn-unowned");
+    assert!(matches!(
+        env(&dir).spawn(spawn_spec("helper_echo")).await,
+        Err(ExecError::InvalidSpec(_))
+    ));
+}

@@ -190,9 +190,8 @@ impl Tool for ShellExec {
                     render(&output)
                 ))),
             },
-            // Nothing was started.
             Err(error @ (ExecError::InvalidSpec(_) | ExecError::Spawn { .. })) => {
-                Err(ToolError::InvalidInput(error.to_string()))
+                Err(ToolError::NotStarted(error.to_string()))
             }
             Err(error @ ExecError::Supervision(_)) => Err(ToolError::Execution(error.to_string())),
         }

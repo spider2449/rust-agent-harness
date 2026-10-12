@@ -350,7 +350,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限未搬，見下方備註）
 - [x] `sandbox-process`、`tools-shell`（opt-in）＋ CLI 的 `Ask` 確認（2026-10-12 完成）
 - [x] `tools-repo`（唯讀；2026-10-12 完成）
-- [ ] `tools-mcp`
+- [x] `tools-mcp`（2026-10-12 完成）
 - [ ] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（例如 Python 寫的 tool）
 - [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition`、`rah-session`
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
@@ -375,6 +375,13 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 宣告 `read`（legacy 因為會 spawn git 而宣告 `execute`）。限制寫在 SECURITY：Git 仍會讀 repo 自己的 `.git/config`（例如 filter driver），legacy 的 layout 和 ownership 檢查沒有移植。
   - 所有 preset 都掛 `sandbox-process` 和 `tools-repo`，policy 指派 `repo.*` = `read`；`tools-shell` 仍不在 preset 中。
   - 測試在暫存 repo 中跑真的 Git（plugin 單元測試用一個最小的測試 `ExecEnv`，因為 plugin 不能依賴 `sandbox-process`；`rah-cli` 的端到端測試用真的 `sandbox-process`）。
+
+- 實作備註（tools-mcp，2026-10-12）：
+  - `sandbox` service 新增 `ExecEnv::spawn(SpawnSpec) -> Spawned`（stdin、stdout、`ProcessHandle`），也就是第 4 節草案裡的 `SupervisedChild`。預設實作拒絕；`sandbox-process` 用自己 scope 的 task 監督，unmount 或 drop handle 會終止 process tree。MCP server 因此也經過 sandbox，不由 `tools-mcp` 自己 spawn。
+  - `rah-api` 新增 `ToolError::NotStarted`（effect 記為 `none`），`tools-shell` 的 spawn 失敗改用它。
+  - 一個 plugin instance 對應一個 server。只暴露設定 `tools` 列出的 tool，名稱 `mcp.<server>.<tool>`，permission 由設定宣告（legacy 的 external permission 指派），policy 仍要另外指派。server 的 annotations 不採用。legacy 要求 tool 集合完全相符、schema 固定；新版只要求列出的 tool 存在，schema 不固定。
+  - server 發來的 request 除了 `ping` 以外一律回 `-32601`；未知 id 的 response（已取消的請求）忽略，不視為協定錯誤（legacy 會斷線）。
+  - 測試用 in-process 的腳本化 server（duplex pipe）。真實 stdio 只做了手動驗證（`rah` + legacy `rah-mcp-echo-server` + `sandbox-process`），沒有自動化測試。
 
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）

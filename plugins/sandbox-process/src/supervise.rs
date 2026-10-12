@@ -17,7 +17,7 @@ use tokio::{
 const CHUNK_BYTES: usize = 8 * 1024;
 /// How long pipes may stay open after the program exits (descendants holding
 /// them), and how long a terminated program may take to be reaped.
-const GRACE: Duration = Duration::from_secs(2);
+pub(crate) const GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) async fn supervise(
     mut child: Child,
@@ -158,7 +158,7 @@ pub(crate) struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -199,7 +199,7 @@ impl ProcessTree {
         Ok(Self { job: Some(job) })
     }
 
-    fn terminate(&mut self) -> Result<(), String> {
+    pub(crate) fn terminate(&mut self) -> Result<(), String> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
@@ -215,7 +215,7 @@ impl ProcessTree {
 
     /// Closing the job handle still kills members left behind
     /// (kill-on-close).
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.job.take();
     }
 }
@@ -227,7 +227,7 @@ pub(crate) struct ProcessTree {
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
         let pid = child
             .id()
             .ok_or_else(|| "the spawned process has no id".to_owned())?;
@@ -235,7 +235,7 @@ impl ProcessTree {
         Ok(Self { group: Some(group) })
     }
 
-    fn terminate(&mut self) -> Result<(), String> {
+    pub(crate) fn terminate(&mut self) -> Result<(), String> {
         let Some(group) = self.group else {
             return Ok(());
         };
@@ -248,7 +248,7 @@ impl ProcessTree {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.group.take();
     }
 }
@@ -262,11 +262,11 @@ impl ProcessTree {
         Ok(Self)
     }
 
-    fn terminate(&mut self) -> Result<(), String> {
+    pub(crate) fn terminate(&mut self) -> Result<(), String> {
         Ok(())
     }
 
-    fn disarm(&mut self) {}
+    pub(crate) fn disarm(&mut self) {}
 }
 
 impl Drop for ProcessTree {

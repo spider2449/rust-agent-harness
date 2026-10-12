@@ -72,7 +72,8 @@ re-reads entries and never re-executes tool calls. Tool results carry
 Implemented:
 
 - `rah-kernel` (P1) and `rah-api` (P2): service contracts `model`, `loop`,
-  `session`, `sandbox` (`ExecEnv`), tools with `ToolInvoker`, and the standard
+  `session`, `sandbox` (`ExecEnv`: `run` to completion, or `spawn` a
+  long-running program with pipes), tools with `ToolInvoker`, and the standard
   hooks
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`.
@@ -80,9 +81,10 @@ Implemented:
   (crate `model-responses`); `loop-react`; `tools-builtin` (`echo` and
   workspace-bounded `fs.read`); `session-jsonl`; `policy-authority`;
   `sandbox-process` (supervised processes, not an OS sandbox); `tools-repo`
-  (read-only Git tools, requires `sandbox`); `tools-shell` (opt-in
-  `shell.exec`, requires `sandbox`); and `frontend-cli`, which also answers
-  `tool.approval` on the terminal.
+  (read-only Git tools, requires `sandbox`); `tools-mcp` (one MCP stdio server
+  per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
+  requires `sandbox`); and `frontend-cli`, which also answers `tool.approval`
+  on the terminal.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
   `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
   except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
@@ -101,7 +103,7 @@ The remaining legacy crates are transformed or removed phase by phase:
 | `rah-runtime-openai` | ported to `model-responses` (P3); removed together with Desktop | P5 |
 | `rah-runtime`, `rah-model` | replaced by `rah-api` and the model plugins; removed together with Desktop | P5 |
 | `rah-tools` | `Tool` moved to `rah-api`; read-only tools ported to `tools-builtin`, `tools-repo` and `tools-shell`, authorization to `policy-authority`; the crate is removed with Desktop | P5 |
-| `rah-tools-mcp` | becomes `tools-mcp` | P4 |
+| `rah-tools-mcp` | ported to `tools-mcp` (P4); removed with `rah-profile-composition` | P4 |
 | `rah-tools-plugin` | generalized into `rah-plugin-host-process` | P4 |
 | `rah-sandbox` | ported to `sandbox-process` (P4); removed with the legacy tools and Desktop | P5 |
 | `rah-session`, `rah-profile-composition` | removed | P4 |

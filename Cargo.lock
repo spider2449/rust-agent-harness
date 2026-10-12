@@ -2815,6 +2815,7 @@ dependencies = [
  "rah-plugin-sandbox-process",
  "rah-plugin-session-jsonl",
  "rah-plugin-tools-builtin",
+ "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
  "rah-plugin-tools-shell",
  "rah-protocol",
@@ -2958,6 +2959,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-builtin"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tools-mcp"
 version = "0.35.0"
 dependencies = [
  "rah-api",

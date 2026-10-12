@@ -37,10 +37,17 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
 }
 
+/// How a tool call failed. `InvalidInput` and `NotStarted` mean nothing was
+/// done, so the effect is `none`; `Execution` and `Cancelled` on a mutating
+/// tool leave its effect `uncertain`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ToolError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// The call was refused or could not start (for example a busy or
+    /// missing backend); nothing was attempted.
+    #[error("not started: {0}")]
+    NotStarted(String),
     #[error("execution failed: {0}")]
     Execution(String),
     #[error("cancelled")]
@@ -190,10 +197,9 @@ impl ToolInvoker {
         let (output, effect) = match result {
             Ok(output) if mutating => (output, ToolEffect::Completed),
             Ok(output) => (output, ToolEffect::None),
-            Err(ToolError::InvalidInput(message)) => (
-                error_output(format!("invalid input: {message}")),
-                ToolEffect::None,
-            ),
+            Err(error @ (ToolError::InvalidInput(_) | ToolError::NotStarted(_))) => {
+                (error_output(error.to_string()), ToolEffect::None)
+            }
             Err(error) => (error_output(error.to_string()), uncertain),
         };
         let completion = ToolCompletion {

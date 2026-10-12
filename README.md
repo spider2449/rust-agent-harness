@@ -70,6 +70,25 @@ config = { allow_programs = ["git", "cargo"] }   # optional allow list
 a timeout, bounded output and process-tree termination. With the mock model,
 `/call shell.exec {"program":"git","args":["status"]}` exercises it.
 
+MCP servers (stdio transport) are mounted one `tools-mcp` instance per
+server. Only the tools listed in `tools` are exposed, as
+`mcp.<server>.<tool>`, with the permission level written there; the policy
+must assign them as well:
+
+```toml
+[[plugin]]
+use = "policy-authority"
+config = { tools = { "mcp.files.*" = "read" } }
+
+[[plugin]]
+use = "tools-mcp"
+id = "mcp-files"
+config = { server = "files", program = "my-mcp-server", args = ["--stdio"], tools = { read_file = "read" } }
+```
+
+The server is started through `sandbox-process` (cleared environment,
+working directory inside the sandbox root) and ends with the plugin.
+
 Real models use the same composition with a different model plugin:
 
 ```powershell

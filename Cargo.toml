@@ -23,6 +23,7 @@ members = [
     "plugins/session-jsonl",
     "plugins/tools-shell",
     "plugins/tools-builtin",
+    "plugins/tools-mcp",
     "plugins/tools-repo",
 ]
 # rah-desktop is legacy and scheduled for removal (pivot plan phase P5); it is
@@ -50,6 +51,7 @@ default-members = [
     "plugins/session-jsonl",
     "plugins/tools-shell",
     "plugins/tools-builtin",
+    "plugins/tools-mcp",
     "plugins/tools-repo",
 ]
 resolver = "3"

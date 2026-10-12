@@ -218,6 +218,11 @@ async fn effects_are_classified_by_permission_and_failure() {
             Some(ToolError::InvalidInput("x".into())),
             ToolEffect::None,
         ),
+        (
+            PermissionLevel::Write,
+            Some(ToolError::NotStarted("x".into())),
+            ToolEffect::None,
+        ),
         (PermissionLevel::Write, None, ToolEffect::Completed),
     ];
     for (permission, fail, expected) in cases {

@@ -7,7 +7,7 @@ description = "Process supervision sandbox plugin (not an OS sandbox): provides 
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }
 serde.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 
 # Process-tree termination: a Job Object on Windows, a process group on Unix.
 [target.'cfg(unix)'.dependencies]

@@ -80,11 +80,37 @@ there is no filesystem or network isolation. It guarantees:
   Job Object right after spawn, so a process it starts before that can
   escape; on Unix a descendant that leaves the process group can escape.
 
+`spawn` starts a long-running program (for example an MCP server) under the
+same environment and working-directory rules, with piped stdin and stdout,
+a bounded stderr tail and no timeout. Its supervision tasks belong to the
+`sandbox-process` scope, so unmounting the sandbox, or dropping the returned
+handle, terminates the process tree.
+
 `tools-shell` provides `shell.exec` with `execute` permission and requires
 `sandbox`. It accepts `program`, `args`, `cwd` and `timeout_ms` only, and can
 be restricted further with `allow_programs`. A program terminated by the
 sandbox, or a supervision failure, is reported as an error, which the
 `ToolInvoker` records as an `uncertain` effect; it is never retried.
+
+## `tools-mcp`
+
+`tools-mcp` connects to one MCP server over stdio, started through the
+`sandbox` service. The server is external code chosen by the user's
+configuration; its messages and metadata are untrusted:
+
+- Only tools listed in the plugin's `tools` map are exposed, as
+  `mcp.<server>.<tool>`, and each declares the level written there. Server
+  annotations (read-only or destructive hints) are ignored. The policy must
+  still assign the exposed names; otherwise they are denied.
+- A listed tool the server does not offer, an unsupported protocol version or
+  a failed handshake fails the plugin, and the server is terminated.
+- Messages are size-bounded, and outstanding requests are limited. A request
+  that times out, is cancelled or loses its connection is never replayed: the
+  server gets `notifications/cancelled`, and a `write` or `execute` tool
+  records an `uncertain` effect. Requests the server never received record no
+  effect.
+- Server-to-client requests other than `ping` are refused, so a server cannot
+  ask RAH for sampling, roots or elicitation.
 
 ## `tools-repo`
 

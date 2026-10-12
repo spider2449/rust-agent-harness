@@ -14,11 +14,18 @@
 //!   group on Unix) on timeout, output overflow, cancellation, unmount of
 //!   this plugin, or when the caller drops the future.
 //!
+//! Long-running programs ([`ExecEnv::spawn`]) get the same environment and
+//! working-directory rules with piped stdin and stdout, a bounded stderr
+//! tail, and no timeout. Their supervision tasks belong to this plugin's
+//! scope: unmounting the plugin or dropping the returned handle terminates
+//! the process tree.
+//!
 //! Configuration: `{ "root": "<dir>", "inherit_env": ["PATH", ...],
 //! "max_timeout_ms": <n> }`. `root` defaults to the current directory;
 //! `inherit_env` defaults to a small platform list (see
 //! [`DEFAULT_INHERIT_ENV`]); `max_timeout_ms` defaults to 10 minutes.
 
+mod spawn;
 mod supervise;
 
 use std::{
@@ -32,7 +39,8 @@ use std::{
 
 use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
-    sandbox::{ExecEnv, ExecError, ExecOutput, ProgramSpec, SANDBOX},
+    kernel::Spawner,
+    sandbox::{ExecEnv, ExecError, ExecOutput, ProgramSpec, SANDBOX, SpawnSpec, Spawned},
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -105,6 +113,7 @@ impl Plugin for SandboxProcessPlugin {
             base_env,
             max_timeout,
             stop: scope.spawner().cancellation(),
+            spawner: Some(scope.spawner()),
         };
         scope.provide(SANDBOX, Arc::new(env))?;
         Ok(())
@@ -118,11 +127,14 @@ pub struct ProcessEnv {
     max_timeout: Duration,
     /// Cancelled when the owning plugin scope is disposed.
     stop: CancellationToken,
+    /// Owns the supervision tasks of spawned programs; `None` without a
+    /// scope, which disables `spawn`.
+    spawner: Option<Spawner>,
 }
 
 impl ProcessEnv {
     /// An environment rooted at an already canonical directory, for embedding
-    /// and tests. It has no owning scope.
+    /// and tests. It has no owning scope, so it cannot `spawn`.
     pub fn new(
         root: PathBuf,
         base_env: BTreeMap<OsString, OsString>,
@@ -133,17 +145,56 @@ impl ProcessEnv {
             base_env,
             max_timeout,
             stop: CancellationToken::new(),
+            spawner: None,
         }
+    }
+
+    fn validate_command(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<(), ExecError> {
+        let invalid = |message: String| Err(ExecError::InvalidSpec(message));
+        if program.is_empty() || program.contains('\0') {
+            return invalid("program must be a non-empty string without NUL".into());
+        }
+        if args.iter().any(|arg| arg.contains('\0')) {
+            return invalid("arguments must not contain NUL".into());
+        }
+        for (name, value) in env {
+            validate_env_name(name).map_err(ExecError::InvalidSpec)?;
+            if value.contains('\0') {
+                return invalid(format!("environment value of `{name}` contains NUL"));
+            }
+        }
+        Ok(())
+    }
+
+    fn command(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: PathBuf,
+        env: &BTreeMap<String, String>,
+    ) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(&self.base_env)
+            .envs(env)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        supervise::configure(&mut command);
+        command
     }
 
     fn validate(&self, spec: &ProgramSpec) -> Result<(), ExecError> {
         let invalid = |message: String| Err(ExecError::InvalidSpec(message));
-        if spec.program.is_empty() || spec.program.contains('\0') {
-            return invalid("program must be a non-empty string without NUL".into());
-        }
-        if spec.args.iter().any(|arg| arg.contains('\0')) {
-            return invalid("arguments must not contain NUL".into());
-        }
+        self.validate_command(&spec.program, &spec.args, &spec.env)?;
         if spec.timeout.is_zero() || spec.timeout > self.max_timeout {
             return invalid(format!(
                 "timeout must be between 1 ms and {} ms",
@@ -152,12 +203,6 @@ impl ProcessEnv {
         }
         if spec.limits.stdout_bytes == 0 || spec.limits.stderr_bytes == 0 {
             return invalid("output limits must be greater than zero".into());
-        }
-        for (name, value) in &spec.env {
-            validate_env_name(name).map_err(ExecError::InvalidSpec)?;
-            if value.contains('\0') {
-                return invalid(format!("environment value of `{name}` contains NUL"));
-            }
         }
         Ok(())
     }
@@ -203,23 +248,40 @@ impl ExecEnv for ProcessEnv {
         if cancel.is_cancelled() || self.stop.is_cancelled() {
             return Err(ExecError::InvalidSpec("cancelled before start".into()));
         }
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(&self.base_env)
-            .envs(&spec.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        supervise::configure(&mut command);
+        let mut command = self.command(&spec.program, &spec.args, cwd, &spec.env);
+        command.stdin(Stdio::null());
         let child = command.spawn().map_err(|error| ExecError::Spawn {
             program: spec.program.clone(),
             message: error.to_string(),
         })?;
         supervise::supervise(child, &spec, &cancel, &self.stop).await
+    }
+
+    async fn spawn(&self, spec: SpawnSpec) -> Result<Spawned, ExecError> {
+        let Some(spawner) = &self.spawner else {
+            return Err(ExecError::InvalidSpec(
+                "this environment has no owning scope and cannot spawn".into(),
+            ));
+        };
+        self.validate_command(&spec.program, &spec.args, &spec.env)?;
+        if spec.stderr_bytes == 0 {
+            return Err(ExecError::InvalidSpec(
+                "stderr_bytes must be greater than zero".into(),
+            ));
+        }
+        let cwd = self.working_directory(spec.cwd.as_deref()).await?;
+        if self.stop.is_cancelled() {
+            return Err(ExecError::InvalidSpec(
+                "the sandbox is shutting down".into(),
+            ));
+        }
+        let mut command = self.command(&spec.program, &spec.args, cwd, &spec.env);
+        command.stdin(Stdio::piped());
+        let child = command.spawn().map_err(|error| ExecError::Spawn {
+            program: spec.program.clone(),
+            message: error.to_string(),
+        })?;
+        spawn::start(child, spec.stderr_bytes, spawner, self.stop.child_token())
     }
 }
 

@@ -19,6 +19,7 @@ rah-plugin-policy-authority = { path = "../../plugins/policy-authority" }
 rah-plugin-sandbox-process = { path = "../../plugins/sandbox-process" }
 rah-plugin-session-jsonl = { path = "../../plugins/session-jsonl" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
+rah-plugin-tools-mcp = { path = "../../plugins/tools-mcp" }
 rah-plugin-tools-repo = { path = "../../plugins/tools-repo" }
 rah-plugin-tools-shell = { path = "../../plugins/tools-shell" }
 serde.workspace = true

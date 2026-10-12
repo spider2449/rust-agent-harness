@@ -2,6 +2,25 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P4)
 
+### P4: `tools-mcp`
+
+- `rah-api`: `ExecEnv::spawn(SpawnSpec)` starts a long-running program with
+  piped stdin and stdout and returns a `ProcessHandle` (`wait`, `terminate`,
+  stderr tail) that terminates the program when dropped. The default
+  implementation refuses. New `ToolError::NotStarted`: the call never started,
+  so its effect is `none` (`tools-shell` now uses it for spawn failures).
+- `sandbox-process` implements `spawn`; supervision and stderr draining are
+  tasks of its scope, so unmounting it terminates spawned programs.
+- New plugin `tools-mcp` (requires `sandbox`), one instance per MCP stdio
+  server. It runs the initialize handshake (protocol `2025-06-18`, accepting
+  `2025-03-26` and `2024-11-05`), pages through `tools/list` and exposes only
+  host-listed tools as `mcp.<server>.<tool>` with host-declared permissions.
+  Calls are bounded and never replayed; timeouts and cancellation send
+  `notifications/cancelled`. Server requests other than `ping` are refused.
+- Tests drive a scripted in-process server through a fake sandbox. A manual
+  run of `rah` against the legacy `rah-mcp-echo-server` binary through
+  `sandbox-process` succeeded; that path has no automated test.
+
 ### P4: `tools-repo`
 
 - New plugin `tools-repo` (requires `sandbox`) with read-only `repo.status`,
