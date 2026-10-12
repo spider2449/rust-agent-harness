@@ -1,0 +1,329 @@
+//! `frontend-web`: a loopback HTTP and WebSocket API with an embedded Web UI.
+//!
+//! The server listens on a loopback address only (default
+//! `127.0.0.1:8765`; port `0` picks a free one) and announces
+//! `http://<address>/#token=<secret>` with
+//! [`FrontendListening`](rah_api::host::FrontendListening). Every `/api`
+//! request needs that per-start token (`Authorization: Bearer <token>`, or
+//! `?token=` for the WebSocket), a `Host` naming this server, and, when
+//! present, an `Origin` naming this server. The static UI needs no token; it
+//! reads it from the URL fragment, which browsers never send.
+//!
+//! API:
+//!
+//! - `GET /api/info`: tools and whether a policy guards them.
+//! - `GET /api/plugins`: plugin statuses.
+//! - `GET|POST /api/sessions`, `GET /api/sessions/{id}`,
+//!   `POST /api/sessions/{id}/fork {at}`.
+//! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
+//!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve}`. Server
+//!   messages: `{type: "event", session, event}`, `approval_required`,
+//!   `approval_resolved`, `error`.
+//!
+//! The plugin answers `tool.approval` through connected browsers: with none
+//! connected it does not answer (a denial), and an unanswered request is
+//! denied after `approval_timeout_secs` (300).
+//!
+//! The loop and session services are resolved per request, so other plugins
+//! can be swapped while the server runs. HTTP connections are served by
+//! tasks of the HTTP library; WebSocket handlers end when this plugin's scope
+//! is disposed.
+
+mod access;
+mod approvals;
+mod ws;
+
+use std::{str::FromStr, sync::Arc, time::Duration};
+
+use axum::{
+    Json, Router,
+    extract::{Path, Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use rah_api::{
+    CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
+    Scope, async_trait,
+    hooks::ToolApproval,
+    host::FrontendListening,
+    session::{SESSION, SessionError, SessionLog},
+    tools::ToolInvoker,
+};
+use rah_protocol::SessionId;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::approvals::Approvals;
+
+const INDEX_HTML: &str = include_str!("../assets/index.html");
+const APP_JS: &str = include_str!("../assets/app.js");
+const APP_CSS: &str = include_str!("../assets/app.css");
+
+pub struct WebFrontendPlugin {
+    manifest: PluginManifest,
+}
+
+impl WebFrontendPlugin {
+    pub fn new(id: impl Into<PluginId>) -> Self {
+        Self {
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .optional(["loop", "session"]),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    bind: Option<String>,
+    approval_timeout_secs: Option<u64>,
+}
+
+pub(crate) struct Shared {
+    pub kernel: KernelHandle,
+    pub token: String,
+    pub hosts: Vec<String>,
+    pub approvals: Approvals,
+    /// Cancelled when the plugin scope is disposed.
+    pub stop: CancellationToken,
+}
+
+type AppState = Arc<Shared>;
+
+#[async_trait]
+impl Plugin for WebFrontendPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        let config: Config = if scope.config().is_null() {
+            Config::default()
+        } else {
+            scope.config_as()?
+        };
+        let requested = access::loopback(config.bind.as_deref().unwrap_or("127.0.0.1:8765"))?;
+        let listener = tokio::net::TcpListener::bind(requested)
+            .await
+            .map_err(|error| format!("cannot listen on {requested}: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("cannot read the listening address: {error}"))?;
+        let timeout = Duration::from_secs(config.approval_timeout_secs.unwrap_or(300).max(1));
+        let shared = Arc::new(Shared {
+            kernel: scope.kernel(),
+            token: access::new_token(),
+            hosts: access::allowed_hosts(address),
+            approvals: Approvals::new(timeout),
+            stop: scope.spawner().cancellation(),
+        });
+        let asker = shared.clone();
+        scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
+            let asker = asker.clone();
+            async move { asker.approvals.ask(request).await }
+        });
+        let app = router(shared.clone());
+        let stop = shared.stop.clone();
+        let started = scope.spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await;
+        });
+        if !started {
+            return Err("the plugin scope is already disposed".into());
+        }
+        scope.kernel().emit(&FrontendListening {
+            plugin: scope.id().clone(),
+            url: format!("http://{address}/#token={}", shared.token),
+        });
+        Ok(())
+    }
+}
+
+fn router(shared: AppState) -> Router {
+    let api = Router::new()
+        .route("/info", get(info))
+        .route("/plugins", get(plugins))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{id}", get(read_session))
+        .route("/sessions/{id}/fork", post(fork_session))
+        .route("/ws", get(ws::upgrade))
+        .layer(middleware::from_fn_with_state(
+            shared.clone(),
+            require_token,
+        ));
+    Router::new()
+        .route(
+            "/",
+            get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }),
+        )
+        .route(
+            "/app.js",
+            get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }),
+        )
+        .route(
+            "/app.css",
+            get(|| async { asset("text/css; charset=utf-8", APP_CSS) }),
+        )
+        .nest("/api", api)
+        .layer(middleware::from_fn_with_state(shared.clone(), require_host))
+        .with_state(shared)
+}
+
+fn asset(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+async fn require_host(State(shared): State<AppState>, request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    if !access::host_allowed(&shared.hosts, header_str(headers, header::HOST))
+        || !access::origin_allowed(&shared.hosts, header_str(headers, header::ORIGIN))
+    {
+        return (StatusCode::FORBIDDEN, "forbidden host or origin").into_response();
+    }
+    next.run(request).await
+}
+
+async fn require_token(State(shared): State<AppState>, request: Request, next: Next) -> Response {
+    let bearer = header_str(request.headers(), header::AUTHORIZATION)
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let query = request.uri().query().and_then(|query| {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+    });
+    match bearer.or(query) {
+        Some(token) if access::token_matches(&shared.token, token) => next.run(request).await,
+        _ => (StatusCode::UNAUTHORIZED, "a valid token is required").into_response(),
+    }
+}
+
+/// An API error as `{error}` with a status code.
+pub(crate) struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<SessionError> for ApiError {
+    fn from(error: SessionError) -> Self {
+        let status = match error {
+            SessionError::NotFound(_) => StatusCode::NOT_FOUND,
+            SessionError::InvalidFork { .. } => StatusCode::BAD_REQUEST,
+            SessionError::Corrupt { .. } | SessionError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self(status, error.to_string())
+    }
+}
+
+type ApiResult = Result<Json<Value>, ApiError>;
+
+fn sessions(shared: &Shared) -> Result<Arc<dyn SessionLog>, ApiError> {
+    shared.kernel.get(SESSION).ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no session service is mounted".into(),
+        )
+    })
+}
+
+fn session_id(id: &str) -> Result<SessionId, ApiError> {
+    SessionId::from_str(id).map_err(|_| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("`{id}` is not a session id"),
+        )
+    })
+}
+
+fn to_json(value: impl serde::Serialize) -> ApiResult {
+    serde_json::to_value(value)
+        .map(Json)
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn info(State(shared): State<AppState>) -> ApiResult {
+    let invoker = ToolInvoker::new(shared.kernel.clone());
+    Ok(Json(json!({
+        "guarded": invoker.is_guarded(),
+        "tools": invoker.definitions(),
+        "loop": shared.kernel.get(rah_api::agent_loop::LOOP).is_some(),
+        "session": shared.kernel.get(SESSION).is_some(),
+    })))
+}
+
+pub(crate) fn status_json(status: &PluginStatus) -> Value {
+    let names = |items: &[String]| items.join(", ");
+    match status {
+        PluginStatus::Pending { missing } => json!({
+            "state": "pending",
+            "detail": names(&missing.iter().map(ToString::to_string).collect::<Vec<_>>()),
+        }),
+        PluginStatus::DependencyCycle { cycle } => json!({
+            "state": "dependency_cycle",
+            "detail": names(&cycle.iter().map(ToString::to_string).collect::<Vec<_>>()),
+        }),
+        PluginStatus::Failed { message } => json!({ "state": "failed", "detail": message }),
+        other => json!({ "state": format!("{other:?}").to_lowercase(), "detail": "" }),
+    }
+}
+
+async fn plugins(State(shared): State<AppState>) -> ApiResult {
+    let plugins: Vec<Value> = shared
+        .kernel
+        .plugins()
+        .into_iter()
+        .map(|(id, status)| {
+            let mut entry = status_json(&status);
+            entry["id"] = json!(id.as_str());
+            entry
+        })
+        .collect();
+    Ok(Json(json!(plugins)))
+}
+
+async fn list_sessions(State(shared): State<AppState>) -> ApiResult {
+    to_json(sessions(&shared)?.list().await?)
+}
+
+async fn create_session(State(shared): State<AppState>) -> ApiResult {
+    to_json(sessions(&shared)?.create().await?)
+}
+
+async fn read_session(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    to_json(sessions(&shared)?.read(&session_id(&id)?).await?)
+}
+
+#[derive(Deserialize)]
+struct Fork {
+    at: u64,
+}
+
+async fn fork_session(
+    State(shared): State<AppState>,
+    Path(id): Path<String>,
+    Json(fork): Json<Fork>,
+) -> ApiResult {
+    to_json(sessions(&shared)?.fork(&session_id(&id)?, fork.at).await?)
+}

@@ -397,6 +397,24 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - [ ] `context-default`（sliding window、記憶）
 - [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）、`rah-profile-composition`、`rah-tools-plugin`、`rah-tools-mcp`、`rah-tools`、`rah-sandbox`（從 P4 延後）
 - 驗收：功能上可以取代 desktop 的日常使用；**在 UI 上切換 model 和 loop plugin 不需要重啟**
+- 切片（2026-10-12 決定）：
+  - P5a：`frontend-web` 核心——HTTP＋WebSocket server、存取控制、session 列表／讀取／建立／fork、經 WebSocket 串流的 turn 和取消、`Ask` 確認、唯讀 plugin 狀態、最小 Web UI。**2026-10-12 完成**。
+  - P5b：plugin 管理——`rah-api` 新增 plugin catalog service（由 distribution 提供，因為 plugin 不能依賴 `rah-cli`），UI 可以掛載、卸載、重啟、改設定，並在不重啟的情況下切換 model 和 loop。
+  - P5c：`context-default`（sliding window、記憶）。
+  - P5d：刪除 Desktop 和延後的 legacy crate，更新文件。
+- 設計決定（2026-10-12）：
+  - Server 用 `axum` 0.8（含 `ws`）。新依賴的理由：Web frontend 需要 HTTP 和 WebSocket server；`hyper`、`tower` 已經在依賴樹中。
+  - 只綁 loopback（`127.0.0.1`、`::1`、`localhost`），設定成其他位址是錯誤。
+  - 存取控制：每次啟動產生隨機 token，`rah` 印出 `http://127.0.0.1:<port>/#token=<token>`；所有 `/api` 請求和 WebSocket 都要帶 token。另外檢查 `Host`（防 DNS rebinding），WebSocket 和會改變狀態的請求檢查 `Origin`。
+  - UI 是內嵌在 binary 裡的靜態 HTML／JS／CSS，不需要 build 步驟，不載入外部資源。
+  - `Ask`：`frontend-web` 註冊 `tool.approval`，推給已連線的瀏覽器；沒有瀏覽器連線時不回答（等於拒絕），等待逾時也是拒絕。
+- 實作備註（P5a，2026-10-12）：
+  - `rah-api` 新增 host event `FrontendListening { plugin, url }`；`rah` 負責印出（含 token），plugin 自己不印。測試也透過這個 event 拿到位址和 token。
+  - `rah --web [--bind]` 把 preset 裡的 `frontend-cli` 換成 `frontend-web`；不能和 `--prompt`、`--session` 一起用。程式在 Ctrl-C 時結束。
+  - HTTP 連線由 axum／hyper 的 task 處理（請求很短）；WebSocket handler 會監看 plugin scope 的 cancellation token，unmount 時關閉（有測試）。
+  - 每條 WebSocket 同時只跑一個 turn；斷線會取消該 turn。
+  - 同時掛 `frontend-cli` 和 `frontend-web` 時，兩者都註冊 `tool.approval`（priority 0），由先註冊的回答。
+  - UI 的 JavaScript 只做了語法檢查（`node --check`）和用 curl 確認資源可以載入；沒有自動化的瀏覽器測試。
 
 ### P6：生態擴充
 - [ ] WASM plugin host（wasmtime＋WIT）

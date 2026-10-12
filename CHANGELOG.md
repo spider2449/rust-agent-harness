@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P4)
+## Unreleased — plugin-kernel pivot (phases P0–P5)
+
+### P5: `frontend-web` (core)
+
+- New plugin `frontend-web` (`axum` 0.8 with WebSocket support; the first new
+  dependency of the pivot, for the HTTP server): a loopback-only API with an
+  embedded Web UI. `GET /api/info`, `/api/plugins`, `GET|POST /api/sessions`,
+  `GET /api/sessions/{id}`, `POST /api/sessions/{id}/fork`, and a WebSocket
+  at `/api/ws` for turns, their events, cancellation and approvals.
+- Access control: a per-start token on every API request, `Host` and
+  `Origin` checks, and a strict Content-Security-Policy for the UI.
+- `tool.approval` is answered in the browser; without a connected browser
+  the call is denied, and unanswered requests time out as denied.
+- `rah-api`: new host event `FrontendListening { plugin, url }`; `rah` prints
+  it. `rah --web [--bind <address>]` replaces the terminal REPL with the
+  Web UI.
+- Tests run the API over real HTTP and WebSocket connections (access control,
+  sessions, forks, turns, approvals, unmount). The UI's JavaScript is
+  syntax-checked but has not been driven in a browser by an automated test.
 
 ### P4: process plugins (protocol v2) and cleanup
 

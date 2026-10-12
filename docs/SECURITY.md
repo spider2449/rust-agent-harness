@@ -112,6 +112,31 @@ configuration; its messages and metadata are untrusted:
 - Server-to-client requests other than `ping` are refused, so a server cannot
   ask RAH for sampling, roots or elicitation.
 
+## `frontend-web`
+
+The Web frontend serves the agent to the local machine only:
+
+- It listens on a loopback address; any other bind address fails the plugin.
+- Every start creates a random token (two UUIDv4, 244 random bits). Every
+  `/api` request and the WebSocket must carry it (`Authorization: Bearer`, or
+  `?token=` for the WebSocket); comparison is constant-time. `rah` prints the
+  URL with the token in the fragment, which browsers do not send to servers;
+  the UI keeps it in `sessionStorage` for the tab and removes it from the
+  address bar.
+- Every request must name this server in `Host` (against DNS rebinding), and a
+  present `Origin` must be this server (against cross-site requests and
+  cross-site WebSocket hijacking).
+- The UI is embedded static HTML, CSS and JavaScript served with a strict
+  Content-Security-Policy (`default-src 'self'`, no framing). Model and tool
+  output is inserted as text only.
+- `Ask` decisions go to the connected browsers. With no browser connected the
+  frontend does not answer (a denial); an unanswered request is denied after
+  `approval_timeout_secs` (300).
+
+Any local process that can read the printed URL can use the API with the
+user's authority; the token protects against other users' browsers and
+websites, not against code already running as the user.
+
 ## Process plugins
 
 A plugin mounted with `use = "process"` ([protocol v2](PROCESS_PLUGINS.md)) is

@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_frontend_cli::CliFrontendPlugin;
+use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
@@ -24,8 +25,9 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 12] = [
+    let entries: [(&'static str, Constructor); 13] = [
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
+        ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),
@@ -179,6 +181,19 @@ impl Distribution {
             "{policy}{}",
             PRESET_TEMPLATE.replace("{MODEL}", preset.model)
         ))
+    }
+
+    /// Replaces every plugin of kind `from` with a plugin of kind `to` and an
+    /// empty configuration. Returns whether any plugin matched.
+    pub fn replace(&mut self, from: &str, to: &str) -> bool {
+        let mut matched = false;
+        for spec in self.plugin.iter_mut().filter(|spec| spec.kind == from) {
+            spec.kind = to.to_owned();
+            spec.id = None;
+            spec.config = Value::Null;
+            matched = true;
+        }
+        matched
     }
 
     /// Sets `key` in the configuration of every plugin of `kind`. Returns

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAH</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="bar">
+    <strong class="brand">RAH</strong>
+    <span id="guard" class="badge" hidden></span>
+    <span id="connection" class="badge muted">connecting</span>
+    <span class="spacer"></span>
+    <button id="toggle-plugins" type="button" class="ghost">Plugins</button>
+  </header>
+
+  <div id="approvals" class="approvals" aria-live="assertive"></div>
+
+  <main class="layout">
+    <nav class="sidebar" aria-label="Sessions">
+      <button id="new-session" type="button">New session</button>
+      <ul id="sessions" class="sessions"></ul>
+    </nav>
+
+    <section class="conversation" aria-label="Conversation">
+      <div id="notice" class="notice" hidden></div>
+      <ol id="transcript" class="transcript"></ol>
+      <div id="live" class="live" hidden></div>
+      <form id="composer" class="composer">
+        <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line)" disabled></textarea>
+        <div class="actions">
+          <button id="send" type="submit" disabled>Send</button>
+          <button id="cancel" type="button" class="ghost" hidden>Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <aside id="plugins-panel" class="plugins" aria-label="Plugins" hidden>
+      <div class="panel-head">
+        <h2>Plugins</h2>
+        <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
+      </div>
+      <table>
+        <thead><tr><th>Plugin</th><th>State</th></tr></thead>
+        <tbody id="plugins"></tbody>
+      </table>
+      <h2>Tools</h2>
+      <ul id="tools" class="tools"></ul>
+    </aside>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

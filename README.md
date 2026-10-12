@@ -103,6 +103,18 @@ id = "word-tools"
 config = { program = "python", args = ["examples/process-plugins/word_tools.py"] }
 ```
 
+`--web` serves a browser UI instead of the terminal REPL:
+
+```powershell
+cargo run -p rah-cli -- --preset dev --web            # http://127.0.0.1:8765
+cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
+```
+
+`rah` prints the address with a per-start access token; open exactly that
+URL. The UI lists, opens, creates and forks sessions, streams turns, and asks
+you to allow or deny tool calls the policy marks `Ask`. It listens on
+loopback only and has no external resources.
+
 Real models use the same composition with a different model plugin:
 
 ```powershell

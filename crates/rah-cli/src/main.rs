@@ -4,7 +4,11 @@ use std::{
 };
 
 use clap::Parser;
-use rah_api::{Kernel, PluginStatus, host::ExitRequested, tools::ToolInvoker};
+use rah_api::{
+    Kernel, PluginStatus,
+    host::{ExitRequested, FrontendListening},
+    tools::ToolInvoker,
+};
 use rah_cli::{Distribution, boot};
 use serde_json::Value;
 
@@ -22,6 +26,12 @@ struct Args {
     /// Distribution file listing the plugins to mount.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Serve the Web UI (frontend-web) instead of the terminal REPL.
+    #[arg(long)]
+    web: bool,
+    /// Web UI address, loopback only (frontend-web); port 0 picks one.
+    #[arg(long)]
+    bind: Option<String>,
     /// Run one prompt and exit (frontend-cli).
     #[arg(long)]
     prompt: Option<String>,
@@ -46,7 +56,16 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         }
         None => Distribution::preset(&args.preset).map_err(|error| error.to_string())?,
     };
+    if args.web {
+        if args.prompt.is_some() || args.session.is_some() {
+            return Err("--web cannot be combined with --prompt or --session".into());
+        }
+        if !distribution.replace("frontend-cli", "frontend-web") {
+            return Err("--web needs a `frontend-cli` plugin to replace".into());
+        }
+    }
     let overrides = [
+        ("frontend-web", "bind", args.bind.clone().map(Value::String)),
         (
             "frontend-cli",
             "prompt",
@@ -113,6 +132,13 @@ async fn run(args: Args) -> i32 {
         if let Some(sender) = sender {
             let _ = sender.send(exit.code);
         }
+    });
+
+    let _listening = handle.subscribe(|listening: &FrontendListening| {
+        eprintln!(
+            "rah: {} is listening at {}",
+            listening.plugin, listening.url
+        );
     });
 
     match boot(&kernel, &distribution).await {

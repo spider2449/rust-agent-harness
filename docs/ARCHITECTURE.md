@@ -67,7 +67,7 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, after phase P4)
+## Current state (transitional, phase P5 in progress)
 
 Implemented:
 
@@ -83,8 +83,10 @@ Implemented:
   `sandbox-process` (supervised processes, not an OS sandbox); `tools-repo`
   (read-only Git tools, requires `sandbox`); `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
-  requires `sandbox`); and `frontend-cli`, which also answers `tool.approval`
-  on the terminal.
+  requires `sandbox`); `frontend-cli`, which also answers `tool.approval`
+  on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API
+  with an embedded Web UI (`rah --web`), which answers `tool.approval` in the
+  browser.
 - `rah-plugin-host-process`: out-of-process plugins over JSON-RPC 2.0 on
   stdio ([protocol v2](PROCESS_PLUGINS.md)). They may provide `tools` and call
   the host's `session` service only if it is in their `requires`. `rah` mounts
