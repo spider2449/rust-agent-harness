@@ -648,7 +648,7 @@ async fn stop_cascade(inner: &Arc<Inner>, root: &PluginId) {
     let mut changes = Changes::new();
     let (stopped, victims) = {
         let mut state = inner.state();
-        if !state.plugins.get(root).is_some_and(|e| e.active.is_some()) {
+        if state.plugins.get(root).is_none_or(|e| e.active.is_none()) {
             return;
         }
         let mut stopped = BTreeSet::from([root.clone()]);
