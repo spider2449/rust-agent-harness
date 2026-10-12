@@ -349,7 +349,8 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 ### P4：policy、tools、sandbox、process plugin
 - [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限未搬，見下方備註）
 - [x] `sandbox-process`、`tools-shell`（opt-in）＋ CLI 的 `Ask` 確認（2026-10-12 完成）
-- [ ] `tools-mcp`、`tools-repo`（唯讀）
+- [x] `tools-repo`（唯讀；2026-10-12 完成）
+- [ ] `tools-mcp`
 - [ ] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（例如 Python 寫的 tool）
 - [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition`、`rah-session`
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
@@ -367,6 +368,13 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - `frontend-cli` 註冊 `tool.approval`：turn 執行中在終端機詢問，只接受 `y`／`yes`，EOF 視為拒絕。`--prompt` 模式也會詢問。
   - `model-mock` 新增 `/call <tool> <json>`，讓測試能驅動任意 tool。
   - `tools-shell` 不在任何 preset 中，要用設定檔掛載（README 有範例）。
+
+- 實作備註（tools-repo，2026-10-12）：
+  - 沒有逐行移植 legacy 的 8k 行。提供 `repo.status`、`repo.diff`（`staged` 取代 legacy 的 `repo.diff-staged`）、`repo.list`、`repo.search`（`path`／`text`），名稱和輸入形狀沿用 legacy；`repo.file-info`、`repo.stats` 延後。
+  - Git 透過 `sandbox` service 執行（plugin 宣告 `requires = ["sandbox"]`），環境沿用 legacy 的 hardening，另加 `GIT_LITERAL_PATHSPECS=1`。每次呼叫先確認設定的目錄是 work tree 的 top level，避免 Git 往上找到外層 repo。不設 `safe.directory`：不屬於使用者的 repo 會被 Git 拒絕。
+  - 宣告 `read`（legacy 因為會 spawn git 而宣告 `execute`）。限制寫在 SECURITY：Git 仍會讀 repo 自己的 `.git/config`（例如 filter driver），legacy 的 layout 和 ownership 檢查沒有移植。
+  - 所有 preset 都掛 `sandbox-process` 和 `tools-repo`，policy 指派 `repo.*` = `read`；`tools-shell` 仍不在 preset 中。
+  - 測試在暫存 repo 中跑真的 Git（plugin 單元測試用一個最小的測試 `ExecEnv`，因為 plugin 不能依賴 `sandbox-process`；`rah-cli` 的端到端測試用真的 `sandbox-process`）。
 
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）

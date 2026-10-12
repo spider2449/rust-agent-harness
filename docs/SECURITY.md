@@ -86,6 +86,29 @@ be restricted further with `allow_programs`. A program terminated by the
 sandbox, or a supervision failure, is reported as an error, which the
 `ToolInvoker` records as an `uncertain` effect; it is never retried.
 
+## `tools-repo`
+
+`tools-repo` provides `repo.status`, `repo.diff`, `repo.list` and
+`repo.search`, declared `read`. They run Git through the `sandbox` service:
+
+- with a hardened environment: no system or global configuration,
+  `core.fsmonitor` and `core.untrackedCache` off, no optional locks, no
+  terminal prompts, and literal pathspecs (`GIT_LITERAL_PATHSPECS=1`), so a
+  model-supplied path is never a glob or magic pathspec;
+- only when the configured directory is the top level of a work tree, so Git
+  never reads a repository above it;
+- with model-supplied paths limited to safe repository-relative paths (no
+  `.`, `..`, `.git`, backslashes, colons or a leading `-`) and text queries
+  passed after `-e` and searched literally;
+- with bounded output and result counts, and `--no-ext-diff --no-textconv`
+  for diffs.
+
+Git still reads the repository's own `.git/config`, and a `.git` file or
+linked worktree can point elsewhere. Configured filter drivers can run
+programs during `status` or `diff`. The tools are therefore only as inert as
+the configured repository, which is the user's choice; the legacy layout and
+ownership checks are not ported.
+
 ## Transitional note
 
 The legacy crates still on `master` (notably `rah-desktop`) keep their v0.35.0

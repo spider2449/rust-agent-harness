@@ -27,9 +27,11 @@ cargo run -p rah-cli -- --preset dev
 
 The `dev` preset mounts `policy-authority`, `session-jsonl` (logs in
 `.rah/sessions`), `tools-builtin` (`echo` and `fs.read` bounded to the current
-directory), `model-mock`, `loop-react` and `frontend-cli`. Type text to run a
-turn. Try `read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
-`/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
+directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
+`repo.diff`, `repo.list` and `repo.search` over Git), `model-mock`,
+`loop-react` and `frontend-cli`. Type text to run a turn. Try
+`read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
+`/sessions`, `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and
 `--session <id>` resumes a session.
 
 | Preset | Model plugin | Policy |
@@ -41,13 +43,13 @@ turn. Try `read README.md`, or use `/history`, `/fork <seq>`, `/sessions`,
 
 `policy-authority` denies every tool without a host permission assignment in
 its own configuration; tool metadata can only make a decision stricter. The
-presets assign `echo` (`none`) and `fs.read` (`read`), allow `none` and `read`,
+presets assign `echo` (`none`), `fs.read` and `repo.*` (`read`), allow `none` and `read`,
 and ask for `write` and `execute`. `frontend-cli` asks on the terminal and
 approves only an explicit `y`; end of input denies. If a configured policy
 plugin fails to start, `rah` refuses to run.
 
-Program execution is opt-in. Add `sandbox-process` (process supervision, not
-an OS sandbox) and `tools-shell` to a distribution file, and assign
+General program execution is opt-in. Add `tools-shell` to a distribution file
+next to `sandbox-process` (process supervision, not an OS sandbox), and assign
 `shell.exec` in the policy:
 
 ```toml

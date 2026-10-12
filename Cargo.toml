@@ -23,6 +23,7 @@ members = [
     "plugins/session-jsonl",
     "plugins/tools-shell",
     "plugins/tools-builtin",
+    "plugins/tools-repo",
 ]
 # rah-desktop is legacy and scheduled for removal (pivot plan phase P5); it is
 # still built and tested by `--workspace`, but not by a bare `cargo build`.
@@ -49,6 +50,7 @@ default-members = [
     "plugins/session-jsonl",
     "plugins/tools-shell",
     "plugins/tools-builtin",
+    "plugins/tools-repo",
 ]
 resolver = "3"
 

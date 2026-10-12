@@ -45,6 +45,7 @@ pub fn headless(dir: &TempDir) -> Distribution {
         .retain(|spec| spec.kind != "frontend-cli");
     distribution.set_config("session-jsonl", "dir", json!(path(&dir.sessions())));
     distribution.set_config("tools-builtin", "root", json!(path(&dir.workspace())));
+    distribution.set_config("sandbox-process", "root", json!(path(&dir.workspace())));
     distribution
 }
 

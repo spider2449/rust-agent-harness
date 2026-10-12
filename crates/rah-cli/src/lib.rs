@@ -12,6 +12,7 @@ use rah_plugin_policy_authority::PolicyAuthorityPlugin;
 use rah_plugin_sandbox_process::SandboxProcessPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
+use rah_plugin_tools_repo::RepoToolsPlugin;
 use rah_plugin_tools_shell::ShellToolsPlugin;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,7 +22,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 10] = [
+    let entries: [(&'static str, Constructor); 11] = [
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
@@ -37,6 +38,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         }),
         ("session-jsonl", |id| Arc::new(JsonlSessionPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
+        ("tools-repo", |id| Arc::new(RepoToolsPlugin::new(id))),
         ("tools-shell", |id| Arc::new(ShellToolsPlugin::new(id))),
     ];
     entries.into_iter().collect()
@@ -52,8 +54,9 @@ pub struct Preset {
     pub guarded: bool,
 }
 
-/// Built-in presets. All share built-in tools, JSONL sessions, the default
-/// loop and the terminal frontend. Every preset except `minimal` mounts
+/// Built-in presets. All share built-in tools, read-only repository tools
+/// over `sandbox-process`, JSONL sessions, the default loop and the terminal
+/// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
 pub const PRESETS: [Preset; 4] = [
     Preset {
@@ -79,11 +82,11 @@ pub const PRESETS: [Preset; 4] = [
 ];
 
 /// Mounted first, so no tool call can run before the policy is in place.
-/// Every built-in tool has an explicit assignment; anything else is denied.
+/// Every preset tool has an explicit assignment; anything else is denied.
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -94,6 +97,13 @@ config = { dir = ".rah/sessions" }
 [[plugin]]
 use = "tools-builtin"
 config = { root = "." }
+
+[[plugin]]
+use = "sandbox-process"
+config = { root = "." }
+
+[[plugin]]
+use = "tools-repo"
 
 [[plugin]]
 use = "{MODEL}"

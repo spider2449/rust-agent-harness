@@ -2,6 +2,20 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P4)
 
+### P4: `tools-repo`
+
+- New plugin `tools-repo` (requires `sandbox`) with read-only `repo.status`,
+  `repo.diff` (unstaged, or `staged`, optionally per path), `repo.list`
+  (tracked direct children) and `repo.search` (`path` or literal `text`
+  mode), declared `read`.
+- Git runs through the sandbox with the legacy hardening environment plus
+  literal pathspecs, only at the top level of a work tree, with validated
+  repository-relative paths and bounded output. `repo.diff-staged` becomes
+  `repo.diff` with `staged`; `repo.file-info` and `repo.stats` are not ported
+  yet.
+- Every preset now mounts `sandbox-process` and `tools-repo`; the preset
+  policy assigns `repo.*` = `read`.
+
 ### P4: `sandbox-process`, `tools-shell` and terminal approval
 
 - `rah-api` gains the `sandbox` service: `ExecEnv::run(ProgramSpec, cancel)`
