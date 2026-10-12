@@ -780,6 +780,7 @@ async function start() {
   });
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
+  setupSettings();
   $("session-search").addEventListener("input", renderSessions);
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));

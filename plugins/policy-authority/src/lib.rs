@@ -11,11 +11,16 @@
 //!   can never grant one.
 //! - The effective level maps to Allow when it is listed in `allow`, to Ask
 //!   when it is listed in `ask`, and to Deny otherwise.
+//! - `decisions` fixes `allow`, `ask` or `deny` for a tool name or `prefix*`
+//!   pattern (matched like `tools`). A matching decision replaces the rules
+//!   above for that tool: the host can turn off one tool of a pattern, ask
+//!   before a read, or allow a write without asking. It is host
+//!   configuration; tool metadata still cannot grant anything.
 //!
 //! Configuration (all fields optional):
 //!
 //! ```toml
-//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" } }
+//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" }, decisions = { "repo.patch" = "deny" } }
 //! ```
 //!
 //! The defaults are `allow = ["none", "read"]`, `ask = ["write", "execute"]`
@@ -82,6 +87,19 @@ pub struct PolicyConfig {
     /// Host permission assignments by tool name or `prefix*` pattern.
     #[serde(default)]
     pub tools: BTreeMap<String, PermissionLevel>,
+    /// Host decisions by tool name or `prefix*` pattern. A matching decision
+    /// replaces the level rules for that tool.
+    #[serde(default)]
+    pub decisions: BTreeMap<String, Decision>,
+}
+
+/// A decision the host fixes for a tool.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Allow,
+    Ask,
+    Deny,
 }
 
 impl Default for PolicyConfig {
@@ -90,6 +108,7 @@ impl Default for PolicyConfig {
             allow: default_allow(),
             ask: default_ask(),
             tools: BTreeMap::new(),
+            decisions: BTreeMap::new(),
         }
     }
 }
@@ -102,14 +121,56 @@ fn default_ask() -> Vec<PermissionLevel> {
     vec![PermissionLevel::Write, PermissionLevel::Execute]
 }
 
+/// Tool names and `prefix*` patterns: exact names win, then the longest
+/// prefix.
+#[derive(Clone, Debug)]
+struct Patterns<T> {
+    exact: BTreeMap<String, T>,
+    /// Longest prefix first.
+    prefixes: Vec<(String, T)>,
+}
+
+impl<T: Copy> Patterns<T> {
+    fn new(entries: BTreeMap<String, T>, what: &str) -> Result<Self, String> {
+        let mut exact = BTreeMap::new();
+        let mut prefixes = Vec::new();
+        for (pattern, value) in entries {
+            match pattern.split_once('*') {
+                None if pattern.is_empty() => {
+                    return Err(format!("tool {what} names must not be empty"));
+                }
+                None => {
+                    exact.insert(pattern, value);
+                }
+                Some((prefix, "")) => prefixes.push((prefix.to_owned(), value)),
+                Some(_) => {
+                    return Err(format!(
+                        "tool pattern `{pattern}` may contain `*` only as its last character"
+                    ));
+                }
+            }
+        }
+        prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+        Ok(Self { exact, prefixes })
+    }
+
+    fn get(&self, name: &str) -> Option<T> {
+        self.exact.get(name).copied().or_else(|| {
+            self.prefixes
+                .iter()
+                .find(|(prefix, _)| name.starts_with(prefix.as_str()))
+                .map(|(_, value)| *value)
+        })
+    }
+}
+
 /// A validated policy.
 #[derive(Clone, Debug)]
 pub struct Policy {
     allow: Vec<PermissionLevel>,
     ask: Vec<PermissionLevel>,
-    exact: BTreeMap<String, PermissionLevel>,
-    /// Prefix patterns, longest prefix first.
-    prefixes: Vec<(String, PermissionLevel)>,
+    assignments: Patterns<PermissionLevel>,
+    decisions: Patterns<Decision>,
 }
 
 impl Policy {
@@ -120,47 +181,39 @@ impl Policy {
                 level_name(*level)
             ));
         }
-        let mut exact = BTreeMap::new();
-        let mut prefixes = Vec::new();
-        for (pattern, level) in config.tools {
-            match pattern.split_once('*') {
-                None if pattern.is_empty() => {
-                    return Err("tool assignment names must not be empty".to_owned());
-                }
-                None => {
-                    exact.insert(pattern, level);
-                }
-                Some((prefix, "")) => prefixes.push((prefix.to_owned(), level)),
-                Some(_) => {
-                    return Err(format!(
-                        "tool pattern `{pattern}` may contain `*` only as its last character"
-                    ));
-                }
-            }
-        }
-        prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
         Ok(Self {
             allow: config.allow,
             ask: config.ask,
-            exact,
-            prefixes,
+            assignments: Patterns::new(config.tools, "assignment")?,
+            decisions: Patterns::new(config.decisions, "decision")?,
         })
     }
 
     /// The host assignment for a tool name, if any.
     pub fn assignment(&self, name: &str) -> Option<PermissionLevel> {
-        self.exact.get(name).copied().or_else(|| {
-            self.prefixes
-                .iter()
-                .find(|(prefix, _)| name.starts_with(prefix.as_str()))
-                .map(|(_, level)| *level)
-        })
+        self.assignments.get(name)
     }
 
     /// Decides one call. `definition` comes from the tool provider; only its
-    /// name and a stricter declared permission are taken into account.
+    /// name and a stricter declared permission are taken into account. A
+    /// host decision for the tool replaces the level rules; it comes from
+    /// the host's configuration, never from tool metadata.
     pub fn decide(&self, definition: &ToolDefinition) -> ToolDecision {
         let name = definition.name.as_str();
+        match self.decisions.get(name) {
+            Some(Decision::Allow) => return ToolDecision::Allow,
+            Some(Decision::Ask) => {
+                return ToolDecision::Ask {
+                    reason: format!("the policy asks before tool `{name}` runs"),
+                };
+            }
+            Some(Decision::Deny) => {
+                return ToolDecision::Deny {
+                    reason: format!("tool `{name}` is turned off in the policy"),
+                };
+            }
+            None => {}
+        }
         let Some(assigned) = self.assignment(name) else {
             return ToolDecision::Deny {
                 reason: format!("tool `{name}` has no permission assignment"),

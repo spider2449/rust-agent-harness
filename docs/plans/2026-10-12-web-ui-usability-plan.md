@@ -23,6 +23,7 @@
 
 ## U3:設定頁
 
-- [ ] 工具權限:列出每個工具，用表單設定 allow／ask／deny，寫回 `policy-authority` 的設定。
-- [ ] 其他設定:system prompt(`context-default`)、模型位址和參數(`model-llamacpp`／`model-openai`)、loop 參數，用表單而不是 JSON。
-- 表單的欄位需要 plugin 提供設定的描述(schema)，或在 UI 端為內建 plugin 寫死。開始前先決定。
+- [x] 工具權限:列出每個工具，用表單設定 allow／ask／deny，寫回 `policy-authority` 的設定。
+- [x] 其他設定:system prompt(`context-default`)、模型位址和參數(`model-llamacpp`／`model-openai`)、loop 參數，用表單而不是 JSON。
+- 決定:表單由 UI 為內建 plugin 寫死(`assets/settings.js`)，不另做 plugin 設定 schema;其他 plugin 繼續用 Plugins 面板的 JSON。每個表單只改自己的欄位，其餘設定保留。
+- 決定:原本的 policy 只能指定等級，而工具宣告的等級只能讓決定更嚴格，表達不了「允許某個寫入工具」或「關掉萬用字元裡的某一個工具」，所以 `policy-authority` 新增 `decisions`(由主機設定的單一工具決定)。

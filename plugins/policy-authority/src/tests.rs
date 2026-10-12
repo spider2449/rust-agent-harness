@@ -100,6 +100,8 @@ fn invalid_configurations_are_rejected() {
         json!({ "tools": { "": "read" } }),
         json!({ "tools": { "a*b": "read" } }),
         json!({ "tools": { "a**": "read" } }),
+        json!({ "decisions": { "": "deny" } }),
+        json!({ "decisions": { "a*b": "allow" } }),
     ] {
         let parsed: PolicyConfig = serde_json::from_value(config.clone()).unwrap();
         assert!(Policy::new(parsed).is_err(), "{config}");
@@ -107,9 +109,48 @@ fn invalid_configurations_are_rejected() {
     for config in [
         json!({ "tools": { "a": "admin" } }),
         json!({ "deny": ["read"] }),
+        json!({ "decisions": { "a": "maybe" } }),
     ] {
         assert!(serde_json::from_value::<PolicyConfig>(config).is_err());
     }
+}
+
+#[test]
+fn host_decisions_replace_the_level_rules_for_their_tools() {
+    let policy = parse(json!({
+        "tools": { "repo.*": "read", "fs.read": "read" },
+        "decisions": {
+            "repo.patch": "allow",
+            "repo.status": "deny",
+            "fs.read": "ask",
+            "mcp.*": "deny",
+            "mcp.files.read": "allow",
+        }
+    }));
+    // A host decision can allow a tool that declares `write`, and needs no
+    // level assignment.
+    assert_eq!(
+        policy.decide(&definition("repo.patch", PermissionLevel::Write)),
+        ToolDecision::Allow
+    );
+    assert_eq!(
+        policy.decide(&definition("mcp.files.read", PermissionLevel::Read)),
+        ToolDecision::Allow
+    );
+    // A pattern assignment can be turned off for one tool.
+    let reason = deny_reason(policy.decide(&definition("repo.status", PermissionLevel::Read)));
+    assert!(reason.contains("turned off"), "{reason}");
+    assert_eq!(
+        policy.decide(&definition("repo.diff", PermissionLevel::Read)),
+        ToolDecision::Allow
+    );
+    deny_reason(policy.decide(&definition("mcp.web.fetch", PermissionLevel::None)));
+    assert!(matches!(
+        policy.decide(&definition("fs.read", PermissionLevel::Read)),
+        ToolDecision::Ask { .. }
+    ));
+    // Tools without a decision follow the levels; unassigned ones stay denied.
+    deny_reason(policy.decide(&definition("shell.exec", PermissionLevel::Execute)));
 }
 
 struct Counter {

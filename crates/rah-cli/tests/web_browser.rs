@@ -214,6 +214,22 @@ impl Page {
         .await;
     }
 
+    /// Saves a PNG of the page as `<name>.png` in `RAH_TEST_SCREENSHOT_DIR`,
+    /// when it is set, for looking at the UI; otherwise does nothing.
+    async fn screenshot(&mut self, name: &str) {
+        let Some(dir) = std::env::var_os("RAH_TEST_SCREENSHOT_DIR") else {
+            return;
+        };
+        let shot = self
+            .call("Page.captureScreenshot", json!({ "format": "png" }))
+            .await;
+        let data = shot["data"].as_str().unwrap_or_default();
+        let bytes = base64_decode(data);
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.png")), bytes).unwrap();
+    }
+
     /// Page errors: uncaught exceptions, `console.error` and browser log
     /// errors such as CSP violations and failed loads.
     fn errors(&self) -> Vec<&Value> {
@@ -788,4 +804,217 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     .await;
     page.eval("byId('ws-cancel').click(); true").await;
     assert_eq!(page.eval("byId('workspace-dialog').open").await, false);
+}
+
+/// Standard base64 (as DevTools returns screenshots), without a dependency.
+fn base64_decode(text: &str) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut buffer, mut bits) = (0_u32, 0_u32);
+    for sextet in text.bytes().filter_map(value) {
+        buffer = (buffer << 6) | u32::from(sextet);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn base64_decodes_padded_text() {
+    assert_eq!(base64_decode("aGVsbG8="), b"hello");
+    assert_eq!(base64_decode("UkFI"), b"RAH");
+}
+
+/// Clicks the settings tab `tab`.
+const TAB: &str = "[...document.querySelectorAll('#settings-tabs button')].find((b) => b.dataset.tab === '{tab}').click(); true";
+
+/// Clicks the settings button labelled `label`.
+fn save(label: &str) -> String {
+    format!(
+        "[...document.querySelectorAll('#settings-body button')].find((b) => b.textContent === '{label}').click()"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let web = start("web-browser-settings").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-settings");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait("the session", "!byId('input').disabled").await;
+
+    // Model: a new label for the mock model takes effect on the next turn.
+    page.eval("byId('open-settings').click(); true").await;
+    page.wait(
+        "the model form",
+        "byId('settings-dialog').open && !!document.querySelector('#settings-body select')",
+    )
+    .await;
+    page.screenshot("settings-model").await;
+    assert_eq!(
+        page.eval("document.querySelector('#settings-body select').value")
+            .await,
+        "model-mock"
+    );
+    page.eval(&format!(
+        "{{ document.querySelector('#settings-body input').value = 'Z'; {}; true }}",
+        save("Save model")
+    ))
+    .await;
+    page.wait(
+        "the saved model",
+        "byId('settings-message').textContent === 'Model saved.'",
+    )
+    .await;
+    page.send_message("/notool hi").await;
+    page.wait(
+        "the new label",
+        "idle() && transcript().includes('[Z] you said: hi')",
+    )
+    .await;
+
+    // A model that cannot start is reported, and the old one keeps working.
+    page.eval(&format!(
+        "{{ const kind = document.querySelector('#settings-body select'); kind.value = 'model-llamacpp'; \
+         kind.dispatchEvent(new Event('change')); \
+         document.querySelector('#settings-body input').value = 'http://example.com'; {}; true }}",
+        save("Save model")
+    ))
+    .await;
+    page.wait(
+        "the refused model",
+        "byId('settings-message').classList.contains('bad') && \
+         byId('settings-message').textContent.includes('was kept')",
+    )
+    .await;
+    assert_eq!(
+        page.eval("byId('status-model').textContent").await,
+        "model: model-mock"
+    );
+
+    // Assistant: the system prompt is saved; other options are kept.
+    page.eval(&TAB.replace("{tab}", "assistant")).await;
+    page.wait(
+        "the assistant form",
+        "!!document.querySelector('#settings-body textarea')",
+    )
+    .await;
+    page.screenshot("settings-assistant").await;
+    page.eval(&format!(
+        "{{ document.querySelector('#settings-body textarea').value = 'Be brief.'; {}; true }}",
+        save("Save assistant")
+    ))
+    .await;
+    page.wait(
+        "the saved assistant",
+        "byId('settings-message').textContent === 'Assistant saved.'",
+    )
+    .await;
+    let context = page
+        .eval(
+            "api('/plugins').then((list) => list.find((p) => p.kind === 'context-default').config)",
+        )
+        .await;
+    assert_eq!(context["system"], "Be brief.", "{context}");
+    assert!(context["memory_file"].is_string(), "{context}");
+
+    // Tools: turn `echo` off; the default choice shows what applies.
+    page.eval(&TAB.replace("{tab}", "tools")).await;
+    page.wait(
+        "the tools form",
+        "!!document.querySelector('#settings-body select[data-tool=\"echo\"]')",
+    )
+    .await;
+    page.screenshot("settings-tools").await;
+    let choice = |tool: &str| {
+        format!("document.querySelector('#settings-body select[data-tool=\"{tool}\"]')")
+    };
+    assert_eq!(
+        page.eval(&format!("{}.options[0].textContent", choice("echo")))
+            .await,
+        "Default (allowed)"
+    );
+    assert_eq!(
+        page.eval(&format!("{}.options[0].textContent", choice("repo.patch")))
+            .await,
+        "Default (asks first)"
+    );
+    page.eval(&format!(
+        "{{ {}.value = 'deny'; {}; true }}",
+        choice("echo"),
+        save("Save tools")
+    ))
+    .await;
+    page.wait(
+        "the saved tools",
+        "byId('settings-message').textContent === 'Tools saved.'",
+    )
+    .await;
+    page.send_message("hello").await;
+    page.wait(
+        "the turned-off tool",
+        "idle() && transcript().includes('turned off in the policy')",
+    )
+    .await;
+    let policy = page
+        .eval("api('/plugins').then((list) => list.find((p) => p.kind === 'policy-authority').config)")
+        .await;
+    assert_eq!(policy["decisions"]["echo"], "deny", "{policy}");
+    assert_eq!(
+        policy["tools"]["repo.*"], "read",
+        "assignments are kept: {policy}"
+    );
+
+    // Loop: switch to plan-and-execute.
+    page.eval(&TAB.replace("{tab}", "loop")).await;
+    page.wait(
+        "the loop form",
+        "!!document.querySelector('#settings-body select')",
+    )
+    .await;
+    page.eval(&format!(
+        "{{ const kind = document.querySelector('#settings-body select'); kind.value = 'loop-plan'; \
+         kind.dispatchEvent(new Event('change')); {}; true }}",
+        save("Save loop")
+    ))
+    .await;
+    page.wait(
+        "the new loop",
+        "byId('settings-message').textContent === 'Loop saved.' && \
+         byId('status-loop').textContent === 'loop: loop-plan'",
+    )
+    .await;
+    page.eval("byId('settings-close').click(); true").await;
+    assert_eq!(page.eval("byId('settings-dialog').open").await, false);
+
+    page.eval("true").await;
+    // The refused model answers 409; that network error is expected.
+    let unexpected: Vec<_> = page
+        .errors()
+        .into_iter()
+        .filter(|event| {
+            !event["params"]["entry"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("409")
+        })
+        .collect();
+    assert!(unexpected.is_empty(), "page errors: {unexpected:#?}");
 }

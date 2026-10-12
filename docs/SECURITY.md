@@ -50,6 +50,11 @@ The policy decides each call from its own configuration only:
   tool declares, so tool metadata can tighten but never grant.
 - The effective level is allowed when listed in `allow`, asked when listed in
   `ask`, and denied otherwise. A level listed in both is a configuration error.
+- A host decision (`decisions`, `allow`, `ask` or `deny` by exact name or
+  `prefix*` pattern, matched the same way) replaces these rules for its
+  tools. It is the user's configuration (the Web UI's Settings write it); it
+  can allow a tool that declares `write` without asking, turn off one tool of
+  a pattern, or ask before a read. Tool metadata still cannot grant anything.
 - An invalid configuration fails the plugin, and `rah` then refuses to boot
   instead of running unguarded.
 - `Ask` needs a `tool.approval` handler; without one it is a denial.

@@ -13,7 +13,8 @@
     <span id="guard" class="badge" hidden></span>
     <span id="connection" class="badge muted">connecting</span>
     <span class="spacer"></span>
-    <button id="toggle-plugins" type="button" class="ghost">Plugins</button>
+    <button id="open-settings" type="button">Settings</button>
+    <button id="toggle-plugins" type="button" class="ghost" title="Advanced: every plugin and its JSON configuration">Plugins</button>
   </header>
 
   <div id="approvals" class="approvals" aria-live="assertive"></div>
@@ -107,6 +108,21 @@
       <button id="ws-use" type="button">Use this folder</button>
     </div>
   </dialog>
+  <dialog id="settings-dialog" class="dialog settings" aria-labelledby="settings-title">
+    <div class="dialog-head">
+      <h2 id="settings-title">Settings</h2>
+      <button id="settings-close" type="button" class="ghost" aria-label="Close settings">Close</button>
+    </div>
+    <div id="settings-tabs" class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="model">Model</button>
+      <button type="button" role="tab" data-tab="assistant">Assistant</button>
+      <button type="button" role="tab" data-tab="tools">Tools</button>
+      <button type="button" role="tab" data-tab="loop">Loop</button>
+    </div>
+    <div id="settings-message" class="settings-message" hidden></div>
+    <div id="settings-body"></div>
+  </dialog>
+  <script src="/settings.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -82,6 +82,7 @@ use crate::approvals::Approvals;
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
+const SETTINGS_JS: &str = include_str!("../assets/settings.js");
 
 pub struct WebFrontendPlugin {
     manifest: PluginManifest,
@@ -196,6 +197,10 @@ fn router(shared: AppState) -> Router {
         .route(
             "/app.js",
             get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }),
+        )
+        .route(
+            "/settings.js",
+            get(|| async { asset("text/javascript; charset=utf-8", SETTINGS_JS) }),
         )
         .route(
             "/app.css",

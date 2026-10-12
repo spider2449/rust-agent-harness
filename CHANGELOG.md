@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Settings (U3)
+
+- `policy-authority`: new `decisions` (`allow`, `ask` or `deny` by tool name
+  or `prefix*` pattern, matched like `tools`). A matching host decision
+  replaces the level rules for that tool, so one tool of a pattern can be
+  turned off, a read can ask first, or a write can run without asking. Tool
+  metadata still cannot grant anything.
+- Web UI: a Settings dialog with forms instead of JSON. Model: provider
+  (llama.cpp, OpenAI, mock) with address, model name or API key variable;
+  changing the provider replaces the plugin and keeps the old one if the new
+  one does not start. Assistant: system prompt and history window
+  (`context-default`). Tools: one rule for reading tools and one for writing
+  tools and commands, and per tool Default (showing what applies), Allow,
+  Ask first or Off. Loop: standard or plan-and-execute, with their limits.
+  Each form changes only its own fields and keeps the rest of the
+  configuration. The Plugins panel stays for everything else.
+- Browser tests can save screenshots to `RAH_TEST_SCREENSHOT_DIR`.
+
 ### Status line
 
 - `rah-api` `ExecEnv`: new `root()` (default `None`), the directory programs
