@@ -123,9 +123,14 @@ impl Root {
             .open(&target)
             .await
             .map_err(|error| ToolError::Execution(format!("cannot create `{path}`: {error}")))?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, content.as_bytes())
-            .await
-            .map_err(|error| ToolError::Execution(format!("cannot write `{path}`: {error}")))?;
+        // A tokio file finishes writes in the background; flush waits for them
+        // so the content is on disk when the tool reports success.
+        let written = async {
+            tokio::io::AsyncWriteExt::write_all(&mut file, content.as_bytes()).await?;
+            tokio::io::AsyncWriteExt::flush(&mut file).await
+        }
+        .await;
+        written.map_err(|error| ToolError::Execution(format!("cannot write `{path}`: {error}")))?;
         Ok(())
     }
 
