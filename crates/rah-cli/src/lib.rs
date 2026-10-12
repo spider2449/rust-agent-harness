@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_frontend_cli::CliFrontendPlugin;
+use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
@@ -125,6 +126,8 @@ pub enum BootError {
     UnknownPreset(String),
     #[error("unknown plugin `{0}`; available: {1}")]
     UnknownPlugin(String, String),
+    #[error("{0}")]
+    Process(String),
     #[error("policy plugin `{0}` is not active ({1}); refusing to run unguarded")]
     PolicyInactive(PluginId, String),
     #[error(transparent)]
@@ -195,24 +198,46 @@ impl Distribution {
     }
 }
 
+/// The `use` name of out-of-process plugins (protocol v2); their `config`
+/// says how to start them.
+pub const PROCESS_PLUGIN: &str = "process";
+
 /// Mounts every plugin in order and returns the resulting statuses. A
 /// configured `policy-authority` that does not become active aborts the boot
-/// before any later plugin (such as a frontend) is mounted.
+/// before any later plugin (such as a frontend) is mounted. A process plugin
+/// is started once first to read its manifest.
 pub async fn boot(
     kernel: &Kernel,
     distribution: &Distribution,
 ) -> Result<Vec<(PluginId, PluginStatus)>, BootError> {
     let catalog = catalog();
     for spec in &distribution.plugin {
-        let constructor = catalog.get(spec.kind.as_str()).ok_or_else(|| {
-            let names: Vec<&str> = catalog.keys().copied().collect();
-            BootError::UnknownPlugin(spec.kind.clone(), names.join(", "))
-        })?;
+        let plugin: Arc<dyn Plugin> = if spec.kind == PROCESS_PLUGIN {
+            if spec.id.is_none() {
+                return Err(BootError::Process(
+                    "a `process` plugin needs an `id`".to_owned(),
+                ));
+            }
+            Arc::new(
+                ProcessPlugin::describe(spec.plugin_id(), &spec.config)
+                    .await
+                    .map_err(BootError::Process)?,
+            )
+        } else {
+            let constructor = catalog.get(spec.kind.as_str()).ok_or_else(|| {
+                let names: Vec<&str> = catalog.keys().copied().collect();
+                BootError::UnknownPlugin(
+                    spec.kind.clone(),
+                    format!("{}, {PROCESS_PLUGIN}", names.join(", ")),
+                )
+            })?;
+            constructor(spec.plugin_id())
+        };
         let mut options = MountOptions::with_config(spec.config.clone());
         for (service, instance) in &spec.bind {
             options = options.bind(service.as_str(), instance.clone());
         }
-        let status = kernel.mount(constructor(spec.plugin_id()), options).await?;
+        let status = kernel.mount(plugin, options).await?;
         if spec.kind == "policy-authority" && status != PluginStatus::Active {
             return Err(BootError::PolicyInactive(
                 spec.plugin_id(),

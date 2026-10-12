@@ -351,9 +351,11 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - [x] `sandbox-process`、`tools-shell`（opt-in）＋ CLI 的 `Ask` 確認（2026-10-12 完成）
 - [x] `tools-repo`（唯讀；2026-10-12 完成）
 - [x] `tools-mcp`（2026-10-12 完成）
-- [ ] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（例如 Python 寫的 tool）
-- [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition`、`rah-session`
+- [x] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（Python 寫的 tool；2026-10-12 完成）
+- [x] 刪除 `rah-session`（2026-10-12）
+- [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition` → **延到 P5**（2026-10-12 決定：legacy Desktop 透過 `rah-profile-composition` 依賴它和 `rah-tools-mcp`，和 Desktop 一起移除）
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
+- 結果（2026-10-12）：三項驗收都有自動化測試（`crates/rah-cli/tests/binary.rs`、`policy.rs`；`crates/rah-plugin-host-process/tests/process.rs`）。
 - 實作備註（policy-authority，2026-10-12）：
   - 設定：`allow`、`ask`（permission level 清單，預設 `["none","read"]`、`["write","execute"]`）和 `tools`（tool 名稱或結尾 `*` 的前綴 → level）。同一 level 同時出現在 `allow` 和 `ask` 是設定錯誤，plugin 為 `Failed`。
   - 決策只看 policy 自己的設定：沒有指派 → Deny；有效 level 取「指派」和「tool 自報」中較嚴格者，所以 tool metadata 只能收緊、不能授權（legacy 的 external permission 指派規則推廣到所有 tool）。
@@ -383,10 +385,17 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - server 發來的 request 除了 `ping` 以外一律回 `-32601`；未知 id 的 response（已取消的請求）忽略，不視為協定錯誤（legacy 會斷線）。
   - 測試用 in-process 的腳本化 server（duplex pipe）。真實 stdio 只做了手動驗證（`rah` + legacy `rah-mcp-echo-server` + `sandbox-process`），沒有自動化測試。
 
+- 實作備註（process plugin host，2026-10-12）：
+  - 新 crate `crates/rah-plugin-host-process`（只依賴 `rah-api`、`rah-protocol`，架構測試強制）。協定文件在 `docs/PROCESS_PLUGINS.md`。
+  - Manifest 由 plugin 在 `initialize` 回報。因為 kernel 在 mount 前就需要 manifest，`rah` 開機時先啟動一次 plugin 讀 manifest 再關掉；之後每次 apply 都啟動新的 process，並檢查 services 和開機時相同（tool 清單可以變）。
+  - v2 目前只支援：provide `tools`、requires／optional 只能是 `session`、host 提供 `session.list`／`session.read`。hook、其他 service、event 延後。
+  - Process 不經過 `sandbox` service：plugin 是使用者掛載的受信任程式碼，而 sandbox 本身也是 plugin，可能沒掛。host 只做 env 清空、kill on drop；不追蹤子孫 process。
+  - `rah` 的 `use = "process"` 必須有 `id`。
+
 ### P5：Web frontend
 - [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）
 - [ ] `context-default`（sliding window、記憶）
-- [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）
+- [ ] 刪除 `rah-desktop`（或另開選配的 `frontend-tauri` 殼，只內嵌 Web UI）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）、`rah-profile-composition`、`rah-tools-plugin`、`rah-tools-mcp`、`rah-tools`、`rah-sandbox`（從 P4 延後）
 - 驗收：功能上可以取代 desktop 的日常使用；**在 UI 上切換 model 和 loop plugin 不需要重啟**
 
 ### P6：生態擴充

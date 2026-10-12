@@ -2808,6 +2808,7 @@ dependencies = [
  "futures",
  "rah-api",
  "rah-plugin-frontend-cli",
+ "rah-plugin-host-process",
  "rah-plugin-loop-react",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
@@ -2881,6 +2882,19 @@ dependencies = [
  "rah-api",
  "rah-protocol",
  "serde",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-host-process"
+version = "0.35.0"
+dependencies = [
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -3068,18 +3082,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rah-session"
-version = "0.35.0"
-dependencies = [
- "async-trait",
- "futures",
- "rah-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]

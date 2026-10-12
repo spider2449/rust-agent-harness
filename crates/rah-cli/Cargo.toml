@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 rah-api = { path = "../rah-api" }
+rah-plugin-host-process = { path = "../rah-plugin-host-process" }
 rah-plugin-frontend-cli = { path = "../../plugins/frontend-cli" }
 rah-plugin-loop-react = { path = "../../plugins/loop-react" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }

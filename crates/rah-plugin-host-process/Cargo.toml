@@ -1,0 +1,23 @@
+[package]
+name = "rah-plugin-host-process"
+version.workspace = true
+edition.workspace = true
+description = "Process plugin host: mounts out-of-process plugins over JSON-RPC 2.0 on stdio (protocol v2)"
+
+[dependencies]
+futures.workspace = true
+rah-api = { path = "../rah-api" }
+rah-protocol = { path = "../rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+
+# Test fixture: a process plugin written in Rust (see tests/process.rs).
+[[bin]]
+name = "rah-process-plugin-fixture"
+path = "src/bin/fixture.rs"
+test = false

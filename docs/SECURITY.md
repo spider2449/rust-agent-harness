@@ -112,6 +112,25 @@ configuration; its messages and metadata are untrusted:
 - Server-to-client requests other than `ping` are refused, so a server cannot
   ask RAH for sampling, roots or elicitation.
 
+## Process plugins
+
+A plugin mounted with `use = "process"` ([protocol v2](PROCESS_PLUGINS.md)) is
+trusted code like any mounted plugin. The host:
+
+- starts it with a fixed program and argument vector, a cleared environment
+  refilled from `inherit_env` and `env`, and piped stdio;
+- bounds every message, applies startup and call timeouts, and never replays a
+  call (`write` and `execute` tools record `uncertain` effects on timeout,
+  cancellation or a lost connection);
+- refuses any `service/call` for a service outside the plugin's own
+  `requires` (error `-32003`), even when that service is mounted;
+- fails the start when the manifest differs from the one read at boot;
+- kills the child when the plugin's scope is disposed. Descendants of the
+  child are not tracked: this is supervision, not isolation.
+
+The tools a process plugin provides still pass through `ToolInvoker` and the
+policy like any other tool.
+
 ## `tools-repo`
 
 `tools-repo` provides `repo.status`, `repo.diff`, `repo.list` and

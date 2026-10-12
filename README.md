@@ -9,12 +9,13 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 ## Status
 
-`master` has completed **phase P3** of the
-[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
-and is working through P4: the kernel, the service contracts (`rah-api`), the
-plugins and the `rah` binary run end to end with a mock model, and with OpenAI
-or llama.cpp through the Responses API. Tool calls are guarded by the
-fail-closed `policy-authority` plugin. The architecture decision is
+`master` has completed **phase P4** of the
+[plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md):
+the kernel, the service contracts (`rah-api`), the plugins and the `rah` binary
+run end to end with a mock model, and with OpenAI or llama.cpp through the
+Responses API. Tool calls are guarded by the fail-closed `policy-authority`
+plugin, and tools come from built-in, repository, shell, MCP and
+out-of-process plugins. The architecture decision is
 [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy
 crates still build and behave as in v0.35.0 while they are transformed phase by
 phase. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
@@ -88,6 +89,19 @@ config = { server = "files", program = "my-mcp-server", args = ["--stdio"], tool
 
 The server is started through `sandbox-process` (cleared environment,
 working directory inside the sandbox root) and ends with the plugin.
+
+Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
+on stdio ([protocol v2](docs/PROCESS_PLUGINS.md)). The Python example
+[`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools
+and reads the session log through the host, which allows only the services
+the plugin lists in `requires`:
+
+```toml
+[[plugin]]
+use = "process"
+id = "word-tools"
+config = { program = "python", args = ["examples/process-plugins/word_tools.py"] }
+```
 
 Real models use the same composition with a different model plugin:
 

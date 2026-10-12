@@ -2,6 +2,26 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P4)
 
+### P4: process plugins (protocol v2) and cleanup
+
+- New crate `rah-plugin-host-process` (depends on `rah-api` and
+  `rah-protocol` only): plugins as child processes speaking newline-delimited
+  JSON-RPC 2.0 on stdio, documented in `docs/PROCESS_PLUGINS.md`. A process
+  plugin declares its manifest in `initialize`, may provide `tools`, and may
+  call the host's `session` service (`list`, `read`) through `service/call`
+  only if `session` is in its `requires`; other services are refused with
+  `-32003`. Calls are bounded, cancellable (`$/cancel`) and never replayed.
+- `rah` mounts process plugins with `use = "process"` (an `id` is required).
+  It starts each one once at boot to read the manifest; every later start
+  must report the same services.
+- Example: `examples/process-plugins/word_tools.py` (Python, standard library
+  only). The host is tested with a Rust fixture plugin; the Python example
+  runs end to end when a Python 3 interpreter is on PATH and is skipped
+  otherwise.
+- `rah-session` is removed. `rah-tools-plugin`, `rah-tools-mcp` and
+  `rah-profile-composition` stay until P5, because the legacy Desktop still
+  composes its profile with them.
+
 ### P4: `tools-mcp`
 
 - `rah-api`: `ExecEnv::spawn(SpawnSpec)` starts a long-running program with

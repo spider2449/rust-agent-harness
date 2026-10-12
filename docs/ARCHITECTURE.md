@@ -67,7 +67,7 @@ Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
 
-## Current state (transitional, phase P4 in progress)
+## Current state (transitional, after phase P4)
 
 Implemented:
 
@@ -85,6 +85,10 @@ Implemented:
   per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
   requires `sandbox`); and `frontend-cli`, which also answers `tool.approval`
   on the terminal.
+- `rah-plugin-host-process`: out-of-process plugins over JSON-RPC 2.0 on
+  stdio ([protocol v2](PROCESS_PLUGINS.md)). They may provide `tools` and call
+  the host's `session` service only if it is in their `requires`. `rah` mounts
+  them with `use = "process"`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
   `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
   except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
@@ -103,10 +107,12 @@ The remaining legacy crates are transformed or removed phase by phase:
 | `rah-runtime-openai` | ported to `model-responses` (P3); removed together with Desktop | P5 |
 | `rah-runtime`, `rah-model` | replaced by `rah-api` and the model plugins; removed together with Desktop | P5 |
 | `rah-tools` | `Tool` moved to `rah-api`; read-only tools ported to `tools-builtin`, `tools-repo` and `tools-shell`, authorization to `policy-authority`; the crate is removed with Desktop | P5 |
-| `rah-tools-mcp` | ported to `tools-mcp` (P4); removed with `rah-profile-composition` | P4 |
-| `rah-tools-plugin` | generalized into `rah-plugin-host-process` | P4 |
+| `rah-tools-mcp` | ported to `tools-mcp` (P4); removed together with Desktop | P5 |
+| `rah-tools-plugin` | generalized into `rah-plugin-host-process` (P4); removed together with Desktop | P5 |
 | `rah-sandbox` | ported to `sandbox-process` (P4); removed with the legacy tools and Desktop | P5 |
-| `rah-session`, `rah-profile-composition` | removed | P4 |
+| `rah-profile-composition` | removed together with Desktop, which still composes the legacy profile with it | P5 |
+
+`rah-session` was removed in P4.
 | `rah-desktop` | legacy, excluded from default members; removed once `frontend-web` reaches parity | P5 |
 
 Removed in P0: `rah-runtime-codex` (the Codex adapter and its certification
