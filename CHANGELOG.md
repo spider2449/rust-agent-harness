@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### WASM: cancelled calls are interrupted
+
+- `rah-plugin-host-wasm` enables wasmtime epoch interruption. Dropping a
+  tool call, which is how `ToolInvoker` cancels, marks that call and moves
+  the engine epoch; the marked guest traps at its next epoch check and frees
+  its blocking thread. Unmarked calls of the same plugin continue.
+  Previously a cancelled guest ran until it returned or its fuel ran out.
+- Test: with a single blocking thread, a spinning guest with practically
+  unlimited fuel is cancelled and the next call still runs.
+
 ### Web UI browser test
 
 - New test `crates/rah-cli/tests/web_browser.rs` drives the embedded Web UI

@@ -95,6 +95,9 @@ component fails to instantiate.
 
 ## Limits
 
-A call that its caller cancels keeps running on its blocking thread until it
-returns or exhausts its fuel; the result is discarded. Fuel and memory bound
-every call.
+Fuel and memory bound every call. A call that its caller cancels is
+interrupted (wasmtime epoch interruption): the guest traps at its next epoch
+check, normally within microseconds, and releases its blocking thread; the
+result is discarded. Other calls of the same plugin are not affected. A
+guest blocked inside `call-service` is interrupted once that host call
+returns.

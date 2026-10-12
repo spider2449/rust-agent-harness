@@ -15,13 +15,24 @@
 //! network, clock, randomness or environment; its only way out is
 //! `call-service`. Every call runs in a fresh store on a blocking thread with
 //! a fuel budget (`fuel`, per call) and a memory cap (`max_memory_mb`). A
-//! guest that runs out of fuel traps, and the call fails.
+//! guest that runs out of fuel traps, and the call fails. Dropping a call
+//! (which is how a cancelled caller stops waiting) interrupts its guest at
+//! the next epoch check, so the blocking thread is released promptly; other
+//! calls of the same plugin keep running.
 //!
 //! `rah` mounts a component with `use = "wasm"`, `id`, and `config = { path =
 //! "plugin.wasm" }` (binary or text format). It reads the manifest once at
 //! boot; the manifest is fixed for the plugin's lifetime.
 
-use std::{collections::BTreeSet, path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
@@ -32,7 +43,7 @@ use rah_protocol::{SessionId, ToolContent, ToolDefinition, ToolOutput};
 use serde::Deserialize;
 use serde_json::Value;
 use wasmtime::{
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
+    Config, Engine, Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline,
     component::{Component, HasSelf, Linker},
 };
 
@@ -141,6 +152,23 @@ struct HostState {
     session: Option<Arc<dyn SessionLog>>,
     runtime: Option<tokio::runtime::Handle>,
     limits: StoreLimits,
+    /// Set when the caller is gone; checked whenever the engine epoch moves.
+    interrupted: Arc<AtomicBool>,
+}
+
+/// Interrupts one call's guest when dropped: it marks the call and moves
+/// the engine epoch, so every running guest checks its own mark. A guest
+/// that is not marked continues.
+struct Interrupt {
+    engine: Engine,
+    interrupted: Arc<AtomicBool>,
+}
+
+impl Drop for Interrupt {
+    fn drop(&mut self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+        self.engine.increment_epoch();
+    }
 }
 
 impl bindings::rah::plugin::host::Host for HostState {
@@ -196,6 +224,7 @@ impl Runtime {
     fn load(config: &WasmConfig) -> Result<Self, String> {
         let mut engine_config = Config::new();
         engine_config.consume_fuel(true);
+        engine_config.epoch_interruption(true);
         let engine = Engine::new(&engine_config).map_err(|error| error.to_string())?;
         let component = Component::from_file(&engine, &config.path)
             .map_err(|error| format!("cannot load `{}`: {error:#}", config.path.display()))?;
@@ -217,6 +246,7 @@ impl Runtime {
         requires: Arc<Vec<String>>,
         session: Option<Arc<dyn SessionLog>>,
         runtime: Option<tokio::runtime::Handle>,
+        interrupted: Arc<AtomicBool>,
         call: impl FnOnce(&Guest, &mut Store<HostState>) -> wasmtime::Result<R>,
     ) -> Result<R, String> {
         let state = HostState {
@@ -226,9 +256,18 @@ impl Runtime {
             limits: StoreLimitsBuilder::new()
                 .memory_size(self.max_memory)
                 .build(),
+            interrupted,
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|context| {
+            if context.data().interrupted.load(Ordering::SeqCst) {
+                Err(wasmtime::Error::msg("interrupted: the caller is gone"))
+            } else {
+                Ok(UpdateDeadline::Continue(1))
+            }
+        });
         store
             .set_fuel(self.fuel)
             .map_err(|error| error.to_string())?;
@@ -252,9 +291,13 @@ impl WasmPlugin {
             .map_err(|error| format!("WASM plugin `{id}`: {error}"))?;
         let described = tokio::task::spawn_blocking(move || {
             let runtime = Runtime::load(&config)?;
-            let manifest = runtime.run(Arc::new(Vec::new()), None, None, |guest, store| {
-                guest.call_manifest(store)
-            })?;
+            let manifest = runtime.run(
+                Arc::new(Vec::new()),
+                None,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                |guest, store| guest.call_manifest(store),
+            )?;
             Ok::<_, String>((runtime, parse_manifest(&manifest)?))
         })
         .await
@@ -329,11 +372,21 @@ impl Tool for WasmTool {
             self.session.clone(),
         );
         let handle = tokio::runtime::Handle::current();
-        // Fuel bounds the call; a cancelled caller stops waiting for it.
+        // Fuel bounds the call. A cancelled caller drops this future, and
+        // the guard interrupts the guest so its thread is not held.
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let _interrupt = Interrupt {
+            engine: runtime.engine.clone(),
+            interrupted: interrupted.clone(),
+        };
         let result = tokio::task::spawn_blocking(move || {
-            runtime.run(requires, session, Some(handle), |guest, store| {
-                guest.call_call_tool(store, &name, &input)
-            })
+            runtime.run(
+                requires,
+                session,
+                Some(handle),
+                interrupted,
+                |guest, store| guest.call_call_tool(store, &name, &input),
+            )
         })
         .await
         .map_err(|error| ToolError::Execution(error.to_string()))?

@@ -426,7 +426,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 新依賴 `wasmtime` 36（只開 `component-model`、`cranelift`、`runtime`、`std`、`wat`，不開 WASI）。理由：計畫指定 wasmtime＋WIT 作為 WASM plugin 的執行環境。
   - WIT world `rah:plugin/wasm-plugin`：guest 匯出 `manifest`（JSON：version、requires、tools）和 `call-tool`；host 只提供 `call-service`，且只允許 guest `requires` 內的 service（目前只有 `session` 的 `list`、`read`）。和 process plugin 一樣只能提供 `tools`。
   - 每次呼叫都在新的 store 中實例化（不保留狀態，trap 只影響該次呼叫），有 fuel（預設 1 億）和記憶體上限（預設 64 MB）。
-  - 已知限制：呼叫在 blocking thread 上執行，caller 取消後不會中斷 guest，要等它結束或 fuel 用完，結果丟棄。
+  - 已知限制：呼叫在 blocking thread 上執行，caller 取消後不會中斷 guest，要等它結束或 fuel 用完，結果丟棄。（2026-10-12 解決：改用 wasmtime epoch interruption，caller 取消時 guest 在下一個 epoch 檢查點 trap，不影響同一 plugin 的其他呼叫。）
   - 測試用 component text format 寫 guest，不需要 WebAssembly 編譯 target。
 - [x] `skills-fs`（2026-10-12 完成。沒有另設 `SkillSource` service：plugin 用 `model.before_request` 列出 skill，並提供 `skills.load` tool 按需載入全文）
 - [x] `scheduler-basic`（含 subagent；2026-10-12 完成。`rah-api` 新增 `scheduler` service；subagent 是 `agent.delegate` tool，在新 session 中巢狀執行一個 turn，有深度上限；`frontend-web` 提供 `/api/jobs`）

@@ -6,7 +6,7 @@
 //! service the guest did not require; `wasm.spin-forever` (17) never
 //! returns. Any other name fails with `invalid_input:`.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use rah_api::{
     CancellationToken, Kernel, MountOptions, Plugin, PluginError, PluginId, PluginManifest,
@@ -190,6 +190,15 @@ impl Plugin for SessionPlugin {
 }
 
 async fn call(kernel: &Kernel, name: &str, input: Value) -> (ToolOutput, ToolEffect) {
+    call_with(kernel, name, input, CancellationToken::new()).await
+}
+
+async fn call_with(
+    kernel: &Kernel,
+    name: &str,
+    input: Value,
+    cancel: CancellationToken,
+) -> (ToolOutput, ToolEffect) {
     let outcome = ToolInvoker::new(kernel.handle())
         .invoke(
             Invocation {
@@ -199,7 +208,7 @@ async fn call(kernel: &Kernel, name: &str, input: Value) -> (ToolOutput, ToolEff
                     name: ToolName::new(name),
                     input: ToolInput(input),
                 },
-                cancel: CancellationToken::new(),
+                cancel,
             },
             || {},
         )
@@ -278,6 +287,90 @@ async fn a_component_provides_tools_and_reaches_only_required_services() {
     // The guest is fresh on every call; it still works after a trap.
     let (output, _) = call(&kernel, "wasm.echo", json!({ "again": true })).await;
     assert_eq!(text(&output), r#"{"again":true}"#);
+}
+
+/// With one blocking thread, a guest that kept running after its caller
+/// cancelled would block every later call.
+#[test]
+fn cancelling_a_call_interrupts_its_guest() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(cancel_and_call_again())
+    }));
+    // A guest that was not interrupted still holds the blocking thread;
+    // do not wait for it, or a failure would hang instead of failing.
+    runtime.shutdown_background();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn cancel_and_call_again() {
+    let fixture = Fixture::new("cancel", &manifest(&[]));
+    // Enough fuel to spin for far longer than the test may take.
+    let config = json!({ "path": fixture.0, "fuel": u64::MAX / 2 });
+    let plugin = WasmPlugin::load(PluginId::new("wasm"), &config)
+        .await
+        .unwrap();
+    let kernel = Kernel::new();
+    kernel
+        .mount(Arc::new(plugin), MountOptions::with_config(config))
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let spinning = tokio::spawn({
+        let cancel = cancel.clone();
+        let kernel = kernel.handle();
+        async move {
+            let invoker = ToolInvoker::new(kernel);
+            invoker
+                .invoke(
+                    Invocation {
+                        session: SessionId::new(),
+                        call: ToolCall {
+                            id: ToolCallId::new(),
+                            name: ToolName::new("wasm.spin-forever"),
+                            input: ToolInput(json!({})),
+                        },
+                        cancel,
+                    },
+                    || {},
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !spinning.is_finished(),
+        "the guest should still be spinning"
+    );
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), spinning)
+        .await
+        .expect("the cancelled call returns")
+        .unwrap();
+    assert!(outcome.output.is_error);
+    assert_eq!(outcome.effect, ToolEffect::None);
+
+    // The only blocking thread is free again.
+    let (output, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        call_with(
+            &kernel,
+            "wasm.echo",
+            json!({ "after": "cancel" }),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("the interrupted guest released its thread");
+    assert_eq!(text(&output), r#"{"after":"cancel"}"#);
 }
 
 #[tokio::test(flavor = "multi_thread")]

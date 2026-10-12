@@ -14,4 +14,4 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 wasmtime = { version = "36.0.17", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
