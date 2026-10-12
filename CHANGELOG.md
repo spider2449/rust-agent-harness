@@ -2,6 +2,26 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P5)
 
+### P5: plugin management
+
+- `rah-api`: new `admin` service (`PluginAdmin`: `kinds`, `instance`,
+  `mount`, `unmount`, `configure`, `restart`, `replace`). `replace` mounts the
+  replacement (under the first free id) and unmounts the old plugin only once
+  the replacement is active; otherwise the old one is kept.
+- `rah` always mounts a `distribution` plugin first. It provides `admin` from
+  the distribution's catalog (including `process` plugins) and records the
+  kind and configuration of everything `rah` mounts. It refuses to unmount or
+  reconfigure itself. `boot` and `admin` share one constructor path.
+- `frontend-web`: `GET /api/catalog`, `POST /api/plugins`,
+  `DELETE /api/plugins/{id}`, `POST /api/plugins/{id}/restart`,
+  `PUT /api/plugins/{id}/config` and `POST /api/plugins/{id}/replace`, and a
+  Plugins panel in the UI to use them. `GET /api/plugins` now includes kind
+  and configuration.
+- Acceptance: an end-to-end test replaces the model and the loop over HTTP
+  while one WebSocket keeps running turns in one session; the next turn uses
+  the new model and the session history is intact. The Plugins panel itself
+  has not been exercised in a browser.
+
 ### P5: `frontend-web` (core)
 
 - New plugin `frontend-web` (`axum` 0.8 with WebSocket support; the first new

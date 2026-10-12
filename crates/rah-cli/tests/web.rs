@@ -309,3 +309,158 @@ async fn unmounting_the_frontend_closes_its_sockets() {
     .await;
     assert!(ended.is_ok(), "the socket stayed open after unmount");
 }
+
+impl Web {
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        reqwest::Client::new()
+            .request(method, format!("http://{}{path}", self.address))
+            .bearer_auth(&self.token)
+    }
+
+    async fn status(&self, request: reqwest::RequestBuilder) -> (u16, Value) {
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        (status, response.json().await.unwrap_or(Value::Null))
+    }
+}
+
+#[tokio::test]
+async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
+    use reqwest::Method;
+    let web = start("web-manage", |_| {}).await;
+    let catalog = web.json(web.get("/api/catalog")).await;
+    let kinds = catalog["kinds"].as_array().unwrap();
+    assert!(
+        kinds.contains(&json!("model-mock")) && kinds.contains(&json!("process")),
+        "{catalog}"
+    );
+    let plugins = web.json(web.get("/api/plugins")).await;
+    let find = |plugins: &Value, id: &str| {
+        plugins
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .cloned()
+    };
+    assert_eq!(find(&plugins, "model-mock").unwrap()["kind"], "model-mock");
+    assert_eq!(find(&plugins, "distribution").unwrap()["locked"], true);
+
+    // One socket and one session for the whole test: nothing restarts.
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+    let (_, text) = run_turn(&mut socket, &session, "one", None).await;
+    assert_eq!(text, "[model-mock] echo returned: one");
+
+    let (status, reply) = web
+        .status(
+            web.post("/api/plugins/model-mock/replace")
+                .json(&json!({ "kind": "model-mock", "config": { "label": "B" } })),
+        )
+        .await;
+    assert_eq!(
+        (status, reply["id"].as_str(), reply["state"].as_str()),
+        (200, Some("model-mock-2"), Some("active")),
+        "{reply}"
+    );
+    let (_, text) = run_turn(&mut socket, &session, "two", None).await;
+    assert_eq!(text, "[B] echo returned: two");
+
+    let (status, reply) = web
+        .status(
+            web.post("/api/plugins/loop-react/replace").json(
+                &json!({ "kind": "loop-react", "id": "loop-b", "config": { "max_rounds": 4 } }),
+            ),
+        )
+        .await;
+    assert_eq!(
+        (status, reply["id"].as_str()),
+        (200, Some("loop-b")),
+        "{reply}"
+    );
+    let (_, text) = run_turn(&mut socket, &session, "/notool three", None).await;
+    // Two earlier turns of four context items each: the history survived.
+    assert_eq!(text, "[B] you said: three (8 earlier items)");
+
+    let (status, _) = web
+        .status(
+            web.request(Method::PUT, "/api/plugins/model-mock-2/config")
+                .json(&json!({ "config": { "label": "C" } })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, text) = run_turn(&mut socket, &session, "four", None).await;
+    assert_eq!(text, "[C] echo returned: four");
+    assert_eq!(
+        web.status(web.post("/api/plugins/loop-b/restart")).await.0,
+        200
+    );
+
+    // A replacement that does not start keeps the plugin it would replace.
+    let (status, reply) = web
+        .status(web.post("/api/plugins/model-mock-2/replace").json(
+            &json!({ "kind": "model-llamacpp", "config": { "endpoint": "http://example.com" } }),
+        ))
+        .await;
+    assert_eq!(status, 409, "{reply}");
+    let (_, text) = run_turn(&mut socket, &session, "five", None).await;
+    assert_eq!(text, "[C] echo returned: five");
+
+    let (status, _) = web
+        .status(
+            web.post("/api/plugins")
+                .json(&json!({ "kind": "model-mock", "id": "spare", "config": { "label": "S" } })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        web.status(
+            web.post("/api/plugins")
+                .json(&json!({ "kind": "model-mock", "id": "spare" }))
+        )
+        .await
+        .0,
+        409
+    );
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/plugins/spare"))
+            .await
+            .0,
+        200
+    );
+    let plugins = web.json(web.get("/api/plugins")).await;
+    assert!(find(&plugins, "spare").is_none());
+    assert!(find(&plugins, "model-mock").is_none() && find(&plugins, "loop-react").is_none());
+
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/plugins/distribution"))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/plugins/missing"))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        web.status(
+            web.post("/api/plugins")
+                .json(&json!({ "kind": "model-gpt9" }))
+        )
+        .await
+        .0,
+        400
+    );
+    let unauthorized = reqwest::Client::new()
+        .post(format!("http://{}/api/plugins", web.address))
+        .json(&json!({ "kind": "model-mock", "id": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status().as_u16(), 401);
+}

@@ -97,3 +97,15 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
   .sidebar { display: none; }
   .plugins { position: fixed; inset: 48px 0 0 auto; background: var(--panel); }
 }
+
+.plugins .kind { display: block; color: var(--muted); font-size: 12px; }
+.plugins .row-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.plugins .row-actions button { font-size: 12px; padding: 0 6px; }
+.editor { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 6px; }
+.editor h3 { margin: 0; font-size: 13px; }
+.editor label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 12px; }
+.editor input, .editor select, .editor textarea {
+  font: 12px/1.4 ui-monospace, Consolas, monospace; padding: 4px; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.editor .buttons { display: flex; gap: 6px; justify-content: flex-end; }

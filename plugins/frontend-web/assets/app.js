@@ -265,17 +265,112 @@ function connect() {
 
 // ---- Plugins --------------------------------------------------------------
 
+// ---- Plugin management ----------------------------------------------------
+
+const editor = { mode: null, target: null };
+
+function report(error) {
+  showNotice(error.message);
+}
+
+async function manage(path, method, body) {
+  const options = { method };
+  if (body !== undefined) options.body = JSON.stringify(body);
+  const result = await api(path, options);
+  if (result.state && result.state !== "active" && result.state !== "unmounted") {
+    showNotice(`${result.id}: ${result.state}${result.detail ? ` (${result.detail})` : ""}`);
+  } else {
+    showNotice("");
+  }
+  await loadPlugins();
+  return result;
+}
+
+function openEditor(mode, plugin) {
+  editor.mode = mode;
+  editor.target = plugin;
+  const titles = { add: "Add plugin", configure: `Configure ${plugin?.id}`, replace: `Replace ${plugin?.id}` };
+  $("editor-title").textContent = titles[mode];
+  $("editor-kind-row").hidden = mode === "configure";
+  $("editor-id-row").hidden = mode === "configure";
+  $("editor-kind").value = plugin?.kind || $("editor-kind").options[0]?.value || "";
+  $("editor-id").value = "";
+  const config = plugin && plugin.config !== undefined ? plugin.config : {};
+  $("editor-config").value = JSON.stringify(config ?? {}, null, 2);
+  $("editor").hidden = false;
+  $("editor-config").focus();
+}
+
+async function saveEditor(event) {
+  event.preventDefault();
+  let config;
+  try {
+    config = JSON.parse($("editor-config").value || "null");
+  } catch (error) {
+    showNotice(`The configuration is not valid JSON: ${error.message}`);
+    return;
+  }
+  const request = { kind: $("editor-kind").value, id: $("editor-id").value.trim() || null, config };
+  const target = editor.target ? encodeURIComponent(editor.target.id) : "";
+  try {
+    if (editor.mode === "add") await manage("/plugins", "POST", request);
+    else if (editor.mode === "configure") await manage(`/plugins/${target}/config`, "PUT", { config });
+    else await manage(`/plugins/${target}/replace`, "POST", request);
+    $("editor").hidden = true;
+  } catch (error) {
+    report(error);
+  }
+}
+
+function removePlugin(plugin) {
+  let warning = `Unmount ${plugin.id}?`;
+  if (plugin.kind === "policy-authority") warning += "\n\nWithout a policy plugin, model tool calls run UNGUARDED.";
+  if (plugin.kind === "frontend-web") warning += "\n\nThis is the Web UI you are using; it will stop responding.";
+  if (!window.confirm(warning)) return;
+  manage(`/plugins/${encodeURIComponent(plugin.id)}`, "DELETE").catch(report);
+}
+
+function pluginRow(plugin) {
+  const row = el("tr");
+  const name = el("td", "", plugin.id);
+  if (plugin.kind && plugin.kind !== plugin.id) name.append(el("span", "kind", plugin.kind));
+  const cell = el("td", `state-${plugin.state}`, plugin.state);
+  if (plugin.detail) cell.title = plugin.detail;
+  if (plugin.kind && !plugin.locked) {
+    const actions = el("div", "row-actions");
+    const action = (label, handler) => {
+      const button = el("button", "ghost", label);
+      button.type = "button";
+      button.addEventListener("click", handler);
+      actions.append(button);
+    };
+    action("Restart", () => manage(`/plugins/${encodeURIComponent(plugin.id)}/restart`, "POST").catch(report));
+    action("Configure", () => openEditor("configure", plugin));
+    action("Replace", () => openEditor("replace", plugin));
+    action("Remove", () => removePlugin(plugin));
+    name.append(actions);
+  }
+  row.append(name, cell);
+  return row;
+}
+
+async function loadCatalog() {
+  try {
+    const catalog = await api("/catalog");
+    $("editor-kind").replaceChildren(...catalog.kinds.map((kind) => {
+      const option = el("option", "", kind);
+      option.value = kind;
+      return option;
+    }));
+    $("add-plugin").hidden = false;
+  } catch {
+    $("add-plugin").hidden = true;
+  }
+}
+
 async function loadPlugins() {
   const [plugins, info] = await Promise.all([api("/plugins"), api("/info")]);
-  const rows = plugins.map((plugin) => {
-    const row = el("tr");
-    row.append(el("td", "", plugin.id));
-    const cell = el("td", `state-${plugin.state}`, plugin.state);
-    if (plugin.detail) cell.title = plugin.detail;
-    row.append(cell);
-    return row;
-  });
-  $("plugins").replaceChildren(...rows);
+  $("plugins").replaceChildren(...plugins.map(pluginRow));
   $("tools").replaceChildren(...info.tools.map((tool) => el("li", "", `${tool.name} (${tool.permission})`)));
   const guard = $("guard");
   guard.hidden = false;
@@ -298,8 +393,14 @@ async function start() {
   $("toggle-plugins").addEventListener("click", () => {
     $("plugins-panel").hidden = !$("plugins-panel").hidden;
   });
-  $("refresh-plugins").addEventListener("click", () => loadPlugins().catch((error) => showNotice(error.message)));
+  $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
+  $("add-plugin").addEventListener("click", () => openEditor("add", null));
+  $("editor").addEventListener("submit", saveEditor);
+  $("editor-cancel").addEventListener("click", () => {
+    $("editor").hidden = true;
+  });
   try {
+    await loadCatalog();
     await loadPlugins();
     await loadSessions();
     if (state.sessions.length > 0) await openSession(state.sessions[0].id);

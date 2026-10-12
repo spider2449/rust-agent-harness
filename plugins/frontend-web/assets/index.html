@@ -39,8 +39,23 @@
     <aside id="plugins-panel" class="plugins" aria-label="Plugins" hidden>
       <div class="panel-head">
         <h2>Plugins</h2>
-        <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
+        <span>
+          <button id="add-plugin" type="button" class="ghost">Add</button>
+          <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
+        </span>
       </div>
+      <form id="editor" class="editor" hidden>
+        <h3 id="editor-title"></h3>
+        <label id="editor-kind-row">Kind <select id="editor-kind"></select></label>
+        <label id="editor-id-row">Id <input id="editor-id" placeholder="defaults to the kind"></label>
+        <label>Configuration (JSON)
+          <textarea id="editor-config" rows="6" spellcheck="false"></textarea>
+        </label>
+        <div class="buttons">
+          <button id="editor-cancel" type="button" class="ghost">Cancel</button>
+          <button id="editor-save" type="submit">Save</button>
+        </div>
+      </form>
       <table>
         <thead><tr><th>Plugin</th><th>State</th></tr></thead>
         <tbody id="plugins"></tbody>

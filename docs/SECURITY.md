@@ -133,6 +133,14 @@ The Web frontend serves the agent to the local machine only:
   frontend does not answer (a denial); an unanswered request is denied after
   `approval_timeout_secs` (300).
 
+The plugin management endpoints (`/api/catalog`, `/api/plugins` changes)
+use the distribution's `admin` service, which can mount or unmount any
+catalog plugin, including `policy-authority`. They are behind the same token
+and checks, and no tool can reach them, so model output cannot change the
+composition. The UI warns before unmounting the policy, and the header shows
+`UNGUARDED` whenever no `tool.before_invoke` handler is mounted. The admin
+service refuses to unmount or reconfigure the `distribution` plugin itself.
+
 Any local process that can read the printed URL can use the API with the
 user's authority; the token protects against other users' browsers and
 websites, not against code already running as the user.

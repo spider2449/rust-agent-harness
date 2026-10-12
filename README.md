@@ -112,8 +112,11 @@ cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
 
 `rah` prints the address with a per-start access token; open exactly that
 URL. The UI lists, opens, creates and forks sessions, streams turns, and asks
-you to allow or deny tool calls the policy marks `Ask`. It listens on
-loopback only and has no external resources.
+you to allow or deny tool calls the policy marks `Ask`. Its Plugins panel
+adds, configures, restarts, replaces and removes plugins while `rah` runs:
+replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
+effect on the next turn without a restart. It listens on loopback only and
+has no external resources.
 
 Real models use the same composition with a different model plugin:
 

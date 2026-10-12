@@ -1,0 +1,85 @@
+//! The `admin` service: plugin management for frontends.
+//!
+//! The distribution provides it, because only the distribution knows which
+//! plugin kinds it can build. A frontend that exposes it must restrict it to
+//! the local user; it is never reachable from model output.
+
+use std::collections::BTreeMap;
+
+use async_trait::async_trait;
+use rah_kernel::{PluginId, PluginStatus, ServiceKey};
+use serde_json::Value;
+
+pub const ADMIN: ServiceKey<dyn PluginAdmin> = ServiceKey::new("admin");
+
+/// A plugin to mount.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MountRequest {
+    /// Catalog kind, for example `model-mock` or `process`.
+    pub kind: String,
+    /// Instance id; defaults to the kind.
+    pub id: Option<String>,
+    pub config: Value,
+    /// Provider instances for dependencies: `{ service = "instance" }`.
+    pub bind: BTreeMap<String, String>,
+}
+
+/// What the distribution knows about a mounted plugin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginInstance {
+    pub kind: String,
+    pub config: Value,
+    /// Whether the admin service refuses to change it (itself).
+    pub locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AdminError {
+    #[error("unknown plugin kind `{0}`")]
+    UnknownKind(String),
+    #[error("plugin `{0}` is not mounted")]
+    NotMounted(PluginId),
+    #[error("plugin `{0}` is already mounted")]
+    AlreadyMounted(PluginId),
+    #[error("plugin `{0}` cannot be changed through the admin service")]
+    Locked(PluginId),
+    #[error("the replacement `{id}` did not start ({status}); `{old}` was kept")]
+    ReplacementFailed {
+        old: PluginId,
+        id: PluginId,
+        status: String,
+    },
+    #[error("{0}")]
+    Failed(String),
+}
+
+#[async_trait]
+pub trait PluginAdmin: Send + Sync {
+    /// Kinds this distribution can mount, sorted.
+    fn kinds(&self) -> Vec<String>;
+
+    /// Kind and configuration of a mounted plugin, if this distribution
+    /// mounted it.
+    fn instance(&self, id: &PluginId) -> Option<PluginInstance>;
+
+    /// Returns the id the plugin was mounted under and its status.
+    async fn mount(&self, request: MountRequest) -> Result<(PluginId, PluginStatus), AdminError>;
+
+    async fn unmount(&self, id: &PluginId) -> Result<(), AdminError>;
+
+    /// Replaces the configuration and restarts the plugin and its
+    /// dependents.
+    async fn configure(&self, id: &PluginId, config: Value) -> Result<PluginStatus, AdminError>;
+
+    async fn restart(&self, id: &PluginId) -> Result<PluginStatus, AdminError>;
+
+    /// Mounts `replacement` (under the first free id when its id is taken),
+    /// and unmounts `old` only if the replacement became active. Consumers
+    /// that resolve services per use (the standard loop and frontends)
+    /// switch to it without restarting. Returns the replacement's id.
+    async fn replace(
+        &self,
+        old: &PluginId,
+        replacement: MountRequest,
+    ) -> Result<(PluginId, PluginStatus), AdminError>;
+}

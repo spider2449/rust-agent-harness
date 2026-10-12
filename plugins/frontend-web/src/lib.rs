@@ -12,7 +12,13 @@
 //! API:
 //!
 //! - `GET /api/info`: tools and whether a policy guards them.
-//! - `GET /api/plugins`: plugin statuses.
+//! - `GET /api/plugins`: plugin statuses, with kind and configuration when
+//!   the distribution's `admin` service knows them.
+//! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
+//!   id, config, bind}`, `DELETE /api/plugins/{id}`,
+//!   `POST /api/plugins/{id}/restart`, `PUT /api/plugins/{id}/config
+//!   {config}` and `POST /api/plugins/{id}/replace {kind, id, config, bind}`
+//!   (mounts the replacement, then unmounts `{id}` once it is active).
 //! - `GET|POST /api/sessions`, `GET /api/sessions/{id}`,
 //!   `POST /api/sessions/{id}/fork {at}`.
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
@@ -31,6 +37,7 @@
 
 mod access;
 mod approvals;
+mod manage;
 mod ws;
 
 use std::{str::FromStr, sync::Arc, time::Duration};
@@ -41,7 +48,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
@@ -90,7 +97,7 @@ pub(crate) struct Shared {
     pub stop: CancellationToken,
 }
 
-type AppState = Arc<Shared>;
+pub(crate) type AppState = Arc<Shared>;
 
 #[async_trait]
 impl Plugin for WebFrontendPlugin {
@@ -145,7 +152,12 @@ impl Plugin for WebFrontendPlugin {
 fn router(shared: AppState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
-        .route("/plugins", get(plugins))
+        .route("/catalog", get(manage::catalog))
+        .route("/plugins", get(manage::list).post(manage::mount))
+        .route("/plugins/{id}", axum::routing::delete(manage::unmount))
+        .route("/plugins/{id}/restart", post(manage::restart))
+        .route("/plugins/{id}/config", put(manage::configure))
+        .route("/plugins/{id}/replace", post(manage::replace))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(read_session))
         .route("/sessions/{id}/fork", post(fork_session))
@@ -218,7 +230,7 @@ async fn require_token(State(shared): State<AppState>, request: Request, next: N
 }
 
 /// An API error as `{error}` with a status code.
-pub(crate) struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -237,7 +249,7 @@ impl From<SessionError> for ApiError {
     }
 }
 
-type ApiResult = Result<Json<Value>, ApiError>;
+pub(crate) type ApiResult = Result<Json<Value>, ApiError>;
 
 fn sessions(shared: &Shared) -> Result<Arc<dyn SessionLog>, ApiError> {
     shared.kernel.get(SESSION).ok_or_else(|| {
@@ -287,20 +299,6 @@ pub(crate) fn status_json(status: &PluginStatus) -> Value {
         PluginStatus::Failed { message } => json!({ "state": "failed", "detail": message }),
         other => json!({ "state": format!("{other:?}").to_lowercase(), "detail": "" }),
     }
-}
-
-async fn plugins(State(shared): State<AppState>) -> ApiResult {
-    let plugins: Vec<Value> = shared
-        .kernel
-        .plugins()
-        .into_iter()
-        .map(|(id, status)| {
-            let mut entry = status_json(&status);
-            entry["id"] = json!(id.as_str());
-            entry
-        })
-        .collect();
-    Ok(Json(json!(plugins)))
 }
 
 async fn list_sessions(State(shared): State<AppState>) -> ApiResult {

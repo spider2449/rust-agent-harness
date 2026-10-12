@@ -1,12 +1,18 @@
 //! The `rah` distribution: a plugin catalog, `rah.toml` parsing, presets and
-//! boot. Everything it mounts is a plugin; this crate only composes.
+//! boot. Everything it mounts is a plugin; this crate only composes. It also
+//! mounts the `distribution` plugin, whose `admin` service lets frontends
+//! manage catalog plugins at runtime.
+
+mod admin;
 
 use std::{collections::BTreeMap, sync::Arc};
+
+use admin::{BuildError, construct};
+pub use admin::{DISTRIBUTION_PLUGIN, DistributionPlugin, Registry};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
-use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
@@ -217,42 +223,46 @@ impl Distribution {
 /// says how to start them.
 pub const PROCESS_PLUGIN: &str = "process";
 
-/// Mounts every plugin in order and returns the resulting statuses. A
-/// configured `policy-authority` that does not become active aborts the boot
-/// before any later plugin (such as a frontend) is mounted. A process plugin
-/// is started once first to read its manifest.
+/// Mounts the `distribution` plugin, then every plugin in order, and returns
+/// the resulting statuses. A configured `policy-authority` that does not
+/// become active aborts the boot before any later plugin (such as a
+/// frontend) is mounted. A process plugin is started once first to read its
+/// manifest.
 pub async fn boot(
     kernel: &Kernel,
     distribution: &Distribution,
 ) -> Result<Vec<(PluginId, PluginStatus)>, BootError> {
-    let catalog = catalog();
+    let registry = Arc::new(Registry::default());
+    kernel
+        .mount(
+            Arc::new(DistributionPlugin::new(registry.clone())),
+            MountOptions::default(),
+        )
+        .await?;
     for spec in &distribution.plugin {
-        let plugin: Arc<dyn Plugin> = if spec.kind == PROCESS_PLUGIN {
-            if spec.id.is_none() {
-                return Err(BootError::Process(
-                    "a `process` plugin needs an `id`".to_owned(),
-                ));
-            }
-            Arc::new(
-                ProcessPlugin::describe(spec.plugin_id(), &spec.config)
-                    .await
-                    .map_err(BootError::Process)?,
-            )
-        } else {
-            let constructor = catalog.get(spec.kind.as_str()).ok_or_else(|| {
-                let names: Vec<&str> = catalog.keys().copied().collect();
-                BootError::UnknownPlugin(
-                    spec.kind.clone(),
-                    format!("{}, {PROCESS_PLUGIN}", names.join(", ")),
-                )
+        if spec.kind == PROCESS_PLUGIN && spec.id.is_none() {
+            return Err(BootError::Process(
+                "a `process` plugin needs an `id`".to_owned(),
+            ));
+        }
+        let plugin = construct(&spec.kind, spec.plugin_id(), &spec.config)
+            .await
+            .map_err(|error| match error {
+                BuildError::UnknownKind(kind) => {
+                    let names: Vec<&str> = catalog().keys().copied().collect();
+                    BootError::UnknownPlugin(
+                        kind,
+                        format!("{}, {PROCESS_PLUGIN}", names.join(", ")),
+                    )
+                }
+                BuildError::Process(message) => BootError::Process(message),
             })?;
-            constructor(spec.plugin_id())
-        };
         let mut options = MountOptions::with_config(spec.config.clone());
         for (service, instance) in &spec.bind {
             options = options.bind(service.as_str(), instance.clone());
         }
         let status = kernel.mount(plugin, options).await?;
+        registry.record(spec.plugin_id(), &spec.kind, spec.config.clone());
         if spec.kind == "policy-authority" && status != PluginStatus::Active {
             return Err(BootError::PolicyInactive(
                 spec.plugin_id(),

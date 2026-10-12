@@ -66,5 +66,11 @@ async fn an_inactive_policy_aborts_the_boot_before_later_plugins_mount() {
         matches!(&error, BootError::PolicyInactive(id, _) if *id == PluginId::new("policy-authority")),
         "{error}"
     );
-    assert_eq!(kernel.plugins().len(), 1, "{:?}", kernel.plugins());
+    // Only the distribution plugin and the failed policy were mounted.
+    let mounted: Vec<String> = kernel
+        .plugins()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    assert_eq!(mounted, ["distribution", "policy-authority"]);
 }

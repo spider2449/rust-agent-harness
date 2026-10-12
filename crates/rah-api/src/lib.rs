@@ -11,6 +11,7 @@
 //! - `KernelHandle::get` resolves on every use: providers can be swapped while
 //!   the consumer keeps running. The standard loop resolves the model per turn.
 
+pub mod admin;
 pub mod agent_loop;
 pub mod hooks;
 pub mod host;
