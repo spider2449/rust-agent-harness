@@ -201,6 +201,55 @@ async fn ask_requires_an_approver() {
 }
 
 #[tokio::test]
+async fn cancellation_ends_a_call_waiting_for_approval() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Write, None).await;
+    mount_policy(
+        &kernel,
+        Some(ToolDecision::Ask {
+            reason: "risky".into(),
+        }),
+        false,
+    )
+    .await;
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let approver = {
+        let asked = asked.clone();
+        plugin(PluginManifest::new("approver", "1"), move |scope| {
+            let asked = asked.clone();
+            scope.hook_bail::<ToolApproval, _, _>(0, move |_request| {
+                let asked = asked.clone();
+                async move {
+                    asked.notify_one();
+                    std::future::pending::<Option<bool>>().await
+                }
+            });
+            Ok(())
+        })
+    };
+    kernel
+        .mount(approver, MountOptions::default())
+        .await
+        .unwrap();
+    let invocation = invocation("count");
+    let cancel = invocation.cancel.clone();
+    let invoker = ToolInvoker::new(kernel.handle());
+    let call = invoker.invoke(invocation, || panic!("must not start"));
+    let cancel_once_asked = async {
+        asked.notified().await;
+        cancel.cancel();
+    };
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(call, cancel_once_asked)
+    })
+    .await
+    .expect("cancellation ends the approval wait");
+    assert!(!outcome.authorized && outcome.output.is_error);
+    assert!(text(&outcome.output).contains("cancelled before the tool started"));
+    assert_eq!(outcome.effect, ToolEffect::None);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn effects_are_classified_by_permission_and_failure() {
     let cases = [
         (

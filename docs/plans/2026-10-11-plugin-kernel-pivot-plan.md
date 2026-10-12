@@ -414,7 +414,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - HTTP 連線由 axum／hyper 的 task 處理（請求很短）；WebSocket handler 會監看 plugin scope 的 cancellation token，unmount 時關閉（有測試）。
   - 每條 WebSocket 同時只跑一個 turn；斷線會取消該 turn。
   - 同時掛 `frontend-cli` 和 `frontend-web` 時，兩者都註冊 `tool.approval`（priority 0），由先註冊的回答。
-  - UI 的 JavaScript 只做了語法檢查（`node --check`）和用 curl 確認資源可以載入；沒有自動化的瀏覽器測試。
+  - UI 的 JavaScript 只做了語法檢查（`node --check`）和用 curl 確認資源可以載入；沒有自動化的瀏覽器測試。（2026-10-12 補上：`crates/rah-cli/tests/web_browser.rs` 用 DevTools protocol 在 headless Chrome／Edge 中操作 UI，含 Plugins 面板和 `Ask`；設定 `RAH_TEST_BROWSER` 才執行，CI 有設定。）
 - 實作備註（P5b，2026-10-12）：
   - Service 叫 `admin`（`PluginAdmin`），不只是 catalog：除了列出 kind，也負責 mount、unmount、configure、restart、replace，並記錄每個 instance 的 kind 和設定（kernel 有存設定但沒有 getter，也不知道 kind；不為此改 kernel）。
   - `rah` 開機時一定先掛 `distribution` plugin（提供 `admin`），`boot` 和 `admin` 共用同一個建構路徑（含 `process`）。`admin` 拒絕卸載或改設定自己。

@@ -26,6 +26,9 @@ jobs:
         run: cargo check --workspace
 
       - name: Test workspace
+        # The runner image ships Chrome; it runs the Web UI browser test.
+        env:
+          RAH_TEST_BROWSER: /usr/bin/google-chrome
         run: cargo test --workspace
 
       - name: Lint workspace

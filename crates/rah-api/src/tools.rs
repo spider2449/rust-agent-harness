@@ -168,11 +168,20 @@ impl ToolInvoker {
             call: call.clone(),
             definition: definition.clone(),
         };
-        if let Err(reason) = self.decide(&request).await {
-            return rejected(format!("denied: {reason}"));
-        }
-        if cancel.is_cancelled() {
-            return rejected("cancelled before the tool started".to_owned());
+        // Cancellation while the policy or an approver decides (an approval
+        // can wait for minutes) ends the call; nothing has started yet.
+        let decision = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            decision = self.decide(&request) => Some(decision),
+        };
+        match decision {
+            Some(Err(reason)) => return rejected(format!("denied: {reason}")),
+            None => return rejected("cancelled before the tool started".to_owned()),
+            Some(Ok(())) if cancel.is_cancelled() => {
+                return rejected("cancelled before the tool started".to_owned());
+            }
+            Some(Ok(())) => {}
         }
         on_authorized();
 

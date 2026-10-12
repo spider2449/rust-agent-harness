@@ -164,12 +164,14 @@ function showLive(text) {
   $("live").hidden = false;
 }
 
+const NOT_CONNECTED = "Not connected to RAH.";
+
 function send(message) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
     state.socket.send(JSON.stringify(message));
     return true;
   }
-  showNotice("Not connected to RAH.");
+  showNotice(NOT_CONNECTED);
   return false;
 }
 
@@ -217,7 +219,9 @@ function showApproval(request) {
   const card = el("div", "approval");
   card.id = `approval-${request.id}`;
   card.append(el("strong", "", `Allow ${request.tool}?`));
-  card.append(el("div", "", `${request.reason} · permission: ${request.permission}`));
+  // The reason names the permission the policy requires; the tool's own
+  // declared permission can be lower and would only mislead here.
+  card.append(el("div", "", request.reason));
   card.append(el("pre", "", JSON.stringify(request.input, null, 2)));
   const buttons = el("div", "buttons");
   for (const [label, approve] of [["Deny", false], ["Allow", true]]) {
@@ -242,7 +246,8 @@ function connect() {
     state.retry = 500;
     $("connection").textContent = "connected";
     $("connection").className = "badge good";
-    showNotice("");
+    // Keep other notices, such as a failed startup request.
+    if ($("notice").textContent === NOT_CONNECTED) showNotice("");
   });
   socket.addEventListener("message", (message) => {
     const data = JSON.parse(message.data);

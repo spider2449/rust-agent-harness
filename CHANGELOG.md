@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Web UI browser test
+
+- New test `crates/rah-cli/tests/web_browser.rs` drives the embedded Web UI
+  in a headless Chromium-based browser over the DevTools protocol, against an
+  in-process `rah` with the mock model: connecting, sessions, turns, Enter to
+  send, forks, the Plugins panel (configure, replace, add, remove), `Ask`
+  approvals (allow, deny, cancel), reload, and a console free of errors and
+  CSP violations. It runs when `RAH_TEST_BROWSER` names the browser and is
+  skipped otherwise; CI sets it to the runner's Chrome. No new dependency.
+- Fix: cancelling a turn while a tool call waits for policy or approval now
+  ends the call at once (`cancelled before the tool started`, effect `none`).
+  `ToolInvoker` previously ignored cancellation until the approver answered
+  or timed out (300 seconds in `frontend-web`), and the approval card stayed
+  open.
+- Fix (Web UI): a notice from a failed startup request, such as "no session
+  service is mounted", is no longer cleared when the WebSocket connects.
+- Fix (Web UI): the approval card shows only the policy's reason; it no
+  longer adds the tool's declared permission, which could contradict it
+  ("requires `write` permission · permission: none").
+- Fix (Web UI): no `/favicon.ico` request (and 404) on every page load.
+
 ## v0.40.0 - first plugin-kernel release (2026-10-12)
 
 > First release of the plugin-kernel architecture ("everything is a plugin"),
