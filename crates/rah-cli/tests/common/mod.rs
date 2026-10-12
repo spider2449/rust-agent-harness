@@ -47,6 +47,7 @@ pub fn headless(dir: &TempDir) -> Distribution {
     distribution.set_config("tools-builtin", "root", json!(path(&dir.workspace())));
     distribution.set_config("sandbox-process", "root", json!(path(&dir.workspace())));
     distribution.set_config("tools-repo-write", "root", json!(path(&dir.workspace())));
+    distribution.set_config("skills-fs", "dir", json!(path(&dir.0.join("skills"))));
     distribution.set_config(
         "context-default",
         "memory_file",

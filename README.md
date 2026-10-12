@@ -33,7 +33,9 @@ directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 (`repo.create-file`, `repo.edit-files` and `repo.patch`, each asking for
 approval), `context-default` (a
 sliding history window and memory notes in `.rah/memory.md`, which the model
-can extend with `memory.remember` after you approve), `model-mock`,
+can extend with `memory.remember` after you approve), `skills-fs` (skills in
+`.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
+`skills.load`), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
 `/sessions`, `/resume <id>` and `/plugins`. `--prompt <text>` runs one turn and exits, and

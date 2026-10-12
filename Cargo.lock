@@ -1073,6 +1073,7 @@ dependencies = [
  "rah-plugin-policy-authority",
  "rah-plugin-sandbox-process",
  "rah-plugin-session-jsonl",
+ "rah-plugin-skills-fs",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
@@ -1214,6 +1215,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-session-jsonl"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-skills-fs"
 version = "0.35.0"
 dependencies = [
  "rah-api",

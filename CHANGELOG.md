@@ -2,6 +2,16 @@
 
 ## Unreleased — plugin-kernel pivot (phases P0–P6)
 
+### P6: `skills-fs`
+
+- New plugin `skills-fs`: skills are `<dir>/<name>/SKILL.md` files with
+  optional `name` and `description` front matter. Every model request gets
+  one system item listing them, and `skills.load {name}` (`read`) returns a
+  skill's text on demand. The directory is read on every request. Skills
+  are text only and grant nothing.
+- Every preset mounts it with `dir = ".rah/skills"`; the preset policy
+  assigns `skills.*` = `read`.
+
 ### P6: `tools-repo-write`
 
 - New plugin `tools-repo-write` (requires `sandbox`) with

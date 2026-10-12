@@ -20,6 +20,7 @@ use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
 use rah_plugin_policy_authority::PolicyAuthorityPlugin;
 use rah_plugin_sandbox_process::SandboxProcessPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
+use rah_plugin_skills_fs::SkillsPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use rah_plugin_tools_mcp::McpToolsPlugin;
 use rah_plugin_tools_repo::RepoToolsPlugin;
@@ -33,7 +34,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 15] = [
+    let entries: [(&'static str, Constructor); 16] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
@@ -50,6 +51,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
             Arc::new(SandboxProcessPlugin::new(id))
         }),
         ("session-jsonl", |id| Arc::new(JsonlSessionPlugin::new(id))),
+        ("skills-fs", |id| Arc::new(SkillsPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
         ("tools-repo", |id| Arc::new(RepoToolsPlugin::new(id))),
@@ -73,7 +75,7 @@ pub struct Preset {
 
 /// Built-in presets. All share built-in tools, read-only repository tools
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
-/// and memory notes in `.rah/memory.md`), the default loop and the terminal
+/// and memory notes in `.rah/memory.md`), `skills-fs` (`.rah/skills`), the default loop and the terminal
 /// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
 pub const PRESETS: [Preset; 4] = [
@@ -104,7 +106,7 @@ pub const PRESETS: [Preset; 4] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "memory.*" = "write" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "memory.*" = "write", "skills.*" = "read" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -130,6 +132,10 @@ config = { root = "." }
 [[plugin]]
 use = "context-default"
 config = { memory_file = ".rah/memory.md" }
+
+[[plugin]]
+use = "skills-fs"
+config = { dir = ".rah/skills" }
 
 [[plugin]]
 use = "{MODEL}"

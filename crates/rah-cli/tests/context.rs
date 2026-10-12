@@ -37,3 +37,22 @@ async fn memory_notes_are_part_of_every_request() {
     let text = reply(&turn(&handle, &session, r#"/call memory.remember {"note":"x"}"#).await);
     assert!(text.contains("no approver"), "{text}");
 }
+
+#[tokio::test]
+async fn skills_are_listed_and_loaded_through_the_presets() {
+    let dir = TempDir::new("context-skills");
+    std::fs::create_dir_all(dir.0.join("skills/tea")).unwrap();
+    std::fs::write(
+        dir.0.join("skills/tea/SKILL.md"),
+        "---\ndescription: Brews tea.\n---\nBoil water first.\n",
+    )
+    .unwrap();
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    // The listing is one system item before the user message.
+    let text = reply(&turn(&handle, &session, "/notool hi").await);
+    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+    let text = reply(&turn(&handle, &session, r#"/call skills.load {"name":"tea"}"#).await);
+    assert_eq!(text, "[model-mock] skills.load returned: Boil water first.");
+}
