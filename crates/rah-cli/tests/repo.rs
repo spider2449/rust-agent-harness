@@ -69,3 +69,24 @@ async fn repo_tools_report_a_workspace_that_is_not_a_repository() {
     assert!(text.contains("repo.status returned:"), "{text}");
     assert!(text.contains("git"), "{text}");
 }
+
+#[tokio::test]
+async fn repo_write_tools_need_approval_in_the_presets() {
+    let dir = TempDir::new("repo-write-ask");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let text = reply(
+        &turn(
+            &handle,
+            &session,
+            r#"/call repo.create-file {"path":"new.txt","content":"x"}"#,
+        )
+        .await,
+    );
+    assert!(
+        text.contains("requires `write` permission") || text.contains("no approver"),
+        "{text}"
+    );
+    assert!(!dir.workspace().join("new.txt").exists());
+}

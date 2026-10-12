@@ -424,7 +424,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 ### P6：生態擴充
 - [ ] WASM plugin host（wasmtime＋WIT）
 - [ ] `skills-fs`、`scheduler-basic`（含 subagent：loop 也是 service，可以巢狀呼叫）
-- [ ] `tools-repo-write`（patch、edit-files、create-file）
+- [x] `tools-repo-write`（patch、edit-files、create-file；2026-10-12 完成。不移植 legacy 的 HostExplicit 審核流程，改由 policy `Ask` 確認；`repo.patch` 透過 sandbox 執行 `git apply --check` 和 `git apply`）
 - [ ] 第二種 loop（例如 plan-and-execute），證明 loop 確實可以替換
 
 ## 9. 已決事項（2026-10-11 核准，記錄於 ADR 0036 第 5 節）

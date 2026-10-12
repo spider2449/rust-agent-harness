@@ -1076,6 +1076,7 @@ dependencies = [
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
+ "rah-plugin-tools-repo-write",
  "rah-plugin-tools-shell",
  "rah-protocol",
  "reqwest",
@@ -1253,6 +1254,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tools-repo-write"
+version = "0.35.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

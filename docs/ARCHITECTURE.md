@@ -83,7 +83,9 @@ Implemented:
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`);
   `sandbox-process` (supervised processes, not an OS sandbox); `tools-repo`
-  (read-only Git tools, requires `sandbox`); `tools-mcp` (one MCP stdio server
+  (read-only Git tools, requires `sandbox`); `tools-repo-write`
+  (`repo.create-file`, `repo.edit-files`, `repo.patch`, declared `write`);
+  `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
   requires `sandbox`); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API

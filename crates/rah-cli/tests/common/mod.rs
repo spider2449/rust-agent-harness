@@ -46,6 +46,7 @@ pub fn headless(dir: &TempDir) -> Distribution {
     distribution.set_config("session-jsonl", "dir", json!(path(&dir.sessions())));
     distribution.set_config("tools-builtin", "root", json!(path(&dir.workspace())));
     distribution.set_config("sandbox-process", "root", json!(path(&dir.workspace())));
+    distribution.set_config("tools-repo-write", "root", json!(path(&dir.workspace())));
     distribution.set_config(
         "context-default",
         "memory_file",

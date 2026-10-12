@@ -17,6 +17,7 @@ members = [
     "plugins/tools-builtin",
     "plugins/tools-mcp",
     "plugins/tools-repo",
+    "plugins/tools-repo-write",
     "plugins/tools-shell",
 ]
 resolver = "3"

@@ -23,6 +23,7 @@ use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use rah_plugin_tools_mcp::McpToolsPlugin;
 use rah_plugin_tools_repo::RepoToolsPlugin;
+use rah_plugin_tools_repo_write::RepoWriteToolsPlugin;
 use rah_plugin_tools_shell::ShellToolsPlugin;
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,7 +33,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 14] = [
+    let entries: [(&'static str, Constructor); 15] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
@@ -52,6 +53,9 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
         ("tools-repo", |id| Arc::new(RepoToolsPlugin::new(id))),
+        ("tools-repo-write", |id| {
+            Arc::new(RepoWriteToolsPlugin::new(id))
+        }),
         ("tools-shell", |id| Arc::new(ShellToolsPlugin::new(id))),
     ];
     entries.into_iter().collect()
@@ -68,7 +72,7 @@ pub struct Preset {
 }
 
 /// Built-in presets. All share built-in tools, read-only repository tools
-/// over `sandbox-process`, JSONL sessions, `context-default` (history window
+/// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
 /// and memory notes in `.rah/memory.md`), the default loop and the terminal
 /// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
@@ -100,7 +104,7 @@ pub const PRESETS: [Preset; 4] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read", "memory.*" = "write" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "memory.*" = "write" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -118,6 +122,10 @@ config = { root = "." }
 
 [[plugin]]
 use = "tools-repo"
+
+[[plugin]]
+use = "tools-repo-write"
+config = { root = "." }
 
 [[plugin]]
 use = "context-default"

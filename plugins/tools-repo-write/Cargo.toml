@@ -1,0 +1,16 @@
+[package]
+name = "rah-plugin-tools-repo-write"
+version.workspace = true
+edition.workspace = true
+description = "Repository write tools (repo.create-file, repo.edit-files, repo.patch)"
+
+[dependencies]
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "macros", "process", "rt"] }

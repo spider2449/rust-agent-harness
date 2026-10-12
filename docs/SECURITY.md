@@ -164,6 +164,19 @@ trusted code like any mounted plugin. The host:
 The tools a process plugin provides still pass through `ToolInvoker` and the
 policy like any other tool.
 
+## `tools-repo-write`
+
+`repo.create-file`, `repo.edit-files` and `repo.patch` declare `write`, so
+under `policy-authority` they are at least `write` whatever their assignment,
+and the presets ask for every call. Paths must be safe repository-relative
+paths and resolve inside the canonical `root` without following a link out of
+it; `repo.create-file` never overwrites. `repo.edit-files` validates every
+edit (exactly one match each) before writing anything and replaces files
+through a temporary file and a rename. `repo.patch` runs `git apply --check`
+then `git apply` through the `sandbox` service, only when Git's top level is
+the configured root; `git apply` rejects paths outside the work tree. A
+failure after the first write is recorded as an `uncertain` effect.
+
 ## `tools-repo`
 
 `tools-repo` provides `repo.status`, `repo.diff`, `repo.list` and

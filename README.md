@@ -29,7 +29,9 @@ cargo run -p rah-cli -- --preset dev
 The `dev` preset mounts `policy-authority`, `session-jsonl` (logs in
 `.rah/sessions`), `tools-builtin` (`echo` and `fs.read` bounded to the current
 directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
-`repo.diff`, `repo.list` and `repo.search` over Git), `context-default` (a
+`repo.diff`, `repo.list` and `repo.search` over Git), `tools-repo-write`
+(`repo.create-file`, `repo.edit-files` and `repo.patch`, each asking for
+approval), `context-default` (a
 sliding history window and memory notes in `.rah/memory.md`, which the model
 can extend with `memory.remember` after you approve), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try

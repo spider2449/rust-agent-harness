@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — plugin-kernel pivot (phases P0–P5)
+## Unreleased — plugin-kernel pivot (phases P0–P6)
+
+### P6: `tools-repo-write`
+
+- New plugin `tools-repo-write` (requires `sandbox`) with
+  `repo.create-file`, `repo.edit-files` (all-or-nothing exact-match edits,
+  also matching CRLF files) and `repo.patch` (`git apply --check`, then
+  `git apply`), all declared `write`. Every preset mounts it; the preset
+  policy assigns the three tools `write`, so each call asks for approval.
+- `rah --root` also sets its root.
 
 ### P5: legacy removal
 
