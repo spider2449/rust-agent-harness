@@ -210,12 +210,18 @@ async fn remembered_notes_reach_later_requests() {
 
 #[test]
 fn workspace_memory_files_are_named_after_the_folder_and_its_path() {
-    let a = workspace_file_name(Path::new(r"D:\work\My Repo"));
+    // `\` separates components only on Windows.
+    let (here, elsewhere) = if cfg!(windows) {
+        (r"D:\work\My Repo", r"E:\other\My Repo")
+    } else {
+        ("/work/My Repo", "/other/My Repo")
+    };
+    let a = workspace_file_name(Path::new(here));
     assert!(a.starts_with("My_Repo-") && a.ends_with(".md"), "{a}");
     // Same folder name elsewhere: another file.
-    assert_ne!(a, workspace_file_name(Path::new(r"E:\other\My Repo")));
+    assert_ne!(a, workspace_file_name(Path::new(elsewhere)));
     // Stable across calls.
-    assert_eq!(a, workspace_file_name(Path::new(r"D:\work\My Repo")));
+    assert_eq!(a, workspace_file_name(Path::new(here)));
     if cfg!(windows) {
         assert_eq!(a, workspace_file_name(Path::new(r"d:\WORK\My Repo")));
     }
