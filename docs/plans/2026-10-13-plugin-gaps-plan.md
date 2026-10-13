@@ -40,6 +40,8 @@
 
 ## G4：`sandbox-os`（OS 層隔離）
 
+**暫緩（2026-10-13，使用者決定）：等本機有 WSL 可以驗證 Linux 再做。** 待決事項：Windows AppContainer 需要在工作目錄加上永久的 ACL（改動主機設定），而且裝在使用者目錄的工具（例如 `~/.cargo` 的 rustup）在容器內讀不到；Linux 的 landlock 目前只能靠 CI 驗證。
+
 起因：`sandbox-process` 只是程序監督（Job Object／process group），不是隔離；`shell.exec` 跑的程式可以讀寫使用者能存取的任何東西，也能連網。
 
 - [ ] 先寫 ADR：威脅模型、各平台採用的機制、能宣稱和不能宣稱的保證（遵守 AGENTS.md「不宣稱未實作的隔離」）。
