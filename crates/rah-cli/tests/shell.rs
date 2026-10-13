@@ -16,6 +16,14 @@ fn config(dir: &TempDir) -> std::path::PathBuf {
     let toml_path = |path: std::path::PathBuf| path.display().to_string().replace('\\', "/");
     let sessions = toml_path(dir.sessions());
     let workspace = toml_path(dir.workspace());
+    // `rustc` is a rustup shim. Where rustup lives outside the home directory
+    // it needs these to find a toolchain; unset ones are skipped.
+    let inherit_env = rah_plugin_sandbox_process::DEFAULT_INHERIT_ENV
+        .iter()
+        .chain(&["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"])
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let path = dir.0.join("rah.toml");
     std::fs::write(
         &path,
@@ -31,7 +39,7 @@ config = {{ dir = "{sessions}" }}
 
 [[plugin]]
 use = "sandbox-process"
-config = {{ root = "{workspace}" }}
+config = {{ root = "{workspace}", inherit_env = [{inherit_env}] }}
 
 [[plugin]]
 use = "tools-shell"

@@ -37,19 +37,6 @@ in the commit which entry it closes.
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`
   with `RAH_TEST_BROWSER` set, then search `run.txt` for `timed out waiting`.
 
-## Local-only: `shell_exec_runs_only_after_terminal_approval` fails
-
-- **Test:** `crates/rah-cli/tests/shell.rs`. It runs `rustc --version`
-  through `tools-shell`.
-- **Cause:** environment, not code. `sandbox-process` passes only a short
-  list of variables (`DEFAULT_INHERIT_ENV`). On a machine where rustup lives
-  outside the home directory (`RUSTUP_HOME`/`CARGO_HOME` set, for example
-  `F:\rust`), the sandboxed `rustc` shim finds no toolchain: "rustup could
-  not choose a version of rustc to run". CI passes it.
-- **Options, undecided:** have the test pass `RUSTUP_HOME` and `CARGO_HOME`
-  through `inherit_env` when they are set, or run a program that does not
-  depend on rustup.
-
 ## Setting up another development machine
 
 - **Browser tests** run only when `RAH_TEST_BROWSER` names Chrome, Chromium
