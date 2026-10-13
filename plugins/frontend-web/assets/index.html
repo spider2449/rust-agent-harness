@@ -59,12 +59,28 @@
         <button id="side-close" type="button" class="ghost icon" title="Hide the panel" aria-label="Hide the panel">✕</button>
       </div>
       <div id="files-view" class="files-view" role="tabpanel" aria-label="Workspace files">
-        <div class="tree-pane">
-          <div class="pane-head">
-            <span id="tree-root" class="pane-title">Files</span>
-            <button id="tree-refresh" type="button" class="ghost icon" title="Reload the files" aria-label="Reload the files">⟳</button>
+        <div id="tree-pane" class="tree-pane">
+          <div class="tree-section">
+            <div class="pane-head">
+              <span id="tree-root" class="pane-title">Files</span>
+              <button id="tree-refresh" type="button" class="ghost icon" title="Reload the files" aria-label="Reload the files">⟳</button>
+            </div>
+            <ul id="tree" class="tree" role="tree" aria-label="Files"></ul>
           </div>
-          <ul id="tree" class="tree" role="tree" aria-label="Files"></ul>
+          <div id="pane-splitter" class="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize files and source control" tabindex="0" title="Drag to resize"></div>
+          <div class="git-section" aria-label="Source control">
+            <div class="pane-head">
+              <span class="pane-title">Source control</span>
+              <span id="git-branch" class="git-branch"></span>
+              <button id="git-refresh" type="button" class="ghost icon" title="Reload the Git state" aria-label="Reload the Git state">⟳</button>
+            </div>
+            <div class="git-body">
+              <details open>
+                <summary>Changes <span id="changes-count" class="count"></span></summary>
+                <ul id="changes" class="tree changes" aria-label="Changed files"></ul>
+              </details>
+            </div>
+          </div>
         </div>
         <div class="viewer-pane">
           <div class="file-tabs">

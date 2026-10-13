@@ -269,6 +269,7 @@ window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(b
 window.sessionItems = () => [...document.querySelectorAll('#sessions li.session')];
 window.folderItems = () => [...document.querySelectorAll('#sessions li.folder')];
 window.treeButton = (path) => document.querySelector(`#tree button[data-path="${path}"]`);
+window.changeButton = (path) => document.querySelector(`#changes button[data-path="${path}"]`);
 window.treeNames = () => [...document.querySelectorAll('#tree button')].map((button) => button.dataset.path);
 window.headTitle = () => byId('session-title').textContent;
 window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta button')]
@@ -908,8 +909,28 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     assert_eq!(page.eval("sessionItems().length").await, 2);
 
     // Switch the workspace with the folder picker.
+    // The workspace is a Git repository with one commit, one modified file
+    // and one untracked file.
     let workspace = web.dir.workspace();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@example.com",
+            ])
+            .args(args)
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
     std::fs::create_dir_all(workspace.join("docs")).unwrap();
+    std::fs::write(workspace.join("docs").join("guide.md"), "# Guide\n").unwrap();
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "docs"]);
+    git(&["commit", "-q", "-m", "add the guide"]);
     std::fs::write(
         workspace.join("docs").join("guide.md"),
         "# Guide\nline two\n",
@@ -995,6 +1016,39 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          treeNames().join() === 'docs,notes.txt'",
     )
     .await;
+    // Git state under the tree: the branch and the changes by folder.
+    page.wait(
+        "the changed files",
+        "!!changeButton('docs/guide.md') && !!changeButton('notes.txt') && \
+         changeButton('docs/guide.md').textContent.endsWith('M') && \
+         changeButton('notes.txt').textContent.endsWith('U') && \
+         byId('git-branch').textContent.includes('trunk')",
+    )
+    .await;
+    page.eval("changeButton('docs/guide.md').click(); true")
+        .await;
+    page.wait(
+        "the diff",
+        "document.querySelector('#file-tabs .file-tab.current')?.dataset.key === 'diff:docs/guide.md' && \
+         [...byId('file-view').querySelectorAll('.tok-inserted')].some((s) => s.textContent === '+line two')",
+    )
+    .await;
+    page.eval("byId('close-all').click(); true").await;
+    // The splitter moves with the keyboard (and the mouse) and is remembered.
+    page.eval(
+        "byId('pane-splitter').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); true",
+    )
+    .await;
+    assert_eq!(
+        page.eval("byId('tree-pane').style.getPropertyValue('--tree-ratio')")
+            .await,
+        "0.550"
+    );
+    assert_eq!(
+        page.eval("JSON.parse(localStorage.getItem('rah-side')).treeRatio")
+            .await,
+        0.55
+    );
     page.eval("treeButton('docs').click(); true").await;
     page.wait(
         "the opened folder",

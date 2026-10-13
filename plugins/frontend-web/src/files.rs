@@ -163,7 +163,7 @@ async fn resolve(root: &Path, relative: &str) -> Result<PathBuf, ApiError> {
 /// `relative` as a path of plain names: no root, drive, stream (`:`), `.`
 /// or `..`. Both separators count on every platform, so a path means the
 /// same everywhere.
-fn checked(relative: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn checked(relative: &str) -> Result<PathBuf, ApiError> {
     let trimmed = relative.trim();
     if trimmed.starts_with(['/', '\\']) {
         return Err(outside(relative));

@@ -879,6 +879,7 @@ function showSide(view) {
   }
   saveSidePrefs({ open: true, view });
   if (view === "files" && !files.dirs.has("")) loadDir("").catch(treeError);
+  if (view === "files" && !git.loaded) loadGit();
   if (view === "plugins") loadPlugins().catch(report);
 }
 
@@ -933,7 +934,10 @@ async function loadDir(path) {
 
 // A turn may have changed files: reload the open folders and files.
 async function reloadFiles() {
-  if (!files.dirs.has("")) return;
+  if (!files.dirs.has("")) {
+    if (git.loaded) await loadGit();
+    return;
+  }
   const paths = [...files.expanded].filter((path) => files.dirs.has(path));
   files.dirs.clear();
   for (const path of paths) {
@@ -947,6 +951,7 @@ async function reloadFiles() {
   renderTree();
   for (const file of files.open) await readFile(file);
   renderFile();
+  await loadGit();
 }
 
 // The workspace moved: start over in the new folder.
@@ -960,7 +965,12 @@ function resetFiles() {
   $("tree-root").title = "";
   $("tree").replaceChildren();
   renderFile();
-  if (!$("side").hidden && sideView() === "files") loadDir("").catch(treeError);
+  git.loaded = false;
+  renderGit();
+  if (!$("side").hidden && sideView() === "files") {
+    loadDir("").catch(treeError);
+    loadGit();
+  }
 }
 
 function treeNote(text, depth) {
@@ -1019,9 +1029,16 @@ function renderTree() {
   tree.scrollTop = scroll;
 }
 
+// An open tab is a file or a file's diff: {key, kind, path, label, data,
+// error}. A file's key is its path, so the tree can mark it.
+const TAB_SOURCES = {
+  file: (tab) => `/files/content?path=${encodeURIComponent(tab.path)}`,
+  diff: (tab) => `/git/diff?path=${encodeURIComponent(tab.path)}`,
+};
+
 async function readFile(file) {
   try {
-    file.data = await api(`/files/content?path=${encodeURIComponent(file.path)}`);
+    file.data = await api(TAB_SOURCES[file.kind](file));
     file.error = null;
   } catch (error) {
     file.data = null;
@@ -1029,26 +1046,37 @@ async function readFile(file) {
   }
 }
 
-async function openFile(path) {
-  let file = files.open.find((open) => open.path === path);
+async function openTab(kind, path, label) {
+  const key = kind === "file" ? path : `${kind}:${path}`;
+  let file = files.open.find((open) => open.key === key);
   if (!file) {
-    file = { path, data: null, error: null };
+    file = { key, kind, path, label, data: null, error: null };
     files.open.push(file);
     await readFile(file);
   }
-  files.current = path;
+  files.current = key;
   if ($("side").hidden || sideView() !== "files") showSide("files");
   renderFile();
   renderTree();
+  renderGit();
 }
 
-function closeFile(path) {
-  const index = files.open.findIndex((file) => file.path === path);
+function openFile(path) {
+  return openTab("file", path, folderName(path));
+}
+
+function openDiff(path) {
+  return openTab("diff", path, `${folderName(path)} (diff)`);
+}
+
+function closeFile(key) {
+  const index = files.open.findIndex((file) => file.key === key);
   if (index < 0) return;
   files.open.splice(index, 1);
-  if (files.current === path) files.current = files.open[Math.min(index, files.open.length - 1)]?.path || null;
+  if (files.current === key) files.current = files.open[Math.min(index, files.open.length - 1)]?.key || null;
   renderFile();
   renderTree();
+  renderGit();
 }
 
 function closeAllFiles() {
@@ -1056,6 +1084,7 @@ function closeAllFiles() {
   files.current = null;
   renderFile();
   renderTree();
+  renderGit();
 }
 
 // File contents are untrusted text: shown as text nodes and token spans
@@ -1070,25 +1099,26 @@ function codeView(text, path) {
 }
 
 function fileTab(file) {
-  const current = file.path === files.current;
-  const tab = el("div", current ? "file-tab current" : "file-tab");
+  const current = file.key === files.current;
+  const tab = el("div", current ? `file-tab current ${file.kind}` : `file-tab ${file.kind}`);
   tab.setAttribute("role", "tab");
   tab.setAttribute("aria-selected", String(current));
-  tab.title = file.path;
-  tab.dataset.path = file.path;
+  tab.title = file.kind === "file" ? file.path : `${file.label}: ${file.path}`;
+  tab.dataset.key = file.key;
   const close = el("button", "", "✕");
   close.type = "button";
   close.title = "Close";
-  close.setAttribute("aria-label", `Close ${file.path}`);
+  close.setAttribute("aria-label", `Close ${file.label}`);
   close.addEventListener("click", (event) => {
     event.stopPropagation();
-    closeFile(file.path);
+    closeFile(file.key);
   });
-  tab.append(el("span", "", folderName(file.path)), close);
+  tab.append(el("span", "", file.label), close);
   tab.addEventListener("click", () => {
-    files.current = file.path;
+    files.current = file.key;
     renderFile();
     renderTree();
+    renderGit();
   });
   return tab;
 }
@@ -1097,19 +1127,156 @@ function renderFile() {
   $("file-tabs").replaceChildren(...files.open.map(fileTab));
   $("close-all").hidden = !files.open.length;
   const view = $("file-view");
-  const file = files.open.find((open) => open.path === files.current);
+  const file = files.open.find((open) => open.key === files.current);
   if (!file) {
     view.replaceChildren(el("div", "placeholder", "Choose a file to view it here (read-only)."));
   } else if (file.error) {
     view.replaceChildren(el("div", "placeholder", file.error));
-  } else if (file.data.binary) {
+  } else if (file.kind === "file" && file.data.binary) {
     view.replaceChildren(el("div", "placeholder", `Binary file, ${file.data.size} bytes: not shown.`));
+  } else if (file.kind !== "file" && !file.data.text) {
+    view.replaceChildren(el("div", "placeholder", "No changes."));
   } else {
     const parts = [];
-    if (file.data.truncated) parts.push(el("div", "file-note", `Showing the start of this ${file.data.size}-byte file.`));
-    parts.push(codeView(file.data.text, file.path));
+    if (file.data.truncated) {
+      const size = file.kind === "file" ? ` ${file.data.size}-byte` : "";
+      parts.push(el("div", "file-note", `Showing the start of this${size} ${file.kind === "file" ? "file" : "diff"}.`));
+    }
+    parts.push(codeView(file.data.text, file.kind === "file" ? file.path : "view.diff"));
     view.replaceChildren(...parts);
   }
+}
+
+// ---- Source control ---------------------------------------------------------
+
+// The Git state under the file tree, read-only: the branch and the changed
+// files, grouped by folder. Paths are untrusted text.
+const git = { loaded: false, loading: null, branch: null, changes: [], truncated: false, error: null, signature: null };
+
+const STATUS_NAMES = {
+  M: "modified", A: "added", D: "deleted", R: "renamed", C: "copied", T: "type changed", U: "untracked", "!": "conflicted",
+};
+
+async function loadGit() {
+  if (git.loading) return git.loading;
+  git.loading = (async () => {
+    try {
+      const changes = await api("/git/changes");
+      // Not a repository (or no Git): a state, not a failure.
+      if (changes.error) throw new Error(changes.error);
+      Object.assign(git, { branch: changes.branch, changes: changes.changes, truncated: changes.truncated, error: null });
+    } catch (error) {
+      Object.assign(git, { branch: null, changes: [], truncated: false, error: error.message });
+    } finally {
+      git.loaded = true;
+      git.loading = null;
+    }
+    renderGit();
+  })();
+  return git.loading;
+}
+
+function changeItem(change, nested) {
+  const item = el("li", "change");
+  const button = el("button");
+  button.type = "button";
+  button.dataset.path = change.path;
+  const opens = change.status === "U" ? change.path : `diff:${change.path}`;
+  if (files.current === opens) button.classList.add("open-file");
+  const name = STATUS_NAMES[change.status] || change.status;
+  button.title = `${change.path}\n${name}${change.staged ? " (staged)" : ""}${change.orig ? `\nfrom ${change.orig}` : ""}`;
+  button.style.setProperty("--depth", nested ? 1 : 0);
+  button.append(
+    el("span", "change-name", folderName(change.path)),
+    el("span", `badge-status status-${change.status === "!" ? "conflict" : change.status}`, change.status),
+  );
+  // Untracked files have no diff: their content is the change.
+  button.addEventListener("click", () => (change.status === "U" ? openFile(change.path) : openDiff(change.path)).catch(report));
+  item.append(button);
+  return item;
+}
+
+function renderGit() {
+  const branch = git.branch && git.branch !== "(detached)" ? `⎇ ${git.branch}` : git.branch ? "⎇ detached" : "";
+  $("git-branch").textContent = branch;
+  $("changes-count").textContent = git.loaded && !git.error ? String(git.changes.length) : "";
+  const changes = $("changes");
+  if (!git.loaded) {
+    changes.replaceChildren(el("li", "note", "Loading…"));
+    return;
+  }
+  if (git.error) {
+    changes.replaceChildren(el("li", "note", git.error));
+    return;
+  }
+  // One row per folder, then its files; files at the root come last.
+  const folders = new Map();
+  for (const change of git.changes) {
+    const cut = change.path.lastIndexOf("/");
+    const folder = cut < 0 ? "" : change.path.slice(0, cut);
+    if (!folders.has(folder)) folders.set(folder, []);
+    folders.get(folder).push(change);
+  }
+  const names = [...folders.keys()].sort((a, b) => (!a ? 1 : !b ? -1 : a.localeCompare(b)));
+  const rows = [];
+  for (const folder of names) {
+    if (folder) {
+      const row = el("li", "change-folder", folder);
+      row.title = folder;
+      rows.push(row);
+    }
+    for (const change of folders.get(folder)) rows.push(changeItem(change, !!folder));
+  }
+  if (!rows.length) rows.push(el("li", "note", "No changes"));
+  if (git.truncated) rows.push(el("li", "note", "…more changes not shown"));
+  changes.replaceChildren(...rows);
+}
+
+// The status line's Git summary changed (every 30 seconds it is read): the
+// list is probably stale.
+function gitSignature(state) {
+  const signature = state ? JSON.stringify([state.branch, state.changed, state.untracked, state.conflicts, state.ahead, state.error]) : "";
+  if (signature !== git.signature) {
+    const known = git.signature !== null;
+    git.signature = signature;
+    if (known && git.loaded && !$("side").hidden) loadGit();
+  }
+}
+
+function setupSplitter() {
+  const pane = $("tree-pane");
+  const apply = (ratio) => pane.style.setProperty("--tree-ratio", String(ratio));
+  const saved = Number(sidePrefs().treeRatio);
+  if (saved > 0 && saved < 1) apply(saved);
+  const handle = $("pane-splitter");
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("dragging");
+    let ratio = null;
+    const move = (moved) => {
+      const box = pane.getBoundingClientRect();
+      ratio = Math.min(Math.max((moved.clientY - box.top) / box.height, 0.1), 0.9);
+      apply(ratio.toFixed(3));
+    };
+    const done = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      if (ratio !== null) saveSidePrefs({ treeRatio: Number(ratio.toFixed(3)) });
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", done, { once: true });
+    handle.addEventListener("pointercancel", done, { once: true });
+  });
+  // Keyboard: arrows move the split by 5%.
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const current = Number(getComputedStyle(pane).getPropertyValue("--tree-ratio")) || 0.6;
+    const next = Math.min(Math.max(current + (event.key === "ArrowUp" ? -0.05 : 0.05), 0.1), 0.9);
+    apply(next.toFixed(3));
+    saveSidePrefs({ treeRatio: Number(next.toFixed(3)) });
+  });
 }
 
 // ---- Activity ---------------------------------------------------------------
@@ -1432,9 +1599,10 @@ async function loadStatus() {
     workspace.root || "Choose a workspace…",
     workspace.root ? `Workspace: ${workspace.root}\nClick to change` : "Choose the folder tools work in",
   );
-  const [git, gitTitle] = gitText(workspace.git);
+  gitSignature(workspace.git);
+  const [gitLabel, gitTitle] = gitText(workspace.git);
   const dirty = workspace.git && !workspace.git.error && workspace.git.changed + workspace.git.untracked > 0;
-  statusItem("status-git", git, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
+  statusItem("status-git", gitLabel, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
   const [model, modelTitle] = providerText("model", status.model);
   statusItem("status-model", model, modelTitle, status.model ? "" : "bad");
   const [loop, loopTitle] = providerText("loop", status.loop);
@@ -1612,7 +1780,10 @@ async function start() {
   $("close-all").addEventListener("click", closeAllFiles);
   $("activity-clear").addEventListener("click", () => $("activity").replaceChildren());
   setupResizer();
+  setupSplitter();
+  $("git-refresh").addEventListener("click", () => loadGit());
   renderFile();
+  renderGit();
   $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
   $("add-plugin").addEventListener("click", () => openEditor("add", null));
   $("editor").addEventListener("submit", saveEditor);

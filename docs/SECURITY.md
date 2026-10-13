@@ -185,6 +185,13 @@ Behind the same token and checks, and likewise unreachable from tools:
   but only through these same checks.
 - `GET /api/status` runs one read-only `git status` in the workspace
   through the `sandbox` service.
+- `GET /api/git/changes` and `/api/git/diff` each run one read-only `git`
+  command the same way: a fixed argument vector with `--no-optional-locks`
+  (no index writes), `--literal-pathspecs` (no pathspec magic), and for
+  diffs `--no-ext-diff` and `--no-textconv` (no configured diff programs).
+  A path must pass the file browser's checks and is passed after `--`, so
+  it cannot become an option. Output is bounded (512 KiB per diff). There
+  is no write action: staging, committing and pushing stay outside the UI.
 
 Any local process that can read the printed URL can use the API with the
 user's authority; the token protects against other users' browsers and

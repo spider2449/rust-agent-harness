@@ -22,7 +22,9 @@
 //! - With a `sandbox` service: `GET /api/files?path=` lists one directory of
 //!   the workspace and `GET /api/files/content?path=` returns the start of one
 //!   file, for the read-only file browser. Paths are relative to the
-//!   workspace root and cannot leave it.
+//!   workspace root and cannot leave it. `GET /api/git/changes` and
+//!   `/api/git/diff?path=` are read-only Git views of the workspace (one
+//!   `git` run each, through the `sandbox` service).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -56,6 +58,7 @@ mod access;
 mod approvals;
 mod export;
 mod files;
+mod git;
 mod jobs;
 mod manage;
 mod status;
@@ -181,6 +184,8 @@ fn router(shared: AppState) -> Router {
         .route("/fs/dirs", get(workspace::list))
         .route("/files", get(files::list))
         .route("/files/content", get(files::content))
+        .route("/git/changes", get(git::changes))
+        .route("/git/diff", get(git::diff))
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/catalog", get(manage::catalog))

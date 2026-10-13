@@ -163,7 +163,9 @@ the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the sys
 prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms. The right-hand panel (**Workspace** in the header) shows the
 workspace's files as a tree, opens them read-only in tabs (with syntax
-highlighting for common languages), and keeps an
+highlighting for common languages), shows the branch and the Git changes
+(by folder) under the tree, with a splitter between the two, opens a
+change's diff read-only, and keeps an
 activity log of the open session's turns and tool calls; it can be resized
 or hidden. Its **Plugins** tab remains for raw plugin configuration: it
 adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:

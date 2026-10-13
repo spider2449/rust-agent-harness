@@ -111,6 +111,14 @@ const Highlight = (() => {
       ["property", "--[\\w-]+|\\b[a-z-]+(?=\\s*:[^:])"],
       ["number", "#[0-9a-fA-F]{3,8}\\b|-?\\b\\d+(?:\\.\\d+)?(?:px|em|rem|vh|vw|%|s|ms|deg|fr)?"],
     ],
+    // `git diff`: file headers before added and removed lines, since
+    // `--- a/x` would otherwise read as a removed line.
+    diff: [
+      ["meta", "^(?:diff --git |index |--- |\\+\\+\\+ |new file mode|deleted file mode|similarity index|rename from|rename to|old mode|new mode|Binary files)[^\\n]*"],
+      ["hunk", "^@@[^\\n]*"],
+      ["inserted", "^\\+[^\\n]*"],
+      ["deleted", "^-[^\\n]*"],
+    ],
     html: [
       ["comment", "<!--[\\s\\S]*?-->"],
       ["tag", "</?[A-Za-z][\\w:-]*|/?>"],
@@ -132,6 +140,7 @@ const Highlight = (() => {
     sh: "shell", bash: "shell", zsh: "shell", ps1: "shell", psm1: "shell",
     css: "css",
     html: "html", htm: "html", xml: "html", svg: "html",
+    diff: "diff", patch: "diff",
   };
 
   const compiled = new Map();

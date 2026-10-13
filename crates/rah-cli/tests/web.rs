@@ -917,3 +917,71 @@ async fn workspace_files_are_listed_and_read_inside_the_workspace_only() {
     let (status, _) = web.status(web.get("/api/files?path=missing")).await;
     assert_eq!(status, 400);
 }
+
+#[tokio::test]
+async fn git_changes_and_diffs_are_shown_read_only() {
+    let web = start("web-git", |_| {}).await;
+    let workspace = web.dir.workspace();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@example.com",
+            ])
+            .args(args)
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    // Not a repository yet: the view says so.
+    let changes = web.json(web.get("/api/git/changes")).await;
+    assert!(changes["error"].is_string(), "{changes}");
+
+    git(&["init", "-q", "-b", "trunk"]);
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src").join("lib.rs"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "first commit"]);
+    std::fs::write(workspace.join("src").join("lib.rs"), "one\ntwo\n").unwrap();
+    std::fs::write(workspace.join("notes.txt"), "draft").unwrap();
+
+    let changes = web.json(web.get("/api/git/changes")).await;
+    assert_eq!(changes["branch"], "trunk", "{changes}");
+    let brief: Vec<(String, String)> = changes["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| {
+            (
+                change["path"].as_str().unwrap().to_owned(),
+                change["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        brief.contains(&("src/lib.rs".into(), "M".into())),
+        "{changes}"
+    );
+    assert!(
+        brief.contains(&("notes.txt".into(), "U".into())),
+        "{changes}"
+    );
+
+    let diff = web.json(web.get("/api/git/diff?path=src%2Flib.rs")).await;
+    let text = diff["text"].as_str().unwrap();
+    assert!(text.contains("\n+two"), "{diff}");
+    assert_eq!(diff["truncated"], false);
+
+    // Only plain paths inside the workspace.
+    for refused in [
+        "/api/git/diff?path=..%2Fsecret",
+        "/api/git/diff?path=%2Fetc%2Fpasswd",
+        "/api/git/diff?path=",
+    ] {
+        let (status, body) = web.status(web.get(refused)).await;
+        assert_eq!(status, 400, "{refused}: {body}");
+    }
+}

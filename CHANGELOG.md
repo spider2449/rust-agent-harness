@@ -17,6 +17,16 @@
   languages, TOML, YAML, JSON, Markdown, shell/PowerShell, CSS and HTML/XML
   with an embedded tokenizer (`assets/highlight.js`, no external resources);
   files over 200 KiB stay plain.
+- Git state under the file tree, read-only: the branch and the changed
+  files grouped by folder with their status (`M`, `A`, `D`, `R`, `U`, `!`).
+  A change opens its highlighted diff, an untracked file its content. A
+  splitter (mouse, or arrow keys) sets the height of the tree and the Git
+  list and is remembered.
+- `frontend-web`: `GET /api/git/changes` and `/api/git/diff?path=`, each one
+  `git` run through the `sandbox` service with `--no-optional-locks`,
+  `--literal-pathspecs`, `--no-ext-diff` and `--no-textconv`. Paths are
+  checked like the file browser's. A folder that is no repository answers
+  `{error}`.
 - `frontend-web`: `GET /api/files?path=` lists one workspace directory and
   `GET /api/files/content?path=` returns the first 512 KiB of one file
   (binary files return no text). Paths are relative to the `sandbox`

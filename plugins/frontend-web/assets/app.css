@@ -225,7 +225,31 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .side-tabs .spacer { flex: 1; }
 .side-tabs button.icon { border: none; color: var(--muted); }
 .files-view { flex: 1; display: flex; min-height: 0; }
-.tree-pane { width: 34%; min-width: 150px; max-width: 320px; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-height: 0; }
+.tree-pane {
+  --tree-ratio: 0.6;
+  width: 34%; min-width: 170px; max-width: 340px; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-height: 0;
+}
+/* The files above, source control below; the splitter sets the ratio. */
+.tree-section { flex: var(--tree-ratio) 1 0; display: flex; flex-direction: column; min-height: 60px; }
+.git-section { flex: calc(1 - var(--tree-ratio)) 1 0; display: flex; flex-direction: column; min-height: 60px; }
+.splitter { flex: none; height: 5px; cursor: row-resize; border-top: 1px solid var(--line); background: transparent; }
+.splitter:hover, .splitter.dragging, .splitter:focus-visible { background: var(--accent); opacity: 0.45; outline: none; }
+.git-branch { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
+.git-body { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; padding-bottom: 8px; }
+.git-body .tree button { overflow: hidden; }
+.git-body details > summary {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  padding: 3px 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); cursor: pointer; user-select: none;
+}
+.git-body .count { font-weight: normal; margin-left: 4px; padding: 0 6px; border-radius: 999px; background: var(--tool); }
+.git-body .count:empty { display: none; }
+.git-body .tree { overflow: visible; flex: none; padding-bottom: 4px; }
+.changes .change-folder { padding: 2px 10px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.changes .change-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.badge-status { flex: none; width: 1.4em; text-align: center; font: 600 11px/1.4 ui-monospace, Consolas, monospace; }
+.status-M, .status-T, .status-R, .status-C { color: var(--warn); }
+.status-A, .status-U { color: var(--good); }
+.status-D, .status-conflict { color: var(--bad); }
 .pane-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; min-height: 30px; }
 .pane-title { flex: 1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-head button.icon { border: none; color: var(--muted); }
@@ -319,3 +343,10 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .tok-attr { color: var(--tok-attr); }
 .tok-property, .tok-tag { color: var(--tok-property); }
 .tok-heading { color: var(--tok-keyword); font-weight: 600; }
+
+/* Diffs in the file view. */
+.tok-inserted, .tok-deleted { display: inline-block; min-width: 100%; }
+.tok-inserted { color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
+.tok-deleted { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.tok-hunk { color: var(--tok-attr); }
+.tok-meta { color: var(--muted); font-weight: 600; }
