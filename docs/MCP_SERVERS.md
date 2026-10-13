@@ -1,7 +1,8 @@
 # Connecting MCP Servers
 
-RAH connects to an MCP server through the `tools-mcp` plugin. Each server is
-one more `[[plugin]]` entry in a distribution file. You do not need a new
+RAH connects to an MCP server through the `tools-mcp` plugin (stdio) or the
+`tools-mcp-http` plugin (Streamable HTTP). Each server is one more
+`[[plugin]]` entry in a distribution file. You do not need a new
 crate or any Rust code. This page covers the general steps, then walks
 through Blender as a worked example
 ([`examples/mcp/blender.toml`](../examples/mcp/blender.toml)).
@@ -37,8 +38,8 @@ model -> loop -> ToolInvoker -> tool.before_invoke (policy-authority)
 
 1. **Find the stdio command.** Use the command the server's documentation
    gives for MCP clients (for example `uvx <package>`, `npx <package>` or a
-   binary). If the server only speaks HTTP or SSE, `tools-mcp` cannot
-   connect to it directly.
+   binary). If the server only speaks HTTP, use `tools-mcp-http` instead
+   (see [HTTP servers](#http-servers)).
 2. **List its tools.** Tool names must match exactly. A listed tool that the
    server does not offer stops the plugin from starting. Mount the server
    with one tool you are sure of, and check the error message or the
@@ -58,6 +59,34 @@ model -> loop -> ToolInvoker -> tool.before_invoke (policy-authority)
 (required); `cwd`, `env`, `call_timeout_ms` (30 s), `startup_timeout_ms`
 (10 s), `max_message_bytes` (8 MiB), `max_outstanding` (16). See the module
 documentation in `plugins/tools-mcp/src/lib.rs`.
+
+## HTTP servers
+
+`tools-mcp-http` connects to a server that is already running and speaks
+the Streamable HTTP transport (MCP 2025-03-26 or later; ADR 0038). RAH does
+not start it, so no `sandbox` is needed:
+
+```toml
+[[plugin]]
+use = "tools-mcp-http"
+id = "mcp-docs"
+config = { server = "docs", url = "https://mcp.example.com/mcp", bearer_token_env = "DOCS_MCP_TOKEN", tools = { search = "read" } }
+```
+
+- `url` must be `https`, or `http` for `localhost`, `127.0.0.1` or `::1`.
+  Redirects are not followed and proxy settings are not used.
+- `bearer_token_env` (optional) names an environment variable that holds a
+  token. It is read when the plugin starts and sent only to `url`, as
+  `Authorization: Bearer …`. OAuth sign-in is not supported.
+- Tool listing, levels, images, timeouts and limits work as for `tools-mcp`.
+  `cwd`, `env`, `program` and `args` do not apply.
+- The session the server opens ends with a `DELETE` when the plugin
+  unmounts. If the server ends it first, calls fail with "the MCP server
+  ended the session". Restart the plugin to start a new one.
+- The legacy HTTP+SSE transport (protocol 2024-11-05) is not supported.
+
+Tool arguments come from the model and go to that URL. Mount a remote
+server only if you would send it what the model may put there.
 
 ### Images
 

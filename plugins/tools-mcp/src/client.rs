@@ -41,12 +41,22 @@ pub(crate) enum RpcError {
     },
     /// The server broke the protocol; the connection was closed.
     Protocol(String),
+    /// No connection to the HTTP endpoint could be made; nothing was sent.
+    Unreachable,
+    /// The HTTP server no longer knows the session (`404`); it did not
+    /// process the request.
+    SessionEnded,
+    /// The HTTP server answered with an error status.
+    Http(u16),
 }
 
 impl RpcError {
     /// Whether the request certainly never reached the server.
     pub fn not_sent(&self) -> bool {
-        matches!(self, Self::Busy | Self::Closed | Self::TooLarge)
+        matches!(
+            self,
+            Self::Busy | Self::Closed | Self::TooLarge | Self::Unreachable | Self::SessionEnded
+        )
     }
 }
 
@@ -65,6 +75,11 @@ impl std::fmt::Display for RpcError {
                 write!(f, "the MCP server returned error {code}: {message}")
             }
             Self::Protocol(message) => write!(f, "MCP protocol violation: {message}"),
+            Self::Unreachable => f.write_str("cannot connect to the MCP server"),
+            Self::SessionEnded => f.write_str(
+                "the MCP server ended the session; restart the plugin to start a new one",
+            ),
+            Self::Http(status) => write!(f, "the MCP server answered HTTP {status}"),
         }
     }
 }
@@ -204,7 +219,7 @@ async fn write_message(
 }
 
 /// What to do with one incoming message.
-enum Incoming {
+pub(crate) enum Incoming {
     Response {
         id: u64,
         result: Result<Value, RpcError>,
@@ -214,9 +229,10 @@ enum Incoming {
     Ignore,
 }
 
-fn classify(line: &[u8]) -> Result<Incoming, RpcError> {
+/// Reads one JSON-RPC message from the server.
+pub(crate) fn classify(line: &[u8]) -> Result<Incoming, RpcError> {
     let message: Value = serde_json::from_slice(line)
-        .map_err(|_| RpcError::Protocol("stdout carried a line that is not JSON".into()))?;
+        .map_err(|_| RpcError::Protocol("the server sent a message that is not JSON".into()))?;
     let Some(object) = message.as_object() else {
         return Err(RpcError::Protocol("message is not a JSON object".into()));
     };

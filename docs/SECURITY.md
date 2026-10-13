@@ -118,6 +118,15 @@ configuration; its messages and metadata are untrusted:
   effect.
 - Server-to-client requests other than `ping` are refused, so a server cannot
   ask RAH for sampling, roots or elicitation.
+- `tools-mcp-http` (ADR 0038) connects to a server RAH does not start, so
+  process supervision does not apply. Its `url` comes from the
+  configuration only: `https`, or `http` for a loopback host. Redirects and
+  proxies are not used. An optional bearer token is read from an environment
+  variable at start, sent only to that URL, and kept out of errors and logs.
+  A remote server receives model-chosen tool arguments. A lost stream or
+  timeout leaves a `write` or `execute` effect `uncertain`, and a request is
+  never resent. A `404` for an ended session means the server did not run
+  the request.
 - Image content is accepted only as PNG, JPEG, GIF or WebP base64 of bounded
   size (ADR 0037); anything else becomes a short note. The Web UI shows only
   those types, as `data:` images, never SVG or HTML. An image is untrusted

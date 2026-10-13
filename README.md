@@ -104,8 +104,8 @@ config = { allow_programs = ["git", "cargo"] }   # optional allow list
 a timeout, bounded output and process-tree termination. With the mock model,
 `/call shell.exec {"program":"git","args":["status"]}` exercises it.
 
-MCP servers (stdio transport) are mounted one `tools-mcp` instance per
-server. Only the tools listed in `tools` are exposed, as
+MCP servers are mounted one `tools-mcp` (stdio) or `tools-mcp-http`
+(Streamable HTTP) instance per server. Only the tools listed in `tools` are exposed, as
 `mcp.<server>.<tool>`, with the permission level written there; the policy
 must assign them as well:
 

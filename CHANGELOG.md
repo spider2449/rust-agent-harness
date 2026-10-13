@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### MCP over Streamable HTTP (ADR 0038)
+
+- New plugin `tools-mcp-http` in `plugins/tools-mcp`: the tools of one MCP
+  server reached over Streamable HTTP (2025-03-26 or later), with JSON and
+  SSE replies, session ids, `MCP-Protocol-Version`, `ping` answers,
+  `notifications/cancelled` on timeout or cancellation, and a closing
+  `DELETE`. It needs no `sandbox`.
+- `url` must be `https`, or `http` for a loopback host; no redirects or
+  proxies. `bearer_token_env` sends a token from an environment variable to
+  that URL only. OAuth and the legacy HTTP+SSE transport are not supported.
+- Lost streams and timeouts are `uncertain` and never resent. An ended
+  session (`404`) fails calls until the plugin restarts.
+- `tools-mcp` gains a `reqwest` dependency (as in the model plugins).
+  Checked by hand against an MCP Python SDK 1.x server in SSE and JSON reply
+  modes.
+
 ### Images in tool output (ADR 0037)
 
 - `rah-protocol`: `ToolContent::Image { media_type, data }` (PNG, JPEG, GIF

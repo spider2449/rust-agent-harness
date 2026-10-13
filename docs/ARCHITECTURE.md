@@ -17,7 +17,7 @@ rah-api                              service contracts: ModelProvider, AgentLoop
 plugins/*                            depend only on rah-api and rah-protocol
    model-openai-responses, model-anthropic, model-llamacpp, model-mock
    loop-react
-   tools-builtin, tools-mcp, tools-repo, tools-repo-write, tools-shell
+   tools-builtin, tools-mcp, tools-mcp-http, tools-repo, tools-repo-write, tools-shell
    session-jsonl, storage-fs, sandbox-process
    policy-authority, context-default, skills-fs, scheduler-basic
    frontend-cli, frontend-web
@@ -101,7 +101,8 @@ Implemented:
   (read-only Git tools, requires `sandbox`); `tools-repo-write`
   (`repo.create-file`, `repo.edit-files`, `repo.patch`, declared `write`);
   `tools-mcp` (one MCP stdio server
-  per instance, requires `sandbox`); `tools-shell` (opt-in `shell.exec`,
+  per instance, requires `sandbox`); `tools-mcp-http` (one Streamable HTTP
+  MCP server per instance, ADR 0038); `tools-shell` (opt-in `shell.exec`,
   requires `sandbox`); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API
   with an embedded Web UI (`rah --web`), which answers `tool.approval` in the

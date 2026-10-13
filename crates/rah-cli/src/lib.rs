@@ -26,7 +26,7 @@ use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_session_titles::SessionTitlesPlugin;
 use rah_plugin_skills_fs::SkillsPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
-use rah_plugin_tools_mcp::McpToolsPlugin;
+use rah_plugin_tools_mcp::{McpHttpToolsPlugin, McpToolsPlugin};
 use rah_plugin_tools_repo::RepoToolsPlugin;
 use rah_plugin_tools_repo_write::RepoWriteToolsPlugin;
 use rah_plugin_tools_shell::ShellToolsPlugin;
@@ -38,7 +38,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 20] = [
+    let entries: [(&'static str, Constructor); 21] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
@@ -64,6 +64,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("skills-fs", |id| Arc::new(SkillsPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
+        ("tools-mcp-http", |id| Arc::new(McpHttpToolsPlugin::new(id))),
         ("tools-repo", |id| Arc::new(RepoToolsPlugin::new(id))),
         ("tools-repo-write", |id| {
             Arc::new(RepoWriteToolsPlugin::new(id))
