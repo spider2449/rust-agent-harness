@@ -1447,6 +1447,7 @@ dependencies = [
  "rah-plugin-tools-repo",
  "rah-plugin-tools-repo-write",
  "rah-plugin-tools-shell",
+ "rah-plugin-tools-web-search",
  "rah-protocol",
  "reqwest",
  "serde",
@@ -1719,6 +1720,18 @@ version = "0.41.0"
 dependencies = [
  "rah-api",
  "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tools-web-search"
+version = "0.41.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

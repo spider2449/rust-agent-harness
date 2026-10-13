@@ -25,6 +25,7 @@ members = [
     "plugins/tools-repo",
     "plugins/tools-repo-write",
     "plugins/tools-shell",
+    "plugins/tools-web-search",
 ]
 resolver = "3"
 

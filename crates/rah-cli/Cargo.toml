@@ -32,6 +32,7 @@ rah-plugin-tools-mcp = { path = "../../plugins/tools-mcp" }
 rah-plugin-tools-repo = { path = "../../plugins/tools-repo" }
 rah-plugin-tools-repo-write = { path = "../../plugins/tools-repo-write" }
 rah-plugin-tools-shell = { path = "../../plugins/tools-shell" }
+rah-plugin-tools-web-search = { path = "../../plugins/tools-web-search" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

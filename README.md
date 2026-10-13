@@ -126,6 +126,26 @@ working directory inside the sandbox root) and ends with the plugin.
 with Blender ([`examples/mcp/blender.toml`](examples/mcp/blender.toml)) as
 the example.
 
+Web search is the opt-in `tools-web-search` plugin: `web.search` needs no
+API key and tries DuckDuckGo, Bing, then any configured SearXNG instances
+until one answers (a rate-limited or blocked engine cools down). An optional
+`time_range` (`day` to `year`) limits results by age; Bing cannot filter by
+age and is skipped then. `web.fetch` reads one page as text (title, body
+without scripts or styles, cut to `max_chars`) and refuses private and local
+addresses, also behind DNS names and redirects. Results come back inside
+`<untrusted-web-content>`. Queries and URLs go to third-party servers, so the
+policy must assign the tools; asking first is a good default:
+
+```toml
+[[plugin]]
+use = "policy-authority"
+config = { tools = { "web.*" = "read" }, decisions = { "web.*" = "ask" } }
+
+[[plugin]]
+use = "tools-web-search"
+config = { engines = ["duckduckgo", "bing"], max_results = 8 }   # all optional
+```
+
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
 on stdio ([protocol v3](docs/PROCESS_PLUGINS.md)). The Python example
 [`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools

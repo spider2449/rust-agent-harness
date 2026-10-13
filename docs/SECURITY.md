@@ -127,6 +127,26 @@ configuration; its messages and metadata are untrusted:
   timeout leaves a `write` or `execute` effect `uncertain`, and a request is
   never resent. A `404` for an ended session means the server did not run
   the request.
+- `tools-web-search` sends model-chosen query text to DuckDuckGo, Bing or
+  configured SearXNG instances, and `web.fetch` requests a model-chosen URL,
+  so a model can leak context through a query or a URL. The plugin is
+  opt-in, both tools declare `read`, and the policy must assign them;
+  `decisions = { "web.*" = "ask" }` shows each request first. Engine URLs
+  come from the configuration only, request URLs are kept out of search
+  errors, bodies are bounded to 2 MiB, and no proxy is used unless `proxy`
+  is set (`web.fetch` never uses one). Results are wrapped in
+  `<untrusted-web-content>` with angle brackets in page text replaced, but
+  they remain untrusted model input.
+- `web.fetch` guards against server-side request forgery: only `http` and
+  `https` without credentials; IP literals (including IPv4-mapped, NAT64 and
+  numeric forms) and every resolved address must be public, so loopback,
+  private, link-local (cloud metadata), shared (CGNAT), documentation,
+  benchmarking, multicast and reserved ranges are refused. A name whose
+  answer mixes public and non-public addresses is refused as a whole, the
+  connection uses the checked address, and each of at most five redirects
+  is checked again. The guard does not stop a public server from returning
+  harmful text, and `fetch_private_networks = true` turns it off for the
+  whole instance.
 - Image content is accepted only as PNG, JPEG, GIF or WebP base64 of bounded
   size (ADR 0037); anything else becomes a short note. The Web UI shows only
   those types, as `data:` images, never SVG or HTML. An image is untrusted

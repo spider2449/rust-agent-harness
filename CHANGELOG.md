@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Keyless web search plugin
+
+- New opt-in plugin `tools-web-search` (`plugins/tools-web-search`): the
+  `web.search` tool (`query`, optional `limit`, `engine` and `time_range`)
+  searches without an API key. DuckDuckGo (HTML) and Bing are scraped, SearXNG instances are
+  read as JSON, and engines are tried in configured order. A rate-limited
+  engine cools down for five minutes and a blocked one for one minute.
+  Results (title, URL, snippet of at most 300 characters) are deduplicated
+  and wrapped in `<untrusted-web-content>`, with a `Note:` line naming the
+  engine that answered. `time_range` (`day`, `week`, `month`, `year`) maps
+  to DuckDuckGo `df` and SearXNG `time_range`; Bing ignores freshness
+  filters without cookies, so a time-ranged search skips it and says so.
+- The same plugin provides `web.fetch` (`url`, optional `max_chars`): one
+  `http`/`https` page of a text-like type, at most 2 MiB, returned as its
+  title and text (scripts, styles and other non-text elements dropped, cut
+  to `fetch_max_chars`, default 20 000) in the same wrapper. It refuses
+  private, loopback, link-local, shared and reserved addresses, for IP
+  literals, resolved names and every redirect, uses no proxy, and follows at
+  most five redirects; `fetch_private_networks = true` lifts the guard. No
+  preset mounts the plugin.
+
 ### Web UI: folder-grouped sessions and a workspace panel
 
 - The session list is grouped by the folder each session worked in: the

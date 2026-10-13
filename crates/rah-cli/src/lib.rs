@@ -30,6 +30,7 @@ use rah_plugin_tools_mcp::{McpHttpToolsPlugin, McpToolsPlugin};
 use rah_plugin_tools_repo::RepoToolsPlugin;
 use rah_plugin_tools_repo_write::RepoWriteToolsPlugin;
 use rah_plugin_tools_shell::ShellToolsPlugin;
+use rah_plugin_tools_web_search::WebSearchPlugin;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -38,7 +39,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 21] = [
+    let entries: [(&'static str, Constructor); 22] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
@@ -70,6 +71,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
             Arc::new(RepoWriteToolsPlugin::new(id))
         }),
         ("tools-shell", |id| Arc::new(ShellToolsPlugin::new(id))),
+        ("tools-web-search", |id| Arc::new(WebSearchPlugin::new(id))),
     ];
     entries.into_iter().collect()
 }
