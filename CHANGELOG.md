@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Plugin storage
+
+- `rah-api` adds the `storage` service (ADR 0041): `KvStore` with `get`,
+  `put` (atomic replace), `delete` and `list` (by prefix), byte values in a
+  namespace per plugin (its id), names of 1 to 128 bytes of letters, digits
+  and `._:-`. `MemoryStore` implements it in memory for tests.
+- New plugin `storage-fs` (`plugins/storage-fs`) provides it as one file per
+  entry in `dir` (default `.rah/storage`), with reversible lowercase file
+  names, writes through a flushed, exclusively created temporary file and a
+  rename (safe when several stores or `rah` processes share the
+  directory: last writer wins per key, never a mixed value), and
+  `max_value_bytes` (16 MiB). There is no compare-and-swap. Every built-in
+  preset mounts it.
+- Process plugins (protocol 3, unchanged version) and WASM plugins may list
+  `storage` in `requires` and call `get {key}`, `put {key, value}`,
+  `delete {key}` and `list {prefix?}` with JSON values; the host fixes the
+  namespace to the plugin's id.
+- `context-compact` keeps its summaries in `storage` when a provider is
+  mounted, in the namespace of its id. **Breaking:** its `dir` option is
+  removed; a configuration with `dir` fails to mount. Old cache files are
+  not migrated (summaries are rebuilt on demand).
+
 ### Telemetry and token usage
 
 - `rah-protocol` adds `ModelUsage` (optional `input_tokens`,
@@ -35,8 +57,8 @@
   arguments are shortened in the transcript.
 - Summaries are cached by an FNV-1a hash of the history prefix they cover,
   so they are reused across requests and by forks that share that prefix,
-  and a longer history extends the newest summary. `dir` keeps them on disk
-  across restarts. A failure or `timeout_secs` (default 120) leaves the
+  and a longer history extends the newest summary. (`dir`, which kept them
+  on disk, was replaced by the `storage` service; see above.) A failure or `timeout_secs` (default 120) leaves the
   request as it was and is not retried for the same history for five
   minutes. Optional `model` and `instructions` change the summary request.
 - `rah` lists the plugin in its catalog; no preset mounts it.

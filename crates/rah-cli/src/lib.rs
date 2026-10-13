@@ -26,6 +26,7 @@ use rah_plugin_scheduler_basic::SchedulerPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_session_titles::SessionTitlesPlugin;
 use rah_plugin_skills_fs::SkillsPlugin;
+use rah_plugin_storage_fs::StorageFsPlugin;
 use rah_plugin_telemetry_log::TelemetryPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use rah_plugin_tools_mcp::{McpHttpToolsPlugin, McpToolsPlugin};
@@ -41,7 +42,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 24] = [
+    let entries: [(&'static str, Constructor); 25] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
@@ -66,6 +67,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
             Arc::new(SessionTitlesPlugin::new(id))
         }),
         ("skills-fs", |id| Arc::new(SkillsPlugin::new(id))),
+        ("storage-fs", |id| Arc::new(StorageFsPlugin::new(id))),
         ("telemetry-log", |id| Arc::new(TelemetryPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
@@ -90,7 +92,7 @@ pub struct Preset {
     pub guarded: bool,
 }
 
-/// Built-in presets. All share built-in tools, read-only repository tools
+/// Built-in presets. All share `storage-fs` (`.rah/storage`), built-in tools, read-only repository tools
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
 /// and memory notes per workspace in `.rah/memory`), `skills-fs` (`.rah/skills`), `scheduler-basic`
 /// (background jobs and `agent.delegate`), the default loop and the terminal
@@ -133,6 +135,10 @@ config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo 
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
+[[plugin]]
+use = "storage-fs"
+config = { dir = ".rah/storage" }
+
 [[plugin]]
 use = "session-jsonl"
 config = { dir = ".rah/sessions" }

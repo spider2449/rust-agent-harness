@@ -19,6 +19,7 @@ pub mod model;
 pub mod sandbox;
 pub mod scheduler;
 pub mod session;
+pub mod storage;
 pub mod tools;
 
 pub use async_trait::async_trait;

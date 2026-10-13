@@ -51,9 +51,17 @@
 - [ ] 測試：寫入工作目錄外失敗、連網被擋（設定禁止時）、取消和逾時仍終止整個 process tree。不支援的平台上測試要明確略過並說明。
 - 這段工作量最大，可能拆成「Windows」和「Linux」兩個 commit。
 
-## G5：`storage-fs`（視需要）
+## G5：`storage-fs`
 
-計畫列了 `storage` 服務（`KvStore`、`BlobStore`），但目前沒有 plugin 需要共用的持久狀態：session 和記憶各自寫檔是合理的。只有在 G1–G4 或之後的工作出現第二個需要持久狀態的 plugin 時才做，屆時在 `rah-api` 新增服務合約並寫 ADR。現在不做。
+原本寫「出現第二個需要持久狀態的 plugin 才做」。G2 的 `context-compact` 用自己的 `dir` 存摘要快取，加上 `context-default` 的記憶檔，條件已經成立；WASM plugin 沒有 WASI，也完全沒辦法保存狀態。2026-10-13 使用者要求開始。
+
+- [x] ADR 0041：`rah-api::storage`，`STORAGE: ServiceKey<dyn KvStore>`，`get`、`put`（原子取代）、`delete`、`list`（前綴、排序）。值是 bytes；每個呼叫帶 namespace，慣例是 plugin id。名稱 1–128 bytes，字元同 plugin id（英數和 `._:-`），區分大小寫。`MemoryStore` 給測試用。
+- [x] 不做 `BlobStore`：目前沒有串流或大型二進位的需求，等有消費者再加新合約。
+- [x] `plugins/storage-fs`：`<dir>/<namespace>/<key>` 一個檔案一筆；檔名可逆編碼成全小寫（其他 byte 寫成 `%xx`，Windows 裝置名稱跳脫），所以不分大小寫的檔案系統也正確；`put` 寫暫存檔、flush、rename；啟動時刪除超過一小時的暫存檔；`max_value_bytes` 預設 16 MiB。所有 preset 都掛（`dir = ".rah/storage"`）。
+- [x] process 和 WASM plugin：`requires` 可以有 `storage`，`service/call`／`call-service` 提供 `get`、`put`、`delete`、`list`，值是 JSON（`rah_api::storage::call_json`，兩個 host 共用）；host 把 namespace 固定成 plugin id，碰不到別人的資料。process protocol 版本不變（3）。
+- [x] `context-compact` 改用 `storage`（每次使用時解析，沒有 provider 就只留記憶體快取），移除 `dir`。
+- 決定：`context-default` 的記憶繼續是 Markdown 檔，因為使用者會直接打開來看和改；`storage-fs` 的檔名不適合手動編輯。
+- [x] 測試：合約和 `call_json`（rah-api）；`storage-fs` 的編碼、CRUD、拒絕無效名稱和過大的值、略過暫存和外來檔案、並行寫入、重啟後仍在、清除舊暫存檔；`context-compact` 重啟後重用、沒有 storage 時不保存、`dir` 被拒；process 和 WASM host 的 namespace 固定和 `requires` 檢查；`crates/rah-cli/tests/compact.rs` 確認 preset 的 `storage-fs` 存了摘要。
 
 ## 備註
 

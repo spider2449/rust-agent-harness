@@ -45,7 +45,8 @@ Without the scripts:
 cargo run -p rah-cli -- --preset dev
 ```
 
-The `dev` preset mounts `policy-authority`, `session-jsonl` (logs in
+The `dev` preset mounts `policy-authority`, `storage-fs` (plugin state in
+`.rah/storage`), `session-jsonl` (logs in
 `.rah/sessions`), `session-titles` (names each session from its first turn),
 `tools-builtin` (`echo` and `fs.read` bounded to the current
 directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
@@ -155,15 +156,24 @@ Long conversations: `context-default` keeps a window of the newest history
 and drops the rest. The opt-in `context-compact` plugin summarizes the old
 part with the mounted model instead, once the history passes
 `trigger_chars`, keeping the newest `keep_chars` as they are. Summaries are
-cached by the history they cover (on disk with `dir`), reused by later
-requests and forks, and extended as the conversation grows. Each summary is
-an extra model request, and the session log is never changed:
+cached by the history they cover, reused by later requests and forks, and
+extended as the conversation grows; with a `storage` provider mounted (the
+presets mount `storage-fs`) they survive restarts. Each summary is an extra
+model request, and the session log is never changed:
 
 ```toml
 [[plugin]]
 use = "context-compact"
-config = { trigger_chars = 60000, keep_chars = 20000, dir = ".rah/compact" }   # all optional
+config = { trigger_chars = 60000, keep_chars = 20000 }   # all optional
 ```
+
+Plugin state: `storage-fs`, mounted by every preset, provides the `storage`
+service (ADR 0041), a key-value store in which each plugin keeps its
+entries under its own id, one file per entry in `.rah/storage`
+(`config = { dir = ".rah/storage", max_value_bytes = 16777216 }`).
+`context-compact` keeps its summaries there, and process and WASM plugins
+that list `storage` in `requires` can keep state between calls and
+restarts.
 
 Diagnostics: the opt-in `telemetry-log` plugin writes one JSON line per
 turn, model request and tool call to `.rah/telemetry/<date>.jsonl`, with

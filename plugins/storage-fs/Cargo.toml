@@ -1,0 +1,14 @@
+[package]
+name = "rah-plugin-storage-fs"
+version.workspace = true
+edition.workspace = true
+description = "Storage plugin: the namespaced key-value store as one file per entry"
+
+[dependencies]
+rah-api = { path = "../../crates/rah-api" }
+serde.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread"] }

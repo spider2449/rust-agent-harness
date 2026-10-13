@@ -29,7 +29,8 @@ config = { path = "plugins/my_plugin.wasm", fuel = 100000000, max_memory_mb = 64
 
 `rah` compiles the component and reads its manifest once at boot. Every tool
 call instantiates the component in a fresh store, so a guest keeps no state
-between calls and a trap affects only that call.
+between calls and a trap affects only that call. State that must last goes
+through the `storage` service (below).
 
 ## The WIT world
 
@@ -63,7 +64,7 @@ Returns JSON:
 ```
 
 A WASM plugin provides `tools` (1 to 128, unique names without whitespace)
-and may require only `session`. Permissions are its declaration;
+and may require only `session` and `storage`. Permissions are its declaration;
 `policy-authority` still assigns each tool and can only be made stricter by
 it.
 
@@ -81,9 +82,16 @@ replayed.
 |---|---|---|---|
 | `session` | `list` | `{}` | JSON `[SessionInfo]` |
 | `session` | `read` | `{"session": "<id>"}` | JSON `[SessionRecord]` |
+| `storage` | `get` | `{"key": "<key>"}` | `{"value": <JSON or null>}` |
+| `storage` | `put` | `{"key": "<key>", "value": <any JSON>}` | `{}` |
+| `storage` | `delete` | `{"key": "<key>"}` | `{"deleted": true}` |
+| `storage` | `list` | `{"prefix": "<prefix>"}` (optional) | `{"keys": [...]}` |
 
 Any service outside the plugin's `requires` returns an error, even when that
-service is mounted.
+service is mounted. `storage` (ADR 0041) keeps entries in the namespace of
+the plugin's id, so a guest sees only its own; keys are 1 to 128 bytes of
+letters, digits and `._:-`. A distribution must mount a provider, such as
+`storage-fs` (every built-in preset does).
 
 ## Building a component
 

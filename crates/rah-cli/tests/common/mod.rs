@@ -26,6 +26,10 @@ impl TempDir {
         self.0.join("sessions")
     }
 
+    pub fn storage(&self) -> PathBuf {
+        self.0.join("storage")
+    }
+
     pub fn workspace(&self) -> PathBuf {
         self.0.join("workspace")
     }
@@ -48,6 +52,7 @@ pub fn headless(dir: &TempDir) -> Distribution {
     distribution.set_config("sandbox-process", "root", json!(path(&dir.workspace())));
     distribution.set_config("tools-repo-write", "root", json!(path(&dir.workspace())));
     distribution.set_config("skills-fs", "dir", json!(path(&dir.0.join("skills"))));
+    distribution.set_config("storage-fs", "dir", json!(path(&dir.storage())));
     distribution.set_config(
         "context-default",
         "memory_dir",

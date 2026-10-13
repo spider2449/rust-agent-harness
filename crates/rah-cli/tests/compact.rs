@@ -1,6 +1,6 @@
 //! `context-compact` in a distribution: it runs before `context-default`,
-//! summarizes old turns through the mounted model and leaves the session
-//! log unchanged.
+//! summarizes old turns through the mounted model, keeps the summary in the
+//! preset's `storage-fs` and leaves the session log unchanged.
 
 mod common;
 
@@ -8,6 +8,7 @@ use common::{TempDir, headless, kernel, new_session, turn};
 use rah_api::{
     hooks::ModelBeforeRequest,
     session::{SESSION, rebuild_context},
+    storage::STORAGE,
 };
 use rah_cli::PluginSpec;
 use rah_protocol::{ContextItem, ModelRequest};
@@ -23,7 +24,6 @@ async fn long_sessions_are_summarized_before_the_window_applies() {
         config: json!({
             "trigger_chars": 600,
             "keep_chars": 200,
-            "dir": dir.0.join("compact").display().to_string(),
         }),
         bind: Default::default(),
     });
@@ -83,7 +83,14 @@ async fn long_sessions_are_summarized_before_the_window_applies() {
     // The log itself is unchanged.
     let after = handle.get(SESSION).unwrap().read(&session).await.unwrap();
     assert_eq!(after.len(), records.len());
-    // The summary was kept on disk.
-    let cached = std::fs::read_dir(dir.0.join("compact")).unwrap().count();
-    assert!(cached >= 1);
+    // The summary was kept by the preset's `storage-fs`, in the namespace
+    // of the plugin's id.
+    let stored = handle
+        .get(STORAGE)
+        .unwrap()
+        .list("context-compact", "")
+        .await
+        .unwrap();
+    assert!(!stored.is_empty());
+    assert!(dir.storage().join("context-compact").is_dir());
 }

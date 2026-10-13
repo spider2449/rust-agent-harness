@@ -10,7 +10,7 @@ rah-api = { path = "../../crates/rah-api" }
 rah-protocol = { path = "../../crates/rah-protocol" }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs", "sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

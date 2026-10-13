@@ -85,7 +85,7 @@ Result, the plugin's manifest:
   `events`.
 - `provides` may contain only `tools`; `tools` must be non-empty exactly when
   it does (at most 128 tools, unique names without whitespace).
-- `requires` and `optional` may contain only `session`. A required service
+- `requires` and `optional` may contain only `session` and `storage`. A required service
   must be mounted before the plugin starts; `optional` services cannot be
   called.
 - `permission` is one of `none`, `read`, `write`, `execute`. It is the
@@ -195,6 +195,16 @@ error code `-32003`, even when that service is mounted. Available methods:
 |---|---|---|---|
 | `session` | `list` | none | `[SessionInfo]` |
 | `session` | `read` | `{session}` | `[SessionRecord]` (the append-only log) |
+| `storage` | `get` | `{key}` | `{value}`, `null` when not stored |
+| `storage` | `put` | `{key, value}` (any JSON) | `{}` |
+| `storage` | `delete` | `{key}` | `{deleted}` |
+| `storage` | `list` | `{prefix?}` | `{keys}`, sorted |
+
+`storage` (ADR 0041) keeps entries in the namespace of the plugin's id; a
+plugin cannot reach another plugin's entries. Keys are 1 to 128 bytes of
+letters, digits and `._:-`. An invalid key or parameter is error `-32602`,
+an unknown method `-32601`, a storage failure `-32000`. A distribution must
+mount a provider, such as `storage-fs` (every built-in preset does).
 
 The host answers plugin requests concurrently with its own; a plugin may call
 a service while it handles a `tools/call` or a `hooks/call`.

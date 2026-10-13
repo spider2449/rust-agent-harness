@@ -7,6 +7,7 @@ use rah_api::{
     PluginStatus, Scope, async_trait,
     hooks::{ModelBeforeRequest, ToolBeforeInvoke, ToolDecision},
     session::{SESSION, SessionAppended, SessionError, SessionLog},
+    storage::{KvStore, MemoryStore, STORAGE},
     tools::{Invocation, ToolInvoker},
 };
 use rah_plugin_host_process::ProcessPlugin;
@@ -200,6 +201,88 @@ async fn services_outside_requires_are_refused_even_when_mounted() {
     )
     .await;
     assert_eq!(json_of(&output)["error"]["code"], -32003);
+}
+
+struct StoragePlugin(PluginManifest, Arc<MemoryStore>);
+
+#[async_trait]
+impl Plugin for StoragePlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        scope.provide(STORAGE, self.1.clone() as Arc<dyn KvStore>)?;
+        Ok(())
+    }
+}
+
+async fn mount_storage(kernel: &Kernel) -> Arc<MemoryStore> {
+    let store = Arc::new(MemoryStore::new());
+    let plugin = StoragePlugin(
+        PluginManifest::new("storage", "1").provides(["storage"]),
+        store.clone(),
+    );
+    kernel
+        .mount(Arc::new(plugin), MountOptions::default())
+        .await
+        .unwrap();
+    store
+}
+
+async fn storage_call(kernel: &Kernel, method: &str, params: Value) -> Value {
+    let (output, _) = call(
+        kernel,
+        "fixture.call",
+        json!({ "service": "storage", "method": method, "params": params }),
+    )
+    .await;
+    json_of(&output)
+}
+
+#[tokio::test]
+async fn storage_is_kept_in_the_namespace_of_the_plugin_id() {
+    let kernel = Kernel::new();
+    let store = mount_storage(&kernel).await;
+    store.put("other", "secret", b"\"x\"").await.unwrap();
+    let status = mount_process(&kernel, config(&["--requires", "storage"], Value::Null)).await;
+    assert_eq!(status, PluginStatus::Active);
+
+    let answer = storage_call(
+        &kernel,
+        "put",
+        json!({ "key": "state", "value": { "n": 1 }, "namespace": "other" }),
+    )
+    .await;
+    assert_eq!(answer["result"], json!({}), "{answer}");
+    assert_eq!(
+        store.get("fixture", "state").await.unwrap(),
+        Some(br#"{"n":1}"#.to_vec())
+    );
+    assert_eq!(store.get("other", "state").await.unwrap(), None);
+
+    let answer = storage_call(&kernel, "get", json!({ "key": "state" })).await;
+    assert_eq!(answer["result"], json!({ "value": { "n": 1 } }), "{answer}");
+    let answer = storage_call(&kernel, "get", json!({ "key": "secret" })).await;
+    assert_eq!(answer["result"], json!({ "value": null }), "{answer}");
+    let answer = storage_call(&kernel, "list", json!({})).await;
+    assert_eq!(answer["result"], json!({ "keys": ["state"] }), "{answer}");
+    let answer = storage_call(&kernel, "delete", json!({ "key": "state" })).await;
+    assert_eq!(answer["result"], json!({ "deleted": true }), "{answer}");
+
+    let answer = storage_call(&kernel, "get", json!({ "key": "../x" })).await;
+    assert_eq!(answer["error"]["code"], -32602, "{answer}");
+    let answer = storage_call(&kernel, "rename", json!({})).await;
+    assert_eq!(answer["error"]["code"], -32601, "{answer}");
+}
+
+#[tokio::test]
+async fn storage_outside_requires_is_refused() {
+    let kernel = Kernel::new();
+    mount_storage(&kernel).await;
+    mount_process(&kernel, config(&[], Value::Null)).await;
+    let answer = storage_call(&kernel, "list", json!({})).await;
+    assert_eq!(answer["error"]["code"], -32003, "{answer}");
 }
 
 #[tokio::test]

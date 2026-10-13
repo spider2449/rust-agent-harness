@@ -1,9 +1,8 @@
-use std::path::PathBuf;
-
 use futures::stream;
 use rah_api::{
     Kernel, MountOptions,
     model::{ModelError, ModelProvider, ModelStream},
+    storage::{KvStore, MemoryStore},
 };
 use rah_protocol::{ToolName, ToolOutput};
 use serde_json::{Value, json};
@@ -271,27 +270,90 @@ async fn a_large_current_turn_is_never_cut() {
     assert_eq!(model.calls(), 1);
 }
 
+/// Provides one store that outlives the kernels mounting it.
+struct StoragePlugin {
+    manifest: PluginManifest,
+    store: Arc<MemoryStore>,
+}
+
+#[async_trait]
+impl Plugin for StoragePlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        let store: Arc<dyn KvStore> = self.store.clone();
+        scope.provide(STORAGE, store)?;
+        Ok(())
+    }
+}
+
+async fn setup_with_storage(model: &Arc<FakeModel>, store: &Arc<MemoryStore>) -> Kernel {
+    let kernel = setup(model, small(json!({}))).await;
+    kernel
+        .mount(
+            Arc::new(StoragePlugin {
+                manifest: PluginManifest::new("storage", "0").provides(["storage"]),
+                store: store.clone(),
+            }),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+}
+
 #[tokio::test]
-async fn summaries_survive_a_restart_with_a_dir() {
-    let dir = std::env::temp_dir().join(format!("rah-compact-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let config = small(json!({ "dir": dir }));
+async fn summaries_survive_a_restart_with_storage() {
+    let store = Arc::new(MemoryStore::new());
     let items = vec![u("1"), a("1"), u("2"), a("2"), u("3")];
 
     let first = FakeModel::new(Mode::Reply);
-    let kernel = setup(&first, config.clone()).await;
+    let kernel = setup_with_storage(&first, &store).await;
     shaped(&kernel, items.clone()).await;
     assert_eq!(first.calls(), 1);
-    drop(kernel);
+    kernel.shutdown().await.unwrap();
+    // Kept in the namespace of the plugin's id.
+    assert_eq!(store.list("compact", "").await.unwrap().len(), 1);
 
     let second = FakeModel::new(Mode::Fail);
-    let kernel = setup(&second, config).await;
+    let kernel = setup_with_storage(&second, &store).await;
     assert_eq!(
         shaped(&kernel, items).await,
         vec![summary_of(4, "summary 1"), u("3")]
     );
     assert_eq!(second.calls(), 0);
-    let _ = std::fs::remove_dir_all(PathBuf::from(&dir));
+}
+
+#[tokio::test]
+async fn without_storage_summaries_do_not_survive_a_restart() {
+    let items = vec![u("1"), a("1"), u("2"), a("2"), u("3")];
+    let first = FakeModel::new(Mode::Reply);
+    let kernel = setup(&first, small(json!({}))).await;
+    shaped(&kernel, items.clone()).await;
+    kernel.shutdown().await.unwrap();
+
+    let second = FakeModel::new(Mode::Reply);
+    let kernel = setup(&second, small(json!({}))).await;
+    shaped(&kernel, items).await;
+    assert_eq!(second.calls(), 1);
+}
+
+#[tokio::test]
+async fn the_removed_dir_option_is_refused() {
+    let kernel = Kernel::new();
+    let status = kernel
+        .mount(
+            Arc::new(CompactPlugin::new("compact")),
+            MountOptions::with_config(small(json!({ "dir": ".rah/compact" }))),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(status, rah_api::PluginStatus::Failed { .. }),
+        "{status:?}"
+    );
 }
 
 #[tokio::test]

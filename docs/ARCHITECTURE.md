@@ -87,7 +87,9 @@ Implemented:
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`. Loops publish each turn event on the event bus as
   `TurnEvent`, and providers report token usage as `ModelEvent::Usage`
-  (ADR 0040).
+  (ADR 0040). `storage` (`KvStore`, ADR 0041): a namespaced key-value
+  store for plugin state that must survive a restart, each plugin in the
+  namespace of its id.
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `model-anthropic` (Anthropic Messages API);
   `loop-react` and `loop-plan` (plan-and-execute;
@@ -99,7 +101,9 @@ Implemented:
   with durations, policy decisions and token usage);
   `context-compact` (opt-in: summarizes history beyond a size limit with the
   model before `context-default` applies its window; summaries are cached by
-  the history prefix they cover);
+  the history prefix they cover, and kept in `storage` when it is mounted);
+  `storage-fs` (the `storage` service as one file per entry under
+  `.rah/storage`, mounted by every preset);
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`; with
   `memory_dir` one file per workspace, chosen from the sandbox root on every
@@ -137,12 +141,14 @@ Implemented:
   stdio ([protocol v3](PROCESS_PLUGINS.md)). They may provide `tools`,
   attach to `tool.before_invoke`, `tool.after_invoke` and
   `model.before_request`, follow `session.appended` events (ADR 0039), and
-  call the host's `session` service only if it is in their `requires`. `rah` mounts
+  call the host's `session` and `storage` services only if they are in
+  their `requires` (`storage` always in the namespace of their id). `rah` mounts
   them with `use = "process"`.
 - `rah-plugin-host-wasm`: WebAssembly components of the WIT world
   `rah:plugin/wasm-plugin` ([WASM plugins](WASM_PLUGINS.md)), run in-process
   by wasmtime without WASI. They provide `tools`; their only import is
-  `call-service`, limited to their `requires` (currently `session`). Each call
+  `call-service`, limited to their `requires` (`session`, and `storage` in
+  the namespace of their id). Each call
   runs in a fresh store with a fuel and memory budget. `rah` mounts them with
   `use = "wasm"`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from

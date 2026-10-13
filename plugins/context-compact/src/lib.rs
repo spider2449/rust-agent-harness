@@ -14,10 +14,11 @@
 //! Summaries are cached by a hash of the history prefix they cover, so later
 //! requests of the same session reuse them, a longer history extends the
 //! newest summary instead of starting over, and a fork reuses its parent's
-//! summary only for the history they share. With `dir` the cache is also
-//! kept on disk and survives restarts. When summarizing fails or times out,
-//! the request keeps the newest summary there is (or none), and the
-//! `context-default` window bounds the rest. The same history is not
+//! summary only for the history they share. When a `storage` service is
+//! mounted (such as `storage-fs`), summaries are also kept there, in the
+//! namespace of this plugin's id, and survive restarts. When summarizing
+//! fails or times out, the request keeps the newest summary there is (or
+//! none), and the `context-default` window bounds the rest. The same history is not
 //! summarized again for five minutes after a failure.
 //!
 //! The summary is model output derived from untrusted content. It is marked
@@ -27,11 +28,10 @@
 //! Configuration (all optional): `{ "trigger_chars": 60000,
 //! "keep_chars": 20000, "chunk_chars": 40000, "max_summary_chars": 6000,
 //! "timeout_secs": 120, "model": "<provider model id>",
-//! "instructions": "...", "dir": ".rah/compact" }`.
+//! "instructions": "..." }`.
 
 use std::{
     collections::VecDeque,
-    path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -39,7 +39,7 @@ use std::{
 use futures::StreamExt;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    async_trait, hooks::ModelBeforeRequest, model::MODEL, tools::describe_image,
+    async_trait, hooks::ModelBeforeRequest, model::MODEL, storage::STORAGE, tools::describe_image,
 };
 use rah_protocol::{ContextItem, ModelEvent, ModelRequest, ToolContent};
 use serde::{Deserialize, Serialize};
@@ -92,7 +92,6 @@ pub struct CompactConfig {
     pub timeout_secs: Option<u64>,
     pub model: Option<String>,
     pub instructions: Option<String>,
-    pub dir: Option<PathBuf>,
 }
 
 #[async_trait]
@@ -133,7 +132,8 @@ impl Plugin for CompactPlugin {
                 .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.to_owned()),
             cache: Cache {
                 recent: Mutex::new(VecDeque::new()),
-                dir: config.dir,
+                kernel: scope.kernel(),
+                namespace: scope.id().to_string(),
             },
             summarizing: tokio::sync::Mutex::new(()),
             failed: Mutex::new(VecDeque::new()),
@@ -166,7 +166,14 @@ struct Summary {
 
 struct Cache {
     recent: Mutex<VecDeque<Summary>>,
-    dir: Option<PathBuf>,
+    /// Resolves the optional `storage` service on every use.
+    kernel: KernelHandle,
+    namespace: String,
+}
+
+/// The storage key of the summary that ends at the prefix with `hash`.
+fn storage_key(hash: u64) -> String {
+    format!("{hash:016x}")
 }
 
 impl Cache {
@@ -187,20 +194,21 @@ impl Cache {
             .cloned()
     }
 
-    /// Looks on disk for a summary covering more than `longer_than` items.
-    async fn best_on_disk(
+    /// Looks in `storage` for a summary covering more than `longer_than`
+    /// items.
+    async fn best_stored(
         &self,
         history: &[ContextItem],
         hashes: &[u64],
         longer_than: usize,
     ) -> Option<Summary> {
-        let dir = self.dir.as_ref()?;
+        let storage = self.kernel.get(STORAGE)?;
         for index in (longer_than + 1..history.len()).rev() {
             if !is_user(&history[index]) {
                 continue;
             }
-            let path = dir.join(format!("{:016x}.json", hashes[index]));
-            let Ok(bytes) = tokio::fs::read(&path).await else {
+            let key = storage_key(hashes[index]);
+            let Ok(Some(bytes)) = storage.get(&self.namespace, &key).await else {
                 continue;
             };
             match serde_json::from_slice::<Summary>(&bytes) {
@@ -225,20 +233,16 @@ impl Cache {
 
     async fn store(&self, summary: Summary) {
         self.remember(summary.clone());
-        let Some(dir) = &self.dir else {
+        let Some(storage) = self.kernel.get(STORAGE) else {
             return;
         };
         let Ok(bytes) = serde_json::to_vec(&summary) else {
             return;
         };
-        // A lost cache file only costs a new summary later.
-        if tokio::fs::create_dir_all(dir).await.is_ok() {
-            let path = dir.join(format!("{:016x}.json", summary.hash));
-            let partial = path.with_extension("json.partial");
-            if tokio::fs::write(&partial, bytes).await.is_ok() {
-                let _ = tokio::fs::rename(&partial, &path).await;
-            }
-        }
+        // A lost entry only costs a new summary later.
+        let _ = storage
+            .put(&self.namespace, &storage_key(summary.hash), &bytes)
+            .await;
     }
 }
 
@@ -272,7 +276,7 @@ impl Compactor {
             best = self.cache.best(history, &hashes);
             if self.needs_more(&sizes, best.as_ref()) {
                 let covered = best.as_ref().map_or(0, |summary| summary.items);
-                if let Some(found) = self.cache.best_on_disk(history, &hashes, covered).await {
+                if let Some(found) = self.cache.best_stored(history, &hashes, covered).await {
                     best = Some(found);
                 }
             }

@@ -9,7 +9,9 @@
 //! - The host provides `host.call-service(service, method, params) ->
 //!   result<string, string>`, refused for any service outside the guest's
 //!   `requires`. Callable services: `session` with `list` and
-//!   `read {session}`.
+//!   `read {session}`; `storage` with `get {key}`, `put {key, value}`,
+//!   `delete {key}` and `list {prefix?}`, always in the namespace of the
+//!   plugin's id ([`rah_api::storage::call_json`]).
 //!
 //! Isolation is the point of this host: a guest gets no WASI, so no files,
 //! network, clock, randomness or environment; its only way out is
@@ -37,6 +39,7 @@ use std::{
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     session::{SESSION, SessionLog},
+    storage::{self, KvStore, STORAGE},
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
 };
 use rah_protocol::{SessionId, ToolContent, ToolDefinition, ToolOutput};
@@ -83,7 +86,7 @@ world wasm-plugin {
 use bindings::WasmPlugin as Guest;
 
 /// Host services a WASM plugin may require and call.
-pub const CALLABLE_SERVICES: [&str; 1] = ["session"];
+pub const CALLABLE_SERVICES: [&str; 2] = ["session", "storage"];
 const DEFAULT_FUEL: u64 = 100_000_000;
 const DEFAULT_MAX_MEMORY_MB: usize = 64;
 const MAX_TOOLS: usize = 128;
@@ -122,7 +125,8 @@ fn parse_manifest(text: &str) -> Result<Described, String> {
         .find(|s| !CALLABLE_SERVICES.contains(&s.as_str()))
     {
         return Err(format!(
-            "a WASM plugin cannot depend on `{service}`; only: session"
+            "a WASM plugin cannot depend on `{service}`; only: {}",
+            CALLABLE_SERVICES.join(", ")
         ));
     }
     if manifest.tools.is_empty() || manifest.tools.len() > MAX_TOOLS {
@@ -146,10 +150,19 @@ fn parse_manifest(text: &str) -> Result<Described, String> {
     })
 }
 
-/// Per-call host state: what the guest may reach, and its limits.
-struct HostState {
+/// The host services a guest may reach: those in its `requires`.
+#[derive(Clone, Default)]
+struct Services {
     requires: Arc<Vec<String>>,
     session: Option<Arc<dyn SessionLog>>,
+    storage: Option<Arc<dyn KvStore>>,
+    /// The plugin's id: its only storage namespace.
+    namespace: Arc<str>,
+}
+
+/// Per-call host state: what the guest may reach, and its limits.
+struct HostState {
+    services: Services,
     runtime: Option<tokio::runtime::Handle>,
     limits: StoreLimits,
     /// Set when the caller is gone; checked whenever the engine epoch moves.
@@ -178,17 +191,27 @@ impl bindings::rah::plugin::host::Host for HostState {
         method: String,
         params: String,
     ) -> Result<String, String> {
-        if !self.requires.contains(&service) {
+        if !self.services.requires.contains(&service) {
             return Err(format!(
                 "service `{service}` is not in this plugin's requires"
             ));
         }
-        let (Some(session), Some(runtime), "session") =
-            (&self.session, &self.runtime, service.as_str())
-        else {
-            return Err(format!("service `{service}` is not available"));
-        };
+        let unavailable = || format!("service `{service}` is not available");
+        let runtime = self.runtime.as_ref().ok_or_else(unavailable)?;
         let params: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
+        if service == "storage" {
+            let store = self.services.storage.clone().ok_or_else(unavailable)?;
+            let namespace = self.services.namespace.clone();
+            let result = runtime.block_on(async move {
+                storage::call_json(store.as_ref(), &namespace, &method, &params).await
+            });
+            return result
+                .map(|value| value.to_string())
+                .map_err(|error| error.to_string());
+        }
+        let (Some(session), "session") = (&self.services.session, service.as_str()) else {
+            return Err(unavailable());
+        };
         let session = session.clone();
         let result = runtime.block_on(async move {
             match method.as_str() {
@@ -243,15 +266,13 @@ impl Runtime {
     /// Instantiates the component in a fresh store and runs `call` on it.
     fn run<R>(
         &self,
-        requires: Arc<Vec<String>>,
-        session: Option<Arc<dyn SessionLog>>,
+        services: Services,
         runtime: Option<tokio::runtime::Handle>,
         interrupted: Arc<AtomicBool>,
         call: impl FnOnce(&Guest, &mut Store<HostState>) -> wasmtime::Result<R>,
     ) -> Result<R, String> {
         let state = HostState {
-            requires,
-            session,
+            services,
             runtime,
             limits: StoreLimitsBuilder::new()
                 .memory_size(self.max_memory)
@@ -292,8 +313,7 @@ impl WasmPlugin {
         let described = tokio::task::spawn_blocking(move || {
             let runtime = Runtime::load(&config)?;
             let manifest = runtime.run(
-                Arc::new(Vec::new()),
-                None,
+                Services::default(),
                 None,
                 Arc::new(AtomicBool::new(false)),
                 |guest, store| guest.call_manifest(store),
@@ -326,11 +346,22 @@ impl Plugin for WasmPlugin {
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let requires = Arc::new(self.described.requires.clone());
+        let requires = &self.described.requires;
         let session = if requires.iter().any(|s| s == "session") {
             Some(scope.inject(SESSION)?)
         } else {
             None
+        };
+        let storage = if requires.iter().any(|s| s == "storage") {
+            Some(scope.inject(STORAGE)?)
+        } else {
+            None
+        };
+        let services = Services {
+            requires: Arc::new(requires.clone()),
+            session,
+            storage,
+            namespace: scope.id().as_str().into(),
         };
         let tools = self
             .described
@@ -340,8 +371,7 @@ impl Plugin for WasmPlugin {
                 Arc::new(WasmTool {
                     definition: definition.clone(),
                     runtime: self.runtime.clone(),
-                    requires: requires.clone(),
-                    session: session.clone(),
+                    services: services.clone(),
                 }) as Arc<dyn Tool>
             })
             .collect();
@@ -353,8 +383,7 @@ impl Plugin for WasmPlugin {
 struct WasmTool {
     definition: ToolDefinition,
     runtime: Arc<Runtime>,
-    requires: Arc<Vec<String>>,
-    session: Option<Arc<dyn SessionLog>>,
+    services: Services,
 }
 
 #[async_trait]
@@ -366,11 +395,7 @@ impl Tool for WasmTool {
     async fn call(&self, input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
         let name = self.definition.name.to_string();
         let input = input.to_string();
-        let (runtime, requires, session) = (
-            self.runtime.clone(),
-            self.requires.clone(),
-            self.session.clone(),
-        );
+        let (runtime, services) = (self.runtime.clone(), self.services.clone());
         let handle = tokio::runtime::Handle::current();
         // Fuel bounds the call. A cancelled caller drops this future, and
         // the guard interrupts the guest so its thread is not held.
@@ -380,13 +405,9 @@ impl Tool for WasmTool {
             interrupted: interrupted.clone(),
         };
         let result = tokio::task::spawn_blocking(move || {
-            runtime.run(
-                requires,
-                session,
-                Some(handle),
-                interrupted,
-                |guest, store| guest.call_call_tool(store, &name, &input),
-            )
+            runtime.run(services, Some(handle), interrupted, |guest, store| {
+                guest.call_call_tool(store, &name, &input)
+            })
         })
         .await
         .map_err(|error| ToolError::Execution(error.to_string()))?

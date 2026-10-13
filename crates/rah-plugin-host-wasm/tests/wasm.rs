@@ -3,8 +3,10 @@
 //!
 //! Guest tools, dispatched by name length: `wasm.echo` (9) returns its input;
 //! `wasm.sessions` (13) calls `session.list`; `wasm.sandbox` (12) calls a
-//! service the guest did not require; `wasm.spin-forever` (17) never
-//! returns. Any other name fails with `invalid_input:`.
+//! service the guest did not require; `wasm.store` (10) and `wasm.stored`
+//! (11) call `storage.put` and `storage.get` with their input as parameters;
+//! `wasm.spin-forever` (17) never returns. Any other name fails with
+//! `invalid_input:`.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -12,6 +14,7 @@ use rah_api::{
     CancellationToken, Kernel, MountOptions, Plugin, PluginError, PluginId, PluginManifest,
     PluginStatus, Scope, async_trait,
     session::{SESSION, SessionError, SessionLog},
+    storage::{KvStore, MemoryStore, STORAGE},
     tools::{Invocation, ToolInvoker},
 };
 use rah_plugin_host_wasm::WasmPlugin;
@@ -58,6 +61,9 @@ fn guest(manifest: &Value) -> String {
     (data (i32.const 60024) "sandbox")
     (data (i32.const 60032) "run")
     (data (i32.const 60040) "{unknown}")
+    (data (i32.const 61000) "storage")
+    (data (i32.const 61008) "put")
+    (data (i32.const 61012) "get")
     (func (export "manifest") (result i32)
       (i32.store (i32.const 16) (i32.const 1024))
       (i32.store (i32.const 20) (i32.const {manifest_len}))
@@ -76,6 +82,14 @@ fn guest(manifest: &Value) -> String {
       (if (i32.eq (local.get $nl) (i32.const 12))
         (then
           (call $call (i32.const 60024) (i32.const 7) (i32.const 60032) (i32.const 3) (i32.const 60016) (i32.const 2) (i32.const 48))
+          (return (i32.const 48))))
+      (if (i32.eq (local.get $nl) (i32.const 10))
+        (then
+          (call $call (i32.const 61000) (i32.const 7) (i32.const 61008) (i32.const 3) (local.get $ip) (local.get $il) (i32.const 48))
+          (return (i32.const 48))))
+      (if (i32.eq (local.get $nl) (i32.const 11))
+        (then
+          (call $call (i32.const 61000) (i32.const 7) (i32.const 61012) (i32.const 3) (local.get $ip) (local.get $il) (i32.const 48))
           (return (i32.const 48))))
       (if (i32.eq (local.get $nl) (i32.const 17))
         (then (loop $forever (br $forever))))
@@ -121,6 +135,8 @@ fn manifest(requires: &[&str]) -> Value {
             tool("wasm.sandbox", "read"),
             tool("wasm.spin-forever", "none"),
             tool("wasm.x", "none"),
+            tool("wasm.store", "write"),
+            tool("wasm.stored", "read"),
         ]
     })
 }
@@ -234,7 +250,7 @@ async fn a_component_provides_tools_and_reaches_only_required_services() {
     let plugin = WasmPlugin::load(PluginId::new("wasm"), &fixture.config())
         .await
         .unwrap();
-    assert_eq!(plugin.described().tools.len(), 5);
+    assert_eq!(plugin.described().tools.len(), 7);
     assert_eq!(plugin.manifest().requires, ["session".into()]);
 
     let kernel = Kernel::new();
@@ -292,6 +308,78 @@ async fn a_component_provides_tools_and_reaches_only_required_services() {
     // The guest is fresh on every call; it still works after a trap.
     let (output, _) = call(&kernel, "wasm.echo", json!({ "again": true })).await;
     assert_eq!(text(&output), r#"{"again":true}"#);
+}
+
+struct StoragePlugin(PluginManifest, Arc<MemoryStore>);
+
+#[async_trait]
+impl Plugin for StoragePlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        scope.provide(STORAGE, self.1.clone() as Arc<dyn KvStore>)?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_component_keeps_state_in_the_namespace_of_its_id() {
+    let fixture = Fixture::new("storage", &manifest(&["storage"]));
+    let plugin = WasmPlugin::load(PluginId::new("counter"), &fixture.config())
+        .await
+        .unwrap();
+    let kernel = Kernel::new();
+    let store = Arc::new(MemoryStore::new());
+    store.put("other", "k", b"\"theirs\"").await.unwrap();
+    kernel
+        .mount(
+            Arc::new(StoragePlugin(
+                PluginManifest::new("storage", "1").provides(["storage"]),
+                store.clone(),
+            )),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let status = kernel
+        .mount(
+            Arc::new(plugin),
+            MountOptions::with_config(fixture.config()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, PluginStatus::Active);
+
+    let (output, _) = call(
+        &kernel,
+        "wasm.store",
+        json!({ "key": "k", "value": [1, 2], "namespace": "other" }),
+    )
+    .await;
+    assert_eq!(text(&output), "{}");
+    assert_eq!(
+        store.get("counter", "k").await.unwrap(),
+        Some(b"[1,2]".to_vec())
+    );
+    assert_eq!(
+        store.get("other", "k").await.unwrap(),
+        Some(b"\"theirs\"".to_vec())
+    );
+    let (output, _) = call(&kernel, "wasm.stored", json!({ "key": "k" })).await;
+    assert_eq!(text(&output), r#"{"value":[1,2]}"#);
+
+    let (output, _) = call(&kernel, "wasm.stored", json!({ "key": "a/b" })).await;
+    assert!(output.is_error);
+    assert!(
+        text(&output).contains("invalid storage name"),
+        "{}",
+        text(&output)
+    );
+    // `session` is not in this guest's requires.
+    let (output, _) = call(&kernel, "wasm.sessions", json!({})).await;
+    assert!(text(&output).contains("not in this plugin's requires"));
 }
 
 /// With one blocking thread, a guest that kept running after its caller

@@ -21,7 +21,9 @@
 //!
 //! - `service/call {service, method, params}`. The host refuses any service
 //!   not in the plugin's own `requires` (error `-32003`). Callable services:
-//!   `session` with `list` and `read {session}`.
+//!   `session` with `list` and `read {session}`; `storage` with `get {key}`,
+//!   `put {key, value}`, `delete {key}` and `list {prefix?}`, always in the
+//!   namespace of the plugin's id ([`rah_api::storage::call_json`]).
 //!
 //! A process plugin may provide `tools` only; other services are not
 //! available over the protocol yet. `rah` learns the manifest by running
@@ -49,6 +51,7 @@ use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     kernel::KERNEL_API,
     session::{SESSION, SessionLog},
+    storage::{self, KvStore, STORAGE, StorageError},
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, image, provide_tools},
 };
 use rah_protocol::{SessionId, ToolContent, ToolDefinition, ToolOutput};
@@ -65,7 +68,7 @@ pub const PROTOCOL_V2: u64 = 2;
 /// Services a process plugin may provide.
 pub const PROVIDABLE_SERVICES: [&str; 1] = [TOOLS_SERVICE];
 /// Host services a process plugin may require and call.
-pub const CALLABLE_SERVICES: [&str; 1] = ["session"];
+pub const CALLABLE_SERVICES: [&str; 2] = ["session", "storage"];
 /// JSON-RPC error code for a service outside the plugin's `requires`.
 pub const FORBIDDEN: i64 = -32003;
 const MAX_TOOLS: usize = 128;
@@ -250,7 +253,8 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         .find(|s| !CALLABLE_SERVICES.contains(&s.as_str()))
     {
         return Err(format!(
-            "a process plugin cannot depend on `{service}`; only: session"
+            "a process plugin cannot depend on `{service}`; only: {}",
+            CALLABLE_SERVICES.join(", ")
         ));
     }
     let provides_tools = reply.provides.iter().any(|s| s == TOOLS_SERVICE);
@@ -380,12 +384,20 @@ impl Plugin for ProcessPlugin {
         } else {
             None
         };
+        let storage = if requires.iter().any(|s| s == "storage") {
+            Some(scope.inject(STORAGE)?)
+        } else {
+            None
+        };
+        let services = HostServices {
+            requires,
+            session,
+            storage,
+            namespace: scope.id().to_string(),
+        };
         let child = launch.spawn()?;
-        let (peer, connection) = Peer::connect(
-            child,
-            host_services(requires, session),
-            launch.max_message(),
-        )?;
+        let (peer, connection) =
+            Peer::connect(child, host_services(services), launch.max_message())?;
         if !scope.spawn(connection) {
             return Err("the plugin scope is already disposed".into());
         }
@@ -430,12 +442,33 @@ impl Plugin for ProcessPlugin {
     }
 }
 
+/// What a running process plugin may call.
+struct HostServices {
+    requires: Vec<String>,
+    session: Option<Arc<dyn SessionLog>>,
+    storage: Option<Arc<dyn KvStore>>,
+    /// The plugin's id: its only storage namespace.
+    namespace: String,
+}
+
+fn storage_fault(error: StorageError) -> RpcFault {
+    let code = match error {
+        StorageError::UnknownMethod(_) => -32601,
+        StorageError::InvalidName(_)
+        | StorageError::InvalidParams(_)
+        | StorageError::TooLarge { .. } => -32602,
+        StorageError::Io(_) => -32000,
+    };
+    RpcFault::new(code, error.to_string())
+}
+
 /// Answers `service/call` for the services in `requires`.
-fn host_services(requires: Vec<String>, session: Option<Arc<dyn SessionLog>>) -> Inbound {
-    let requires = Arc::new(requires);
+fn host_services(services: HostServices) -> Inbound {
+    let services = Arc::new(services);
     Arc::new(move |method, params| {
-        let (requires, session) = (requires.clone(), session.clone());
+        let services = services.clone();
         async move {
+            let (requires, session) = (&services.requires, services.session.clone());
             if method != "service/call" {
                 return Err(RpcFault::new(-32601, format!("unknown method `{method}`")));
             }
@@ -476,6 +509,14 @@ fn host_services(requires: Vec<String>, session: Option<Arc<dyn SessionLog>>) ->
                         .map_err(|e| RpcFault::new(-32000, e.to_string()))?;
                     serde_json::to_value(records).map_err(|e| RpcFault::new(-32603, e.to_string()))
                 }
+                ("storage", call, _) => match &services.storage {
+                    Some(store) => {
+                        storage::call_json(store.as_ref(), &services.namespace, call, &args)
+                            .await
+                            .map_err(storage_fault)
+                    }
+                    None => Err(RpcFault::new(-32601, "service `storage` is not available")),
+                },
                 _ => Err(RpcFault::new(
                     -32601,
                     format!("unknown method `{service}.{call}`"),

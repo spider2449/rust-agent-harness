@@ -163,8 +163,21 @@ it can carry instructions planted in a tool result into a more prominent
 position. It is labeled as background, not instructions, bounded to
 `max_summary_chars`, and grants nothing: tool calls it prompts still go
 through `ToolInvoker` and the policy. The summary request has no tools and
-no `model.before_request` hooks. Cache files in `dir` hold summaries of
-conversations in plain text; they are kept until deleted.
+no `model.before_request` hooks. With a `storage` provider, summaries of
+conversations are kept there in plain text (with `storage-fs`, under
+`.rah/storage/context-compact`) until deleted.
+
+## `storage`
+
+The `storage` service (ADR 0041) holds plugin state. Namespaces separate
+plugins: in-process plugins choose theirs (trusted code, a convention), and
+the process and WASM hosts fix it to the plugin's id, so such a plugin can
+reach only its own entries and only when `storage` is in its `requires`.
+Names are limited to the plugin-id alphabet, so a key cannot form a path;
+`storage-fs` additionally encodes every name into a single file name inside
+its directory. Stored values are data a plugin wrote, possibly derived from
+model output, and grant nothing. `storage-fs` files are plain, unencrypted
+and readable by the user's account.
 
 ## `telemetry-log`
 
@@ -252,7 +265,8 @@ trusted code like any mounted plugin. The host:
   call (`write` and `execute` tools record `uncertain` effects on timeout,
   cancellation or a lost connection);
 - refuses any `service/call` for a service outside the plugin's own
-  `requires` (error `-32003`), even when that service is mounted;
+  `requires` (error `-32003`), even when that service is mounted, and keeps
+  `storage` calls in the namespace of the plugin's id;
 - fails the start when the manifest differs from the one read at boot;
 - kills the child when the plugin's scope is disposed. Descendants of the
   child are not tracked: this is supervision, not isolation.
