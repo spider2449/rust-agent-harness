@@ -37,21 +37,6 @@ in the commit which entry it closes.
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`
   with `RAH_TEST_BROWSER` set, then search `run.txt` for `timed out waiting`.
 
-## Intermittent: the loop switch notice times out in the settings browser test
-
-- **Test:** `crates/rah-cli/tests/web_browser.rs`,
-  `settings_change_the_model_assistant_tools_and_loop_in_the_browser`,
-  step `the switch notice`.
-- **Seen:** 2026-10-13, once locally on Windows 10 with Edge, on the first
-  run after a build (the run took 36 seconds instead of about 5). The next
-  five runs passed.
-- **Symptom:** after saving `loop-plan` in Settings, the notice never reads
-  `Switched to loop loop-plan. The next message uses it.` within 30 seconds.
-- **Suspects, unconfirmed:** the status poll that announces a switch sees
-  the new loop before the settings save finishes, or another notice
-  replaces the announcement before the wait reads it. The wait checks the
-  current notice text, not the `notices` history.
-
 ## Setting up another development machine
 
 - **Browser tests** run only when `RAH_TEST_BROWSER` names Chrome, Chromium

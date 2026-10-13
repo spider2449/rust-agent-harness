@@ -97,6 +97,10 @@ async function savePlugin(plugin, kind, config, label, done) {
     result = await api("/plugins", { method: "POST", body: JSON.stringify({ kind, config }) });
   }
   await reloadSettings();
+  loadPlugins().catch(() => {});
+  // The status may announce the switch itself; refresh it first so that the
+  // save's own message, shown last, is the one that stays.
+  await loadStatus().catch(() => {});
   if (result.state && result.state !== "active") {
     settingsMessage(`${label} saved, but ${result.id} is ${result.state}${result.detail ? `: ${result.detail}` : ""}`, true);
   } else {
@@ -104,8 +108,6 @@ async function savePlugin(plugin, kind, config, label, done) {
     // Also under the conversation, where it stays after the dialog closes.
     if (done) showInfo(done(result.id));
   }
-  loadPlugins().catch(() => {});
-  refreshStatus();
 }
 
 function saveButton(label, handler) {
@@ -365,7 +367,7 @@ function loopForm() {
     saveButton("Save loop", async () => {
       const next = kind.value === current?.kind ? { ...config } : {};
       for (const [key, input] of Object.entries(inputs)) put(next, key, numberOrEmpty(input));
-      await savePlugin(current, kind.value, next, "Loop", (id) => `The next message uses ${id}.`);
+      await savePlugin(current, kind.value, next, "Loop", (id) => `Switched to loop ${id}. The next message uses it.`);
     }),
   );
   return form;

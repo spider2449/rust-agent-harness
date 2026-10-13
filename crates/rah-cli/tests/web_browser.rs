@@ -1140,16 +1140,27 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     .await;
     page.wait(
         "the new loop",
-        "byId('settings-message').textContent === 'Loop saved. The next message uses loop-plan.' && \
+        "byId('settings-message').textContent === \
+         'Loop saved. Switched to loop loop-plan. The next message uses it.' && \
          byId('status-loop').textContent === 'loop: loop-plan'",
     )
     .await;
-    // The status line announces the switch under the conversation.
-    page.wait(
-        "the switch notice",
-        "byId('notice').textContent === 'Switched to loop loop-plan. The next message uses it.'",
-    )
-    .await;
+    // The switch is also shown under the conversation. The save shows it
+    // after the status refresh, so a status poll during the save cannot
+    // replace it.
+    assert_eq!(
+        page.eval("byId('notice').textContent").await,
+        "Switched to loop loop-plan. The next message uses it."
+    );
+    let notices = page.eval("notices").await;
+    assert!(
+        !notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice.as_str().unwrap_or_default().contains("loop-react")),
+        "no switch back to the old loop: {notices:#}"
+    );
     page.eval("byId('settings-close').click(); true").await;
     assert_eq!(page.eval("byId('settings-dialog').open").await, false);
 

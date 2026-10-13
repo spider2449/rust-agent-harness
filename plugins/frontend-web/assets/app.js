@@ -14,6 +14,9 @@ const state = {
   retry: 500,
   // Last seen model and loop providers, to announce a switch.
   providers: {},
+  // The latest status request, and the latest one shown.
+  statusRequests: 0,
+  statusShown: 0,
   info: null,
 };
 
@@ -942,7 +945,12 @@ function announceProvider(label, provider) {
 }
 
 async function loadStatus() {
+  // Overlapping requests can answer out of order; an older answer would
+  // undo a newer one and announce a switch back.
+  const request = ++state.statusRequests;
   const status = await api("/status");
+  if (request < state.statusShown) return;
+  state.statusShown = request;
   const workspace = status.workspace || {};
   state.workspace = workspace.root || null;
   statusItem(
