@@ -166,6 +166,17 @@ through `ToolInvoker` and the policy. The summary request has no tools and
 no `model.before_request` hooks. Cache files in `dir` hold summaries of
 conversations in plain text; they are kept until deleted.
 
+## `telemetry-log`
+
+`telemetry-log` follows the `TurnEvent`s loops publish on the event bus
+(ADR 0040) and writes records to local files. Records hold session ids,
+tool names, policy decisions, durations, error messages (cut to 500
+characters) and token counts, never message text or tool output. Tool
+arguments, which can contain paths or secrets the model passed, are
+recorded only with `include_arguments = true`. Files are plain text in
+`dir`, deleted after `keep_days`. Token counts are provider metadata: they
+are shown and recorded, never used for a decision.
+
 ## `frontend-web`
 
 The Web frontend serves the agent to the local machine only:

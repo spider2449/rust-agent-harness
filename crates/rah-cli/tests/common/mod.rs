@@ -110,6 +110,7 @@ pub fn kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ModelRequestStarted { .. } => "model",
             AgentEvent::ModelDelta { .. } => "delta",
             AgentEvent::ModelReasoningStarted { .. } => "reasoning",
+            AgentEvent::ModelUsage { .. } => "usage",
             AgentEvent::ToolRequested { .. } => "tool-requested",
             AgentEvent::ToolStarted { .. } => "tool-started",
             AgentEvent::ToolFinished { .. } => "tool-finished",
@@ -118,7 +119,7 @@ pub fn kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::Failed { .. } => "failed",
             AgentEvent::Cancelled { .. } => "cancelled",
         })
-        .filter(|kind| *kind != "delta")
+        .filter(|kind| !matches!(*kind, "delta" | "usage"))
         .collect()
 }
 

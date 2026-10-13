@@ -8,7 +8,7 @@ use rah_api::{
     model::{ModelError, ModelProvider},
 };
 use rah_protocol::{
-    ContextItem, ModelEvent, ModelRequest, PermissionLevel, ToolDefinition, ToolName,
+    ContextItem, ModelEvent, ModelRequest, ModelUsage, PermissionLevel, ToolDefinition, ToolName,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -225,6 +225,46 @@ async fn openai_streams_text_and_sends_a_bounded_request() {
     assert_eq!(body["stream"], true);
     assert_eq!(body["input"], json!([{"role":"user","content":"hi"}]));
     assert_eq!(body["tools"][0]["name"], "fs_read");
+}
+
+#[tokio::test]
+async fn reported_usage_is_sent_before_completed() {
+    let mut events = text_events("hi");
+    let last = events.len() - 1;
+    events[last]["response"]["usage"] = json!({
+        "input_tokens": 120,
+        "input_tokens_details": { "cached_tokens": 100 },
+        "output_tokens": 7,
+        "output_tokens_details": { "reasoning_tokens": 2 },
+        "total_tokens": 127
+    });
+    let server = Server::new(vec![
+        Reply::Sse(frames(&events)),
+        Reply::Sse(frames(&text_events("hi"))),
+    ])
+    .await;
+    let model = openai(&server);
+    let events = collect(&model, request(user("hi"))).await.unwrap();
+    assert_eq!(
+        events[events.len() - 2..],
+        [
+            ModelEvent::Usage {
+                usage: ModelUsage {
+                    input_tokens: Some(120),
+                    output_tokens: Some(7),
+                    cached_input_tokens: Some(100),
+                },
+            },
+            ModelEvent::Completed
+        ]
+    );
+    // A response without usage sends none.
+    let events = collect(&model, request(user("hi"))).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Usage { .. }))
+    );
 }
 
 #[tokio::test]

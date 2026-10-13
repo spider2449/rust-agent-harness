@@ -27,7 +27,7 @@ use std::sync::{
 use futures::{StreamExt, channel::mpsc};
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    agent_loop::{AgentLoop, LOOP, TurnRequest, TurnStream},
+    agent_loop::{AgentLoop, LOOP, TurnEvent, TurnRequest, TurnStream},
     async_trait,
     hooks::ModelBeforeRequest,
     kernel::Spawner,
@@ -187,6 +187,9 @@ struct Turn {
 
 impl Turn {
     fn emit(&self, event: AgentEvent) {
+        self.kernel.emit(&TurnEvent {
+            event: event.clone(),
+        });
         let _ = self.events.unbounded_send(event);
     }
 
@@ -430,6 +433,13 @@ impl Turn {
                     });
                 }
                 Some(Ok(ModelEvent::ReasoningStarted)) => {}
+                Some(Ok(ModelEvent::Usage { usage })) => {
+                    self.emit(AgentEvent::ModelUsage {
+                        session_id: self.sid.clone(),
+                        model_request_id: model_request_id.clone(),
+                        usage,
+                    });
+                }
                 Some(Ok(ModelEvent::ToolCall {
                     call_id,
                     name,

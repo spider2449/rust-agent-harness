@@ -1452,6 +1452,7 @@ dependencies = [
  "rah-plugin-session-jsonl",
  "rah-plugin-session-titles",
  "rah-plugin-skills-fs",
+ "rah-plugin-telemetry-log",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
@@ -1681,6 +1682,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-skills-fs"
+version = "0.41.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-telemetry-log"
 version = "0.41.0"
 dependencies = [
  "rah-api",

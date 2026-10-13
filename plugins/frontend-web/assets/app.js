@@ -18,6 +18,8 @@ const state = {
   statusRequests: 0,
   statusShown: 0,
   info: null,
+  // Tokens the model reported per session since this page was opened.
+  usage: new Map(),
 };
 
 // The token arrives in the URL fragment, which browsers never send to a
@@ -335,6 +337,7 @@ function editTitle(host, info) {
 
 function closeSession() {
   state.current = null;
+  renderUsage();
   $("transcript").replaceChildren();
   $("activity").replaceChildren();
   $("input").disabled = true;
@@ -386,6 +389,7 @@ function awaitTitle() {
 
 async function openSession(id) {
   state.current = id;
+  renderUsage();
   setRunning(false);
   await ensureWorkspace(state.sessions.find((info) => info.id === id));
   await loadSessions();
@@ -774,7 +778,36 @@ async function submit(event) {
   if (await startTurn(input)) $("input").value = "";
 }
 
+function addUsage(session, usage) {
+  const total = state.usage.get(session) || { input: 0, output: 0, cached: 0, requests: 0 };
+  total.input += usage.input_tokens || 0;
+  total.output += usage.output_tokens || 0;
+  total.cached += usage.cached_input_tokens || 0;
+  total.requests += 1;
+  state.usage.set(session, total);
+}
+
+function formatTokens(count) {
+  return count >= 10000 ? `${(count / 1000).toFixed(count >= 100000 ? 0 : 1)}k` : String(count);
+}
+
+function renderUsage() {
+  const item = $("status-usage");
+  const total = state.current && state.usage.get(state.current);
+  item.hidden = !total;
+  if (!total) return;
+  item.textContent = `${formatTokens(total.input)} in · ${formatTokens(total.output)} out`;
+  item.title = `Tokens the model reported for this session since the page was opened: `
+    + `${total.input} input (${total.cached} cached), ${total.output} output, `
+    + `${total.requests} model request${total.requests === 1 ? "" : "s"}`;
+}
+
 function onEvent(session, event) {
+  if (event.type === "model_usage") {
+    addUsage(session, event.usage);
+    if (session === state.current) renderUsage();
+    return;
+  }
   if (session !== state.current) return;
   eventActivity(event);
   switch (event.type) {

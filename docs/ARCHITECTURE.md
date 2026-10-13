@@ -85,7 +85,9 @@ Implemented:
   long-running program with pipes), tools with `ToolInvoker`, and the standard
   hooks
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
-  `model.before_request`.
+  `model.before_request`. Loops publish each turn event on the event bus as
+  `TurnEvent`, and providers report token usage as `ModelEvent::Usage`
+  (ADR 0040).
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
   (crate `model-responses`); `model-anthropic` (Anthropic Messages API);
   `loop-react` and `loop-plan` (plan-and-execute;
@@ -93,6 +95,8 @@ Implemented:
   workspace-bounded `fs.read`, `fs.list`, `fs.glob` and
   `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;
+  `telemetry-log` (opt-in: JSONL records of turns, model requests and tools
+  with durations, policy decisions and token usage);
   `context-compact` (opt-in: summarizes history beyond a size limit with the
   model before `context-default` applies its window; summaries are cached by
   the history prefix they cover);

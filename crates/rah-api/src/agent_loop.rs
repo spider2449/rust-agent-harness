@@ -23,3 +23,13 @@ pub trait AgentLoop: Send + Sync {
     /// [`crate::tools::ToolInvoker`] and record the turn in the session log.
     fn run_turn(&self, request: TurnRequest) -> TurnStream;
 }
+
+/// Published on the kernel event bus for every event a loop puts into a
+/// [`TurnStream`], so observers (telemetry, indexing) can follow all turns,
+/// including background and subagent turns nobody streams (ADR 0040). It is
+/// a copy for observation: the turn does not wait for or depend on
+/// subscribers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnEvent {
+    pub event: AgentEvent,
+}

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Telemetry and token usage
+
+- `rah-protocol` adds `ModelUsage` (optional `input_tokens`,
+  `output_tokens`, `cached_input_tokens`), `ModelEvent::Usage` and
+  `AgentEvent::ModelUsage` (ADR 0040). `model-responses` reports
+  `response.usage`, `model-anthropic` reports `message_start` and
+  `message_delta` usage (cache reads and writes counted as input), and
+  `model-mock` reports an estimate. Loops forward it per model request.
+- Loops publish every turn event on the kernel event bus as
+  `rah_api::agent_loop::TurnEvent`, so plugins can follow turns they did
+  not start.
+- New opt-in plugin `telemetry-log` (`plugins/telemetry-log`) writes
+  `turn`, `model_request` and `tool` records as JSONL to
+  `.rah/telemetry/<YYYY-MM-DD>.jsonl` (UTC): outcome, error code,
+  durations, time to first text, tool decision (`allowed`, `approved`,
+  `denied`, `rejected`) and token usage. It never records message text or
+  tool output; `include_arguments` adds tool arguments. Files roll over at
+  `max_file_bytes` (10 MiB) and are deleted after `keep_days` (14).
+- The Web UI status bar shows the input and output tokens reported for the
+  open session since the page was loaded.
+
 ### Summarizing long conversations
 
 - New opt-in plugin `context-compact` (`plugins/context-compact`). On

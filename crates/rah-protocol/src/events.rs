@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentOutput, ApprovalId, ModelRequestId, RequestId, SessionId, ToolCall, ToolCallId, ToolOutput,
+    AgentOutput, ApprovalId, ModelRequestId, ModelUsage, RequestId, SessionId, ToolCall,
+    ToolCallId, ToolOutput,
 };
 
 /// A request for host approval before a tool call proceeds.
@@ -61,6 +62,15 @@ pub enum AgentEvent {
         model_request_id: ModelRequestId,
         /// Incremental UTF-8 text.
         delta: String,
+    },
+    /// Token counts the provider reported for a model request (ADR 0040).
+    ModelUsage {
+        /// Session associated with the operation.
+        session_id: SessionId,
+        /// Model request the counts belong to.
+        model_request_id: ModelRequestId,
+        /// The reported counts.
+        usage: ModelUsage,
     },
     /// The model began private reasoning for a model request.
     ///

@@ -10,6 +10,9 @@
 //! - any other user message when `echo` is offered: request `echo`;
 //! - otherwise: reply `[label] you said: <text> (<n> earlier items)`.
 //!
+//! Each streamed reply also reports usage, estimated as one token per four
+//! bytes of request and reply.
+//!
 //! Configuration: `{ "label": "..." }` (defaults to the plugin id).
 
 use std::sync::Arc;
@@ -20,7 +23,9 @@ use rah_api::{
     model::{MODEL, ModelError, ModelProvider, ModelStream},
     tools::describe_image,
 };
-use rah_protocol::{ContextItem, ModelEvent, ModelRequest, ToolContent, ToolName, ToolOutput};
+use rah_protocol::{
+    ContextItem, ModelEvent, ModelRequest, ModelUsage, ToolContent, ToolName, ToolOutput,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -174,9 +179,29 @@ impl ModelProvider for MockModel {
         if cancel.is_cancelled() {
             return Err(ModelError::Cancelled);
         }
-        Ok(Box::pin(stream::iter(
-            self.respond(&request).into_iter().map(Ok),
-        )))
+        let mut events = self.respond(&request);
+        let usage = estimated_usage(&request, &events);
+        events.insert(events.len().saturating_sub(1), ModelEvent::Usage { usage });
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+/// Usage the way a real provider reports it, estimated as one token per
+/// four bytes of request JSON and of reply text.
+fn estimated_usage(request: &ModelRequest, events: &[ModelEvent]) -> ModelUsage {
+    let input = serde_json::to_vec(&request.items).map_or(0, |bytes| bytes.len());
+    let output: usize = events
+        .iter()
+        .map(|event| match event {
+            ModelEvent::TextDelta { text } => text.len(),
+            ModelEvent::ToolCall { arguments, .. } => arguments.to_string().len(),
+            _ => 0,
+        })
+        .sum();
+    ModelUsage {
+        input_tokens: Some(input.div_ceil(4) as u64),
+        output_tokens: Some(output.div_ceil(4) as u64),
+        cached_input_tokens: None,
     }
 }
 

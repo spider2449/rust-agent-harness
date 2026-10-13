@@ -165,6 +165,20 @@ use = "context-compact"
 config = { trigger_chars = 60000, keep_chars = 20000, dir = ".rah/compact" }   # all optional
 ```
 
+Diagnostics: the opt-in `telemetry-log` plugin writes one JSON line per
+turn, model request and tool call to `.rah/telemetry/<date>.jsonl`, with
+durations, the policy decision of each tool call and the token usage
+providers report (ADR 0040). It sees every turn, including background and
+subagent turns, and never records message text or tool output. The Web UI
+status bar shows the tokens reported for the open session since the page
+was loaded.
+
+```toml
+[[plugin]]
+use = "telemetry-log"
+config = { dir = ".rah/telemetry", keep_days = 14, include_arguments = false }   # all optional
+```
+
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
 on stdio ([protocol v3](docs/PROCESS_PLUGINS.md)). The Python example
 [`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools

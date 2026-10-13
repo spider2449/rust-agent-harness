@@ -21,6 +21,7 @@ members = [
     "plugins/session-jsonl",
     "plugins/session-titles",
     "plugins/skills-fs",
+    "plugins/telemetry-log",
     "plugins/tools-builtin",
     "plugins/tools-mcp",
     "plugins/tools-repo",

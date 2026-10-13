@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rah_protocol::{ContextItem, ToolContent, ToolDefinition, ToolOutput};
+use rah_protocol::{ContextItem, ModelUsage, ToolContent, ToolDefinition, ToolOutput};
 use serde_json::{Map, Value, json};
 
 use crate::{error::E, sse::MAX_FRAME};
@@ -271,7 +271,16 @@ pub(crate) struct Response {
     stop_reason: Option<String>,
     stopped: bool,
     text: usize,
+    /// The latest `usage` counts, by wire name.
+    usage: BTreeMap<&'static str, u64>,
 }
+
+const USAGE_FIELDS: [&str; 4] = [
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+];
 
 pub(crate) enum Update {
     Text(String),
@@ -282,6 +291,34 @@ pub(crate) enum Update {
 }
 
 impl Response {
+    fn record_usage(&mut self, usage: &Value) {
+        for field in USAGE_FIELDS {
+            if let Some(count) = usage[field].as_u64() {
+                self.usage.insert(field, count);
+            }
+        }
+    }
+
+    /// The reported token counts. Anthropic's `input_tokens` leaves out
+    /// cache reads and writes; the neutral count includes them.
+    pub fn usage(&self) -> Option<ModelUsage> {
+        let count = |field: &str| self.usage.get(field).copied();
+        let input = [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ]
+        .into_iter()
+        .filter_map(count)
+        .reduce(u64::saturating_add);
+        let usage = ModelUsage {
+            input_tokens: input,
+            output_tokens: count("output_tokens"),
+            cached_input_tokens: count("cache_read_input_tokens"),
+        };
+        (!usage.is_empty()).then_some(usage)
+    }
+
     fn text(&mut self, text: &str) -> Result<Update, E> {
         self.text += text.len();
         if self.text > MAX_BYTES {
@@ -309,6 +346,7 @@ impl Response {
                     return Err(E::Protocol);
                 }
                 self.started = true;
+                self.record_usage(&message["usage"]);
                 Ok(Update::None)
             }
             "content_block_start" => {
@@ -415,6 +453,8 @@ impl Response {
                 if let Some(reason) = v["delta"]["stop_reason"].as_str() {
                     self.stop_reason = Some(reason.to_owned());
                 }
+                // Counts here are cumulative and replace earlier ones.
+                self.record_usage(&v["usage"]);
                 Ok(Update::None)
             }
             "message_stop" => {

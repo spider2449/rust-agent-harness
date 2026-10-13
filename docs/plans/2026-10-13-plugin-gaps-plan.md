@@ -29,11 +29,14 @@
 
 起因：出問題時只能翻 session log；沒有每輪的延遲、工具耗時、錯誤統計，也看不到 token 用量。
 
-- [ ] 新 plugin，訂閱 event bus，寫成 JSONL（每天一個檔、大小上限、保留天數），記錄每輪和每個模型請求的開始、結束、耗時，工具呼叫的名稱、決定（allow／ask／deny）、耗時和結果類別，以及錯誤。
-- [ ] 不記錄訊息全文和工具參數（預設），可以設定開啟；紀錄裡不得出現 API key 或 header。
-- [ ] Token 用量：`rah-protocol` 的 `AgentEvent` 目前沒有用量欄位。新增一個 provider 中立的用量事件（input／output／cached tokens，皆為選填），由 `model-responses` 和 `model-anthropic` 從各自的回應中填入。這是 protocol 變更，要寫 ADR。
-- [ ] `frontend-web` 在對話標題列或狀態列顯示本 session 的累計 token（有資料時才顯示）。
-- [ ] 測試：事件寫入格式、輪替、不含敏感欄位、mock 模型回報用量後累計正確。
+- [x] 新 plugin `telemetry-log`，訂閱 event bus，寫成 JSONL（`<dir>/<YYYY-MM-DD>.jsonl`，UTC；超過 `max_file_bytes` 接著寫 `.1`、`.2`；超過 `keep_days` 的檔案刪除），記錄 `turn`（結果、錯誤代碼與訊息、耗時、模型請求數、工具呼叫數、token 加總）、`model_request`（耗時、第一段文字的時間、是否推理、token）和 `tool`（名稱、決定、耗時、是否錯誤）。
+  - 原本 loop 的事件只送進啟動者的 `TurnStream`，bus 上看不到。新增 `rah-api::agent_loop::TurnEvent`：兩個 loop 把每個事件也發到 bus 上，所以背景和 subagent 的 turn 也記得到。
+  - 決定的對應：`allowed`（直接執行）、`approved`（問過、同意）、`denied`（policy 拒絕）、`rejected`（問過、拒絕），由 `ToolStarted` 和 `ApprovalRequired` 推得，不必改 `ToolInvoker`。
+- [x] 不記錄訊息全文和工具輸出；工具參數只在 `include_arguments = true` 時記錄（截到 500 字元）。紀錄裡沒有 header 或 key。
+- [x] Token 用量：`rah-protocol` 新增 `ModelUsage`、`ModelEvent::Usage`、`AgentEvent::ModelUsage`，寫在 ADR 0040。`model-responses` 讀 `response.usage`；`model-anthropic` 讀 `message_start` 和 `message_delta`（cache 讀寫算進 input）；`model-mock` 回報估計值（每 4 bytes 一個 token），讓測試不需要真的模型。
+- [x] `frontend-web` 狀態列顯示目前 session 的 input／output token（滑過顯示 cached 和請求數）。**限制：**只算這個頁面開啟之後的用量，重新整理會歸零；用量沒寫進 session log，長期紀錄在 `telemetry-log`。
+- [x] 測試：tracker 單元測試（四種決定、token 加總、失敗與取消、不含訊息文字和參數、`include_arguments`）、檔案輪替與刪除、日期換算、bus 端到端；provider 的用量解析（Responses、Anthropic 含 cache）；protocol 序列化；`crates/rah-cli/tests/telemetry.rs` 用 `dev` preset 跑一輪確認紀錄和 token。
+- 決定：不放進任何 preset。
 
 ## G4：`sandbox-os`（OS 層隔離）
 

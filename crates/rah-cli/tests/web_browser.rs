@@ -425,6 +425,22 @@ async fn the_web_ui_works_in_a_real_browser() {
         json!(["you", "tool call · echo", "tool result", "assistant"])
     );
     assert_eq!(page.eval("byId('input').value").await, "");
+    // model-mock reports usage for both model requests of the turn.
+    assert_eq!(page.eval("shown(byId('status-usage'))").await, true);
+    let usage = page.eval("byId('status-usage').textContent").await;
+    assert!(
+        usage
+            .as_str()
+            .is_some_and(|text| text.ends_with(" out") && text.contains(" in · ")),
+        "{usage}"
+    );
+    let title = page.eval("byId('status-usage').title").await;
+    assert!(
+        title
+            .as_str()
+            .is_some_and(|text| text.ends_with("2 model requests")),
+        "{title}"
+    );
 
     // Enter sends; the textarea does not keep a newline.
     page.eval(

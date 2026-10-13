@@ -28,6 +28,7 @@ rah-plugin-scheduler-basic = { path = "../../plugins/scheduler-basic" }
 rah-plugin-session-jsonl = { path = "../../plugins/session-jsonl" }
 rah-plugin-session-titles = { path = "../../plugins/session-titles" }
 rah-plugin-skills-fs = { path = "../../plugins/skills-fs" }
+rah-plugin-telemetry-log = { path = "../../plugins/telemetry-log" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
 rah-plugin-tools-mcp = { path = "../../plugins/tools-mcp" }
 rah-plugin-tools-repo = { path = "../../plugins/tools-repo" }

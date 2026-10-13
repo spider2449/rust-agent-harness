@@ -54,5 +54,36 @@ pub enum ModelEvent {
         name: ToolName,
         arguments: Value,
     },
+    /// Token counts the provider reported for this request, sent at most
+    /// once, before `Completed` (ADR 0040). Provider metadata: shown and
+    /// recorded, never used for decisions.
+    Usage {
+        usage: ModelUsage,
+    },
     Completed,
+}
+
+/// Provider-reported token counts of one model request. A provider fills in
+/// what it reports; a missing count is `None`, never zero.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelUsage {
+    /// Input tokens, including cached ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Output tokens, including reasoning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Input tokens served from the provider's prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+}
+
+impl ModelUsage {
+    /// Whether no count is known.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.cached_input_tokens.is_none()
+    }
 }

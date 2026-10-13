@@ -8,7 +8,7 @@ use rah_api::{
     model::{ModelError, ModelProvider},
 };
 use rah_protocol::{
-    ContextItem, ModelEvent, ModelRequest, PermissionLevel, ToolDefinition, ToolName,
+    ContextItem, ModelEvent, ModelRequest, ModelUsage, PermissionLevel, ToolDefinition, ToolName,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -315,6 +315,14 @@ async fn tool_use_maps_back_to_the_original_tool_name() {
                 name: ToolName::new("fs.read"),
                 arguments: json!({"path":"a.txt"}),
             },
+            // `message_start` counts 3 input tokens; `message_delta` ends at 5 output.
+            ModelEvent::Usage {
+                usage: ModelUsage {
+                    input_tokens: Some(3),
+                    output_tokens: Some(5),
+                    cached_input_tokens: None,
+                },
+            },
             ModelEvent::Completed
         ]
     );
@@ -322,6 +330,29 @@ async fn tool_use_maps_back_to_the_original_tool_name() {
     let events = collect(&model, request(user("read"))).await.unwrap();
     assert!(
         matches!(&events[0], ModelEvent::ToolCall { arguments, .. } if *arguments == json!({}))
+    );
+}
+
+#[tokio::test]
+async fn cache_reads_and_writes_count_as_input_tokens() {
+    let mut events = text_events("hi");
+    events[0] = json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":300,"output_tokens":1}}});
+    let server = Server::new(vec![Reply::Sse(frames(&events))]).await;
+    let events = collect(
+        &anthropic(&server, settings("claude-test")),
+        request(user("hi")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        events[events.len() - 2],
+        ModelEvent::Usage {
+            usage: ModelUsage {
+                input_tokens: Some(330),
+                output_tokens: Some(5),
+                cached_input_tokens: Some(300),
+            },
+        }
     );
 }
 

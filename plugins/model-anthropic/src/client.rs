@@ -198,6 +198,9 @@ fn events(
                 arguments,
             };
         }
+        if let Some(usage) = parsed.usage() {
+            yield ModelEvent::Usage { usage };
+        }
         yield ModelEvent::Completed;
     }
 }

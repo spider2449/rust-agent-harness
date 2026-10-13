@@ -10,7 +10,7 @@ mod tools;
 pub use agent::{AgentOutput, Message, MessageRole};
 pub use events::{AgentErrorCode, AgentEvent, ApprovalRequest};
 pub use identifiers::{ApprovalId, ModelRequestId, RequestId, SessionId, ToolCallId};
-pub use model::{ContextItem, ModelEvent, ModelRequest};
+pub use model::{ContextItem, ModelEvent, ModelRequest, ModelUsage};
 pub use session::{
     ForkPoint, MAX_TITLE_CHARS, SessionEntry, SessionInfo, SessionRecord, ToolEffect,
     normalize_title,

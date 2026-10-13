@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rah_api::tools::describe_image;
-use rah_protocol::{ContextItem, ToolContent, ToolDefinition, ToolOutput};
+use rah_protocol::{ContextItem, ModelUsage, ToolContent, ToolDefinition, ToolOutput};
 use serde_json::{Value, json};
 
 use crate::{error::E, sse::MAX_FRAME};
@@ -223,6 +223,7 @@ pub(crate) struct Response {
     calls: BTreeMap<u64, Call>,
     text: String,
     completed: bool,
+    usage: ModelUsage,
 }
 
 struct Call {
@@ -365,6 +366,12 @@ impl Response {
                 if count != self.calls.len() || text != self.text {
                     return Err(E::Protocol);
                 }
+                let usage = &v["response"]["usage"];
+                self.usage = ModelUsage {
+                    input_tokens: usage["input_tokens"].as_u64(),
+                    output_tokens: usage["output_tokens"].as_u64(),
+                    cached_input_tokens: usage["input_tokens_details"]["cached_tokens"].as_u64(),
+                };
                 self.completed = true;
                 Ok(Update::Complete)
             }
@@ -384,6 +391,11 @@ impl Response {
             }
             _ => Err(E::Protocol),
         }
+    }
+
+    /// The token counts `response.completed` reported, if any.
+    pub fn usage(&self) -> Option<ModelUsage> {
+        (!self.usage.is_empty()).then_some(self.usage)
     }
 
     /// Completed function calls in output order: `(call_id, wire name, arguments)`.

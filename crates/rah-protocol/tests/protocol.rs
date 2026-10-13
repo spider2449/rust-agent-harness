@@ -1,7 +1,8 @@
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentOutput, ApprovalId, ApprovalRequest, ContextItem, Message,
-    MessageRole, ModelRequest, ModelRequestId, PermissionLevel, RAH_PROTOCOL_VERSION, RequestId,
-    SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
+    MessageRole, ModelEvent, ModelRequest, ModelRequestId, ModelUsage, PermissionLevel,
+    RAH_PROTOCOL_VERSION, RequestId, SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition,
+    ToolInput, ToolName, ToolOutput,
 };
 use serde_json::{Value, json};
 
@@ -157,4 +158,34 @@ fn tool_input_preserves_json_value_kinds() {
     assert!(matches!(value["boolean"], Value::Bool(true)));
     assert!(value["number"].is_number());
     assert!(value["text"].is_string());
+}
+
+#[test]
+fn usage_omits_unknown_counts_on_the_wire() {
+    let usage = ModelUsage {
+        input_tokens: Some(12),
+        output_tokens: None,
+        cached_input_tokens: Some(4),
+    };
+    let event = ModelEvent::Usage { usage };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        value,
+        json!({"type": "usage", "usage": {"input_tokens": 12, "cached_input_tokens": 4}})
+    );
+    assert_eq!(serde_json::from_value::<ModelEvent>(value).unwrap(), event);
+    assert!(ModelUsage::default().is_empty());
+    assert!(!usage.is_empty());
+
+    let session_id = SessionId::new();
+    let model_request_id = ModelRequestId::new();
+    let event = AgentEvent::ModelUsage {
+        session_id: session_id.clone(),
+        model_request_id: model_request_id.clone(),
+        usage,
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "model_usage");
+    assert_eq!(value["usage"]["input_tokens"], 12);
+    assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
 }
