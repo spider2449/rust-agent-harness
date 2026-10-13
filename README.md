@@ -11,10 +11,10 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 
 `master` has completed phases P0 to P6 of the
 [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
-(release 0.40.0):
+(first released as 0.40.0; current release 0.41.0):
 the kernel, the service contracts (`rah-api`), the plugins and the `rah` binary
-run end to end with a mock model, and with OpenAI or llama.cpp through the
-Responses API. Tool calls are guarded by the fail-closed `policy-authority`
+run end to end with a mock model, with OpenAI or llama.cpp through the
+Responses API, and with Anthropic through the Messages API. Tool calls are guarded by the fail-closed `policy-authority`
 plugin, and tools come from built-in, repository, shell, MCP and
 out-of-process plugins. The architecture decision is
 [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy

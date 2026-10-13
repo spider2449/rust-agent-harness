@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.41.0 (2026-10-13)
+
+> Web UI usability (U1-U3: sessions, status line, workspaces, Settings),
+> the `model-anthropic` plugin, images in tool output (ADR 0037) and MCP
+> over Streamable HTTP (ADR 0038).
 
 ### MCP over Streamable HTTP (ADR 0038)
 
