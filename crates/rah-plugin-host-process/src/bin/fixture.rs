@@ -1,9 +1,16 @@
-//! A process plugin used by the host's tests (protocol v2).
+//! A process plugin used by the host's tests (protocol v3).
 //!
-//! Arguments: `--requires <service>` (repeatable) and `--mode <mode>`, where
-//! mode is `normal`, `old-protocol` or `provides-model`. With
-//! `initialize.config.flip_file`, the first start creates that file and the
-//! next start reports a different manifest.
+//! Arguments: `--requires <service>`, `--hook <name>[:<priority>]` and
+//! `--event <name>` (all repeatable), and `--mode <mode>`, where mode is
+//! `normal`, `v2` (answers protocol 2), `old-protocol` or `provides-model`.
+//! With `initialize.config.flip_file`, the first start creates that file and
+//! the next start reports a different manifest.
+//!
+//! Hooks act on `text` markers: `tool.before_invoke` decides by the call's
+//! `text` argument (`allow`, `deny`, `ask`, `malformed`, `hang`),
+//! `tool.after_invoke` rewrites `fixture.echo` output (`hang-after` does not
+//! answer) and `model.before_request` adds a system item unless the last
+//! user text is `hang` or `bad-image`.
 
 use std::{
     collections::VecDeque,
@@ -17,6 +24,7 @@ struct Plugin {
     queued: VecDeque<Value>,
     next: u64,
     cancelled: Vec<Value>,
+    events: Vec<Value>,
 }
 
 fn send(message: &Value) {
@@ -75,12 +83,23 @@ fn main() {
     };
     let mode = flag("--mode").pop().unwrap_or_else(|| "normal".into());
     let mut requires = flag("--requires");
+    let hooks: Vec<Value> = flag("--hook")
+        .iter()
+        .map(|spec| match spec.split_once(':') {
+            Some((hook, priority)) => {
+                json!({ "hook": hook, "priority": priority.parse::<i32>().unwrap() })
+            }
+            None => json!({ "hook": spec }),
+        })
+        .collect();
+    let events = flag("--event");
     eprintln!("fixture started in mode {mode}");
     let mut plugin = Plugin {
         lines: std::io::stdin().lock().lines(),
         queued: VecDeque::new(),
         next: 0,
         cancelled: Vec::new(),
+        events: Vec::new(),
     };
     while let Some(message) = plugin.next_message() {
         let id = message.get("id").cloned();
@@ -99,11 +118,18 @@ fn main() {
                 } else {
                     "tools"
                 };
+                let protocol = match mode.as_str() {
+                    "old-protocol" => 1,
+                    "v2" => 2,
+                    _ => 3,
+                };
                 json!({
-                    "protocol": if mode == "old-protocol" { 1 } else { 2 },
+                    "protocol": protocol,
                     "version": "0.1.0",
                     "provides": [provides],
                     "requires": requires,
+                    "hooks": hooks,
+                    "events": events,
                     "tools": [
                         tool("fixture.echo", "none"),
                         tool("fixture.call", "read"),
@@ -111,6 +137,7 @@ fn main() {
                         tool("fixture.slow", "write"),
                         tool("fixture.cancelled", "none"),
                         tool("fixture.exit", "execute"),
+                        tool("fixture.events", "none"),
                     ]
                 })
             }
@@ -143,8 +170,19 @@ fn main() {
                     "fixture.cancelled" => json!({
                         "content": [{ "type": "json", "json": plugin.cancelled }]
                     }),
+                    "fixture.events" => json!({
+                        "content": [{ "type": "json", "json": plugin.events }]
+                    }),
                     _ => std::process::exit(3),
                 }
+            }
+            Some("hooks/call") => match hook(&params) {
+                Some(result) => result,
+                None => continue,
+            },
+            Some("event") => {
+                plugin.events.push(params);
+                continue;
             }
             Some("$/cancel") => {
                 plugin.cancelled.push(params["id"].clone());
@@ -157,5 +195,55 @@ fn main() {
             _ => continue,
         };
         send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+}
+
+/// Answers `hooks/call`; `None` leaves the request unanswered.
+fn hook(params: &Value) -> Option<Value> {
+    let input = &params["input"];
+    match params["hook"].as_str().unwrap() {
+        "tool.before_invoke" => match input["call"]["input"]["text"].as_str() {
+            Some("allow") => Some(json!({ "decision": "allow" })),
+            Some("deny") => Some(json!({ "decision": "deny", "reason": "fixture says no" })),
+            Some("ask") => Some(json!({ "decision": "ask", "reason": "fixture asks" })),
+            Some("malformed") => Some(json!({ "decision": "maybe" })),
+            Some("hang") => None,
+            _ => Some(Value::Null),
+        },
+        "tool.after_invoke" if input["call"]["name"] == "fixture.echo" => {
+            let text = input["output"]["content"][0]["text"].as_str().unwrap();
+            if text == "hang-after" {
+                return None;
+            }
+            let filtered = format!("filtered {text} ({})", input["effect"].as_str().unwrap());
+            Some(json!({ "output": { "content": [{ "type": "text", "text": filtered }] } }))
+        }
+        "tool.after_invoke" => Some(Value::Null),
+        "model.before_request" => {
+            let mut request = input.clone();
+            let last = request["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|item| item["type"] == "user")
+                .and_then(|item| item["text"].as_str())
+                .map(str::to_owned);
+            let added = match last.as_deref() {
+                Some("hang") => return None,
+                Some("bad-image") => json!({
+                    "type": "tool_result",
+                    "call_id": "c1",
+                    "output": {
+                        "content": [{ "type": "image", "value": { "media_type": "image/svg+xml", "data": "AA==" } }],
+                        "is_error": false
+                    }
+                }),
+                _ => json!({ "type": "system", "text": "from fixture" }),
+            };
+            request["items"].as_array_mut().unwrap().push(added);
+            Some(json!({ "request": request }))
+        }
+        _ => Some(Value::Null),
     }
 }

@@ -1,17 +1,18 @@
-//! Protocol v2 against the Rust fixture plugin (`src/bin/fixture.rs`).
+//! Protocol v3 against the Rust fixture plugin (`src/bin/fixture.rs`).
 
 use std::{sync::Arc, time::Duration};
 
 use rah_api::{
     CancellationToken, Kernel, MountOptions, Plugin, PluginError, PluginId, PluginManifest,
     PluginStatus, Scope, async_trait,
-    session::{SESSION, SessionError, SessionLog},
+    hooks::{ModelBeforeRequest, ToolBeforeInvoke, ToolDecision},
+    session::{SESSION, SessionAppended, SessionError, SessionLog},
     tools::{Invocation, ToolInvoker},
 };
 use rah_plugin_host_process::ProcessPlugin;
 use rah_protocol::{
-    PermissionLevel, RequestId, SessionEntry, SessionId, SessionInfo, SessionRecord, ToolCall,
-    ToolCallId, ToolContent, ToolEffect, ToolInput, ToolName, ToolOutput,
+    ContextItem, ModelRequest, PermissionLevel, RequestId, SessionEntry, SessionId, SessionInfo,
+    SessionRecord, ToolCall, ToolCallId, ToolContent, ToolEffect, ToolInput, ToolName, ToolOutput,
 };
 use serde_json::{Value, json};
 
@@ -20,7 +21,8 @@ fn config(args: &[&str], plugin: Value) -> Value {
         "program": env!("CARGO_BIN_EXE_rah-process-plugin-fixture"),
         "args": args,
         "plugin": plugin,
-        "call_timeout_ms": 500
+        "call_timeout_ms": 500,
+        "hook_timeout_ms": 300
     })
 }
 
@@ -142,7 +144,7 @@ async fn describe_reads_the_manifest_and_tools() {
     assert_eq!(plugin.manifest().requires, ["session".into()]);
     assert_eq!(plugin.manifest().version, "0.1.0");
     let tools = &plugin.described().tools;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert_eq!(tools[1].permission, PermissionLevel::Read);
 }
 
@@ -288,5 +290,235 @@ async fn a_changed_manifest_fails_the_start() {
             assert!(message.contains("manifest changed"), "{message}")
         }
         other => panic!("{other:?}"),
+    }
+}
+
+fn text_of(output: &ToolOutput) -> String {
+    match &output.content[0] {
+        ToolContent::Text(text) => text.clone(),
+        other => panic!("unexpected content: {other:?}"),
+    }
+}
+
+/// Denies every call at priority 0, like a strict policy.
+struct DenyAll(PluginManifest);
+
+#[async_trait]
+impl Plugin for DenyAll {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        scope.hook_bail::<ToolBeforeInvoke, _, _>(0, |_| async {
+            Some(ToolDecision::Deny {
+                reason: "static policy".into(),
+            })
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn protocol_2_plugins_still_load_but_cannot_hook() {
+    let kernel = Kernel::new();
+    let status = mount_process(&kernel, config(&["--mode", "v2"], Value::Null)).await;
+    assert_eq!(status, PluginStatus::Active);
+    let (output, _) = call(&kernel, "fixture.echo", json!({ "text": "hi" })).await;
+    assert_eq!(text_of(&output), "hi");
+
+    for args in [
+        &["--mode", "v2", "--hook", "tool.before_invoke"][..],
+        &["--mode", "v2", "--event", "session.appended"][..],
+    ] {
+        let error = ProcessPlugin::describe(PluginId::new("fixture"), &config(args, Value::Null))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("need protocol 3"), "{args:?}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_hooks_and_events_fail_describe() {
+    for (args, expected) in [
+        (
+            &["--hook", "tool.approval"][..],
+            "cannot attach to `tool.approval`",
+        ),
+        (
+            &[
+                "--hook",
+                "tool.before_invoke",
+                "--hook",
+                "tool.before_invoke:5",
+            ][..],
+            "duplicate hook",
+        ),
+        (
+            &["--event", "plugin.status"][..],
+            "cannot subscribe to `plugin.status`",
+        ),
+        (
+            &["--event", "session.appended", "--event", "session.appended"][..],
+            "duplicate event",
+        ),
+    ] {
+        let error = ProcessPlugin::describe(PluginId::new("fixture"), &config(args, Value::Null))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains(expected), "{args:?}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn before_invoke_decides_and_fails_closed() {
+    let kernel = Kernel::new();
+    mount_process(
+        &kernel,
+        config(&["--hook", "tool.before_invoke"], Value::Null),
+    )
+    .await;
+    assert!(ToolInvoker::new(kernel.handle()).is_guarded());
+
+    for (text, expected) in [
+        ("allow", "allow"),
+        ("no decision", "no decision"),
+        ("deny", "denied: fixture says no"),
+        ("ask", "no approver"),
+        ("malformed", "malformed decision"),
+        ("hang", "timed out"),
+    ] {
+        let (output, effect) = call(&kernel, "fixture.echo", json!({ "text": text })).await;
+        let shown = text_of(&output);
+        assert!(shown.contains(expected), "{text}: {shown}");
+        assert_eq!(output.is_error, !matches!(text, "allow" | "no decision"));
+        assert_eq!(effect, ToolEffect::None);
+    }
+    // A hook that failed does not break the connection.
+    let (output, _) = call(&kernel, "fixture.echo", json!({ "text": "allow" })).await;
+    assert_eq!(text_of(&output), "allow");
+
+    kernel.unmount(&PluginId::new("fixture")).await.unwrap();
+    assert!(!ToolInvoker::new(kernel.handle()).is_guarded());
+}
+
+#[tokio::test]
+async fn hook_priority_orders_process_and_static_handlers() {
+    for (hook, expected) in [
+        ("tool.before_invoke:10", "allow"),
+        ("tool.before_invoke:-10", "denied: static policy"),
+    ] {
+        let kernel = Kernel::new();
+        kernel
+            .mount(
+                Arc::new(DenyAll(PluginManifest::new("deny-all", "1"))),
+                MountOptions::default(),
+            )
+            .await
+            .unwrap();
+        mount_process(&kernel, config(&["--hook", hook], Value::Null)).await;
+        let (output, _) = call(&kernel, "fixture.echo", json!({ "text": "allow" })).await;
+        assert!(text_of(&output).contains(expected), "{hook}: {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn after_invoke_rewrites_output_and_failures_become_errors() {
+    let kernel = Kernel::new();
+    mount_process(
+        &kernel,
+        config(&["--hook", "tool.after_invoke"], Value::Null),
+    )
+    .await;
+    let (output, effect) = call(&kernel, "fixture.echo", json!({ "text": "hi" })).await;
+    assert_eq!(
+        output.content,
+        [ToolContent::Text("filtered hi (none)".into())]
+    );
+    assert!(!output.is_error);
+    assert_eq!(effect, ToolEffect::None);
+
+    let (output, effect) = call(&kernel, "fixture.echo", json!({ "text": "hang-after" })).await;
+    assert!(output.is_error);
+    let shown = text_of(&output);
+    assert!(
+        shown.contains("`tool.after_invoke` handler of process plugin `fixture` failed"),
+        "{shown}"
+    );
+    assert!(shown.contains("timed out"), "{shown}");
+    assert_eq!(effect, ToolEffect::None, "the tool's own effect is kept");
+}
+
+#[tokio::test]
+async fn model_before_request_extends_the_request_or_fails_it() {
+    let kernel = Kernel::new();
+    mount_process(
+        &kernel,
+        config(&["--hook", "model.before_request"], Value::Null),
+    )
+    .await;
+    let request = |text: &str| ModelRequest {
+        model: None,
+        items: vec![ContextItem::User { text: text.into() }],
+        tools: Vec::new(),
+    };
+    let extended = kernel
+        .handle()
+        .waterfall::<ModelBeforeRequest>(request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extended.items,
+        [
+            ContextItem::User { text: "hi".into() },
+            ContextItem::System {
+                text: "from fixture".into()
+            },
+        ]
+    );
+    for text in ["hang", "bad-image"] {
+        let result = kernel
+            .handle()
+            .waterfall::<ModelBeforeRequest>(request(text))
+            .await;
+        assert!(result.is_err(), "{text}: {result:?}");
+    }
+    // The connection survives a failed request.
+    assert!(
+        kernel
+            .handle()
+            .waterfall::<ModelBeforeRequest>(request("again"))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn session_appended_events_reach_subscribed_plugins_only() {
+    let session = SessionId::new();
+    let appended = SessionAppended {
+        session: session.clone(),
+        seq: 3,
+        entry: SessionEntry::TurnStarted {
+            turn: RequestId::new(),
+            input: "hello".into(),
+        },
+    };
+    for (args, count) in [(&["--event", "session.appended"][..], 1), (&[][..], 0)] {
+        let kernel = Kernel::new();
+        mount_process(&kernel, config(args, Value::Null)).await;
+        kernel.handle().emit(&appended);
+        let (output, _) = call(&kernel, "fixture.events", json!({})).await;
+        let events = json_of(&output);
+        let events = events.as_array().unwrap();
+        assert_eq!(events.len(), count, "{args:?}: {events:?}");
+        if let Some(event) = events.first() {
+            assert_eq!(event["event"], "session.appended");
+            assert_eq!(event["data"]["seq"], 3);
+            assert_eq!(event["data"]["session"], session.to_string());
+            assert_eq!(event["data"]["entry"]["input"], "hello");
+        }
     }
 }

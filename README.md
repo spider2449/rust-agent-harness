@@ -127,10 +127,12 @@ with Blender ([`examples/mcp/blender.toml`](examples/mcp/blender.toml)) as
 the example.
 
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
-on stdio ([protocol v2](docs/PROCESS_PLUGINS.md)). The Python example
+on stdio ([protocol v3](docs/PROCESS_PLUGINS.md)). The Python example
 [`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools
 and reads the session log through the host, which allows only the services
-the plugin lists in `requires`:
+the plugin lists in `requires`.
+[`tool_guard.py`](examples/process-plugins/tool_guard.py) has no tools; it
+attaches to the tool hooks to deny and redact. Mounting `word_tools.py`:
 
 ```toml
 [[plugin]]

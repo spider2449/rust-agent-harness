@@ -1,15 +1,20 @@
-//! Process plugin host, protocol v2: plugins as child processes speaking
+//! Process plugin host, protocol v3: plugins as child processes speaking
 //! newline-delimited JSON-RPC 2.0 on stdin and stdout (stderr is kept as a
 //! bounded diagnostic tail).
 //!
 //! Host to plugin:
 //!
 //! - `initialize {protocol, kernel_api, plugin_id, config}` returns the
-//!   manifest `{protocol: 2, version, provides, requires, optional, tools}`.
+//!   manifest `{protocol: 3, version, provides, requires, optional, tools,
+//!   hooks, events}`. A manifest answering protocol 2 is accepted without
+//!   `hooks` and `events`.
 //! - `tools/call {name, arguments, session}` returns
 //!   `{content: [{type: "text", text} | {type: "json", json}], is_error}`. An
 //!   error whose `data.kind` is `invalid_input` or `not_started` means nothing
 //!   was done.
+//! - `hooks/call {hook, input}` for `tool.before_invoke`,
+//!   `tool.after_invoke` and `model.before_request` (see [`hooks`]).
+//! - `event {event, data}` (notification) for `session.appended`.
 //! - `$/cancel {id}` (notification) and `shutdown`.
 //!
 //! Plugin to host:
@@ -18,8 +23,8 @@
 //!   not in the plugin's own `requires` (error `-32003`). Callable services:
 //!   `session` with `list` and `read {session}`.
 //!
-//! A process plugin may provide `tools` only; hooks and other services are
-//! not available over the protocol yet. `rah` learns the manifest by running
+//! A process plugin may provide `tools` only; other services are not
+//! available over the protocol yet. `rah` learns the manifest by running
 //! the plugin once at boot ([`ProcessPlugin::describe`]); every start then
 //! checks that the manifest is unchanged. The child gets a cleared
 //! environment (refilled from `inherit_env` and `env`), runs while its plugin
@@ -27,6 +32,7 @@
 //! code; this is process supervision, not a sandbox: descendants of the
 //! child are not tracked.
 
+pub mod hooks;
 mod peer;
 
 use std::{
@@ -50,9 +56,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
+use crate::hooks::{EVENTS, HOOKABLE, HookSpec};
 pub use crate::peer::{Inbound, Peer, PeerError, RpcFault};
 
-pub const PROTOCOL_VERSION: u64 = 2;
+pub const PROTOCOL_VERSION: u64 = 3;
+/// The tools-only protocol, still accepted from plugins.
+pub const PROTOCOL_V2: u64 = 2;
 /// Services a process plugin may provide.
 pub const PROVIDABLE_SERVICES: [&str; 1] = [TOOLS_SERVICE];
 /// Host services a process plugin may require and call.
@@ -85,6 +94,7 @@ pub struct ProcessConfig {
     pub plugin: Value,
     pub startup_timeout_ms: Option<u64>,
     pub call_timeout_ms: Option<u64>,
+    pub hook_timeout_ms: Option<u64>,
     pub max_message_bytes: Option<usize>,
 }
 
@@ -95,6 +105,10 @@ impl ProcessConfig {
 
     fn call_timeout(&self) -> Duration {
         Duration::from_millis(self.call_timeout_ms.unwrap_or(60_000).max(1))
+    }
+
+    fn hook_timeout(&self) -> Duration {
+        Duration::from_millis(self.hook_timeout_ms.unwrap_or(5_000).max(1))
     }
 
     fn max_message(&self) -> usize {
@@ -139,14 +153,27 @@ pub struct Described {
     pub requires: Vec<String>,
     pub optional: Vec<String>,
     pub tools: Vec<ToolDefinition>,
+    pub hooks: Vec<HookSpec>,
+    pub events: Vec<String>,
 }
 
+type Shape<'a> = (
+    BTreeSet<&'a String>,
+    BTreeSet<&'a String>,
+    BTreeSet<&'a String>,
+    BTreeSet<&'a HookSpec>,
+    BTreeSet<&'a String>,
+);
+
 impl Described {
-    fn services(&self) -> (BTreeSet<&String>, BTreeSet<&String>, BTreeSet<&String>) {
+    /// What must not change between starts: services, hooks and events.
+    fn shape(&self) -> Shape<'_> {
         (
             self.provides.iter().collect(),
             self.requires.iter().collect(),
             self.optional.iter().collect(),
+            self.hooks.iter().collect(),
+            self.events.iter().collect(),
         )
     }
 }
@@ -164,14 +191,48 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         optional: Vec<String>,
         #[serde(default)]
         tools: Vec<ToolDefinition>,
+        #[serde(default)]
+        hooks: Vec<HookSpec>,
+        #[serde(default)]
+        events: Vec<String>,
     }
     let reply: Reply = serde_json::from_value(result)
         .map_err(|error| format!("invalid initialize result: {error}"))?;
-    if reply.protocol != PROTOCOL_VERSION {
+    if reply.protocol != PROTOCOL_VERSION && reply.protocol != PROTOCOL_V2 {
         return Err(format!(
-            "the plugin speaks protocol {}, the host speaks {PROTOCOL_VERSION}",
+            "the plugin speaks protocol {}, the host speaks {PROTOCOL_V2} or {PROTOCOL_VERSION}",
             reply.protocol
         ));
+    }
+    if reply.protocol == PROTOCOL_V2 && !(reply.hooks.is_empty() && reply.events.is_empty()) {
+        return Err(format!(
+            "`hooks` and `events` need protocol {PROTOCOL_VERSION}"
+        ));
+    }
+    let mut hooks = BTreeSet::new();
+    for spec in &reply.hooks {
+        if !HOOKABLE.contains(&spec.hook.as_str()) {
+            return Err(format!(
+                "a process plugin cannot attach to `{}`; only: {}",
+                spec.hook,
+                HOOKABLE.join(", ")
+            ));
+        }
+        if !hooks.insert(spec.hook.as_str()) {
+            return Err(format!("duplicate hook `{}`", spec.hook));
+        }
+    }
+    let mut events = BTreeSet::new();
+    for event in &reply.events {
+        if !EVENTS.contains(&event.as_str()) {
+            return Err(format!(
+                "a process plugin cannot subscribe to `{event}`; only: {}",
+                EVENTS.join(", ")
+            ));
+        }
+        if !events.insert(event.as_str()) {
+            return Err(format!("duplicate event `{event}`"));
+        }
     }
     if let Some(service) = reply
         .provides
@@ -215,6 +276,8 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         requires: reply.requires,
         optional: reply.optional,
         tools: reply.tools,
+        hooks: reply.hooks,
+        events: reply.events,
     })
 }
 
@@ -329,7 +392,7 @@ impl Plugin for ProcessPlugin {
         let described = initialize(&peer, scope.id(), &launch)
             .await
             .map_err(|error| with_stderr(error, &peer))?;
-        if described.services() != self.described.services() {
+        if described.shape() != self.described.shape() {
             return Err("the plugin's manifest changed since `rah` started; restart `rah`".into());
         }
         if !described.tools.is_empty() {
@@ -346,6 +409,13 @@ impl Plugin for ProcessPlugin {
                 .collect();
             provide_tools(scope, tools)?;
         }
+        hooks::attach(
+            scope,
+            &peer,
+            &described.hooks,
+            &described.events,
+            launch.hook_timeout(),
+        );
         scope.on_dispose(move || async move {
             let _ = peer
                 .request(
@@ -457,6 +527,24 @@ impl Tool for ProcessTool {
             })?;
         tool_output(&result)
     }
+}
+
+/// The protocol form of a tool output, as a `tools/call` result.
+fn wire_output(output: &ToolOutput) -> Value {
+    let content: Vec<Value> = output
+        .content
+        .iter()
+        .map(|item| match item {
+            ToolContent::Text(text) => json!({ "type": "text", "text": text }),
+            ToolContent::Json(value) => json!({ "type": "json", "json": value }),
+            ToolContent::Image(picture) => json!({
+                "type": "image",
+                "media_type": picture.media_type,
+                "data": picture.data,
+            }),
+        })
+        .collect();
+    json!({ "content": content, "is_error": output.is_error })
 }
 
 fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {

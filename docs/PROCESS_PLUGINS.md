@@ -1,12 +1,17 @@
-# Process Plugins — Protocol v2
+# Process Plugins — Protocol v3
 
 A process plugin is a RAH plugin implemented as a child process in any
 language. The host is `rah-plugin-host-process`; the `rah` binary mounts one
 for every `use = "process"` entry. Like every mounted plugin, a process plugin
 is trusted code. The host supervises the process but does not sandbox it.
 
-A complete example in Python (standard library only) is
-[`examples/process-plugins/word_tools.py`](../examples/process-plugins/word_tools.py).
+Two examples in Python (standard library only):
+[`word_tools.py`](../examples/process-plugins/word_tools.py) provides tools
+(protocol 2), and [`tool_guard.py`](../examples/process-plugins/tool_guard.py)
+attaches to hooks and follows session events (protocol 3).
+
+Protocol 3 adds hooks and events (ADR 0039). The host still accepts plugins
+that answer protocol 2; they can only provide tools.
 
 ## Mounting
 
@@ -28,10 +33,11 @@ config = { program = "python", args = ["examples/process-plugins/word_tools.py"]
 | `program`, `args` | required, `[]` | The command. No shell is involved. |
 | `cwd` | `rah`'s directory | Working directory of the child. |
 | `inherit_env` | `PATH` and a few platform variables | Variables copied from `rah`'s environment; everything else is cleared. |
-| `env` | `{}` | Extra variables. `RAH_PLUGIN_PROTOCOL=2` is always set. |
+| `env` | `{}` | Extra variables. `RAH_PLUGIN_PROTOCOL=3` is always set. |
 | `plugin` | `null` | Passed to the plugin as `initialize.config`. |
 | `startup_timeout_ms` | 10000 | Limit for `initialize`. |
 | `call_timeout_ms` | 60000 | Limit for each `tools/call`. |
+| `hook_timeout_ms` | 5000 | Limit for each `hooks/call`. |
 | `max_message_bytes` | 4 MiB | Limit for one message in either direction. |
 
 At boot `rah` starts the plugin once to read its manifest, then shuts it down.
@@ -54,14 +60,14 @@ host keeps the last 16 KiB and includes them in startup errors.
 ### `initialize` (request)
 
 ```json
-{"protocol": 2, "kernel_api": 1, "plugin_id": "word-tools", "config": null}
+{"protocol": 3, "kernel_api": 1, "plugin_id": "word-tools", "config": null}
 ```
 
 Result, the plugin's manifest:
 
 ```json
 {
-  "protocol": 2,
+  "protocol": 3,
   "version": "0.1.0",
   "provides": ["tools"],
   "requires": ["session"],
@@ -69,11 +75,14 @@ Result, the plugin's manifest:
   "tools": [
     {"name": "words.count", "description": "...",
      "input_schema": {"type": "object"}, "permission": "none"}
-  ]
+  ],
+  "hooks": [{"hook": "tool.before_invoke", "priority": 10}],
+  "events": ["session.appended"]
 }
 ```
 
-- `protocol` must be `2`.
+- `protocol` must be `3`, or `2` for a plugin without `hooks` and
+  `events`.
 - `provides` may contain only `tools`; `tools` must be non-empty exactly when
   it does (at most 128 tools, unique names without whitespace).
 - `requires` and `optional` may contain only `session`. A required service
@@ -82,6 +91,12 @@ Result, the plugin's manifest:
 - `permission` is one of `none`, `read`, `write`, `execute`. It is the
   plugin's declaration; `policy-authority` still needs its own assignment and
   can only be made stricter by it.
+- `hooks` lists at most one entry per hook, of `tool.before_invoke`,
+  `tool.after_invoke` and `model.before_request` (see below). `priority`
+  defaults to `0`; higher runs first. `policy-authority` uses `0`.
+- `events` may contain `session.appended`.
+- A plugin may have no tools and only hooks or events (`provides` is then
+  empty).
 
 ### `tools/call` (request)
 
@@ -107,6 +122,54 @@ response whose `data.kind` is `invalid_input` or `not_started` tells the host
 that nothing was done (effect `none`). Any other error, a timeout, a
 cancellation or a lost connection leaves the effect of a `write` or `execute`
 tool `uncertain`; the host never replays a call.
+
+### `hooks/call` (request)
+
+```json
+{"hook": "tool.before_invoke", "input": {}}
+```
+
+Sent for each hook in the manifest, limited by `hook_timeout_ms`. Never
+retried.
+
+| Hook | `input` | Result |
+|---|---|---|
+| `tool.before_invoke` | `{session, call: {id, name, input}, definition}` | `null` (no decision) or `{"decision": "allow"}`, `{"decision": "deny", "reason"}`, `{"decision": "ask", "reason"}` |
+| `tool.after_invoke` | `{session, call, definition, output, effect}` | `null` (unchanged) or `{"output": <tool output>}` |
+| `model.before_request` | the model request `{model, items, tools}` | `null` (unchanged) or `{"request": <model request>}` |
+
+- `call.input` and the request's items come from the model and are
+  untrusted.
+- `output` uses the same form as a `tools/call` result and is checked the
+  same way. Only the output can change; `effect` is the tool's and stays.
+- A model request uses RAH's own JSON form, the same as session records: tool
+  content items are `{"type": "text", "value": "..."}`, `{"type": "json",
+  "value": ...}` or `{"type": "image", "value": {"media_type", "data"}}`.
+  Returned images are checked. The whole request crosses the pipe, so
+  `max_message_bytes` must hold it.
+- `ask` needs an approver (a frontend); without one the call is denied.
+- A plugin with a higher priority than `policy-authority` decides first. An
+  `allow` from it lets the call through without the policy. That is the
+  user's decision when mounting it.
+
+A timeout, cancellation, error response, malformed result or lost
+connection behaves like a failing Rust handler:
+
+- `tool.before_invoke`: the call is denied, with the failure as the reason.
+- `tool.after_invoke`: the output becomes an error naming the failure.
+- `model.before_request`: the model request fails and the turn ends with an
+  error. The kernel reports the failure as a panicking handler.
+
+### `event` (notification)
+
+```json
+{"event": "session.appended", "data": {"session": "<id>", "seq": 3, "entry": {}}}
+```
+
+Sent for each event in the manifest. `entry` is a session record entry, as
+from `session.read`. Delivery is best effort, in order and at most once.
+Events are lost while the plugin is not running. Use `seq` and
+`session.read` to catch up.
 
 ### `$/cancel` (notification)
 
@@ -134,9 +197,10 @@ error code `-32003`, even when that service is mounted. Available methods:
 | `session` | `read` | `{session}` | `[SessionRecord]` (the append-only log) |
 
 The host answers plugin requests concurrently with its own; a plugin may call
-a service while it handles a `tools/call`.
+a service while it handles a `tools/call` or a `hooks/call`.
 
 ## Not yet available
 
-Hooks (for example a `tool.before_invoke` policy in another language),
-providing services other than `tools`, and events. For capability-isolated plugins see [WASM plugins](WASM_PLUGINS.md).
+Providing services other than `tools`, emitting events, and the
+`tool.approval` and `host.interrupt` hooks. For capability-isolated plugins
+see [WASM plugins](WASM_PLUGINS.md).

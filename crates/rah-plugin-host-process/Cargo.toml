@@ -2,7 +2,7 @@
 name = "rah-plugin-host-process"
 version.workspace = true
 edition.workspace = true
-description = "Process plugin host: mounts out-of-process plugins over JSON-RPC 2.0 on stdio (protocol v2)"
+description = "Process plugin host: mounts out-of-process plugins over JSON-RPC 2.0 on stdio (protocol v3)"
 
 [dependencies]
 futures.workspace = true

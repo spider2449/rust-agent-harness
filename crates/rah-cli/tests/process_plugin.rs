@@ -95,6 +95,57 @@ async fn the_python_example_provides_guarded_tools_and_reads_the_session() {
 }
 
 #[tokio::test]
+async fn the_python_guard_denies_and_redacts_through_hooks() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python 3 interpreter on PATH");
+        return;
+    };
+    let dir = TempDir::new("process-python-guard");
+    let guard = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/process-plugins/tool_guard.py");
+    let mut distribution = distribution(&dir, python);
+    distribution.plugin.extend(
+        Distribution::parse(&format!(
+            r#"
+[[plugin]]
+use = "process"
+id = "tool-guard"
+config = {{ program = "{python}", args = ["{script}"], plugin = {{ block = ["password"] }} }}
+"#,
+            script = forward(&guard),
+        ))
+        .unwrap()
+        .plugin,
+    );
+    let kernel = Kernel::new();
+    boot(&kernel, &distribution).await.unwrap();
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+
+    // The policy would allow `words.count`; the guard runs first and denies.
+    let denied = reply(
+        &turn(
+            &handle,
+            &session,
+            r#"/call words.count {"text":"my password"}"#,
+        )
+        .await,
+    );
+    assert!(
+        denied.contains("denied: the arguments mention `password`"),
+        "{denied}"
+    );
+    let counted = reply(&turn(&handle, &session, r#"/call words.count {"text":"a b"}"#).await);
+    assert!(counted.contains(r#""words":2"#), "{counted}");
+
+    // The earlier input is in the session log; the guard redacts it.
+    let inputs = reply(&turn(&handle, &session, "/call words.session_inputs {}").await);
+    assert!(inputs.contains("my [redacted]"), "{inputs}");
+    assert!(!inputs.contains("password"), "{inputs}");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn process_plugins_need_an_id_and_a_startable_program() {
     let dir = TempDir::new("process-errors");
     let mut distribution = distribution(&dir, "rah-no-such-interpreter-x7");

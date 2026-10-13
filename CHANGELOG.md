@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Hooks and events for process plugins (ADR 0039)
+
+- Process plugin protocol 3. A manifest may list `hooks`
+  (`tool.before_invoke`, `tool.after_invoke`, `model.before_request`, each
+  with a `priority`) and `events` (`session.appended`). The host sends
+  `hooks/call {hook, input}` requests and `event` notifications. Plugins
+  answering protocol 2 still load and provide tools only.
+- A hook that times out (`hook_timeout_ms`, default 5000), disconnects or
+  answers malformed fails closed: the tool call is denied, the tool output
+  becomes an error, or the model request fails. Hook calls are never
+  retried.
+- New example `examples/process-plugins/tool_guard.py`: denies tool calls
+  whose arguments mention a configured word and redacts it from output.
+
 ## v0.41.0 (2026-10-13)
 
 > Web UI usability (U1-U3: sessions, status line, workspaces, Settings),

@@ -183,7 +183,7 @@ websites, not against code already running as the user.
 
 ## Process plugins
 
-A plugin mounted with `use = "process"` ([protocol v2](PROCESS_PLUGINS.md)) is
+A plugin mounted with `use = "process"` ([protocol v3](PROCESS_PLUGINS.md)) is
 trusted code like any mounted plugin. The host:
 
 - starts it with a fixed program and argument vector, a cleared environment
@@ -199,6 +199,13 @@ trusted code like any mounted plugin. The host:
 
 The tools a process plugin provides still pass through `ToolInvoker` and the
 policy like any other tool.
+
+A process plugin may also attach to `tool.before_invoke`, `tool.after_invoke`
+and `model.before_request` (ADR 0039). It is trusted like a Rust plugin on
+the same hook: at a priority above `policy-authority` its `allow` bypasses
+the policy. A hook that times out, disconnects or answers malformed fails
+closed: the call is denied, the output becomes an error, or the model
+request fails. Hook calls are never retried.
 
 ## `scheduler-basic`
 

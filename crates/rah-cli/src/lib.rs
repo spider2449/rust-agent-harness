@@ -269,7 +269,7 @@ impl Distribution {
 /// the tools that depend on it restart with the new root.
 pub const WORKSPACE_PLUGINS: [&str; 3] = ["sandbox-process", "tools-builtin", "tools-repo-write"];
 
-/// The `use` name of out-of-process plugins (protocol v2); their `config`
+/// The `use` name of out-of-process plugins (protocol v3); their `config`
 /// says how to start them.
 pub const PROCESS_PLUGIN: &str = "process";
 
