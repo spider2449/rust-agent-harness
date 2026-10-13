@@ -124,6 +124,34 @@ pub fn searxng(body: &Value) -> Option<Vec<Hit>> {
     )
 }
 
+/// Whether any hit mentions the query: a word of it in the title, snippet
+/// or URL (case-insensitive), or for a word with non-ASCII letters (such as
+/// CJK text without spaces) any one of those letters. An engine that serves
+/// a suspected bot unrelated results fails this check.
+pub fn mentions_query(hits: &[Hit], query: &str) -> bool {
+    let query = query.to_lowercase();
+    let words: Vec<&str> = query
+        .split(|c: char| c.is_whitespace() || (c.is_ascii_punctuation() && c != '-'))
+        // Single ASCII letters carry no signal.
+        .filter(|word| !word.is_ascii() || word.len() >= 2)
+        .collect();
+    if words.is_empty() {
+        return true;
+    }
+    hits.iter().any(|hit| {
+        let text = format!("{} {} {}", hit.title, hit.snippet, hit.url).to_lowercase();
+        words.iter().any(|word| {
+            if word.is_ascii() {
+                text.contains(word)
+            } else {
+                word.chars()
+                    .filter(|c| !c.is_ascii())
+                    .any(|c| text.contains(c))
+            }
+        })
+    })
+}
+
 /// Whether a scraped page is a bot check rather than a result page.
 pub fn is_bot_wall(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
@@ -297,9 +325,13 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
         "tr",
         "ul",
     ];
+    // `<pre>` blocks keep their whitespace: each is replaced by a marker line
+    // and inserted verbatim after the rest of the text is normalized.
+    let html = &html.replace(PRE_MARK, "");
+    let mut blocks: Vec<String> = Vec::new();
     let title = next_element(html, &["title"]).map(|(_, inner, _)| clean(inner, 300));
     let mut out = String::with_capacity(html.len() / 2);
-    let mut rest = html;
+    let mut rest = html.as_str();
     while let Some(at) = rest.find('<') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
@@ -326,6 +358,15 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
+        if name == "pre" && !closing {
+            let close = find_ignore_case(rest, "</pre").unwrap_or(rest.len());
+            blocks.push(pre_text(&rest[..close]));
+            out.push_str(&format!("\n{PRE_MARK}{}{PRE_MARK}\n", blocks.len() - 1));
+            rest = rest[close..]
+                .find('>')
+                .map_or("", |end| &rest[close + end + 1..]);
+            continue;
+        }
         if !closing && !tag.ends_with('/') && SKIP.contains(&name.as_str()) {
             rest = match find_ignore_case(rest, &format!("</{name}")) {
                 Some(close) => rest[close..]
@@ -351,6 +392,22 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
     let (mut blank, mut bullet) = (false, false);
     for line in text.lines() {
         let mut line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let block = line
+            .strip_prefix(PRE_MARK)
+            .and_then(|marked| marked.strip_suffix(PRE_MARK))
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| blocks.get(index));
+        if let Some(block) = block {
+            // A preformatted block is its own paragraph.
+            if !block.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(block.clone());
+                blank = true;
+            }
+            continue;
+        }
         if line == "-" {
             bullet = true;
             continue;
@@ -370,6 +427,35 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
         lines.push(line);
     }
     (title, lines.join("\n"))
+}
+
+/// Marks the line that stands for a `<pre>` block in [`html_to_text`].
+const PRE_MARK: char = '\u{1}';
+
+/// The text of a `<pre>` block: tags dropped (`<br>` becomes a line break),
+/// whitespace kept, the leading newline HTML ignores removed.
+fn pre_text(inner: &str) -> String {
+    let mut text = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while let Some(at) = rest.find('<') {
+        text.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        let name = rest[1..end]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or_default();
+        if name.eq_ignore_ascii_case("br") {
+            text.push('\n');
+        }
+        rest = &rest[end + 1..];
+    }
+    text.push_str(rest);
+    let text = neutralize(&decode_entities(&text)).replace("\r\n", "\n");
+    let text = text.strip_prefix('\n').unwrap_or(&text);
+    text.trim_end().to_owned()
 }
 
 /// Replaces angle brackets so text cannot forge an `untrusted-web-content`
@@ -585,6 +671,39 @@ mod tests {
             }])
         );
         assert_eq!(searxng(&json!({ "error": "x" })), None);
+    }
+
+    #[test]
+    fn mentions_query_detects_unrelated_results() {
+        let hit = |title: &str, url: &str| Hit {
+            url: url.into(),
+            title: title.into(),
+            snippet: String::new(),
+        };
+        let food = [hit(
+            "21 must-try Vietnamese dishes",
+            "https://vietnam.travel/",
+        )];
+        assert!(!mentions_query(&food, "tokio cancellation token"));
+        assert!(mentions_query(
+            &[hit("CancellationToken docs", "https://docs.rs/tokio-util/")],
+            "Tokio cancellation token"
+        ));
+        assert!(mentions_query(
+            &[hit("Rust 程式設計語言", "https://x/")],
+            "程式語言"
+        ));
+        assert!(!mentions_query(&[hit("Weather", "https://x/")], "程式語言"));
+        // Nothing to check against.
+        assert!(mentions_query(&food, "q ?"));
+    }
+
+    #[test]
+    fn html_to_text_keeps_preformatted_whitespace() {
+        let page = "<p>x</p><PRE>\n  fn main() {<br>\t<span>1 &lt; 2</span>\r\n  }\n</pre>\
+                    <p>y   z</p><pre> </pre>";
+        let (_, text) = html_to_text(page);
+        assert_eq!(text, "x\n\n  fn main() {\n\t1 ‹ 2\n  }\n\ny z");
     }
 
     #[test]

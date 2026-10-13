@@ -130,9 +130,14 @@ Web search is the opt-in `tools-web-search` plugin: `web.search` needs no
 API key and tries DuckDuckGo, Bing, then any configured SearXNG instances
 until one answers (a rate-limited or blocked engine cools down). An optional
 `time_range` (`day` to `year`) limits results by age; Bing cannot filter by
-age and is skipped then. `web.fetch` reads one page as text (title, body
-without scripts or styles, cut to `max_chars`) and refuses private and local
-addresses, also behind DNS names and redirects. Results come back inside
+age and is skipped then. `web.multi_search` asks all engines at once and
+merges the results, marking which engines returned each. `web.fetch` reads
+one page as text (title, body without scripts or styles, `<pre>` kept,
+declared charsets decoded, cut to `max_chars`) and refuses private and local
+addresses, also behind DNS names and redirects. Scraped engines rate-limit
+and sometimes answer with bot checks or unrelated results (both fall over);
+a SearXNG instance you run (`searxng = ["http://..."]`) is the most
+reliable backend. Results come back inside
 `<untrusted-web-content>`. Queries and URLs go to third-party servers, so the
 policy must assign the tools; asking first is a good default:
 

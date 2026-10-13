@@ -1729,6 +1729,8 @@ dependencies = [
 name = "rah-plugin-tools-web-search"
 version = "0.41.0"
 dependencies = [
+ "encoding_rs",
+ "futures",
  "rah-api",
  "rah-protocol",
  "reqwest",

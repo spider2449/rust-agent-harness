@@ -128,8 +128,9 @@ configuration; its messages and metadata are untrusted:
   never resent. A `404` for an ended session means the server did not run
   the request.
 - `tools-web-search` sends model-chosen query text to DuckDuckGo, Bing or
-  configured SearXNG instances, and `web.fetch` requests a model-chosen URL,
-  so a model can leak context through a query or a URL. The plugin is
+  configured SearXNG instances (`web.multi_search` sends it to all of them
+  at once), and `web.fetch` requests a model-chosen URL, so a model can leak
+  context through a query or a URL. The plugin is
   opt-in, both tools declare `read`, and the policy must assign them;
   `decisions = { "web.*" = "ask" }` shows each request first. Engine URLs
   come from the configuration only, request URLs are kept out of search

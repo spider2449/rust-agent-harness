@@ -127,7 +127,9 @@ impl WebFetch {
             }
             body.extend_from_slice(&chunk);
         }
-        let raw = String::from_utf8_lossy(&body);
+        let encoding = encoding_of(&content_type, kind, &body);
+        // `decode` also honors a byte order mark and replaces invalid bytes.
+        let (raw, encoding, _) = encoding.decode(&body);
         let (title, text) = match kind {
             ContentKind::Html => parse::html_to_text(&raw),
             ContentKind::Text => (None, parse::neutralize(&raw)),
@@ -135,10 +137,11 @@ impl WebFetch {
         let total = text.chars().count();
         let shown = parse::truncate_chars(&text, max_chars);
         let media = content_type.split(';').next().unwrap_or_default().trim();
-        let media = if media.is_empty() {
-            "unknown type"
-        } else {
-            media
+        let media = match (media.is_empty(), encoding == encoding_rs::UTF_8) {
+            (true, true) => "unknown type".to_owned(),
+            (true, false) => encoding.name().to_owned(),
+            (false, true) => media.to_owned(),
+            (false, false) => format!("{media}, {}", encoding.name()),
         };
         let mut out = if total > max_chars {
             format!(
@@ -179,6 +182,39 @@ impl ContentKind {
             None
         }
     }
+}
+
+/// The text encoding: the `charset` of the content type, else (for HTML) a
+/// `<meta>` charset in the first 2 KiB, else UTF-8. Unknown labels fall back
+/// to UTF-8.
+fn encoding_of(
+    content_type: &str,
+    kind: ContentKind,
+    body: &[u8],
+) -> &'static encoding_rs::Encoding {
+    let from_header = charset_label(content_type);
+    let from_meta = || {
+        let head = &body[..body.len().min(2048)];
+        charset_label(&String::from_utf8_lossy(head).to_ascii_lowercase())
+    };
+    let label = match (from_header, kind) {
+        (Some(label), _) => Some(label),
+        (None, ContentKind::Html) => from_meta(),
+        (None, ContentKind::Text) => None,
+    };
+    label
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8)
+}
+
+/// The value after the first `charset=` in lowercase text.
+fn charset_label(text: &str) -> Option<String> {
+    let at = text.find("charset=")?;
+    let value = text[at + "charset=".len()..].trim_start_matches(['"', '\'', ' ']);
+    let end = value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
+        .unwrap_or(value.len());
+    (end > 0).then(|| value[..end].to_owned())
 }
 
 /// A transport error with its causes (where a guard refusal shows up), but

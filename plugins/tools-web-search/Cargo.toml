@@ -5,6 +5,8 @@ edition.workspace = true
 description = "Keyless web plugin: `web.search` over DuckDuckGo, Bing and SearXNG with failover, and guarded `web.fetch`"
 
 [dependencies]
+encoding_rs = "0.8"
+futures.workspace = true
 rah-api = { path = "../../crates/rah-api" }
 rah-protocol = { path = "../../crates/rah-protocol" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }

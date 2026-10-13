@@ -25,6 +25,8 @@ enum Reply {
     Json(Value),
     /// Status, content type and body.
     Typed(u16, &'static str, String),
+    /// Content type and raw body bytes, with status 200.
+    Bytes(&'static str, Vec<u8>),
     /// A `302` to this location.
     Redirect(String),
     /// Never answers.
@@ -70,12 +72,15 @@ async fn fixture(routes: Vec<(&'static str, Reply)>) -> Fixture {
                     .unwrap_or(Reply::Page(404, "missing"));
                 let mut extra = String::new();
                 let (status, content_type, body) = match reply {
-                    Reply::Page(status, body) => (status, "text/html", body.to_owned()),
-                    Reply::Json(body) => (200, "application/json", body.to_string()),
-                    Reply::Typed(status, content_type, body) => (status, content_type, body),
+                    Reply::Page(status, body) => (status, "text/html", body.as_bytes().to_vec()),
+                    Reply::Json(body) => (200, "application/json", body.to_string().into_bytes()),
+                    Reply::Typed(status, content_type, body) => {
+                        (status, content_type, body.into_bytes())
+                    }
+                    Reply::Bytes(content_type, body) => (200, content_type, body),
                     Reply::Redirect(location) => {
                         extra = format!("location: {location}\r\n");
-                        (302, "text/plain", String::new())
+                        (302, "text/plain", Vec::new())
                     }
                     Reply::Hold => {
                         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -83,10 +88,12 @@ async fn fixture(routes: Vec<(&'static str, Reply)>) -> Fixture {
                     }
                 };
                 let response = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n{body}",
+                    "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
                     body.len()
                 );
-                let _ = stream.write_all(response.as_bytes()).await;
+                let mut response = response.into_bytes();
+                response.extend_from_slice(&body);
+                let _ = stream.write_all(&response).await;
             });
         }
     });
@@ -134,7 +141,7 @@ async fn first_engine_answers_with_wrapped_deduplicated_results() {
     ])
     .await;
     let tool = fixture.tool(json!({}));
-    let text = search(&tool, json!({ "query": "  rust   async & more " }))
+    let text = search(&tool, json!({ "query": "  ddg   hit & more " }))
         .await
         .unwrap();
     assert_eq!(
@@ -147,10 +154,10 @@ async fn first_engine_answers_with_wrapped_deduplicated_results() {
     );
     assert_eq!(
         fixture.seen(),
-        vec!["GET /ddg?q=rust%20async%20%26%20more HTTP/1.1"]
+        vec!["GET /ddg?q=ddg%20hit%20%26%20more HTTP/1.1"]
     );
 
-    let text = search(&tool, json!({ "query": "rust", "limit": 1 }))
+    let text = search(&tool, json!({ "query": "hit", "limit": 1 }))
         .await
         .unwrap();
     assert!(!text.contains("Second"), "{text}");
@@ -606,4 +613,197 @@ fn only_public_addresses_pass_the_guard() {
         vec![addr("8.8.8.8:0"), addr("1.1.1.1:0")]
     );
     assert!(public_addrs(vec![addr("8.8.8.8:0"), addr("10.0.0.1:0")]).is_empty());
+}
+
+fn multi(tool: WebSearch) -> MultiSearch {
+    MultiSearch(Arc::new(tool))
+}
+
+async fn multi_search(tool: &MultiSearch, input: Value) -> Result<String, ToolError> {
+    let output = tool.call(input, cx()).await?;
+    match output.content.as_slice() {
+        [ToolContent::Text(text)] => Ok(text.clone()),
+        other => panic!("unexpected output {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multi_search_merges_engines_and_ranks_agreement_first() {
+    let fixture = fixture(vec![
+        (
+            "/ddg",
+            Reply::Page(
+                200,
+                r#"<a class="result__a" href="https://a.example/">A</a>
+<a class="result__a" href="https://shared.example/x">Shared</a>
+<a class="result__snippet" href="s">ddg snippet</a>"#,
+            ),
+        ),
+        (
+            "/bing",
+            Reply::Page(
+                200,
+                r#"<li class="b_algo"><h2><a href="https://SHARED.example/x/">Shared</a></h2></li>
+<li class="b_algo"><h2><a href="https://c.example/">C</a></h2><p>c snippet</p></li>"#,
+            ),
+        ),
+        ("/searx", Reply::Page(429, "slow down")),
+    ])
+    .await;
+    let tool = multi(fixture.tool(json!({ "searxng": [format!("{}/searx", fixture.base)] })));
+    let host = host(&fixture.base).to_owned();
+    let text = multi_search(&tool, json!({ "query": "q" })).await.unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "Note: results from duckduckgo, bing; searxng({host}) failed (quota: HTTP 429 Too Many Requests).\n\
+             <untrusted-web-content engine=\"multi\">\n\
+             1. Shared\n   https://SHARED.example/x/\n   ddg snippet\n   seen in: bing, duckduckgo\n\
+             2. A\n   https://a.example/\n   seen in: duckduckgo\n\
+             3. C\n   https://c.example/\n   c snippet\n   seen in: bing\n\
+             </untrusted-web-content>"
+        )
+    );
+
+    // The failed engine cools down; `limit` cuts the merged list.
+    let text = multi_search(&tool, json!({ "query": "q", "limit": 1 }))
+        .await
+        .unwrap();
+    assert!(
+        text.contains(&format!("searxng({host}) is cooling down")),
+        "{text}"
+    );
+    assert!(
+        text.contains("1. Shared") && !text.contains("2. "),
+        "{text}"
+    );
+
+    // Listing engines bypasses cooldowns and drops the others.
+    let error = multi_search(&tool, json!({ "query": "q", "engines": ["searxng"] }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ToolError::Execution(message) if message.contains("quota")),
+        "{error:?}"
+    );
+    assert!(matches!(
+        multi_search(
+            &tool,
+            json!({ "query": "q", "engines": ["bing"], "time_range": "day" }),
+        )
+        .await,
+        Err(ToolError::InvalidInput(message)) if message.contains("time_range")
+    ));
+    // A time range skips Bing; the cooling SearXNG is not requested either.
+    let before = fixture.seen().len();
+    let text = multi_search(&tool, json!({ "query": "q", "time_range": "day" }))
+        .await
+        .unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "Note: results from duckduckgo; bing skipped (no time_range support); searxng({host}) is cooling down."
+        )),
+        "{text}"
+    );
+    let seen = fixture.seen();
+    assert_eq!(seen.len(), before + 1);
+    assert_eq!(seen[before], "GET /ddg?q=q&df=d HTTP/1.1");
+    for engines in [json!([]), json!(["google"])] {
+        assert!(matches!(
+            multi_search(&tool, json!({ "query": "q", "engines": engines })).await,
+            Err(ToolError::InvalidInput(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn multi_search_reports_empty_engines_and_cancellation() {
+    let fixture = fixture(vec![
+        ("/ddg", Reply::Page(200, "<html>nothing</html>")),
+        ("/bing", Reply::Hold),
+    ])
+    .await;
+    let tool = multi(fixture.tool(json!({})));
+    let text = multi_search(&tool, json!({ "query": "q", "engines": ["duckduckgo"] }))
+        .await
+        .unwrap();
+    assert_eq!(text, "No results (duckduckgo returned none).");
+
+    let bing_only = multi(fixture.tool(json!({ "engines": ["bing"] })));
+    assert!(matches!(
+        multi_search(&bing_only, json!({ "query": "q", "time_range": "week" })).await,
+        Err(ToolError::Execution(message))
+            if message == "no search engine is available: bing skipped (no time_range support)"
+    ));
+
+    let cx = cx();
+    let cancel = cx.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    assert!(matches!(
+        tool.call(json!({ "query": "q" }), cx).await,
+        Err(ToolError::Cancelled)
+    ));
+    assert_eq!(tool.definition().name, ToolName::new("web.multi_search"));
+}
+
+#[tokio::test]
+async fn fetch_decodes_declared_charsets() {
+    let (big5, _, _) = encoding_rs::BIG5.encode("中文測試");
+    let mut meta_page = b"<html><head><meta charset=\"big5\"><title>".to_vec();
+    meta_page.extend_from_slice(&big5);
+    meta_page.extend_from_slice(b"</title></head><body><p>");
+    meta_page.extend_from_slice(&big5);
+    meta_page.extend_from_slice(b"</p></body></html>");
+    let fixture = fixture(vec![
+        (
+            "/header",
+            Reply::Bytes("text/plain; charset=Big5", big5.to_vec()),
+        ),
+        ("/meta", Reply::Bytes("text/html", meta_page)),
+        (
+            "/latin",
+            Reply::Bytes("text/plain; charset=iso-8859-1", b"caf\xe9".to_vec()),
+        ),
+        (
+            "/unknown",
+            Reply::Bytes("text/plain; charset=nonsense", "ok".into()),
+        ),
+    ])
+    .await;
+    let tool = fetch_tool(json!({ "fetch_private_networks": true }));
+    let get = |path: &str| fetch(&tool, json!({ "url": format!("{}{path}", fixture.base) }));
+
+    let text = get("/header").await.unwrap();
+    assert!(text.contains("(text/plain, Big5, 4 characters)"), "{text}");
+    assert!(text.contains("\">\n中文測試\n<"), "{text}");
+    let text = get("/meta").await.unwrap();
+    assert!(text.contains("(text/html, Big5,"), "{text}");
+    assert!(text.contains("Title: 中文測試\n\n中文測試\n<"), "{text}");
+    let text = get("/latin").await.unwrap();
+    assert!(text.contains("\">\ncafé\n<"), "{text}");
+    let text = get("/unknown").await.unwrap();
+    assert!(text.contains("(text/plain, 2 characters)"), "{text}");
+}
+
+#[tokio::test]
+async fn unrelated_scraped_results_fall_over() {
+    let fixture = fixture(vec![
+        ("/bing", Reply::Page(200, r#"<li class="b_algo"><h2><a href="https://vietnam.travel/">Vietnamese dishes</a></h2></li>"#)),
+        ("/ddg", Reply::Page(200, r#"<a class="result__a" href="https://docs.rs/tokio-util/">CancellationToken</a>"#)),
+    ])
+    .await;
+    let tool = fixture.tool(json!({ "engines": ["bing", "duckduckgo"] }));
+    let text = search(&tool, json!({ "query": "tokio cancellation" }))
+        .await
+        .unwrap();
+    assert!(
+        text.starts_with(
+            "Note: bing failed (invalid-response: results do not match the query); using duckduckgo."
+        ),
+        "{text}"
+    );
+    assert!(text.contains("1. CancellationToken"), "{text}");
 }

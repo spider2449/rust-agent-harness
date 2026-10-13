@@ -22,6 +22,16 @@
   literals, resolved names and every redirect, uses no proxy, and follows at
   most five redirects; `fetch_private_networks = true` lifts the guard. No
   preset mounts the plugin.
+- `web.multi_search` (`query`, optional `limit`, `engines` and
+  `time_range`) queries the engines concurrently and merges the results by
+  URL; each lists the engines that returned it, and results more engines
+  agree on come first. It shares the cooldowns of `web.search`.
+- A scraped engine whose results mention no word of the query (Bing serves
+  unrelated pages to clients it suspects are bots) counts as an invalid
+  response and falls over to the next engine.
+- `web.fetch` decodes the charset of the content type or of an HTML
+  `<meta>` tag (Big5, GBK, Shift_JIS, Latin-1 and the rest of the WHATWG
+  encodings, UTF-8 otherwise) and keeps the whitespace of `<pre>` blocks.
 
 ### Web UI: folder-grouped sessions and a workspace panel
 
