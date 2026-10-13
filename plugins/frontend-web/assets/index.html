@@ -14,6 +14,7 @@
     <span id="connection" class="badge muted">connecting</span>
     <span class="spacer"></span>
     <button id="open-settings" type="button">Settings</button>
+    <button id="toggle-side" type="button" class="ghost" title="Show or hide the workspace panel">Workspace</button>
     <button id="toggle-plugins" type="button" class="ghost" title="Advanced: every plugin and its JSON configuration">Plugins</button>
   </header>
 
@@ -23,10 +24,6 @@
     <nav class="sidebar" aria-label="Sessions">
       <button id="new-session" type="button">New session</button>
       <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
-      <select id="session-scope" aria-label="Which sessions to list">
-        <option value="here">This folder</option>
-        <option value="all">All folders</option>
-      </select>
       <ul id="sessions" class="sessions"></ul>
     </nav>
 
@@ -53,32 +50,62 @@
       </form>
     </section>
 
-    <aside id="plugins-panel" class="plugins" aria-label="Plugins" hidden>
-      <div class="panel-head">
-        <h2>Plugins</h2>
-        <span>
-          <button id="add-plugin" type="button" class="ghost">Add</button>
-          <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
-        </span>
+    <aside id="side" class="side" aria-label="Workspace and plugins" hidden>
+      <div id="side-resizer" class="resizer" title="Drag to resize" aria-hidden="true"></div>
+      <div id="side-tabs" class="tabs side-tabs" role="tablist">
+        <button type="button" role="tab" data-view="files">Workspace</button>
+        <button type="button" role="tab" data-view="plugins">Plugins</button>
+        <span class="spacer"></span>
+        <button id="side-close" type="button" class="ghost icon" title="Hide the panel" aria-label="Hide the panel">✕</button>
       </div>
-      <form id="editor" class="editor" hidden>
-        <h3 id="editor-title"></h3>
-        <label id="editor-kind-row">Kind <select id="editor-kind"></select></label>
-        <label id="editor-id-row">Id <input id="editor-id" placeholder="defaults to the kind"></label>
-        <label>Configuration (JSON)
-          <textarea id="editor-config" rows="6" spellcheck="false"></textarea>
-        </label>
-        <div class="buttons">
-          <button id="editor-cancel" type="button" class="ghost">Cancel</button>
-          <button id="editor-save" type="submit">Save</button>
+      <div id="files-view" class="files-view" role="tabpanel" aria-label="Workspace files">
+        <div class="tree-pane">
+          <div class="pane-head">
+            <span id="tree-root" class="pane-title">Files</span>
+            <button id="tree-refresh" type="button" class="ghost icon" title="Reload the files" aria-label="Reload the files">⟳</button>
+          </div>
+          <ul id="tree" class="tree" role="tree" aria-label="Files"></ul>
         </div>
-      </form>
-      <table>
-        <thead><tr><th>Plugin</th><th>State</th></tr></thead>
-        <tbody id="plugins"></tbody>
-      </table>
-      <h2>Tools</h2>
-      <ul id="tools" class="tools"></ul>
+        <div class="viewer-pane">
+          <div class="file-tabs">
+            <div id="file-tabs" class="file-tab-list" role="tablist" aria-label="Open files"></div>
+            <button id="close-all" type="button" class="ghost" hidden>Close all</button>
+          </div>
+          <div id="file-view" class="file-view"></div>
+          <div class="pane-head activity-head">
+            <span class="pane-title">Activity</span>
+            <button id="activity-clear" type="button" class="ghost icon" title="Clear the activity log" aria-label="Clear the activity log">✕</button>
+          </div>
+          <ol id="activity" class="activity" aria-live="polite"></ol>
+        </div>
+      </div>
+      <div id="plugins-panel" class="plugins" role="tabpanel" aria-label="Plugins" hidden>
+        <div class="panel-head">
+          <h2>Plugins</h2>
+          <span>
+            <button id="add-plugin" type="button" class="ghost">Add</button>
+            <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
+          </span>
+        </div>
+        <form id="editor" class="editor" hidden>
+          <h3 id="editor-title"></h3>
+          <label id="editor-kind-row">Kind <select id="editor-kind"></select></label>
+          <label id="editor-id-row">Id <input id="editor-id" placeholder="defaults to the kind"></label>
+          <label>Configuration (JSON)
+            <textarea id="editor-config" rows="6" spellcheck="false"></textarea>
+          </label>
+          <div class="buttons">
+            <button id="editor-cancel" type="button" class="ghost">Cancel</button>
+            <button id="editor-save" type="submit">Save</button>
+          </div>
+        </form>
+        <table>
+          <thead><tr><th>Plugin</th><th>State</th></tr></thead>
+          <tbody id="plugins"></tbody>
+        </table>
+        <h2>Tools</h2>
+        <ul id="tools" class="tools"></ul>
+      </div>
     </aside>
   </main>
   <footer id="status" class="status" aria-label="Status">

@@ -136,41 +136,117 @@ function folderName(path) {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 }
 
-// "here": sessions of the current workspace, then those without a recorded
-// one. "all": every session, with its folder.
-function sessionScope() {
-  return $("session-scope").value;
+// Sessions are grouped by the folder they worked in: the current workspace
+// first, then the other folders by their latest session, then those without
+// a recorded folder. A folder shows its first sessions until "Show more".
+const FOLDER_PAGE = 10;
+const FOLDERS_KEY = "rah-folders";
+
+// {key: true|false} for folders the user opened or closed; the others follow
+// the default (only the current workspace is open).
+function folderChoices() {
+  if (!state.folderChoices) {
+    try {
+      state.folderChoices = JSON.parse(localStorage.getItem(FOLDERS_KEY) || "{}") || {};
+    } catch {
+      state.folderChoices = {};
+    }
+  }
+  return state.folderChoices;
+}
+
+function folderKey(path) {
+  return path ? path.toLowerCase() : "";
+}
+
+function folderOpen(key, here, searching) {
+  if (searching) return true;
+  const choice = folderChoices()[key];
+  return choice === undefined ? here : choice;
+}
+
+function toggleFolder(key, open) {
+  folderChoices()[key] = open;
+  try {
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify(folderChoices()));
+  } catch {
+    // Not remembered.
+  }
+  renderSessions();
+}
+
+function sessionGroups(visible) {
+  const groups = new Map();
+  const add = (path) => {
+    const key = folderKey(path);
+    if (!groups.has(key)) groups.set(key, { key, path, sessions: [] });
+    return groups.get(key);
+  };
+  // The current workspace is listed even before it has sessions.
+  if (state.workspace) add(state.workspace);
+  for (const info of visible) add(info.workspace || null).sessions.push(info);
+  const here = folderKey(state.workspace);
+  const latest = (group) => Math.max(0, ...group.sessions.map((info) => info.updated || info.created));
+  return [...groups.values()].sort((a, b) => {
+    if ((here && a.key === here) || !b.key) return -1;
+    if ((here && b.key === here) || !a.key) return 1;
+    return latest(b) - latest(a);
+  });
+}
+
+function folderItem(group, open, here) {
+  const item = el("li", here ? "folder here" : "folder");
+  item.dataset.folder = group.path || "";
+  const button = el("button");
+  button.type = "button";
+  button.title = group.path ? `${group.path}${here ? "\nThe current workspace" : ""}` : "Sessions without a recorded folder";
+  button.setAttribute("aria-expanded", String(open));
+  button.append(
+    el("span", "caret", open ? "▾" : "▸"),
+    el("span", "folder-name", group.path ? folderName(group.path) : "No folder recorded"),
+    el("span", "count", String(group.sessions.length)),
+  );
+  button.addEventListener("click", () => toggleFolder(group.key, !open));
+  item.append(button);
+  return item;
 }
 
 function renderSessions() {
   const query = $("session-search").value.trim().toLowerCase();
-  const scoped = sessionScope() === "here" && state.workspace;
   const list = $("sessions");
   list.replaceChildren();
   const visible = state.sessions.filter((info) => {
     const haystack = `${info.title || ""} ${info.preview || ""} ${info.id} ${info.workspace || ""}`.toLowerCase();
-    if (query && !haystack.includes(query)) return false;
-    return !scoped || !info.workspace || sameFolder(info.workspace, state.workspace);
+    return !query || haystack.includes(query);
   });
-  const here = visible.filter((info) => !scoped || info.workspace);
-  const unrecorded = scoped ? visible.filter((info) => !info.workspace) : [];
-  let group = null;
-  for (const info of here) {
-    const label = dayGroup(info.updated || info.created);
-    if (label !== group) {
-      group = label;
-      list.append(el("li", "group", label));
+  const expanded = state.expandedFolders || (state.expandedFolders = new Set());
+  for (const group of sessionGroups(visible)) {
+    const here = !!group.key && group.key === folderKey(state.workspace);
+    if (query && !group.sessions.length) continue;
+    const open = folderOpen(group.key, here, !!query);
+    list.append(folderItem(group, open, here));
+    if (!open) continue;
+    if (!group.sessions.length) {
+      list.append(el("li", "empty", "No sessions in this folder yet"));
+      continue;
     }
-    list.append(sessionItem(info));
+    const all = query || expanded.has(group.key);
+    // Keep the open session visible even past the first page.
+    const shown = all ? group.sessions : group.sessions.filter((info, index) => index < FOLDER_PAGE || info.id === state.current);
+    for (const info of shown) list.append(sessionItem(info));
+    if (shown.length < group.sessions.length) {
+      const more = el("li", "more");
+      const button = el("button", "", `Show ${group.sessions.length - shown.length} more…`);
+      button.type = "button";
+      button.addEventListener("click", () => {
+        expanded.add(group.key);
+        renderSessions();
+      });
+      more.append(button);
+      list.append(more);
+    }
   }
-  if (unrecorded.length) {
-    list.append(el("li", "group", "No folder recorded"));
-    for (const info of unrecorded) list.append(sessionItem(info));
-  }
-  if (!list.children.length) {
-    const empty = query ? "No matching sessions" : scoped ? "No sessions in this folder yet" : "No sessions yet";
-    list.append(el("li", "group", empty));
-  }
+  if (!list.children.length) list.append(el("li", "group", query ? "No matching sessions" : "No sessions yet"));
 }
 
 // Before working in a session, use the folder it belongs to, so its history
@@ -196,7 +272,6 @@ function sessionItem(info) {
   const name = el("span", "name", sessionName(info));
   const meta = [timeLabel(info.updated || info.created)];
   if (info.parent) meta.push(`fork of ${info.parent.session.slice(0, 8)}`);
-  if (info.workspace && !sameFolder(info.workspace, state.workspace)) meta.push(`in ${folderName(info.workspace)}`);
   if (info.workspace) name.title = info.workspace;
   const actions = el("span", "item-actions");
   for (const [label, text, handler] of [
@@ -261,6 +336,7 @@ function editTitle(host, info) {
 function closeSession() {
   state.current = null;
   $("transcript").replaceChildren();
+  $("activity").replaceChildren();
   $("input").disabled = true;
   $("send").disabled = true;
   renderHeader();
@@ -434,6 +510,7 @@ async function loadTranscript() {
   const records = await api(`/sessions/${state.current}`);
   const list = $("transcript");
   list.replaceChildren(...records.map(entryNode).filter(Boolean));
+  seedActivity(records);
   // Regenerate the last turn: send its message again in a new branch.
   const last = [...records].reverse().find((record) => record.entry.kind === "turn_started");
   const answer = [...list.querySelectorAll(".entry.assistant, .entry.failed")].pop();
@@ -652,8 +729,7 @@ async function runSlash(input) {
         await newSession();
         break;
       case "/plugins":
-        $("plugins-panel").hidden = false;
-        await loadPlugins();
+        showSide("plugins");
         break;
       case "/stop": {
         const plugin = (slash.plugins || []).find((p) => p.id === argument);
@@ -700,6 +776,7 @@ async function submit(event) {
 
 function onEvent(session, event) {
   if (session !== state.current) return;
+  eventActivity(event);
   switch (event.type) {
     case "model_delta":
       showLive(event.delta);
@@ -720,6 +797,7 @@ function onEvent(session, event) {
       setRunning(false);
       loadTranscript().catch((error) => showNotice(error.message));
       refreshStatus();
+      reloadFiles().catch(report);
       loadSessions()
         .then(() => {
           if (event.type === "completed") awaitTitle();
@@ -753,6 +831,374 @@ function showApproval(request) {
   }
   card.append(buttons);
   $("approvals").append(card);
+}
+
+// ---- Workspace panel --------------------------------------------------------
+
+// The right-hand panel: the workspace's files (read-only), the files opened
+// from them, and an activity log of the open session; or the plugins.
+const SIDE_KEY = "rah-side";
+const files = {
+  root: null,
+  // Directory path ("" is the root) -> its listing, once loaded.
+  dirs: new Map(),
+  expanded: new Set([""]),
+  // Open files in tab order: {path, data, error}.
+  open: [],
+  current: null,
+};
+
+function sidePrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(SIDE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSidePrefs(change) {
+  try {
+    localStorage.setItem(SIDE_KEY, JSON.stringify({ ...sidePrefs(), ...change }));
+  } catch {
+    // Not remembered.
+  }
+}
+
+function sideView() {
+  return $("plugins-panel").hidden ? "files" : "plugins";
+}
+
+function showSide(view) {
+  $("side").hidden = false;
+  $("files-view").hidden = view !== "files";
+  $("plugins-panel").hidden = view !== "plugins";
+  for (const tab of $("side-tabs").querySelectorAll("[data-view]")) {
+    const current = tab.dataset.view === view;
+    tab.classList.toggle("current", current);
+    tab.setAttribute("aria-selected", String(current));
+  }
+  saveSidePrefs({ open: true, view });
+  if (view === "files" && !files.dirs.has("")) loadDir("").catch(treeError);
+  if (view === "plugins") loadPlugins().catch(report);
+}
+
+function hideSide() {
+  $("side").hidden = true;
+  saveSidePrefs({ open: false });
+}
+
+// The header buttons open their view, or close the panel when it shows it.
+function toggleSide(view) {
+  if (!$("side").hidden && sideView() === view) hideSide();
+  else showSide(view);
+}
+
+function setupResizer() {
+  const width = sidePrefs().width;
+  if (width) document.documentElement.style.setProperty("--side-width", `${width}px`);
+  const handle = $("side-resizer");
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("dragging");
+    const move = (moved) => {
+      const next = Math.round(Math.min(Math.max(window.innerWidth - moved.clientX, 320), window.innerWidth * 0.75));
+      document.documentElement.style.setProperty("--side-width", `${next}px`);
+    };
+    const done = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      saveSidePrefs({ width: Math.round($("side").getBoundingClientRect().width) });
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", done, { once: true });
+    handle.addEventListener("pointercancel", done, { once: true });
+  });
+}
+
+function treeError(error) {
+  $("tree").replaceChildren(el("li", "note", error.message));
+}
+
+async function loadDir(path) {
+  const listing = await api(`/files?path=${encodeURIComponent(path)}`);
+  if (path === "") {
+    files.root = listing.root;
+    $("tree-root").textContent = folderName(listing.root);
+    $("tree-root").title = listing.root;
+  }
+  files.dirs.set(path, listing);
+  renderTree();
+}
+
+// A turn may have changed files: reload the open folders and files.
+async function reloadFiles() {
+  if (!files.dirs.has("")) return;
+  const paths = [...files.expanded].filter((path) => files.dirs.has(path));
+  files.dirs.clear();
+  for (const path of paths) {
+    try {
+      await loadDir(path);
+    } catch {
+      // Gone: shown closed.
+      files.expanded.delete(path);
+    }
+  }
+  renderTree();
+  for (const file of files.open) await readFile(file);
+  renderFile();
+}
+
+// The workspace moved: start over in the new folder.
+function resetFiles() {
+  files.root = null;
+  files.dirs.clear();
+  files.expanded = new Set([""]);
+  files.open = [];
+  files.current = null;
+  $("tree-root").textContent = "Files";
+  $("tree-root").title = "";
+  $("tree").replaceChildren();
+  renderFile();
+  if (!$("side").hidden && sideView() === "files") loadDir("").catch(treeError);
+}
+
+function treeNote(text, depth) {
+  const note = el("li", "note", text);
+  note.style.setProperty("--depth", depth);
+  return note;
+}
+
+function treeNodes(path, depth) {
+  const listing = files.dirs.get(path);
+  if (!listing) return [treeNote("Loading…", depth)];
+  const nodes = listing.entries.map((entry) => {
+    const item = el("li", entry.dir ? "dir" : "file");
+    item.setAttribute("role", "treeitem");
+    const button = el("button");
+    button.type = "button";
+    button.title = entry.path;
+    button.dataset.path = entry.path;
+    button.style.setProperty("--depth", depth);
+    const open = entry.dir && files.expanded.has(entry.path);
+    if (entry.dir) item.setAttribute("aria-expanded", String(open));
+    if (!entry.dir && entry.path === files.current) button.classList.add("open-file");
+    button.append(
+      el("span", "caret", entry.dir ? (open ? "▾" : "▸") : ""),
+      el("span", "icon-glyph", entry.dir ? "▣" : "▢"),
+      el("span", "", entry.name),
+    );
+    button.addEventListener("click", () => {
+      if (!entry.dir) {
+        openFile(entry.path).catch(report);
+        return;
+      }
+      if (open) files.expanded.delete(entry.path);
+      else files.expanded.add(entry.path);
+      if (!open && !files.dirs.has(entry.path)) loadDir(entry.path).catch(report);
+      renderTree();
+    });
+    item.append(button);
+    if (open) {
+      const children = el("ul");
+      children.setAttribute("role", "group");
+      children.append(...treeNodes(entry.path, depth + 1));
+      item.append(children);
+    }
+    return item;
+  });
+  if (!listing.entries.length) nodes.push(treeNote("Empty folder", depth));
+  if (listing.truncated) nodes.push(treeNote("…more entries not shown", depth));
+  return nodes;
+}
+
+function renderTree() {
+  const tree = $("tree");
+  const scroll = tree.scrollTop;
+  tree.replaceChildren(...treeNodes("", 0));
+  tree.scrollTop = scroll;
+}
+
+async function readFile(file) {
+  try {
+    file.data = await api(`/files/content?path=${encodeURIComponent(file.path)}`);
+    file.error = null;
+  } catch (error) {
+    file.data = null;
+    file.error = error.message;
+  }
+}
+
+async function openFile(path) {
+  let file = files.open.find((open) => open.path === path);
+  if (!file) {
+    file = { path, data: null, error: null };
+    files.open.push(file);
+    await readFile(file);
+  }
+  files.current = path;
+  if ($("side").hidden || sideView() !== "files") showSide("files");
+  renderFile();
+  renderTree();
+}
+
+function closeFile(path) {
+  const index = files.open.findIndex((file) => file.path === path);
+  if (index < 0) return;
+  files.open.splice(index, 1);
+  if (files.current === path) files.current = files.open[Math.min(index, files.open.length - 1)]?.path || null;
+  renderFile();
+  renderTree();
+}
+
+function closeAllFiles() {
+  files.open = [];
+  files.current = null;
+  renderFile();
+  renderTree();
+}
+
+// File contents are untrusted text: shown with textContent only.
+function codeView(text) {
+  const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+  const code = el("div", "code");
+  code.append(
+    el("pre", "gutter", lines.map((_, index) => index + 1).join("\n")),
+    el("pre", "lines", lines.join("\n")),
+  );
+  return code;
+}
+
+function fileTab(file) {
+  const current = file.path === files.current;
+  const tab = el("div", current ? "file-tab current" : "file-tab");
+  tab.setAttribute("role", "tab");
+  tab.setAttribute("aria-selected", String(current));
+  tab.title = file.path;
+  tab.dataset.path = file.path;
+  const close = el("button", "", "✕");
+  close.type = "button";
+  close.title = "Close";
+  close.setAttribute("aria-label", `Close ${file.path}`);
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeFile(file.path);
+  });
+  tab.append(el("span", "", folderName(file.path)), close);
+  tab.addEventListener("click", () => {
+    files.current = file.path;
+    renderFile();
+    renderTree();
+  });
+  return tab;
+}
+
+function renderFile() {
+  $("file-tabs").replaceChildren(...files.open.map(fileTab));
+  $("close-all").hidden = !files.open.length;
+  const view = $("file-view");
+  const file = files.open.find((open) => open.path === files.current);
+  if (!file) {
+    view.replaceChildren(el("div", "placeholder", "Choose a file to view it here (read-only)."));
+  } else if (file.error) {
+    view.replaceChildren(el("div", "placeholder", file.error));
+  } else if (file.data.binary) {
+    view.replaceChildren(el("div", "placeholder", `Binary file, ${file.data.size} bytes: not shown.`));
+  } else {
+    const parts = [];
+    if (file.data.truncated) parts.push(el("div", "file-note", `Showing the start of this ${file.data.size}-byte file.`));
+    parts.push(codeView(file.data.text));
+    view.replaceChildren(...parts);
+  }
+}
+
+// ---- Activity ---------------------------------------------------------------
+
+const ACTIVITY_LIMIT = 500;
+
+function clock() {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+// Tool arguments are untrusted: shown as text, and a `path` among them only
+// opens the read-only view, which the server keeps inside the workspace.
+function logActivity(text, kind, when, path) {
+  const log = $("activity");
+  const following = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+  const item = el("li", kind || "");
+  const line = el("span", "text", text);
+  line.title = text;
+  item.append(el("span", "time", when || clock()), line);
+  if (path) {
+    item.classList.add("link");
+    item.title = `Open ${path}`;
+    item.addEventListener("click", () => openFile(path).catch(report));
+  }
+  log.append(item);
+  while (log.children.length > ACTIVITY_LIMIT) log.firstChild.remove();
+  if (following) log.scrollTop = log.scrollHeight;
+}
+
+function oneLine(text, limit = 160) {
+  const line = String(text).replace(/\s+/g, " ").trim();
+  return line.length > limit ? `${line.slice(0, limit)}…` : line;
+}
+
+function toolPath(input) {
+  return input && typeof input.path === "string" && input.path ? input.path : null;
+}
+
+function toolActivity(name, input, when) {
+  logActivity(`⚙ ${name} ${oneLine(JSON.stringify(input))}`, "tool", when, toolPath(input));
+}
+
+function resultActivity(output, effect, when) {
+  const status = output.is_error ? "✗ error" : "✓ done";
+  const uncertain = effect === "uncertain";
+  const kind = output.is_error ? "bad" : uncertain ? "warn" : "muted";
+  logActivity(`  ${status}${uncertain ? " (effect uncertain)" : ""} ${oneLine(renderContent(output), 120)}`, kind, when);
+}
+
+// The open session's history in brief, by record number.
+function seedActivity(records) {
+  $("activity").replaceChildren();
+  for (const record of records) {
+    const entry = record.entry;
+    const when = `#${record.seq}`;
+    if (entry.kind === "turn_started") logActivity(`▶ ${oneLine(entry.input)}`, "", when);
+    else if (entry.kind === "tool_call") toolActivity(entry.name, entry.arguments, when);
+    else if (entry.kind === "tool_result") resultActivity(entry.output, entry.effect, when);
+    else if (entry.kind === "turn_completed") logActivity("■ turn completed", "good", when);
+    else if (entry.kind === "turn_failed") logActivity(`■ turn failed: ${oneLine(entry.message)}`, "bad", when);
+  }
+}
+
+function eventActivity(event) {
+  switch (event.type) {
+    case "model_request_started":
+      logActivity("… model request", "muted");
+      break;
+    case "tool_requested":
+      toolActivity(event.tool_call.name, event.tool_call.input);
+      break;
+    case "approval_required":
+      logActivity("? waiting for approval", "warn");
+      break;
+    case "tool_finished":
+      resultActivity(event.output);
+      break;
+    case "completed":
+      logActivity("■ turn completed", "good");
+      break;
+    case "failed":
+      logActivity(`■ turn failed: ${oneLine(event.message)}`, "bad");
+      break;
+    case "cancelled":
+      logActivity("■ turn cancelled", "warn");
+      break;
+    default:
+      break;
+  }
 }
 
 // ---- Connection -----------------------------------------------------------
@@ -974,7 +1420,13 @@ async function loadStatus() {
   if (request < state.statusShown) return;
   state.statusShown = request;
   const workspace = status.workspace || {};
+  // Undefined until the first status: nothing has moved yet.
+  const moved = state.workspace !== undefined && !sameFolder(state.workspace, workspace.root) && (state.workspace || workspace.root);
   state.workspace = workspace.root || null;
+  if (moved) {
+    resetFiles();
+    renderSessions();
+  }
   statusItem(
     "status-root",
     workspace.root || "Choose a workspace…",
@@ -1125,19 +1577,6 @@ async function start() {
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   setupSettings();
   $("session-search").addEventListener("input", renderSessions);
-  try {
-    $("session-scope").value = localStorage.getItem("rah-session-scope") === "all" ? "all" : "here";
-  } catch {
-    // Storage unavailable: the default scope applies.
-  }
-  $("session-scope").addEventListener("change", () => {
-    try {
-      localStorage.setItem("rah-session-scope", sessionScope());
-    } catch {
-      // Not remembered.
-    }
-    renderSessions();
-  });
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));
   $("ws-path").addEventListener("keydown", (event) => {
@@ -1163,9 +1602,17 @@ async function start() {
   for (const format of ["md", "json"]) {
     $(`export-${format}`).addEventListener("click", () => exportSession(format).catch(report));
   }
-  $("toggle-plugins").addEventListener("click", () => {
-    $("plugins-panel").hidden = !$("plugins-panel").hidden;
-  });
+  $("toggle-plugins").addEventListener("click", () => toggleSide("plugins"));
+  $("toggle-side").addEventListener("click", () => toggleSide("files"));
+  for (const tab of $("side-tabs").querySelectorAll("[data-view]")) {
+    tab.addEventListener("click", () => showSide(tab.dataset.view));
+  }
+  $("side-close").addEventListener("click", hideSide);
+  $("tree-refresh").addEventListener("click", () => reloadFiles().catch(report));
+  $("close-all").addEventListener("click", closeAllFiles);
+  $("activity-clear").addEventListener("click", () => $("activity").replaceChildren());
+  setupResizer();
+  renderFile();
   $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
   $("add-plugin").addEventListener("click", () => openEditor("add", null));
   $("editor").addEventListener("submit", saveEditor);
@@ -1178,6 +1625,8 @@ async function start() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshStatus();
   });
+  const side = sidePrefs();
+  if (side.open ?? window.innerWidth >= 1100) showSide(side.view === "plugins" ? "plugins" : "files");
   try {
     await loadCatalog();
     await loadPlugins();

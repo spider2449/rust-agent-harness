@@ -62,6 +62,22 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 }
 .sessions { list-style: none; margin: 0; padding: 0; }
 .sessions li.group { padding: 10px 8px 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.sessions li.folder { margin-top: 6px; }
+.sessions li.folder button {
+  display: flex; width: 100%; gap: 6px; align-items: center; text-align: left; font: inherit; font-size: 13px; font-weight: 600;
+  padding: 4px 6px; border: none; border-radius: 6px; background: none; color: var(--text); cursor: pointer;
+}
+.sessions li.folder button:hover { background: var(--tool); }
+.sessions li.folder.here button { color: var(--accent); }
+.sessions .caret { width: 1em; flex: none; color: var(--muted); font-size: 10px; }
+.sessions .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sessions .count { flex: none; color: var(--muted); font-size: 11px; font-weight: normal; }
+.sessions li.session { margin-left: 14px; }
+.sessions li.more { margin-left: 14px; padding: 2px 8px 4px; }
+.sessions li.more button, .sessions li.empty { font-size: 12px; color: var(--muted); }
+.sessions li.more button { border: none; background: none; padding: 0; font-style: italic; }
+.sessions li.more button:hover { color: var(--accent); }
+.sessions li.empty { margin-left: 14px; padding: 2px 8px 4px; }
 .sessions li.session { position: relative; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .sessions li.session:hover { background: var(--tool); }
 .sessions li.current { background: var(--user); font-weight: 600; }
@@ -182,7 +198,65 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .composer textarea { flex: 1; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; }
 .composer .actions { display: flex; flex-direction: column; gap: 6px; }
 
-.plugins { width: 300px; padding: 12px; border-left: 1px solid var(--line); overflow-y: auto; font-size: 13px; }
+/* The right-hand panel: the workspace files and the plugins, as tabs. */
+.side {
+  position: relative; flex: none; width: var(--side-width, 46vw); min-width: 320px; max-width: 75vw;
+  display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--panel);
+}
+.resizer { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 2; }
+.resizer:hover, .resizer.dragging { background: var(--accent); opacity: 0.4; }
+.side-tabs { display: flex; align-items: center; margin: 0; padding: 0 8px; }
+.side-tabs .spacer { flex: 1; }
+.side-tabs button.icon { border: none; color: var(--muted); }
+.files-view { flex: 1; display: flex; min-height: 0; }
+.tree-pane { width: 34%; min-width: 150px; max-width: 320px; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-height: 0; }
+.pane-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; min-height: 30px; }
+.pane-title { flex: 1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-head button.icon { border: none; color: var(--muted); }
+.tree { list-style: none; margin: 0; padding: 0 0 8px; overflow: auto; flex: 1; font-size: 13px; }
+.tree ul { list-style: none; margin: 0; padding: 0; }
+.tree button {
+  display: flex; width: 100%; gap: 4px; align-items: center; text-align: left; font: inherit; white-space: nowrap;
+  padding: 2px 8px 2px calc(8px + var(--depth, 0) * 14px); border: none; border-radius: 0; background: none; color: var(--text); cursor: pointer;
+}
+.tree button:hover { background: var(--tool); }
+.tree button.open-file { background: var(--user); }
+.tree .caret { width: 1em; flex: none; color: var(--muted); font-size: 10px; }
+.tree .icon-glyph { flex: none; width: 1.2em; color: var(--muted); }
+.tree .dir > button .icon-glyph { color: var(--accent); }
+.tree .note { padding: 2px 8px 2px calc(22px + var(--depth, 0) * 14px); color: var(--muted); font-size: 12px; }
+.viewer-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.file-tabs { display: flex; align-items: flex-end; gap: 6px; border-bottom: 1px solid var(--line); padding: 0 6px; min-height: 32px; }
+.file-tab-list { flex: 1; display: flex; overflow-x: auto; min-width: 0; }
+.file-tab-list .file-tab {
+  display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px; font-size: 12px; white-space: nowrap; cursor: pointer;
+  border-bottom: 2px solid transparent; color: var(--muted);
+}
+.file-tab-list .file-tab.current { color: var(--text); border-bottom-color: var(--accent); }
+.file-tab-list .file-tab button { border: none; background: none; color: var(--muted); padding: 0 4px; font-size: 11px; }
+.file-tab-list .file-tab button:hover { color: var(--bad); }
+.file-tabs > button { font-size: 12px; padding: 1px 8px; margin-bottom: 4px; border: none; }
+.file-view { flex: 3 1 0; min-height: 80px; overflow: auto; background: var(--bg); }
+.file-view .placeholder, .file-view .file-note { padding: 12px; color: var(--muted); font-size: 13px; }
+.file-view .file-note { padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--warn-bg); color: var(--warn); font-size: 12px; }
+.code { display: flex; min-width: max-content; }
+.code pre { margin: 0; padding: 8px 0; white-space: pre; word-break: normal; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+.code .gutter { padding: 8px 10px 8px 12px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg); }
+.code .lines { padding-left: 12px; padding-right: 16px; }
+.activity-head { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.activity {
+  flex: 1 1 0; min-height: 60px; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0;
+  font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--bg);
+}
+.activity li { display: flex; gap: 8px; padding: 0 10px; white-space: nowrap; }
+.activity li .time { flex: none; color: var(--muted); }
+.activity li .text { overflow: hidden; text-overflow: ellipsis; }
+.activity li.tool .text { color: var(--accent); }
+.activity li.bad .text { color: var(--bad); }
+.activity li.good .text { color: var(--good); }
+.activity li.warn .text { color: var(--warn); }
+.activity li.muted .text { color: var(--muted); }
+.plugins { flex: 1; padding: 12px; overflow-y: auto; font-size: 13px; }
 .plugins h2 { font-size: 13px; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; }
 .plugins table { width: 100%; border-collapse: collapse; }
@@ -200,7 +274,9 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 
 @media (max-width: 760px) {
   .sidebar { display: none; }
-  .plugins { position: fixed; inset: 48px 0 0 auto; background: var(--panel); }
+  .side { position: fixed; inset: 48px 0 0 0; width: auto; max-width: none; min-width: 0; z-index: 5; }
+  .tree-pane { width: 40%; min-width: 0; }
+  .resizer { display: none; }
 }
 
 .plugins .kind { display: block; color: var(--muted); font-size: 12px; }
@@ -214,3 +290,5 @@ button.danger { color: var(--bad); border-color: var(--bad); }
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
 .editor .buttons { display: flex; gap: 6px; justify-content: flex-end; }
+.activity li.link { cursor: pointer; }
+.activity li.link:hover .text { text-decoration: underline; }

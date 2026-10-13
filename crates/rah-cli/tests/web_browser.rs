@@ -267,6 +267,9 @@ window.answer = (label) => [...approval().querySelectorAll('button')]
   .find((button) => button.textContent === label).click();
 window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(byId('live'));
 window.sessionItems = () => [...document.querySelectorAll('#sessions li.session')];
+window.folderItems = () => [...document.querySelectorAll('#sessions li.folder')];
+window.treeButton = (path) => document.querySelector(`#tree button[data-path="${path}"]`);
+window.treeNames = () => [...document.querySelectorAll('#tree button')].map((button) => button.dataset.path);
 window.headTitle = () => byId('session-title').textContent;
 window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta button')]
   .filter((button) => button.textContent === label);
@@ -905,6 +908,14 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     assert_eq!(page.eval("sessionItems().length").await, 2);
 
     // Switch the workspace with the folder picker.
+    let workspace = web.dir.workspace();
+    std::fs::create_dir_all(workspace.join("docs")).unwrap();
+    std::fs::write(
+        workspace.join("docs").join("guide.md"),
+        "# Guide\nline two\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("notes.txt"), "draft").unwrap();
     std::fs::create_dir_all(web.dir.0.join("other").join(".git")).unwrap();
     page.eval("byId('status-root').click(); true").await;
     page.wait(
@@ -943,27 +954,32 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     page.eval("byId('ws-cancel').click(); true").await;
     assert_eq!(page.eval("byId('workspace-dialog').open").await, false);
 
-    // Sessions belong to their folder: the new folder has none, and the open
-    // session of the old folder was closed.
+    // Sessions are grouped by folder: the current one (empty) is open, the
+    // old one is listed closed, and the open session of the old folder was
+    // closed.
     page.wait(
         "the empty folder",
-        "sessionItems().length === 0 && \
+        "sessionItems().length === 0 && folderItems().length === 2 && \
+         folderItems()[0].classList.contains('here') && \
+         folderItems()[0].dataset.folder.endsWith('other') && \
          byId('sessions').textContent.includes('No sessions in this folder yet') && \
          byId('input').disabled",
     )
     .await;
-    // All folders lists them with their folder; opening one switches back.
-    page.eval(
-        "byId('session-scope').value = 'all'; \
-         byId('session-scope').dispatchEvent(new Event('change')); true",
-    )
-    .await;
+    // The workspace panel follows the folder.
     page.wait(
-        "every folder's sessions",
-        "sessionItems().length === 2 && \
-         sessionItems().every((item) => item.textContent.includes('in workspace'))",
+        "the other folder's files",
+        "byId('tree-root').textContent === 'other' && treeNames().length === 0",
     )
     .await;
+    // Opening the old folder lists its sessions; opening one switches back.
+    page.eval(
+        "folderItems().find((item) => item.dataset.folder.endsWith('workspace')) \
+         .querySelector('button').click(); true",
+    )
+    .await;
+    page.wait("the old folder's sessions", "sessionItems().length === 2")
+        .await;
     page.eval("sessionItems()[0].click(); true").await;
     page.wait(
         "the session's own folder",
@@ -972,6 +988,49 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          !byId('input').disabled && entries().length > 0",
     )
     .await;
+    // Its files, folders first, and a read-only view of one.
+    page.wait(
+        "the workspace files",
+        "byId('tree-root').textContent === 'workspace' && \
+         treeNames().join() === 'docs,notes.txt'",
+    )
+    .await;
+    page.eval("treeButton('docs').click(); true").await;
+    page.wait(
+        "the opened folder",
+        "treeNames().join() === 'docs,docs/guide.md,notes.txt'",
+    )
+    .await;
+    page.eval("treeButton('docs/guide.md').click(); true").await;
+    page.wait(
+        "the file view",
+        "byId('file-view').querySelector('.lines')?.textContent === '# Guide\\nline two' && \
+         byId('file-view').querySelector('.gutter').textContent === '1\\n2' && \
+         document.querySelector('#file-tabs .file-tab.current')?.title === 'docs/guide.md'",
+    )
+    .await;
+    page.eval("treeButton('notes.txt').click(); true").await;
+    page.wait(
+        "a second tab",
+        "document.querySelectorAll('#file-tabs .file-tab').length === 2 && \
+         byId('file-view').querySelector('.lines')?.textContent === 'draft'",
+    )
+    .await;
+    page.eval("byId('close-all').click(); true").await;
+    page.wait(
+        "no open files",
+        "document.querySelectorAll('#file-tabs .file-tab').length === 0 && \
+         byId('file-view').textContent.includes('read-only')",
+    )
+    .await;
+    // The activity log lists the session's turns in brief.
+    assert_eq!(
+        page.eval("byId('activity').textContent.includes('turn completed')")
+            .await,
+        true,
+        "{}",
+        page.eval("byId('activity').textContent").await
+    );
 }
 
 /// Standard base64 (as DevTools returns screenshots), without a dependency.

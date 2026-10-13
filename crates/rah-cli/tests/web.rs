@@ -855,3 +855,65 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
         );
     }
 }
+
+#[tokio::test]
+async fn workspace_files_are_listed_and_read_inside_the_workspace_only() {
+    let web = start("web-files", |_| {}).await;
+    let workspace = web.dir.workspace();
+    std::fs::create_dir_all(workspace.join("src").join("ui")).unwrap();
+    std::fs::create_dir_all(workspace.join(".git")).unwrap();
+    std::fs::write(workspace.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(workspace.join("README.md"), "# Notes\n").unwrap();
+    std::fs::write(workspace.join("blob.bin"), [0_u8, 1, 2, 3]).unwrap();
+    std::fs::write(web.dir.0.join("secret.txt"), "outside").unwrap();
+
+    // Folders first, then files; Git's own data is not listed.
+    let root = web.json(web.get("/api/files")).await;
+    let names: Vec<&str> = root["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["src", "blob.bin", "README.md"], "{root}");
+    assert_eq!(root["entries"][0]["dir"], true);
+    assert_eq!(root["path"], "");
+    assert!(
+        root["root"].as_str().unwrap().ends_with("workspace"),
+        "{root}"
+    );
+    let src = web.json(web.get("/api/files?path=src")).await;
+    assert_eq!(src["entries"][0]["path"], "src/ui", "{src}");
+    assert_eq!(src["entries"][1]["path"], "src/main.rs");
+
+    let file = web
+        .json(web.get("/api/files/content?path=src%2Fmain.rs"))
+        .await;
+    assert_eq!(file["text"], "fn main() {}\n", "{file}");
+    assert_eq!(file["binary"], false);
+    assert_eq!(file["truncated"], false);
+    let blob = web.json(web.get("/api/files/content?path=blob.bin")).await;
+    assert_eq!(blob["binary"], true, "{blob}");
+    assert_eq!(blob["text"], "");
+
+    // Nothing outside the workspace, however it is named.
+    let absolute = web.dir.0.join("secret.txt").display().to_string();
+    for path in [
+        "..%2Fsecret.txt",
+        "src%2F..%2F..%2Fsecret.txt",
+        &absolute
+            .replace('\\', "%5C")
+            .replace(':', "%3A")
+            .replace('/', "%2F"),
+    ] {
+        let (status, body) = web
+            .status(web.get(&format!("/api/files/content?path={path}")))
+            .await;
+        assert_eq!(status, 400, "{path}: {body}");
+        assert!(body["text"].is_null(), "{body}");
+    }
+    let (status, _) = web.status(web.get("/api/files/content?path=src")).await;
+    assert_eq!(status, 400, "a folder is not a file");
+    let (status, _) = web.status(web.get("/api/files?path=missing")).await;
+    assert_eq!(status, 400);
+}

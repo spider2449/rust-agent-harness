@@ -130,7 +130,7 @@ pub(crate) async fn list(
 }
 
 /// A path for people: without Windows' verbatim `\\?\` prefix.
-fn plain(path: &Path) -> String {
+pub(crate) fn plain(path: &Path) -> String {
     let text = path.display().to_string();
     match text.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => rest.to_owned(),

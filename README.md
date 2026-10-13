@@ -149,8 +149,9 @@ cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
 ```
 
 `rah` prints the address with a per-start access token; open exactly that
-URL. The UI lists sessions by last activity, grouped by day and searchable,
-with titles the model generates after the first turn; you can rename, delete
+URL. The UI lists sessions grouped by the folder they worked in (the current
+workspace first and open, the others folded, ten per folder until "Show
+more") and searchable, with titles the model generates after the first turn; you can rename, delete
 (moved to `.rah/sessions/deleted/`), export (Markdown or JSON) and fork them,
 regenerate the last answer or edit an earlier message and send it again (both
 in a new branch, so the original is kept). It streams turns and asks you to
@@ -160,7 +161,10 @@ use, and whether a policy guards tool calls. Click the workspace path to
 switch the folder the tools work in, without restarting. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
-forms; the **Plugins** panel remains for raw plugin configuration. Its Plugins panel
+forms. The right-hand panel (**Workspace** in the header) shows the
+workspace's files as a tree, opens them read-only in tabs, and keeps an
+activity log of the open session's turns and tool calls; it can be resized
+or hidden. Its **Plugins** tab remains for raw plugin configuration: it
 adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
 effect on the next turn without a restart. Typing `/` in the message box

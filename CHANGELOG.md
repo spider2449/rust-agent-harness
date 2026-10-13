@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Web UI: folder-grouped sessions and a workspace panel
+
+- The session list is grouped by the folder each session worked in: the
+  current workspace first and open, other folders folded (remembered per
+  browser), ten sessions per folder until "Show more". The "This folder /
+  All folders" selector is gone.
+- A right-hand panel (header **Workspace**, resizable, hideable) shows the
+  workspace as a file tree, opens files read-only in tabs with line numbers,
+  and keeps an activity log of the open session (turns, tool calls and
+  results, live while a turn runs; a tool call's `path` opens that file).
+  The Plugins panel moved into the same panel as a tab.
+- `frontend-web`: `GET /api/files?path=` lists one workspace directory and
+  `GET /api/files/content?path=` returns the first 512 KiB of one file
+  (binary files return no text). Paths are relative to the `sandbox`
+  service's root; absolute paths, drives, `:` streams, `..` and links that
+  lead outside are refused.
+
 ### Hooks and events for process plugins (ADR 0039)
 
 - Process plugin protocol 3. A manifest may list `hooks`

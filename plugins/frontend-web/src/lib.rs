@@ -19,6 +19,10 @@
 //!   workspace plugins at another directory. `GET /api/fs/dirs?path=` lists
 //!   a directory's subdirectories (names, and whether each is a Git
 //!   repository) for the folder picker.
+//! - With a `sandbox` service: `GET /api/files?path=` lists one directory of
+//!   the workspace and `GET /api/files/content?path=` returns the start of one
+//!   file, for the read-only file browser. Paths are relative to the
+//!   workspace root and cannot leave it.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -51,6 +55,7 @@
 mod access;
 mod approvals;
 mod export;
+mod files;
 mod jobs;
 mod manage;
 mod status;
@@ -173,6 +178,8 @@ fn router(shared: AppState) -> Router {
         .route("/status", get(status::status))
         .route("/workspace", put(workspace::set))
         .route("/fs/dirs", get(workspace::list))
+        .route("/files", get(files::list))
+        .route("/files/content", get(files::content))
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/catalog", get(manage::catalog))

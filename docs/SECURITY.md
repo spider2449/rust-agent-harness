@@ -174,6 +174,14 @@ Behind the same token and checks, and likewise unreachable from tools:
 - `GET /api/fs/dirs` lists the subdirectory names of any host directory the
   user's account can read, for the folder picker. It returns no file names
   or contents.
+- `GET /api/files` and `GET /api/files/content` show the user the current
+  workspace (the `sandbox` service's root), read-only: one directory's
+  entries (without `.git`) or the first 512 KiB of one file. Paths are
+  relative names only; absolute paths, drives, `:` streams and `..` are
+  refused, and the canonical result must stay inside the canonical root, so
+  a link leading outside is refused too. The UI shows file contents as text
+  only, like model output. A tool call's `path` argument can open the view,
+  but only through these same checks.
 - `GET /api/status` runs one read-only `git status` in the workspace
   through the `sandbox` service.
 
