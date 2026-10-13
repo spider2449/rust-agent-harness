@@ -12,6 +12,9 @@ const state = {
   running: false,
   liveText: "",
   retry: 500,
+  // Last seen model and loop providers, to announce a switch.
+  providers: {},
+  info: null,
 };
 
 // The token arrives in the URL fragment, which browsers never send to a
@@ -35,6 +38,17 @@ function el(tag, className, text) {
 function showNotice(text) {
   $("notice").textContent = text;
   $("notice").hidden = !text;
+}
+
+// Informational notices (such as a reconnected model) end with the next turn.
+function showInfo(text) {
+  showNotice(text);
+  state.info = text;
+}
+
+function clearInfo() {
+  if (state.info && $("notice").textContent === state.info) showNotice("");
+  state.info = null;
 }
 
 async function api(path, options = {}) {
@@ -419,8 +433,12 @@ function setRunning(running) {
 
 function showLive(text) {
   state.liveText += text;
-  $("live").textContent = state.liveText;
-  $("live").hidden = false;
+  const live = $("live");
+  // Follow the output unless the user scrolled up to read.
+  const following = live.hidden || live.scrollHeight - live.scrollTop - live.clientHeight < 24;
+  live.textContent = state.liveText;
+  live.hidden = false;
+  if (following) live.scrollTop = live.scrollHeight;
 }
 
 const NOT_CONNECTED = "Not connected to RAH.";
@@ -441,6 +459,7 @@ async function startTurn(input) {
     // Another tab may have moved the workspace since the session was opened.
     if (!(await ensureWorkspace(currentInfo()))) return false;
     if (!send({ type: "turn", session: state.current, input })) return false;
+    clearInfo();
     setRunning(true);
     showLive(`you: ${input}\n`);
     return true;
@@ -693,6 +712,22 @@ function providerText(label, provider) {
   return [`${label}: ${provider.plugin}${model}`, `${label} plugin ${provider.plugin}${kind}${model}`];
 }
 
+// A replaced provider reconnects without any visible sign, so say so once
+// the status line sees a different one. The first status only records it.
+function announceProvider(label, provider) {
+  const key = provider ? [provider.plugin, provider.kind, provider.model].join("\n") : "";
+  const previous = state.providers[label];
+  state.providers[label] = key;
+  if (previous === undefined || previous === key) return;
+  if (!provider) {
+    showNotice(`No ${label} plugin is active: messages cannot run until one is.`);
+    return;
+  }
+  const model = provider.model ? ` · ${provider.model}` : "";
+  const verb = label === "model" ? "Reconnected to" : "Switched to";
+  showInfo(`${verb} ${label} ${provider.plugin}${model}. The next message uses it.`);
+}
+
 async function loadStatus() {
   const status = await api("/status");
   const workspace = status.workspace || {};
@@ -709,6 +744,8 @@ async function loadStatus() {
   statusItem("status-model", model, modelTitle, status.model ? "" : "bad");
   const [loop, loopTitle] = providerText("loop", status.loop);
   statusItem("status-loop", loop, loopTitle, status.loop ? "" : "bad");
+  announceProvider("model", status.model);
+  announceProvider("loop", status.loop);
   statusItem("status-tools", `${status.tools} tools`, "Tools offered to the model");
   statusItem(
     "status-policy",

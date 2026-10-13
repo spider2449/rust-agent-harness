@@ -561,12 +561,37 @@ async fn the_web_ui_works_in_a_real_browser() {
         "byId('status-model').textContent === 'model: model-mock-2'",
     )
     .await;
+    page.wait(
+        "the reconnect notice",
+        "byId('notice').textContent === 'Reconnected to model model-mock-2. The next message uses it.'",
+    )
+    .await;
     page.send_message("/notool after replace").await;
     page.wait(
         "the replacement reply",
         "transcript().includes('[B] you said: after replace') && idle()",
     )
     .await;
+    assert_eq!(page.eval("shown(byId('notice'))").await, false);
+
+    // Long streaming output scrolls inside the conversation: the page does not
+    // grow and the status line stays at the bottom of the window.
+    let layout = page
+        .eval(
+            "(() => { showLive('line\\n'.repeat(500)); \
+             const live = byId('live'); \
+             const result = { \
+               pageFits: document.documentElement.scrollHeight <= innerHeight, \
+               statusAtBottom: Math.abs(byId('status').getBoundingClientRect().bottom - innerHeight) < 2, \
+               followsOutput: live.scrollHeight - live.scrollTop - live.clientHeight < 2, \
+             }; \
+             setRunning(false); return result; })()",
+        )
+        .await;
+    assert_eq!(
+        layout,
+        json!({ "pageFits": true, "statusAtBottom": true, "followsOutput": true })
+    );
 
     // Add a plugin, then remove it after the confirmation.
     page.eval("byId('add-plugin').click(); true").await;
@@ -594,7 +619,8 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     page.eval("byId('editor-cancel').click(); true").await;
     let notices = page.eval("notices").await;
-    assert_eq!(notices.as_array().unwrap().len(), 1, "notices: {notices:#}");
+    // The reconnect notice and the JSON error.
+    assert_eq!(notices.as_array().unwrap().len(), 2, "notices: {notices:#}");
 
     // A reload keeps the token for the tab, without the fragment.
     page.call("Page.reload", json!({})).await;
@@ -920,15 +946,22 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     .await;
     page.wait(
         "the saved model",
-        "byId('settings-message').textContent === 'Model saved.'",
+        "byId('settings-message').textContent === \
+         'Model saved. Reconnected: Mock (for testing) as model-mock. The next message uses it.'",
     )
     .await;
+    // The reconnect is also shown under the conversation, until the next turn.
+    assert_eq!(
+        page.eval("byId('notice').textContent").await,
+        "Reconnected: Mock (for testing) as model-mock. The next message uses it."
+    );
     page.send_message("/notool hi").await;
     page.wait(
         "the new label",
         "idle() && transcript().includes('[Z] you said: hi')",
     )
     .await;
+    assert_eq!(page.eval("byId('notice').hidden").await, true);
 
     // A model that cannot start is reported, and the old one keeps working.
     page.eval(&format!(
@@ -1037,8 +1070,14 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     .await;
     page.wait(
         "the new loop",
-        "byId('settings-message').textContent === 'Loop saved.' && \
+        "byId('settings-message').textContent === 'Loop saved. The next message uses loop-plan.' && \
          byId('status-loop').textContent === 'loop: loop-plan'",
+    )
+    .await;
+    // The status line announces the switch under the conversation.
+    page.wait(
+        "the switch notice",
+        "byId('notice').textContent === 'Switched to loop loop-plan. The next message uses it.'",
     )
     .await;
     page.eval("byId('settings-close').click(); true").await;

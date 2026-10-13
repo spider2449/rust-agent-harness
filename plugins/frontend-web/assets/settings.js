@@ -74,7 +74,8 @@ function pluginOfKinds(kinds, preferred) {
 }
 
 // Saves `config` for `plugin`, or replaces it with `kind` when that differs.
-async function savePlugin(plugin, kind, config, label) {
+// `done` is the message shown once the plugin is active again.
+async function savePlugin(plugin, kind, config, label, done) {
   let result;
   if (plugin && plugin.kind === kind) {
     result = await api(`/plugins/${encodeURIComponent(plugin.id)}/config`, { method: "PUT", body: JSON.stringify({ config }) });
@@ -90,7 +91,9 @@ async function savePlugin(plugin, kind, config, label) {
   if (result.state && result.state !== "active") {
     settingsMessage(`${label} saved, but ${result.id} is ${result.state}${result.detail ? `: ${result.detail}` : ""}`, true);
   } else {
-    settingsMessage(`${label} saved.`);
+    settingsMessage(`${label} saved.${done ? ` ${done(result.id)}` : ""}`);
+    // Also under the conversation, where it stays after the dialog closes.
+    if (done) showInfo(done(result.id));
   }
   loadPlugins().catch(() => {});
   refreshStatus();
@@ -160,7 +163,11 @@ function modelForm() {
         if (input.isConnected) put(next, key, input.value.trim());
       }
       if (kind.value === "model-openai" && !next.model) throw new Error("Enter the OpenAI model.");
-      await savePlugin(current, kind.value, next, "Model");
+      // The provider connects lazily, so the next message is the first
+      // request to the new address or model.
+      const model = next.model ? ` · ${next.model}` : "";
+      await savePlugin(current, kind.value, next, "Model", (id) =>
+        `Reconnected: ${MODEL_KINDS[kind.value]} as ${id}${model}. The next message uses it.`);
     }),
   );
   return form;
@@ -335,7 +342,7 @@ function loopForm() {
     saveButton("Save loop", async () => {
       const next = kind.value === current?.kind ? { ...config } : {};
       for (const [key, input] of Object.entries(inputs)) put(next, key, numberOrEmpty(input));
-      await savePlugin(current, kind.value, next, "Loop");
+      await savePlugin(current, kind.value, next, "Loop", (id) => `The next message uses ${id}.`);
     }),
   );
   return form;

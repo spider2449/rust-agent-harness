@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Web UI: show provider switches; keep the status line in place
+
+- Saving the model or loop in Settings says what is now used, for example
+  "Reconnected: llama.cpp (local server) as model-llamacpp", in the dialog
+  and under the conversation. A model or loop replaced from the Plugins
+  panel is announced the same way when the status line sees it. These
+  notices end with the next message. A model provider connects on that
+  message, so the notice does not claim the server is reachable.
+- Fix: streaming output scrolls inside the conversation (up to half its
+  height, following new output unless scrolled up) instead of growing the
+  page, which pushed the status line up while the model was answering.
+
 ### Sessions belong to a workspace
 
 - `rah-protocol`: `SessionInfo` gains `workspace` (additive).
