@@ -119,6 +119,9 @@ config = { server = "files", program = "my-mcp-server", args = ["--stdio"], tool
 
 The server is started through `sandbox-process` (cleared environment,
 working directory inside the sandbox root) and ends with the plugin.
+[docs/MCP_SERVERS.md](docs/MCP_SERVERS.md) walks through adding a server,
+with Blender ([`examples/mcp/blender.toml`](examples/mcp/blender.toml)) as
+the example.
 
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
 on stdio ([protocol v2](docs/PROCESS_PLUGINS.md)). The Python example

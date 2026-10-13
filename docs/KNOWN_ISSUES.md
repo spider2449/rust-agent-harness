@@ -37,6 +37,17 @@ in the commit which entry it closes.
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`
   with `RAH_TEST_BROWSER` set, then search `run.txt` for `timed out waiting`.
 
+## The terminal REPL rejects `/call`
+
+- **Seen:** 2026-10-13. The README and `model-mock` describe
+  `/call <tool> <json>`, but `frontend-cli` treats every line that starts
+  with `/` (except `/notool`) as a REPL command. It answers
+  `unknown command /call; try /help`
+  (`plugins/frontend-cli/src/lib.rs`, the `/plugins` match arm's fallback).
+- **Workaround:** pass the line as `--prompt '/call <tool> <json>'`, which
+  skips the REPL command parsing. In Git Bash, set `MSYS_NO_PATHCONV=1`, or
+  it rewrites `/call` into a Windows path.
+
 ## Setting up another development machine
 
 - **Browser tests** run only when `RAH_TEST_BROWSER` names Chrome, Chromium
