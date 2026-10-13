@@ -77,7 +77,7 @@ Ctrl-C cancels a running turn (with no turn running, it exits). `--prompt <text>
 
 `policy-authority` denies every tool without a host permission assignment in
 its own configuration; tool metadata can only make a decision stricter. The
-presets assign `echo` (`none`), `fs.read` and `repo.*` (`read`), allow `none` and `read`,
+presets assign `echo` (`none`), `fs.*` and `repo.*` (`read`), allow `none` and `read`,
 and ask for `write` and `execute`. `frontend-cli` asks on the terminal and
 approves only an explicit `y`; end of input denies. If a configured policy
 plugin fails to start, `rah` refuses to run.
@@ -89,7 +89,7 @@ next to `sandbox-process` (process supervision, not an OS sandbox), and assign
 ```toml
 [[plugin]]
 use = "policy-authority"
-config = { tools = { echo = "none", "fs.read" = "read", "shell.exec" = "execute" } }
+config = { tools = { echo = "none", "fs.*" = "read", "shell.exec" = "execute" } }
 
 [[plugin]]
 use = "sandbox-process"
@@ -233,7 +233,7 @@ Compose your own plugins with a distribution file:
 # rah.toml — run with: rah --config rah.toml
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read" } }
 
 [[plugin]]
 use = "session-jsonl"

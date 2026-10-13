@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### File tools without Git
+
+- `tools-builtin` adds `fs.list` (`path`, `depth`, `hidden`), `fs.glob`
+  (`pattern`, `path`, `hidden`) and `fs.grep` (`pattern`, `path`, `glob`,
+  `ignore_case`, `hidden`), so the model can find files in a folder that is
+  not a Git repository. They follow the `fs.read` path rules (relative, no
+  `..`, no symbolic link out of the root), walk in name order without
+  following symbolic links or junctions, skip hidden entries unless asked
+  and do not descend into `skip_dirs` (default `.git`, `target`,
+  `node_modules`). Globs support `*`, `?`, `**` and `{a,b}`; a pattern
+  without `/` matches file names at any depth. `fs.grep` takes a Rust
+  `regex` pattern, skips binary, non-UTF-8 and files over `max_bytes`, and
+  says how many it skipped. New limits `max_results` (default 500 lines) and
+  `max_scan` (default 20 000 entries) bound each call, and output says when
+  one cut it short. All three are declared `read`.
+- The presets' `policy-authority` assignment changes from `"fs.read"` to
+  `"fs.*"`. A distribution file that assigns only `"fs.read"` keeps
+  denying the new tools until it assigns them.
+- New dependency `regex` for `fs.grep`.
+
 ### Keyless web search plugin
 
 - New opt-in plugin `tools-web-search` (`plugins/tools-web-search`): the

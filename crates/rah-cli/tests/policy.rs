@@ -4,8 +4,12 @@
 mod common;
 
 use common::{TempDir, headless, kernel, new_session, reply, turn};
-use rah_api::{Kernel, PluginId, tools::ToolInvoker};
+use rah_api::{
+    CancellationToken, Kernel, PluginId,
+    tools::{Invocation, ToolInvoker},
+};
 use rah_cli::{BootError, Distribution, PRESETS, boot};
+use rah_protocol::{ToolCall, ToolCallId, ToolContent, ToolInput, ToolName};
 use serde_json::json;
 
 #[test]
@@ -36,6 +40,44 @@ async fn the_dev_preset_is_guarded_and_allows_assigned_built_in_tools() {
     let session = new_session(&handle).await;
     let events = turn(&handle, &session, "hello").await;
     assert_eq!(reply(&events), "[model-mock] echo returned: hello");
+}
+
+#[tokio::test]
+async fn the_presets_allow_the_built_in_file_tools_without_asking() {
+    let dir = TempDir::new("policy-fs-tools");
+    std::fs::create_dir_all(dir.workspace().join("src")).unwrap();
+    std::fs::write(dir.workspace().join("src/lib.rs"), "fn found() {}\n").unwrap();
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let invoker = ToolInvoker::new(handle);
+    for (tool, input, expected) in [
+        ("fs.list", json!({}), "src/"),
+        ("fs.glob", json!({ "pattern": "*.rs" }), "src/lib.rs"),
+        (
+            "fs.grep",
+            json!({ "pattern": "found" }),
+            "src/lib.rs:1: fn found() {}",
+        ),
+    ] {
+        let call = ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new(tool),
+            input: ToolInput(input),
+        };
+        let invocation = Invocation {
+            session: session.clone(),
+            call,
+            cancel: CancellationToken::new(),
+        };
+        let outcome = invoker.invoke(invocation, || {}).await;
+        assert!(outcome.authorized, "{tool}: {outcome:?}");
+        assert_eq!(
+            outcome.output.content,
+            vec![ToolContent::Text(expected.into())],
+            "{tool}"
+        );
+    }
 }
 
 #[tokio::test]

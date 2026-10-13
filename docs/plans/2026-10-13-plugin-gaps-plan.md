@@ -6,13 +6,13 @@
 
 起因：`tools-builtin` 只有 `echo` 和 `fs.read`；列目錄和搜尋只在 `tools-repo`（`repo.list`、`repo.search`），而它要求工作目錄是 git repo。非 git 的資料夾裡，模型沒辦法找檔案。
 
-- [ ] `fs.list`：列出目錄（可選遞迴深度、上限筆數），跳過隱藏和常見的大型資料夾（`.git`、`target`、`node_modules`），可設定。
-- [ ] `fs.glob`：依 glob 樣式找檔案，結果有上限。
-- [ ] `fs.grep`：在工作目錄內搜尋文字或 regex，回傳檔案、行號和該行內容；略過二進位檔，結果和讀取的位元組都有上限。
-- [ ] 三個工具都宣告 `read`，沿用 `fs.read` 的路徑規則（相對路徑、沒有 `..`、不跟隨跳出 root 的 symlink）。
-- [ ] `root` 目前預設為程序的工作目錄；改成有 `sandbox` 時跟隨 `ExecEnv::root()`，切換工作目錄（U2b）後不必重啟。沒有 sandbox 時維持現狀。
-- [ ] Web UI 設定頁的工具權限清單自動出現新工具（確認即可，不另寫表單）。
-- 待決：新依賴（`globset`、`regex`、`ignore`）要寫明理由；若 `ignore` 太大，只用 `globset` 加自己的走訪。
+- [x] `fs.list`：列出目錄（`depth` 1–32），跳過隱藏項目（`hidden` 可開啟），`skip_dirs`（預設 `.git`、`target`、`node_modules`）列出但不展開，可設定。
+- [x] `fs.glob`：支援 `*`、`?`、`**`、`{a,b}`；沒有 `/` 的樣式比對任意深度的檔名。matcher 自己寫，不加 `globset`。
+- [x] `fs.grep`：在工作目錄內搜尋文字或 regex，回傳檔案、行號和該行內容；略過二進位檔，結果和讀取的位元組都有上限。
+- [x] 三個工具都宣告 `read`，沿用 `fs.read` 的路徑規則（相對路徑、沒有 `..`、不跟隨跳出 root 的 symlink）；走訪時完全不跟隨 symlink 和 junction。每次呼叫最多走訪 `max_scan`（預設 20000）個項目、回傳 `max_results`（預設 500）行，被截斷時輸出會說明。preset 的 policy 從 `"fs.read"` 改成 `"fs.*"`。
+- [x] `root` 跟隨工作目錄：不需要改。`tools-builtin` 已在 `WORKSPACE_PLUGINS` 裡，`set_workspace` 和 `--root` 會用新的 `root` 重新設定它（計畫寫成時漏看了）。
+- [x] Web UI 設定頁的工具清單來自執行中的工具，新工具自動出現，不需要改。
+- 決定：只加 `regex`（`fs.grep` 需要 regex 語法）；glob 和目錄走訪自己寫，不加 `globset`、`ignore`。不讀 `.gitignore`（那是 `tools-repo` 的範圍）。
 
 ## G2：`context-compact`（長對話壓縮）
 

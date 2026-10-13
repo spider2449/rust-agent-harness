@@ -90,7 +90,8 @@ Implemented:
   (crate `model-responses`); `model-anthropic` (Anthropic Messages API);
   `loop-react` and `loop-plan` (plan-and-execute;
   either can replace the other at runtime); `tools-builtin` (`echo` and
-  workspace-bounded `fs.read`); `session-jsonl`; `session-titles` (asks the
+  workspace-bounded `fs.read`, `fs.list`, `fs.glob` and
+  `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`; with

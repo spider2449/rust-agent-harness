@@ -2,11 +2,12 @@
 name = "rah-plugin-tools-builtin"
 version.workspace = true
 edition.workspace = true
-description = "Built-in tools plugin: echo and bounded fs.read"
+description = "Built-in tools plugin: echo and workspace-bounded fs.read, fs.list, fs.glob and fs.grep"
 
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }
 rah-protocol = { path = "../../crates/rah-protocol" }
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs"] }
