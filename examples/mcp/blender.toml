@@ -44,8 +44,7 @@ config = { root = "." }
 #
 # Left out on purpose:
 # - `*_for_cli`: start a background Blender process (needs BLENDER_PATH);
-# - `get_screenshot_of_*_as_image`: image content arrives as base64 JSON in
-#   the model context and easily exceeds `max_message_bytes`;
+# - `get_screenshot_of_area_as_image`: only to keep the list short;
 # - `render_*_to_path`: write to any `output_path`, outside the sandbox root.
 #
 # The first start downloads and builds the server, hence the long
@@ -53,7 +52,7 @@ config = { root = "." }
 [[plugin]]
 use = "tools-mcp"
 id = "mcp-blender"
-config = { server = "blender", program = "uvx", args = ["--from", "git+https://projects.blender.org/lab/blender_mcp.git@dbbf836ad4b1025f14a2b3b504c43903f39e0b04#subdirectory=mcp", "blender-mcp"], env = { BLENDER_MCP_HOST = "localhost", BLENDER_MCP_PORT = "9876" }, startup_timeout_ms = 180000, call_timeout_ms = 120000, tools = { get_objects_summary = "read", get_object_detail_summary = "read", get_blendfile_summary_datablocks = "read", get_blendfile_summary_missing_files = "read", get_blendfile_summary_of_linked_libraries = "read", get_blendfile_summary_path_info = "read", get_blendfile_summary_usage_guess = "read", get_screenshot_of_window_as_json = "read", get_python_api_docs = "read", search_api_docs = "read", search_manual_docs = "read", jump_to_tab_by_name = "write", jump_to_tab_by_space_type = "write", jump_to_view3d_object_by_name = "write", jump_to_view3d_object_data_by_name = "write", execute_blender_code = "execute" } }
+config = { server = "blender", program = "uvx", args = ["--from", "git+https://projects.blender.org/lab/blender_mcp.git@dbbf836ad4b1025f14a2b3b504c43903f39e0b04#subdirectory=mcp", "blender-mcp"], env = { BLENDER_MCP_HOST = "localhost", BLENDER_MCP_PORT = "9876" }, startup_timeout_ms = 180000, call_timeout_ms = 120000, tools = { get_objects_summary = "read", get_object_detail_summary = "read", get_blendfile_summary_datablocks = "read", get_blendfile_summary_missing_files = "read", get_blendfile_summary_of_linked_libraries = "read", get_blendfile_summary_path_info = "read", get_blendfile_summary_usage_guess = "read", get_screenshot_of_window_as_json = "read", get_screenshot_of_window_as_image = "read", get_python_api_docs = "read", search_api_docs = "read", search_manual_docs = "read", jump_to_tab_by_name = "write", jump_to_tab_by_space_type = "write", jump_to_view3d_object_by_name = "write", jump_to_view3d_object_data_by_name = "write", execute_blender_code = "execute" } }
 
 [[plugin]]
 use = "context-default"

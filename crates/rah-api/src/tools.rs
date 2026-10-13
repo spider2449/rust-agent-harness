@@ -9,8 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rah_kernel::{KernelHandle, Scope, ScopeError, ServiceKey};
 use rah_protocol::{
-    PermissionLevel, SessionId, ToolCall, ToolContent, ToolDefinition, ToolEffect, ToolName,
-    ToolOutput,
+    IMAGE_MEDIA_TYPES, ImageContent, PermissionLevel, SessionId, ToolCall, ToolContent,
+    ToolDefinition, ToolEffect, ToolName, ToolOutput,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -226,6 +226,51 @@ impl ToolInvoker {
             authorized: true,
         }
     }
+}
+
+/// The most base64 characters one image may have (3 MiB of image bytes).
+pub const MAX_IMAGE_DATA: usize = 4 * 1024 * 1024;
+
+/// Checks an image from a tool, such as an MCP server or a process plugin,
+/// and returns it as content. The media type must be one of
+/// [`IMAGE_MEDIA_TYPES`] and the data padded standard base64 of at most
+/// [`MAX_IMAGE_DATA`] characters. The bytes themselves are not decoded.
+pub fn image(media_type: &str, data: &str) -> Result<ToolContent, String> {
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if !IMAGE_MEDIA_TYPES.contains(&media_type.as_str()) {
+        return Err(format!("unsupported image type `{media_type}`"));
+    }
+    if data.is_empty() || data.len() > MAX_IMAGE_DATA {
+        return Err(format!(
+            "the image has {} base64 characters; 1 to {MAX_IMAGE_DATA} are allowed",
+            data.len()
+        ));
+    }
+    let body = data.trim_end_matches('=');
+    let valid = data.len().is_multiple_of(4)
+        && data.len() - body.len() <= 2
+        && body
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/');
+    if !valid {
+        return Err("the image data is not standard base64".into());
+    }
+    Ok(ToolContent::Image(ImageContent {
+        media_type,
+        data: data.to_owned(),
+    }))
+}
+
+/// A short text that stands for an image where the image cannot be shown,
+/// such as for a model without image input.
+pub fn describe_image(image: &ImageContent) -> String {
+    let bytes = image.data.len() / 4 * 3;
+    let size = if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KiB", bytes.div_ceil(1024))
+    };
+    format!("[{} image, {size}]", image.media_type)
 }
 
 fn error_output(text: String) -> ToolOutput {

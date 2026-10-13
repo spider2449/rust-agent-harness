@@ -118,6 +118,11 @@ configuration; its messages and metadata are untrusted:
   effect.
 - Server-to-client requests other than `ping` are refused, so a server cannot
   ask RAH for sampling, roots or elicitation.
+- Image content is accepted only as PNG, JPEG, GIF or WebP base64 of bounded
+  size (ADR 0037); anything else becomes a short note. The Web UI shows only
+  those types, as `data:` images, never SVG or HTML. An image is untrusted
+  model input like any other tool output: text inside it can try to
+  instruct the model.
 
 ## `frontend-web`
 

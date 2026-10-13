@@ -8,6 +8,8 @@ use serde_json::{Map, Value, json};
 use crate::{error::E, sse::MAX_FRAME};
 
 pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
+/// The largest request; images make it larger than [`MAX_BYTES`].
+pub(crate) const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_CALLS: usize = 128;
 const MAX_BLOCKS: usize = 1024;
 
@@ -108,16 +110,31 @@ pub(crate) fn tools(definitions: &[ToolDefinition], names: &ToolNames) -> Result
         .collect()
 }
 
-fn output_text(output: &ToolOutput) -> String {
-    output
-        .content
-        .iter()
-        .map(|content| match content {
-            ToolContent::Text(text) => text.clone(),
-            ToolContent::Json(value) => value.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// A tool result's content: text, or a list of text and image blocks when
+/// it has images.
+fn output_content(output: &ToolOutput) -> Option<Value> {
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+    for content in &output.content {
+        match content {
+            ToolContent::Text(text) => texts.push(text.clone()),
+            ToolContent::Json(value) => texts.push(value.to_string()),
+            ToolContent::Image(image) => images.push(json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": image.media_type, "data": image.data},
+            })),
+        }
+    }
+    let text = texts.join("\n");
+    if images.is_empty() {
+        return (!text.is_empty()).then(|| text.into());
+    }
+    let mut blocks = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+    blocks.append(&mut images);
+    Some(blocks.into())
 }
 
 /// Appends a block to the last message when it has the same role, so roles
@@ -207,9 +224,8 @@ pub(crate) fn conversation(
             }
             ContextItem::ToolResult { call_id, output } => {
                 let mut block = json!({"type": "tool_result", "tool_use_id": sanitize(call_id)});
-                let text = output_text(output);
-                if !text.is_empty() {
-                    block["content"] = text.into();
+                if let Some(content) = output_content(output) {
+                    block["content"] = content;
                 }
                 if output.is_error {
                     block["is_error"] = true.into();
@@ -223,7 +239,7 @@ pub(crate) fn conversation(
         .map_err(|_| E::Protocol)?
         .len()
         + system.as_ref().map_or(0, String::len);
-    if size > MAX_BYTES {
+    if size > MAX_REQUEST_BYTES {
         return Err(E::Protocol);
     }
     Ok((system, messages))
@@ -530,6 +546,40 @@ mod tests {
                     {"type": "tool_result", "tool_use_id": "call_1", "content": "nope", "is_error": true},
                     {"type": "text", "text": "[System note] note"}
                 ]}
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_result_images_become_image_blocks() {
+        let names = ToolNames::new(&[definition("shot", json!({"type": "object"}))]);
+        let items = [
+            ContextItem::User { text: "u".into() },
+            ContextItem::ToolCall {
+                call_id: "c1".into(),
+                name: ToolName::new("shot"),
+                arguments: json!({}),
+            },
+            ContextItem::ToolResult {
+                call_id: "c1".into(),
+                output: ToolOutput {
+                    content: vec![
+                        ToolContent::Text("window".into()),
+                        ToolContent::Image(rah_protocol::ImageContent {
+                            media_type: "image/png".into(),
+                            data: "AAAA".into(),
+                        }),
+                    ],
+                    is_error: false,
+                },
+            },
+        ];
+        let (_, messages) = conversation(&items, &names).unwrap();
+        assert_eq!(
+            messages[2]["content"][0]["content"],
+            json!([
+                {"type": "text", "text": "window"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
             ])
         );
     }

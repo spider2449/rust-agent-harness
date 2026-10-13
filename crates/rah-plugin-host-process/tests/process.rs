@@ -126,6 +126,7 @@ fn json_of(output: &ToolOutput) -> Value {
     match output.content.last().unwrap() {
         ToolContent::Json(value) => value.clone(),
         ToolContent::Text(text) => Value::String(text.clone()),
+        other => panic!("unexpected content: {other:?}"),
     }
 }
 

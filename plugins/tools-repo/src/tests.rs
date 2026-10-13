@@ -158,6 +158,7 @@ async fn call(
     Ok(match output.content.into_iter().next().unwrap() {
         ToolContent::Json(value) => value,
         ToolContent::Text(text) => Value::String(text),
+        other => panic!("unexpected content: {other:?}"),
     })
 }
 

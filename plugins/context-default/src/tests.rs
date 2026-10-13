@@ -112,6 +112,56 @@ fn the_current_turn_is_kept_even_when_it_exceeds_the_limits() {
     );
 }
 
+fn screenshot(id: &str) -> ContextItem {
+    ContextItem::ToolResult {
+        call_id: id.into(),
+        output: ToolOutput {
+            content: vec![
+                ToolContent::Text("window".into()),
+                ToolContent::Image(rah_protocol::ImageContent {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(400_000),
+                }),
+            ],
+            is_error: false,
+        },
+    }
+}
+
+#[test]
+fn images_are_sent_in_the_current_turn_only_and_count_a_fixed_size() {
+    let items = vec![
+        user("one"),
+        call("1"),
+        screenshot("1"),
+        assistant("two"),
+        user("three"),
+        call("2"),
+        screenshot("2"),
+    ];
+    // Two images of 400,000 characters each fit, since each counts as
+    // IMAGE_CHARS.
+    let window = Window {
+        max_items: 100,
+        max_chars: 3 * IMAGE_CHARS,
+    };
+    let shaped = shape(request(items.clone()), None, None, window).items;
+    assert_eq!(shaped.len(), items.len(), "{shaped:#?}");
+    let ContextItem::ToolResult { output, .. } = &shaped[2] else {
+        panic!("{shaped:#?}");
+    };
+    assert_eq!(
+        output.content,
+        vec![
+            ToolContent::Text("window".into()),
+            ToolContent::Text(
+                "[image/png image, 293 KiB] (from an earlier message; not shown again)".into()
+            ),
+        ]
+    );
+    assert_eq!(shaped[6], items[6], "the current turn keeps its image");
+}
+
 #[test]
 fn system_prompt_and_notes_come_first() {
     let items = vec![

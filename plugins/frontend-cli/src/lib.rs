@@ -32,6 +32,7 @@ use rah_api::{
     hooks::{ApprovalRequest, ToolApproval},
     host::{ExitRequested, Interrupt},
     session::{SESSION, SessionLog},
+    tools::describe_image,
 };
 use rah_protocol::{AgentEvent, SessionEntry, SessionId, ToolContent, ToolOutput};
 use serde::Deserialize;
@@ -536,6 +537,7 @@ fn render(output: &ToolOutput) -> String {
         .map(|content| match content {
             ToolContent::Text(text) => text.clone(),
             ToolContent::Json(value) => value.to_string(),
+            ToolContent::Image(image) => describe_image(image),
         })
         .collect::<Vec<_>>()
         .join(" ")

@@ -7,6 +7,9 @@
 //!   a tool call is never separated from its result, and the current turn is
 //!   always kept whole. Omitted items are replaced by one short note. The
 //!   session log itself is unchanged.
+//! - Images in tool results are sent only in the current turn. Earlier ones
+//!   are replaced by a short text, and each counts as [`IMAGE_CHARS`]
+//!   characters in the window.
 //! - Memory notes, injected after the system prompt (at most
 //!   `max_memory_bytes`, read on every request). With memory the plugin also
 //!   provides `memory.remember {note}` (`write` permission), which appends one
@@ -29,7 +32,7 @@ use rah_api::{
     KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::ModelBeforeRequest,
     sandbox::SANDBOX,
-    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
+    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, describe_image, provide_tools},
 };
 use rah_protocol::{
     ContextItem, ModelRequest, PermissionLevel, ToolContent, ToolDefinition, ToolName, ToolOutput,
@@ -40,6 +43,9 @@ use tokio::{io::AsyncWriteExt, sync::Mutex};
 
 const DEFAULT_MAX_ITEMS: usize = 200;
 const DEFAULT_MAX_CHARS: usize = 200_000;
+/// What one image counts for in `max_chars`: roughly what a model is
+/// charged for an image, not the size of its data.
+pub const IMAGE_CHARS: usize = 4_000;
 const DEFAULT_MAX_MEMORY_BYTES: u64 = 16 * 1024;
 const MAX_NOTE_CHARS: usize = 1000;
 
@@ -142,8 +148,32 @@ fn size(item: &ContextItem) -> usize {
             .map(|content| match content {
                 ToolContent::Text(text) => text.len(),
                 ToolContent::Json(value) => value.to_string().len(),
+                ToolContent::Image(_) => IMAGE_CHARS,
             })
             .sum(),
+    }
+}
+
+/// Replaces the images of turns before the last user message with text, so
+/// a screenshot is sent once rather than with every later request.
+fn earlier_images_as_text(history: &mut [ContextItem]) {
+    let Some(last_user) = history
+        .iter()
+        .rposition(|item| matches!(item, ContextItem::User { .. }))
+    else {
+        return;
+    };
+    for item in &mut history[..last_user] {
+        if let ContextItem::ToolResult { output, .. } = item {
+            for content in &mut output.content {
+                if let ToolContent::Image(image) = content {
+                    *content = ToolContent::Text(format!(
+                        "{} (from an earlier message; not shown again)",
+                        describe_image(image)
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -159,8 +189,9 @@ pub fn shape(
         .iter()
         .position(|item| !matches!(item, ContextItem::System { .. }))
         .unwrap_or(request.items.len());
-    let history = request.items.split_off(split);
+    let mut history = request.items.split_off(split);
     let mut leading = std::mem::take(&mut request.items);
+    earlier_images_as_text(&mut history);
 
     // Walk back from the newest item while within both limits.
     let (mut count, mut chars, mut start) = (0, 0, history.len());

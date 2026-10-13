@@ -75,7 +75,24 @@ pub enum ToolContent {
     Text(String),
     /// Structured JSON content.
     Json(Value),
+    /// An image for models that accept images.
+    Image(ImageContent),
 }
+
+/// An image in tool output: base64 data of one of [`IMAGE_MEDIA_TYPES`].
+///
+/// The protocol carries the data as is. Producers check it with
+/// `rah_api::tools::image` before they return it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImageContent {
+    /// The image's media type, such as `image/png`.
+    pub media_type: String,
+    /// Standard base64 of the image bytes, without a `data:` prefix.
+    pub data: String,
+}
+
+/// Image media types a tool may return.
+pub const IMAGE_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Permission category required by a tool.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

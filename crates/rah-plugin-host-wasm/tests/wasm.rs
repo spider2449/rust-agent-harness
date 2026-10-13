@@ -224,6 +224,7 @@ fn text(output: &ToolOutput) -> String {
     match &output.content[0] {
         ToolContent::Text(text) => text.clone(),
         ToolContent::Json(value) => value.to_string(),
+        other => panic!("unexpected content: {other:?}"),
     }
 }
 

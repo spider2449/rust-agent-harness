@@ -180,6 +180,7 @@ async fn effect_of(result: Result<ExecOutput, ExecError>) -> (ToolEffect, String
     let text = match &outcome.output.content[0] {
         ToolContent::Text(text) => text.clone(),
         ToolContent::Json(value) => value.to_string(),
+        other => panic!("unexpected content: {other:?}"),
     };
     (outcome.effect, text)
 }

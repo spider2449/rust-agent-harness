@@ -371,6 +371,69 @@ async fn llamacpp_requires_an_explicit_model_when_several_are_served() {
     ));
 }
 
+#[tokio::test]
+async fn llamacpp_sends_images_only_to_a_model_listed_with_image_input() {
+    let screenshot = vec![
+        ContextItem::User {
+            text: "look".into(),
+        },
+        ContextItem::ToolCall {
+            call_id: "c1".into(),
+            name: ToolName::new("shot"),
+            arguments: json!({}),
+        },
+        ContextItem::ToolResult {
+            call_id: "c1".into(),
+            output: rah_protocol::ToolOutput {
+                content: vec![rah_protocol::ToolContent::Image(
+                    rah_protocol::ImageContent {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    },
+                )],
+                is_error: false,
+            },
+        },
+    ];
+    for (vision, expected) in [
+        (
+            true,
+            json!([
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+            ]),
+        ),
+        (false, json!("[image/png image, 1 KiB]")),
+    ] {
+        let modalities = if vision {
+            json!(["text", "image"])
+        } else {
+            json!(["text"])
+        };
+        let server = Server::new(vec![
+            Reply::Json(200, json!({"status":"ok"})),
+            Reply::Json(
+                200,
+                json!({"data": [{"id": "m", "architecture": {"input_modalities": modalities}}]}),
+            ),
+            Reply::Sse(frames(&text_events("seen"))),
+        ])
+        .await;
+        let model = ResponsesModel::llamacpp(
+            llamacpp_origin(&server.origin).unwrap(),
+            String::new(),
+            None,
+        )
+        .unwrap();
+        let events = collect(&model, request(screenshot.clone())).await.unwrap();
+        assert_eq!(text(&events), "seen");
+        let requests = server.requests();
+        assert_eq!(
+            requests[2].1["input"][2]["output"], expected,
+            "vision {vision}"
+        );
+    }
+}
+
 #[test]
 fn endpoints_are_bounded_to_official_or_loopback_origins() {
     assert_eq!(

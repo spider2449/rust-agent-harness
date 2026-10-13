@@ -711,6 +711,25 @@ async fn the_web_ui_works_in_a_real_browser() {
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 
+    // A tool result shows its raster images; other image types stay text.
+    let shown = page
+        .eval(
+            "(() => { const node = entryNode({ seq: 99, entry: { kind: 'tool_result', effect: 'none', \
+             output: { is_error: false, content: [{ type: 'text', value: 'window' }, \
+             { type: 'image', value: { media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=' } }, \
+             { type: 'image', value: { media_type: 'image/svg+xml', data: 'PHN2Zz4=' } }] } } }); \
+             return { text: node.querySelector('pre').textContent, \
+             images: [...node.querySelectorAll('img')].map((image) => image.getAttribute('src')) }; })()",
+        )
+        .await;
+    assert_eq!(
+        shown,
+        json!({
+            "text": "window\n[image/png image]\n[image/svg+xml image]",
+            "images": ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="]
+        })
+    );
+
     // A failed startup request stays reported after the socket connects.
     page.eval("window.confirm = () => true; rowAction('session-jsonl', 'Remove'); true")
         .await;

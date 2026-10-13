@@ -16,7 +16,8 @@ pub use session::{
     normalize_title,
 };
 pub use tools::{
-    PermissionLevel, ToolCall, ToolContent, ToolDefinition, ToolInput, ToolName, ToolOutput,
+    IMAGE_MEDIA_TYPES, ImageContent, PermissionLevel, ToolCall, ToolContent, ToolDefinition,
+    ToolInput, ToolName, ToolOutput,
 };
 
 /// The initial version of the serialized RAH protocol.

@@ -1,5 +1,6 @@
 //! Session export as Markdown or JSON.
 
+use rah_api::tools::describe_image;
 use rah_protocol::{SessionEntry, SessionInfo, SessionRecord, ToolContent, ToolOutput};
 use serde_json::json;
 
@@ -71,6 +72,7 @@ fn render(output: &ToolOutput) -> String {
         .map(|item| match item {
             ToolContent::Text(text) => text.clone(),
             ToolContent::Json(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
+            ToolContent::Image(image) => describe_image(image),
         })
         .collect::<Vec<_>>()
         .join("\n")

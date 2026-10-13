@@ -160,6 +160,7 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .entry { padding: 8px 12px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); position: relative; }
 .entry.user { background: var(--user); }
 .entry.tool { background: var(--tool); font-size: 13px; }
+.entry .tool-image { display: block; max-width: 100%; max-height: 480px; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
 .entry.failed { border-color: var(--bad); color: var(--bad); }
 .entry .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center; }
 .entry .meta .spacer { flex: 1; }

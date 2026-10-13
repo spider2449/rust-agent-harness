@@ -2,12 +2,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use rah_api::tools::describe_image;
 use rah_protocol::{ContextItem, ToolContent, ToolDefinition, ToolOutput};
 use serde_json::{Value, json};
 
 use crate::{error::E, sse::MAX_FRAME};
 
 pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
+/// The largest request input; images make it larger than [`MAX_BYTES`].
+pub(crate) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_CALLS: usize = 128;
 
 /// Maps RAH tool names to provider-safe function names (`[A-Za-z0-9_-]`,
@@ -128,29 +131,47 @@ fn strict(v: &Value) -> bool {
     }
 }
 
-fn output_text(output: &ToolOutput) -> String {
-    let text = output
-        .content
-        .iter()
-        .map(|content| match content {
-            ToolContent::Text(text) => text.clone(),
-            ToolContent::Json(value) => value.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if output.is_error {
+/// A function call output: text, or with `images`, a list of text and image
+/// parts. Without `images`, an image becomes a short text.
+fn output(output: &ToolOutput, images: bool) -> Value {
+    let mut texts = Vec::new();
+    let mut pictures = Vec::new();
+    for content in &output.content {
+        match content {
+            ToolContent::Text(text) => texts.push(text.clone()),
+            ToolContent::Json(value) => texts.push(value.to_string()),
+            ToolContent::Image(image) if images => pictures.push(json!({
+                "type": "input_image",
+                "image_url": format!("data:{};base64,{}", image.media_type, image.data),
+            })),
+            ToolContent::Image(image) => texts.push(describe_image(image)),
+        }
+    }
+    let text = texts.join("\n");
+    let text = if output.is_error {
         format!("[error] {text}")
     } else {
         text
+    };
+    if pictures.is_empty() {
+        return text.into();
     }
+    let mut parts = Vec::with_capacity(pictures.len() + 1);
+    if !text.is_empty() {
+        parts.push(json!({"type": "input_text", "text": text}));
+    }
+    parts.append(&mut pictures);
+    parts.into()
 }
 
 /// Converts neutral context into Responses input items. llama.cpp needs an
 /// explicit `type: message` to tell replayed assistant text from user input.
+/// `images` says whether the model takes image input.
 pub(crate) fn input(
     items: &[ContextItem],
     names: &ToolNames,
     llamacpp: bool,
+    images: bool,
 ) -> Result<Vec<Value>, E> {
     let input: Vec<Value> = items
         .iter()
@@ -174,11 +195,13 @@ pub(crate) fn input(
             ContextItem::ToolResult { call_id, output } => json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": output_text(output),
+                "output": self::output(output, images),
             }),
         })
         .collect();
-    bounded(&input)?;
+    if serde_json::to_vec(&input).map_err(|_| E::Protocol)?.len() > MAX_INPUT_BYTES {
+        return Err(E::Protocol);
+    }
     Ok(input)
 }
 
@@ -522,7 +545,7 @@ mod tests {
                 },
             },
         ];
-        let openai = input(&items, &names, false).unwrap();
+        let openai = input(&items, &names, false, true).unwrap();
         assert_eq!(openai[2], json!({"role": "assistant", "content": "a"}));
         assert_eq!(
             openai[3],
@@ -532,7 +555,36 @@ mod tests {
             openai[4],
             json!({"type":"function_call_output","call_id":"c1","output":"[error] nope"})
         );
-        let llama = input(&items, &names, true).unwrap();
+        let llama = input(&items, &names, true, true).unwrap();
         assert_eq!(llama[2]["type"], "message");
+    }
+
+    #[test]
+    fn images_go_in_function_call_output_parts_or_become_text() {
+        let names = ToolNames::new(&[definition("shot")]);
+        let items = [ContextItem::ToolResult {
+            call_id: "c1".into(),
+            output: ToolOutput {
+                content: vec![
+                    ToolContent::Text("window".into()),
+                    ToolContent::Image(rah_protocol::ImageContent {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    }),
+                ],
+                is_error: false,
+            },
+        }];
+        assert_eq!(
+            input(&items, &names, true, true).unwrap()[0]["output"],
+            json!([
+                {"type": "input_text", "text": "window"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+            ])
+        );
+        assert_eq!(
+            input(&items, &names, true, false).unwrap()[0]["output"],
+            json!("window\n[image/png image, 1 KiB]")
+        );
     }
 }

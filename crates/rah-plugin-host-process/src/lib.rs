@@ -43,7 +43,7 @@ use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     kernel::KERNEL_API,
     session::{SESSION, SessionLog},
-    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
+    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, image, provide_tools},
 };
 use rah_protocol::{SessionId, ToolContent, ToolDefinition, ToolOutput};
 use serde::Deserialize;
@@ -473,6 +473,11 @@ fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
                 .and_then(Value::as_str)
                 .map(|t| ToolContent::Text(t.to_owned())),
             Some("json") => item.get("json").cloned().map(ToolContent::Json),
+            Some("image") => image(
+                item.get("media_type").and_then(Value::as_str)?,
+                item.get("data").and_then(Value::as_str)?,
+            )
+            .ok(),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
@@ -482,4 +487,44 @@ fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
         Some(flag) => flag.as_bool().ok_or_else(malformed)?,
     };
     Ok(ToolOutput { content, is_error })
+}
+
+#[cfg(test)]
+mod tests {
+    use rah_protocol::ImageContent;
+
+    use super::*;
+
+    #[test]
+    fn tool_results_carry_text_json_and_checked_images() {
+        let output = tool_output(&json!({
+            "content": [
+                {"type": "text", "text": "t"},
+                {"type": "json", "json": {"a": 1}},
+                {"type": "image", "media_type": "image/png", "data": "AA=="}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            output.content,
+            vec![
+                ToolContent::Text("t".into()),
+                ToolContent::Json(json!({"a": 1})),
+                ToolContent::Image(ImageContent {
+                    media_type: "image/png".into(),
+                    data: "AA==".into()
+                }),
+            ]
+        );
+        for item in [
+            json!({"type": "image", "media_type": "image/svg+xml", "data": "AA=="}),
+            json!({"type": "image", "media_type": "image/png", "data": "not base64"}),
+            json!({"type": "image", "data": "AA=="}),
+        ] {
+            assert!(
+                tool_output(&json!({ "content": [item] })).is_err(),
+                "{item}"
+            );
+        }
+    }
 }

@@ -17,6 +17,11 @@
 //! (busy, closed connection) record no effect. A crashed server stays down
 //! until the plugin is restarted.
 //!
+//! Text content becomes text and image content (PNG, JPEG, GIF or WebP, at
+//! most `rah_api::tools::MAX_IMAGE_DATA` base64 characters) an image, which
+//! a model that takes images sees. An image that does not qualify becomes a
+//! short note. Other content and `structuredContent` are passed on as JSON.
+//!
 //! Configuration:
 //!
 //! ```toml
@@ -26,7 +31,8 @@
 //!
 //! Optional: `cwd` (relative to the sandbox root), `env`,
 //! `call_timeout_ms` (30 s), `startup_timeout_ms` (10 s),
-//! `max_message_bytes` (1 MiB) and `max_outstanding` (16).
+//! `max_message_bytes` (8 MiB, room for a screenshot) and `max_outstanding`
+//! (16).
 
 mod client;
 
@@ -35,7 +41,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     sandbox::{SANDBOX, SpawnSpec},
-    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
+    tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, image, provide_tools},
 };
 use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolName, ToolOutput};
 use serde::Deserialize;
@@ -131,7 +137,7 @@ impl Plugin for McpToolsPlugin {
         )?);
         let max_message = positive(
             config.max_message_bytes.map(|v| v as u64),
-            1024 * 1024,
+            8 * 1024 * 1024,
             "max_message_bytes",
         )? as usize;
         let max_outstanding = positive(
@@ -297,8 +303,9 @@ impl Tool for McpTool {
     }
 }
 
-/// Maps a `tools/call` result. Text items become text; other content items
-/// and `structuredContent` are passed on as JSON.
+/// Maps a `tools/call` result. Text items become text and image items
+/// images; other content items and `structuredContent` are passed on as
+/// JSON.
 fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
     let malformed =
         || ToolError::Execution("the MCP server returned a malformed tool result".into());
@@ -314,6 +321,7 @@ fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
         ) {
             (Some("text"), Some(text)) => content.push(ToolContent::Text(text.to_owned())),
             (Some("text"), None) | (None, _) => return Err(malformed()),
+            (Some("image"), _) => content.push(mcp_image(item)),
             (Some(_), _) => content.push(ToolContent::Json(item.clone())),
         }
     }
@@ -325,6 +333,14 @@ fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
         Some(flag) => flag.as_bool().ok_or_else(malformed)?,
     };
     Ok(ToolOutput { content, is_error })
+}
+
+/// An MCP image item, or a note saying why it is left out.
+fn mcp_image(item: &Value) -> ToolContent {
+    let media_type = item.get("mimeType").and_then(Value::as_str).unwrap_or("");
+    let data = item.get("data").and_then(Value::as_str).unwrap_or("");
+    image(media_type, data)
+        .unwrap_or_else(|reason| ToolContent::Text(format!("[image left out: {reason}]")))
 }
 
 #[cfg(test)]

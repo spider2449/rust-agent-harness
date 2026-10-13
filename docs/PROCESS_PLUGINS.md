@@ -95,6 +95,13 @@ Result:
 {"content": [{"type": "text", "text": "..."}, {"type": "json", "json": {}}], "is_error": false}
 ```
 
+A content item may also be an image for models that take images:
+`{"type": "image", "media_type": "image/png", "data": "<base64>"}`. The media
+type must be `image/png`, `image/jpeg`, `image/gif` or `image/webp`, and the
+data padded standard base64 of at most 4 MiB (no `data:` prefix). Any other
+image makes the whole result malformed. Keep `max_message_bytes` large
+enough for it.
+
 `arguments` come from the model and are untrusted; validate them. An error
 response whose `data.kind` is `invalid_input` or `not_started` tells the host
 that nothing was done (effect `none`). Any other error, a timeout, a

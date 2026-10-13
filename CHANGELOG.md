@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Images in tool output (ADR 0037)
+
+- `rah-protocol`: `ToolContent::Image { media_type, data }` (PNG, JPEG, GIF
+  or WebP as base64). `rah_api::tools::image` checks untrusted images (type,
+  base64, at most 4 MiB) and `describe_image` gives a short text for them.
+- `tools-mcp` turns MCP image content into images; an unacceptable one
+  becomes a note. Its default `max_message_bytes` is now 8 MiB. Process
+  plugins may return `{"type": "image", "media_type", "data"}` items.
+- `model-anthropic` sends image blocks in tool results and the Responses
+  plugins send `input_image` parts. `model-llamacpp` does so only when
+  llama-server lists image input for the model; otherwise the model gets the
+  description. Request limits are 32 MiB.
+- `context-default` sends images only during the turn that produced them.
+  Earlier ones become their description, and each counts as 4,000
+  characters in the history window.
+- The Web UI shows tool images in the transcript; the terminal and Markdown
+  export show the description. The Blender example exposes
+  `get_screenshot_of_window_as_image`. Checked by hand: a Blender screenshot
+  described correctly by a local llama.cpp vision model.
+
+### Round limits, `repo.list` depth and a Settings notice fix
+
+- `loop-react` and `loop-plan` no longer fail when a turn or step uses up its
+  model rounds: one more request without tools asks for an answer from what
+  was gathered. The turn fails only if that answer is empty.
+- `repo.list` takes `depth` (1 to 16) to list a tree in one call.
+- Fix: saving the loop in Settings could leave the wrong notice when a status
+  poll ran during the save; out-of-order status answers are ignored.
+
+### Stop and start plugins; interrupt turns
+
+- `PluginAdmin` gains `stop` and `start`; a stopped plugin keeps its id and
+  configuration. The policy plugin cannot be stopped. `/stop`, `/start` and
+  `/restart` in the terminal, and Stop and Start in the Web UI.
+- Ctrl-C cancels the running turn or approval prompt in the terminal
+  (`host.interrupt` hook) and exits only when nothing handles it.
+- The terminal lists commands with `/` or `/help` and suggests close matches;
+  the Web UI has a slash command menu. `/call` and `/notool` run as turns.
+- New guide `docs/MCP_SERVERS.md` with a Blender example.
+
 ### Anthropic model plugin
 
 - New crate `plugins/model-anthropic` with the plugin `model-anthropic`: the

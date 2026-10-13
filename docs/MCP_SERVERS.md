@@ -56,8 +56,25 @@ model -> loop -> ToolInvoker -> tool.before_invoke (policy-authority)
 
 `tools-mcp` configuration fields: `server`, `program`, `args`, `tools`
 (required); `cwd`, `env`, `call_timeout_ms` (30 s), `startup_timeout_ms`
-(10 s), `max_message_bytes` (1 MiB), `max_outstanding` (16). See the module
+(10 s), `max_message_bytes` (8 MiB), `max_outstanding` (16). See the module
 documentation in `plugins/tools-mcp/src/lib.rs`.
+
+### Images
+
+Image content from a server (PNG, JPEG, GIF or WebP, up to 4 MiB of base64,
+about 3 MiB of image data) reaches the model as an image (ADR 0037):
+
+- `model-anthropic` and `model-openai` send it as an image.
+- `model-llamacpp` sends it when llama-server lists `image` input for the
+  model, which needs a vision model with its projector (`--mmproj`).
+  Otherwise the model gets a short text such as `[image/png image, 368 KiB]`.
+- `context-default` sends images only during the turn that produced them.
+  Later requests get the short text instead, so a screenshot does not fill
+  every following request.
+- The Web UI shows the image in the transcript. The terminal and Markdown
+  export show the short text.
+
+Other content types (audio, resources) still reach the model as JSON text.
 
 ## Example: Blender
 
@@ -131,7 +148,7 @@ The example exposes these tools:
 
 | Level | Tools |
 |---|---|
-| `read` | `get_objects_summary`, `get_object_detail_summary`, `get_blendfile_summary_*` (datablocks, missing_files, of_linked_libraries, path_info, usage_guess), `get_screenshot_of_window_as_json`, `get_python_api_docs`, `search_api_docs`, `search_manual_docs` |
+| `read` | `get_objects_summary`, `get_object_detail_summary`, `get_blendfile_summary_*` (datablocks, missing_files, of_linked_libraries, path_info, usage_guess), `get_screenshot_of_window_as_json`, `get_screenshot_of_window_as_image`, `get_python_api_docs`, `search_api_docs`, `search_manual_docs` |
 | `write` | `jump_to_tab_by_name`, `jump_to_tab_by_space_type`, `jump_to_view3d_object_by_name`, `jump_to_view3d_object_data_by_name` (change the Blender UI) |
 | `execute` | `execute_blender_code` |
 
@@ -139,9 +156,8 @@ These tools are left out on purpose:
 
 - `*_for_cli`: they start a background Blender process and need
   `BLENDER_PATH`.
-- `get_screenshot_of_area_as_image` and `get_screenshot_of_window_as_image`:
-  `tools-mcp` passes image content to the model as JSON (base64). A
-  screenshot easily exceeds `max_message_bytes` and fills the context.
+- `get_screenshot_of_area_as_image`: left out only to keep the list short.
+  It can be added like the window screenshot.
 - `render_thumbnail_to_path` and `render_viewport_to_path`: they write to
   any `output_path`, outside the sandbox root.
 

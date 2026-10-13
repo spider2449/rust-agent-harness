@@ -27,9 +27,17 @@ enum Flavor {
     LlamaCpp {
         origin: String,
         model: Option<String>,
-        /// Served model ids, discovered lazily and dropped on transport errors.
-        served: Mutex<Option<Vec<String>>>,
+        /// Served models, discovered lazily and dropped on transport errors.
+        served: Mutex<Option<Vec<Served>>>,
     },
+}
+
+/// A model a llama-server serves.
+#[derive(Clone)]
+struct Served {
+    id: String,
+    /// Whether `/v1/models` lists image input for it.
+    images: bool,
 }
 
 /// A Responses API model. Credentials are never exposed through Debug,
@@ -85,9 +93,11 @@ impl ResponsesModel {
         matches!(self.flavor, Flavor::LlamaCpp { .. })
     }
 
-    async fn model(&self, requested: Option<String>) -> Result<String, E> {
+    /// The model to ask, and whether it takes image input. OpenAI models are
+    /// assumed to; a llama-server model only when the server says so.
+    async fn model(&self, requested: Option<String>) -> Result<(String, bool), E> {
         match &self.flavor {
-            Flavor::OpenAi { model } => Ok(requested.unwrap_or_else(|| model.clone())),
+            Flavor::OpenAi { model } => Ok((requested.unwrap_or_else(|| model.clone()), true)),
             Flavor::LlamaCpp {
                 origin,
                 model,
@@ -98,12 +108,14 @@ impl ResponsesModel {
                     *cache = Some(self.discover(origin).await?);
                 }
                 let served = cache.as_deref().unwrap_or_default();
-                match requested.or_else(|| model.clone()) {
-                    Some(model) if served.contains(&model) => Ok(model),
-                    Some(_) => Err(E::ModelUnavailable),
-                    None if served.len() == 1 => Ok(served[0].clone()),
-                    None => Err(E::ModelUnavailable),
-                }
+                let found = match requested.or_else(|| model.clone()) {
+                    Some(model) => served.iter().find(|served| served.id == model),
+                    None if served.len() == 1 => served.first(),
+                    None => None,
+                };
+                found
+                    .map(|served| (served.id.clone(), served.images))
+                    .ok_or(E::ModelUnavailable)
             }
         }
     }
@@ -139,21 +151,27 @@ impl ResponsesModel {
     }
 
     /// llama-server readiness (`/health`) and served models (`/v1/models`).
-    async fn discover(&self, origin: &str) -> Result<Vec<String>, E> {
+    async fn discover(&self, origin: &str) -> Result<Vec<Served>, E> {
         let discovery = async {
             let health = self.get_json(format!("{origin}/health"), false).await?;
             if health["status"] != "ok" {
                 return Err(E::Loading);
             }
             let catalog = self.get_json(format!("{origin}/v1/models"), true).await?;
-            let mut models: Vec<String> = Vec::new();
+            let mut models: Vec<Served> = Vec::new();
             for item in catalog["data"].as_array().ok_or(E::Protocol)? {
                 let id = item["id"].as_str().ok_or(E::Protocol)?;
                 if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
                     return Err(E::Protocol);
                 }
-                if !models.iter().any(|m| m == id) {
-                    models.push(id.to_owned());
+                let images = item["architecture"]["input_modalities"]
+                    .as_array()
+                    .is_some_and(|modalities| modalities.iter().any(|m| m == "image"));
+                if !models.iter().any(|m| m.id == id) {
+                    models.push(Served {
+                        id: id.to_owned(),
+                        images,
+                    });
                 }
             }
             if models.is_empty() {
@@ -174,7 +192,7 @@ impl ModelProvider for ResponsesModel {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
-        let model = tokio::select! {
+        let (model, images) = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ModelError::Cancelled),
             model = self.model(request.model.clone()) => model?,
@@ -183,7 +201,7 @@ impl ModelProvider for ResponsesModel {
         let names = ToolNames::new(&request.tools);
         let body = json!({
             "model": model,
-            "input": wire::input(&request.items, &names, llamacpp)?,
+            "input": wire::input(&request.items, &names, llamacpp, images)?,
             "tools": wire::tools(&request.tools, &names)?,
             "stream": true,
             "store": false,

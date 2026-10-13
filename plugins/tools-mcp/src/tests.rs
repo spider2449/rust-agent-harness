@@ -140,7 +140,9 @@ async fn serve(
                     json!({
                         "content": [
                             { "type": "text", "text": message["params"]["arguments"]["text"] },
-                            { "type": "image", "data": "AA==", "mimeType": "image/png" }
+                            { "type": "image", "data": "AA==", "mimeType": "image/png" },
+                            { "type": "image", "data": "AA==", "mimeType": "image/svg+xml" },
+                            { "type": "audio", "data": "AA==", "mimeType": "audio/wav" }
                         ],
                         "structuredContent": { "ok": true }
                     })
@@ -245,6 +247,7 @@ fn text(output: &ToolOutput) -> String {
     match &output.content[0] {
         ToolContent::Text(text) => text.clone(),
         ToolContent::Json(value) => value.to_string(),
+        other => panic!("unexpected content: {other:?}"),
     }
 }
 
@@ -293,7 +296,12 @@ async fn calls_map_results_and_answer_server_requests() {
         echo.output.content,
         vec![
             ToolContent::Text("hi".into()),
-            ToolContent::Json(json!({ "type": "image", "data": "AA==", "mimeType": "image/png" })),
+            ToolContent::Image(rah_protocol::ImageContent {
+                media_type: "image/png".into(),
+                data: "AA==".into()
+            }),
+            ToolContent::Text("[image left out: unsupported image type `image/svg+xml`]".into()),
+            ToolContent::Json(json!({ "type": "audio", "data": "AA==", "mimeType": "audio/wav" })),
             ToolContent::Json(json!({ "ok": true })),
         ]
     );

@@ -64,10 +64,30 @@ async function api(path, options = {}) {
   return body;
 }
 
+// Images are shown separately (contentImages); the text names them.
 function renderContent(output) {
   return (output.content || [])
-    .map((item) => (item.type === "text" ? item.value : JSON.stringify(item.value, null, 2)))
+    .map((item) => {
+      if (item.type === "text") return item.value;
+      if (item.type === "image") return `[${item.value.media_type} image]`;
+      return JSON.stringify(item.value, null, 2);
+    })
     .join("\n");
+}
+
+// Tool output is untrusted: only raster types the host accepts become a
+// data URL, never SVG or HTML.
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+function contentImages(output) {
+  return (output.content || [])
+    .filter((item) => item.type === "image" && IMAGE_TYPES.includes(item.value.media_type) && /^[A-Za-z0-9+/]+=*$/.test(item.value.data))
+    .map((item) => {
+      const image = el("img", "tool-image");
+      image.alt = `${item.value.media_type} image from the tool`;
+      image.src = `data:${item.value.media_type};base64,${item.value.data}`;
+      return image;
+    });
 }
 
 // ---- Sessions -------------------------------------------------------------
@@ -364,6 +384,7 @@ function entryNode(record) {
   node.dataset.seq = record.seq;
   const meta = el("div", "meta");
   const body = el("pre");
+  let images = [];
   switch (entry.kind) {
     case "turn_started":
       node.classList.add("user");
@@ -385,6 +406,7 @@ function entryNode(record) {
       meta.append(el("span", "", entry.output.is_error ? "tool error" : "tool result"));
       meta.append(el("span", `effect-${entry.effect}`, `effect: ${entry.effect}`));
       body.textContent = renderContent(entry.output);
+      images = contentImages(entry.output);
       break;
     }
     case "turn_completed":
@@ -403,7 +425,7 @@ function entryNode(record) {
     meta.append(metaButton("edit", "Edit this message and send it in a new branch", () => editMessage(node, record.seq, entry.input)));
   }
   meta.append(metaButton("fork here", `Start a new session continuing after record ${record.seq}`, () => fork(record.seq)));
-  node.append(meta, body);
+  node.append(meta, body, ...images);
   return node;
 }
 

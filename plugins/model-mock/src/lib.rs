@@ -18,6 +18,7 @@ use futures::stream;
 use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     model::{MODEL, ModelError, ModelProvider, ModelStream},
+    tools::describe_image,
 };
 use rah_protocol::{ContextItem, ModelEvent, ModelRequest, ToolContent, ToolName, ToolOutput};
 use serde::Deserialize;
@@ -157,6 +158,7 @@ fn render(output: &ToolOutput) -> String {
         .map(|content| match content {
             ToolContent::Text(text) => text.clone(),
             ToolContent::Json(value) => value.to_string(),
+            ToolContent::Image(image) => describe_image(image),
         })
         .collect::<Vec<_>>()
         .join("\n")
