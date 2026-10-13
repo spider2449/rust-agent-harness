@@ -13,6 +13,10 @@
   and keeps an activity log of the open session (turns, tool calls and
   results, live while a turn runs; a tool call's `path` opens that file).
   The Plugins panel moved into the same panel as a tab.
+- The file view highlights Rust, JavaScript/TypeScript, Python, C-like
+  languages, TOML, YAML, JSON, Markdown, shell/PowerShell, CSS and HTML/XML
+  with an embedded tokenizer (`assets/highlight.js`, no external resources);
+  files over 200 KiB stay plain.
 - `frontend-web`: `GET /api/files?path=` lists one workspace directory and
   `GET /api/files/content?path=` returns the first 512 KiB of one file
   (binary files return no text). Paths are relative to the `sandbox`

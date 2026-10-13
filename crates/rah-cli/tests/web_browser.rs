@@ -1009,6 +1009,12 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          document.querySelector('#file-tabs .file-tab.current')?.title === 'docs/guide.md'",
     )
     .await;
+    // Markdown is highlighted; the text itself is unchanged (checked above).
+    assert_eq!(
+        page.eval("byId('file-view').querySelector('.lines .tok-heading')?.textContent")
+            .await,
+        "# Guide"
+    );
     page.eval("treeButton('notes.txt').click(); true").await;
     page.wait(
         "a second tab",
@@ -1016,6 +1022,12 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          byId('file-view').querySelector('.lines')?.textContent === 'draft'",
     )
     .await;
+    // A file without a known language stays plain text.
+    assert_eq!(
+        page.eval("byId('file-view').querySelectorAll('.lines span').length")
+            .await,
+        0
+    );
     page.eval("byId('close-all').click(); true").await;
     page.wait(
         "no open files",

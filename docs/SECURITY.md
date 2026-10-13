@@ -180,7 +180,8 @@ Behind the same token and checks, and likewise unreachable from tools:
   relative names only; absolute paths, drives, `:` streams and `..` are
   refused, and the canonical result must stay inside the canonical root, so
   a link leading outside is refused too. The UI shows file contents as text
-  only, like model output. A tool call's `path` argument can open the view,
+  only, like model output: syntax highlighting splits them into text nodes
+  inside spans with fixed class names, never HTML. A tool call's `path` argument can open the view,
   but only through these same checks.
 - `GET /api/status` runs one read-only `git status` in the workspace
   through the `sandbox` service.

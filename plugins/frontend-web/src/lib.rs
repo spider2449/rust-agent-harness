@@ -90,6 +90,7 @@ const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
 const SETTINGS_JS: &str = include_str!("../assets/settings.js");
+const HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
 
 pub struct WebFrontendPlugin {
     manifest: PluginManifest,
@@ -212,6 +213,10 @@ fn router(shared: AppState) -> Router {
         .route(
             "/settings.js",
             get(|| async { asset("text/javascript; charset=utf-8", SETTINGS_JS) }),
+        )
+        .route(
+            "/highlight.js",
+            get(|| async { asset("text/javascript; charset=utf-8", HIGHLIGHT_JS) }),
         )
         .route(
             "/app.css",

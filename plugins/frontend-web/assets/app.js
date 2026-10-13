@@ -1058,14 +1058,14 @@ function closeAllFiles() {
   renderTree();
 }
 
-// File contents are untrusted text: shown with textContent only.
-function codeView(text) {
+// File contents are untrusted text: shown as text nodes and token spans
+// (Highlight), never as HTML.
+function codeView(text, path) {
   const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
   const code = el("div", "code");
-  code.append(
-    el("pre", "gutter", lines.map((_, index) => index + 1).join("\n")),
-    el("pre", "lines", lines.join("\n")),
-  );
+  const body = el("pre", "lines");
+  body.append(Highlight.render(lines.join("\n"), path));
+  code.append(el("pre", "gutter", lines.map((_, index) => index + 1).join("\n")), body);
   return code;
 }
 
@@ -1107,7 +1107,7 @@ function renderFile() {
   } else {
     const parts = [];
     if (file.data.truncated) parts.push(el("div", "file-note", `Showing the start of this ${file.data.size}-byte file.`));
-    parts.push(codeView(file.data.text));
+    parts.push(codeView(file.data.text, file.path));
     view.replaceChildren(...parts);
   }
 }

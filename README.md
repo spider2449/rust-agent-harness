@@ -162,7 +162,8 @@ switch the folder the tools work in, without restarting. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms. The right-hand panel (**Workspace** in the header) shows the
-workspace's files as a tree, opens them read-only in tabs, and keeps an
+workspace's files as a tree, opens them read-only in tabs (with syntax
+highlighting for common languages), and keeps an
 activity log of the open session's turns and tool calls; it can be resized
 or hidden. Its **Plugins** tab remains for raw plugin configuration: it
 adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:
