@@ -34,6 +34,8 @@ pub struct PluginInstance {
     pub config: Value,
     /// Whether the admin service refuses to change it (itself).
     pub locked: bool,
+    /// Whether it is stopped (see [`PluginAdmin::stop`]).
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -46,6 +48,10 @@ pub enum AdminError {
     AlreadyMounted(PluginId),
     #[error("plugin `{0}` cannot be changed through the admin service")]
     Locked(PluginId),
+    #[error("plugin `{0}` is stopped; start it first")]
+    Stopped(PluginId),
+    #[error("plugin `{0}` is not stopped")]
+    NotStopped(PluginId),
     #[error("the replacement `{id}` did not start ({status}); `{old}` was kept")]
     ReplacementFailed {
         old: PluginId,
@@ -75,6 +81,21 @@ pub trait PluginAdmin: Send + Sync {
     async fn configure(&self, id: &PluginId, config: Value) -> Result<PluginStatus, AdminError>;
 
     async fn restart(&self, id: &PluginId) -> Result<PluginStatus, AdminError>;
+
+    /// Stops a plugin and keeps its kind, configuration and bindings, so
+    /// [`start`](Self::start) can mount it again under the same id. Its
+    /// dependents wait as `Pending` meanwhile. A stopped plugin is not
+    /// mounted: the kernel does not list it, but [`stopped`](Self::stopped)
+    /// and [`instance`](Self::instance) do, and its id stays taken.
+    /// Policy plugins cannot be stopped; stopping one would leave tool calls
+    /// unguarded.
+    async fn stop(&self, id: &PluginId) -> Result<(), AdminError>;
+
+    /// Mounts a stopped plugin again. Returns its status.
+    async fn start(&self, id: &PluginId) -> Result<PluginStatus, AdminError>;
+
+    /// Ids of the stopped plugins, sorted.
+    fn stopped(&self) -> Vec<PluginId>;
 
     /// Mounts `replacement` (under the first free id when its id is taken),
     /// and unmounts `old` only if the replacement became active. Consumers

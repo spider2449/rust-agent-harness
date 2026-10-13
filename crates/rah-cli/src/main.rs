@@ -6,7 +6,7 @@ use std::{
 use clap::Parser;
 use rah_api::{
     Kernel, PluginStatus,
-    host::{ExitRequested, FrontendListening},
+    host::{ExitRequested, FrontendListening, Interrupt},
     tools::ToolInvoker,
 };
 use rah_cli::{Distribution, boot};
@@ -168,9 +168,18 @@ async fn run(args: Args) -> i32 {
         );
     }
 
-    let code = tokio::select! {
-        code = exit_receiver => code.unwrap_or(1),
-        _ = tokio::signal::ctrl_c() => 130,
+    // Ctrl-C first lets a frontend cancel its running turn; it exits only
+    // when nothing took the interrupt.
+    let mut exit_receiver = exit_receiver;
+    let code = loop {
+        tokio::select! {
+            code = &mut exit_receiver => break code.unwrap_or(1),
+            _ = tokio::signal::ctrl_c() => {
+                if !matches!(handle.bail::<Interrupt>(()).await, Ok(Some(()))) {
+                    break 130;
+                }
+            }
+        }
     };
     let _ = kernel.shutdown().await;
     code

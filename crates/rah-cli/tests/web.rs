@@ -325,6 +325,105 @@ impl Web {
 }
 
 #[tokio::test]
+async fn plugins_are_stopped_and_started_over_http() {
+    use reqwest::Method;
+    let web = start("web-stop", |_| {}).await;
+    let state = |plugins: &Value, id: &str| {
+        plugins
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .map(|p| (p["state"].clone(), p["kind"].clone()))
+    };
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+
+    let (status, reply) = web.status(web.post("/api/plugins/model-mock/stop")).await;
+    assert_eq!(
+        (status, reply["state"].as_str()),
+        (200, Some("stopped")),
+        "{reply}"
+    );
+    let plugins = web.json(web.get("/api/plugins")).await;
+    assert_eq!(
+        state(&plugins, "model-mock"),
+        Some((json!("stopped"), json!("model-mock"))),
+        "{plugins}"
+    );
+    let (terminal, _) = run_turn(&mut socket, &session, "one", None).await;
+    assert_eq!(terminal, "failed");
+
+    // While stopped: the id stays taken, and only start and remove apply.
+    for (method, path, expected) in [
+        (Method::POST, "/api/plugins/model-mock/stop", 409),
+        (Method::POST, "/api/plugins/model-mock/restart", 409),
+        (Method::PUT, "/api/plugins/model-mock/config", 409),
+    ] {
+        let request = web.request(method, path).json(&json!({ "config": {} }));
+        assert_eq!(web.status(request).await.0, expected, "{path}");
+    }
+    let (status, _) = web
+        .status(
+            web.post("/api/plugins")
+                .json(&json!({ "kind": "model-mock" })),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    let (status, reply) = web.status(web.post("/api/plugins/model-mock/start")).await;
+    assert_eq!(
+        (status, reply["state"].as_str()),
+        (200, Some("active")),
+        "{reply}"
+    );
+    let (_, text) = run_turn(&mut socket, &session, "two", None).await;
+    assert_eq!(text, "[model-mock] echo returned: two");
+    assert_eq!(
+        web.status(web.post("/api/plugins/model-mock/start"))
+            .await
+            .0,
+        409
+    );
+
+    // Policy plugins and the distribution cannot be stopped.
+    assert_eq!(
+        web.status(web.post("/api/plugins/policy-authority/stop"))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        web.status(web.post("/api/plugins/distribution/stop"))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        web.status(web.post("/api/plugins/missing/stop")).await.0,
+        404
+    );
+    assert_eq!(
+        web.status(web.post("/api/plugins/missing/start")).await.0,
+        404
+    );
+
+    // Removing a stopped plugin forgets it.
+    web.status(web.post("/api/plugins/model-mock/stop")).await;
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/plugins/model-mock"))
+            .await
+            .0,
+        200
+    );
+    let plugins = web.json(web.get("/api/plugins")).await;
+    assert_eq!(state(&plugins, "model-mock"), None);
+}
+
+#[tokio::test]
 async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     use reqwest::Method;
     let web = start("web-manage", |_| {}).await;

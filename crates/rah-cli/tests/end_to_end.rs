@@ -7,13 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use common::{TempDir, entries, headless, kernel, kinds, new_session, reply, turn, turn_with};
 use rah_api::{
-    CancellationToken, MountOptions, PluginId, PluginStatus, kernel::PluginStatusChanged,
+    CancellationToken, MountOptions, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
+    Scope, admin::ADMIN, async_trait, hooks::ToolApproval, kernel::PluginStatusChanged,
     session::SESSION,
 };
 use rah_cli::catalog;
-use rah_plugin_frontend_cli::{ReplOptions, run_repl};
+use rah_plugin_frontend_cli::{ApprovalPrompt, ReplOptions, RunningTurn, run_repl};
 use rah_protocol::{AgentEvent, SessionEntry, ToolEffect};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn tool_round_trip_is_streamed_and_recorded() {
@@ -223,7 +225,8 @@ async fn repl_runs_turns_and_commands() {
     let dir = TempDir::new("repl");
     let kernel = kernel(&headless(&dir)).await;
     let input: &[u8] =
-        b"hello\n/history\n/plugins\n/rename  My trip \n/fork 5\n/sessions\n/bogus\n/quit\n";
+        b"hello\n/history\n/plugins\n/rename  My trip \n/fork 5\n/sessions\n/bogus\n/call echo {\"text\":\"called\"}\n\
+          /\n/st\n/stop\n/stop policy-authority\n/stop loop-react\n/plugins\nnot run\n/start loop-react\n/quit\n";
     let mut output = Vec::new();
     let code = run_repl(
         &kernel.handle(),
@@ -231,6 +234,7 @@ async fn repl_runs_turns_and_commands() {
         &mut output,
         ReplOptions::default(),
         None,
+        RunningTurn::default(),
     )
     .await
     .unwrap();
@@ -249,8 +253,196 @@ async fn repl_runs_turns_and_commands() {
         // `/sessions` names the renamed session; the fork shows its preview.
         "  My trip",
         "  hello",
-        "unknown command /bogus",
+        "type /help for commands",
+        "unknown command /bogus; try /help",
+        // `/call` is a turn for the model, not a REPL command.
+        "[model-mock] echo returned: called",
+        // `/` alone lists the commands.
+        "  /stop <plugin>        stop a plugin, keeping its configuration",
+        "unknown command /st; did you mean /stop <plugin>, /start <plugin>?",
+        "usage: /stop <plugin>  (see /plugins)",
+        "error: plugin `policy-authority` guards tool calls and cannot be stopped",
+        "loop-react: stopped",
+        "error: no agent loop is mounted",
+        "loop-react: active",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
     }
+    assert!(!text.contains("unknown command /call"), "{text}");
+}
+
+/// Answers `tool.approval` by forwarding each request, like `frontend-cli`.
+struct Approver {
+    manifest: PluginManifest,
+    prompts: tokio::sync::mpsc::Sender<ApprovalPrompt>,
+}
+
+#[async_trait]
+impl Plugin for Approver {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        let prompts = self.prompts.clone();
+        scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
+            let prompts = prompts.clone();
+            async move {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                prompts.send((request, reply)).await.ok()?;
+                Some(answer.await.unwrap_or(false))
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Reads `out` until `text` appears; returns everything read.
+async fn read_until(out: &mut tokio::io::DuplexStream, seen: &mut String, text: &str) {
+    let mut buffer = [0u8; 1024];
+    while !seen.contains(text) {
+        let read = tokio::time::timeout(std::time::Duration::from_secs(10), out.read(&mut buffer))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {text:?} in:\n{seen}"))
+            .unwrap();
+        assert!(read > 0, "output ended before {text:?}:\n{seen}");
+        seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+}
+
+#[tokio::test]
+async fn an_interrupt_cancels_the_running_turn_and_the_repl_continues() {
+    let dir = TempDir::new("repl-interrupt");
+    let kernel = kernel(&headless(&dir)).await;
+    let (prompts, approvals) = tokio::sync::mpsc::channel(1);
+    kernel
+        .mount(
+            Arc::new(Approver {
+                manifest: PluginManifest::new("approver", "0"),
+                prompts,
+            }),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let (mut input, input_end) = tokio::io::duplex(4096);
+    let (output_end, mut output) = tokio::io::duplex(65536);
+    let running = RunningTurn::default();
+    assert!(!running.interrupt(), "no turn is running yet");
+    let repl = tokio::spawn({
+        let handle = kernel.handle();
+        let running = running.clone();
+        async move {
+            run_repl(
+                &handle,
+                BufReader::new(input_end),
+                output_end,
+                ReplOptions::default(),
+                Some(approvals),
+                running,
+            )
+            .await
+        }
+    });
+    let mut seen = String::new();
+    read_until(&mut output, &mut seen, "> ").await;
+    // `repo.create-file` is a `write` tool: the policy asks, and the turn
+    // waits for an answer that never comes.
+    input
+        .write_all(b"/call repo.create-file {\"path\":\"a.txt\",\"content\":\"a\"}\n")
+        .await
+        .unwrap();
+    read_until(&mut output, &mut seen, "Allow? [y/N] ").await;
+    assert!(running.interrupt(), "the turn is running");
+    read_until(&mut output, &mut seen, "[cancelled]").await;
+    assert!(seen.contains("[denied]"), "{seen}");
+    assert!(!dir.workspace().join("a.txt").exists());
+    assert!(!running.interrupt(), "the turn has ended");
+
+    // The REPL keeps running.
+    input.write_all(b"hello\n/quit\n").await.unwrap();
+    read_until(&mut output, &mut seen, "echo returned: hello").await;
+    assert_eq!(repl.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_stopped_plugin_keeps_its_configuration_and_its_dependents_wait() {
+    let dir = TempDir::new("admin-stop");
+    let mut distribution = headless(&dir);
+    distribution.set_config("model-mock", "label", json!("L"));
+    let kernel = kernel(&distribution).await;
+    let handle = kernel.handle();
+    let admin = handle.get(ADMIN).unwrap();
+    let sandbox = PluginId::new("sandbox-process");
+    let repo = PluginId::new("tools-repo");
+    assert_eq!(handle.status(&repo), Some(PluginStatus::Active));
+
+    admin.stop(&sandbox).await.unwrap();
+    assert_eq!(handle.status(&sandbox), None);
+    assert_eq!(admin.stopped(), std::slice::from_ref(&sandbox));
+    assert!(admin.instance(&sandbox).unwrap().stopped);
+    // A dependent waits for the stopped service.
+    assert!(
+        matches!(handle.status(&repo), Some(PluginStatus::Pending { .. })),
+        "{:?}",
+        handle.status(&repo)
+    );
+    // The stopped id stays taken, and only `start` and `unmount` apply.
+    let error = admin
+        .mount(rah_api::admin::MountRequest {
+            kind: "sandbox-process".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, rah_api::admin::AdminError::AlreadyMounted(_)),
+        "{error}"
+    );
+    for error in [
+        admin.stop(&sandbox).await.unwrap_err(),
+        admin.restart(&sandbox).await.map(|_| ()).unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, rah_api::admin::AdminError::Stopped(_)),
+            "{error}"
+        );
+    }
+
+    assert_eq!(admin.start(&sandbox).await.unwrap(), PluginStatus::Active);
+    assert_eq!(handle.status(&repo), Some(PluginStatus::Active));
+    assert!(admin.stopped().is_empty());
+    let error = admin.start(&sandbox).await.unwrap_err();
+    assert!(
+        matches!(error, rah_api::admin::AdminError::NotStopped(_)),
+        "{error}"
+    );
+
+    // The configuration survives a stop and start.
+    let model = PluginId::new("model-mock");
+    admin.stop(&model).await.unwrap();
+    admin.start(&model).await.unwrap();
+    let session = new_session(&handle).await;
+    assert_eq!(
+        reply(&turn(&handle, &session, "/notool x").await),
+        "[L] you said: x (0 earlier items)"
+    );
+
+    // Policy plugins and the distribution itself cannot be stopped.
+    assert!(
+        admin
+            .stop(&PluginId::new("policy-authority"))
+            .await
+            .is_err()
+    );
+    assert!(admin.stop(&PluginId::new("distribution")).await.is_err());
+    assert_eq!(
+        handle.status(&PluginId::new("policy-authority")),
+        Some(PluginStatus::Active)
+    );
+
+    // Unmounting a stopped plugin forgets it.
+    admin.stop(&model).await.unwrap();
+    admin.unmount(&model).await.unwrap();
+    assert!(admin.stopped().is_empty() && admin.instance(&model).is_none());
 }

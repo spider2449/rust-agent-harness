@@ -10,17 +10,27 @@
 //! The plugin answers `tool.approval`: while a turn runs, a policy `Ask` is
 //! shown on the terminal and approved only by an explicit `y` or `yes`. End
 //! of input, any other answer, or a REPL that is no longer running denies it.
+//!
+//! It also answers `host.interrupt` (Ctrl-C): a running turn is cancelled
+//! and the REPL continues. Without a running turn the host exits.
+//!
+//! `/stop`, `/start` and `/restart` manage plugins through the distribution's
+//! `admin` service, when one is mounted.
 
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use futures::StreamExt;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
     Scope,
+    admin::ADMIN,
     agent_loop::{LOOP, TurnRequest},
     async_trait,
     hooks::{ApprovalRequest, ToolApproval},
-    host::ExitRequested,
+    host::{ExitRequested, Interrupt},
     session::{SESSION, SessionLog},
 };
 use rah_protocol::{AgentEvent, SessionEntry, SessionId, ToolContent, ToolOutput};
@@ -32,6 +42,42 @@ use tokio::{
 
 /// A pending `Ask` confirmation and where to send the answer.
 pub type ApprovalPrompt = (ApprovalRequest, oneshot::Sender<bool>);
+
+/// The cancellation token of the turn the REPL is running, if any.
+#[derive(Clone, Default)]
+pub struct RunningTurn(Arc<Mutex<Option<CancellationToken>>>);
+
+impl RunningTurn {
+    /// Cancels the running turn. Returns whether there was one.
+    pub fn interrupt(&self) -> bool {
+        match self.lock().as_ref() {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<CancellationToken>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers a new turn; the returned guard clears it when dropped.
+    fn begin(&self) -> (CancellationToken, TurnGuard<'_>) {
+        let token = CancellationToken::new();
+        *self.lock() = Some(token.clone());
+        (token, TurnGuard(self))
+    }
+}
+
+struct TurnGuard<'a>(&'a RunningTurn);
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
+}
 
 pub struct CliFrontendPlugin {
     manifest: PluginManifest,
@@ -78,10 +124,17 @@ impl Plugin for CliFrontendPlugin {
                 Some(answer.await.unwrap_or(false))
             }
         });
+        let running = RunningTurn::default();
+        let interrupts = running.clone();
+        scope.hook_bail::<Interrupt, _, _>(0, move |()| {
+            let handled = interrupts.interrupt();
+            async move { handled.then_some(()) }
+        });
         scope.spawn(async move {
             let stdin = BufReader::new(tokio::io::stdin());
             let stdout = tokio::io::stdout();
-            let code = match run_repl(&kernel, stdin, stdout, options, Some(approvals)).await {
+            let repl = run_repl(&kernel, stdin, stdout, options, Some(approvals), running);
+            let code = match repl.await {
                 Ok(code) => code,
                 Err(error) => {
                     eprintln!("rah: terminal I/O failed: {error}");
@@ -94,29 +147,66 @@ impl Plugin for CliFrontendPlugin {
     }
 }
 
-const HELP: &str = "\
-commands:
-  <text>            run a turn
-  /new              start a new session
-  /sessions         list sessions
-  /resume <id>      switch to a session
-  /fork <seq>       fork the current session after record <seq> and switch to it
-  /rename [title]   rename the current session (no title clears it)
-  /history          show the current session log
-  /plugins          show plugin status
-  /help             show this help
-  /quit             exit
-";
+/// Slash-prefixed input that is a turn for the model, not a REPL command
+/// (`model-mock` reads these).
+const TURN_COMMANDS: [&str; 2] = ["/call", "/notool"];
+
+/// REPL commands: usage and description, as `/help` lists them.
+const COMMANDS: [(&str, &str); 15] = [
+    ("/new", "start a new session"),
+    ("/sessions", "list sessions"),
+    ("/resume <id>", "switch to a session"),
+    (
+        "/fork <seq>",
+        "fork the current session after record <seq> and switch to it",
+    ),
+    (
+        "/rename [title]",
+        "rename the current session (no title clears it)",
+    ),
+    ("/history", "show the current session log"),
+    ("/plugins", "show plugin status"),
+    ("/stop <plugin>", "stop a plugin, keeping its configuration"),
+    ("/start <plugin>", "start a stopped plugin"),
+    ("/restart <plugin>", "restart a plugin"),
+    (
+        "/call <tool> <json>",
+        "run a turn that requests a tool (mock model)",
+    ),
+    ("/notool <text>", "run a turn without tools (mock model)"),
+    ("/help", "show this help"),
+    ("/quit", "exit"),
+    ("/exit", "exit"),
+];
+
+fn help() -> String {
+    let mut text =
+        String::from("commands:\n  <text>                run a turn; Ctrl-C cancels it\n");
+    for (usage, description) in COMMANDS {
+        text.push_str(&format!("  {usage:<21} {description}\n"));
+    }
+    text
+}
+
+/// Commands starting with `prefix`, for hints on unknown input.
+fn suggestions(prefix: &str) -> Vec<&'static str> {
+    COMMANDS
+        .iter()
+        .map(|(usage, _)| *usage)
+        .filter(|usage| usage.starts_with(prefix))
+        .collect()
+}
 
 /// Runs the REPL until EOF or `/quit`. Returns the process exit code.
 /// `approvals` delivers `Ask` confirmations, answered from `input` while a
-/// turn runs.
+/// turn runs. `running` holds the running turn, so it can be interrupted.
 pub async fn run_repl<R, W>(
     kernel: &KernelHandle,
     input: R,
     mut out: W,
     options: ReplOptions,
     mut approvals: Option<mpsc::Receiver<ApprovalPrompt>>,
+    running: RunningTurn,
 ) -> std::io::Result<i32>
 where
     R: AsyncBufRead + Unpin,
@@ -144,6 +234,9 @@ where
         },
     };
     line(&mut out, &format!("session {current}")).await?;
+    if options.prompt.is_none() {
+        line(&mut out, "type /help for commands").await?;
+    }
 
     let mut lines = input.lines();
     if let Some(prompt) = &options.prompt {
@@ -151,6 +244,7 @@ where
             out: &mut out,
             lines: &mut lines,
             approvals: &mut approvals,
+            running: &running,
         };
         let completed = turn(kernel, &current, prompt, &mut terminal).await?;
         return Ok(if completed { 0 } else { 1 });
@@ -167,7 +261,7 @@ where
         match command {
             "" => {}
             "/quit" | "/exit" => break,
-            "/help" => out.write_all(HELP.as_bytes()).await?,
+            "/" | "/help" => out.write_all(help().as_bytes()).await?,
             "/new" => match sessions.create().await {
                 Ok(info) => {
                     current = info.id;
@@ -234,12 +328,33 @@ where
                 Err(error) => line(&mut out, &format!("error: {error}")).await?,
             },
             "/plugins" => {
-                for (id, status) in kernel.plugins() {
-                    line(&mut out, &format!("{id}: {}", status_text(&status))).await?;
+                let stopped = kernel
+                    .get(ADMIN)
+                    .map(|admin| admin.stopped())
+                    .unwrap_or_default();
+                let mut plugins: Vec<(PluginId, String)> = kernel
+                    .plugins()
+                    .into_iter()
+                    .map(|(id, status)| (id, status_text(&status)))
+                    .chain(stopped.into_iter().map(|id| (id, "stopped".to_owned())))
+                    .collect();
+                plugins.sort();
+                for (id, status) in plugins {
+                    line(&mut out, &format!("{id}: {status}")).await?;
                 }
             }
-            _ if command.starts_with('/') && !command.starts_with("/notool") => {
-                line(&mut out, &format!("unknown command {command}; try /help")).await?;
+            "/stop" | "/start" | "/restart" => {
+                let message = manage(kernel, command, argument.trim()).await;
+                line(&mut out, &message).await?;
+            }
+            _ if command.starts_with('/') && !TURN_COMMANDS.contains(&command) => {
+                let close = suggestions(command);
+                let hint = if close.is_empty() {
+                    "try /help".to_owned()
+                } else {
+                    format!("did you mean {}?", close.join(", "))
+                };
+                line(&mut out, &format!("unknown command {command}; {hint}")).await?;
             }
             _ => {
                 let text = text.to_owned();
@@ -247,12 +362,33 @@ where
                     out: &mut out,
                     lines: &mut lines,
                     approvals: &mut approvals,
+                    running: &running,
                 };
                 turn(kernel, &current, &text, &mut terminal).await?;
             }
         }
     }
     Ok(0)
+}
+
+/// Runs `/stop`, `/start` or `/restart` through the `admin` service.
+async fn manage(kernel: &KernelHandle, command: &str, id: &str) -> String {
+    if id.is_empty() || id.contains(' ') {
+        return format!("usage: {command} <plugin>  (see /plugins)");
+    }
+    let Some(admin) = kernel.get(ADMIN) else {
+        return "error: plugin management is not available (no `admin` service)".to_owned();
+    };
+    let id = PluginId::new(id);
+    let result = match command {
+        "/stop" => admin.stop(&id).await.map(|()| "stopped".to_owned()),
+        "/start" => admin.start(&id).await.map(|status| status_text(&status)),
+        _ => admin.restart(&id).await.map(|status| status_text(&status)),
+    };
+    match result {
+        Ok(status) => format!("{id}: {status}"),
+        Err(error) => format!("error: {error}"),
+    }
 }
 
 async fn open(sessions: &dyn SessionLog, id: &str) -> Result<SessionId, String> {
@@ -275,6 +411,7 @@ struct Terminal<'a, R, W> {
     out: &'a mut W,
     lines: &'a mut Lines<R>,
     approvals: &'a mut Option<mpsc::Receiver<ApprovalPrompt>>,
+    running: &'a RunningTurn,
 }
 
 /// The next confirmation request; pending forever once there is none.
@@ -289,9 +426,11 @@ async fn next_prompt(approvals: &mut Option<mpsc::Receiver<ApprovalPrompt>>) -> 
 }
 
 /// Asks the user to confirm one tool call. Only `y` or `yes` approves.
+/// Cancelling the turn denies it.
 async fn confirm<R, W>(
     terminal: &mut Terminal<'_, R, W>,
     request: &ApprovalRequest,
+    cancel: &CancellationToken,
 ) -> std::io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
@@ -304,7 +443,11 @@ where
     );
     terminal.out.write_all(question.as_bytes()).await?;
     terminal.out.flush().await?;
-    let answer = terminal.lines.next_line().await?.unwrap_or_default();
+    // `next_line` is cancellation safe: a partly typed answer is kept.
+    let answer = tokio::select! {
+        answer = terminal.lines.next_line() => answer?.unwrap_or_default(),
+        () = cancel.cancelled() => String::new(),
+    };
     let approved = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
     if !approved {
         line(terminal.out, "[denied]").await?;
@@ -327,16 +470,17 @@ where
         line(terminal.out, "error: no agent loop is mounted").await?;
         return Ok(false);
     };
+    let (cancel, _running) = terminal.running.begin();
     let mut events = agent_loop.run_turn(TurnRequest {
         session: session.clone(),
         input: input.to_owned(),
-        cancel: CancellationToken::new(),
+        cancel: cancel.clone(),
     });
     loop {
         let event = tokio::select! {
             event = events.next() => event,
             (request, reply) = next_prompt(terminal.approvals) => {
-                let approved = confirm(terminal, &request).await?;
+                let approved = confirm(terminal, &request, &cancel).await?;
                 let _ = reply.send(approved);
                 continue;
             }

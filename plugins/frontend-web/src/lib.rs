@@ -23,7 +23,9 @@
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
 //!   id, config, bind}`, `DELETE /api/plugins/{id}`,
-//!   `POST /api/plugins/{id}/restart`, `PUT /api/plugins/{id}/config
+//!   `POST /api/plugins/{id}/restart`, `POST /api/plugins/{id}/stop` and
+//!   `/start` (stopped plugins are listed with the state `stopped`),
+//!   `PUT /api/plugins/{id}/config
 //!   {config}` and `POST /api/plugins/{id}/replace {kind, id, config, bind}`
 //!   (mounts the replacement, then unmounts `{id}` once it is active).
 //! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
@@ -177,6 +179,8 @@ fn router(shared: AppState) -> Router {
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))
         .route("/plugins/{id}/restart", post(manage::restart))
+        .route("/plugins/{id}/stop", post(manage::stop))
+        .route("/plugins/{id}/start", post(manage::start))
         .route("/plugins/{id}/config", put(manage::configure))
         .route("/plugins/{id}/replace", post(manage::replace))
         .route("/sessions", get(list_sessions).post(create_session))

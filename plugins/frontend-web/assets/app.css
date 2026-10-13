@@ -167,7 +167,17 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .effect-uncertain { color: var(--warn); font-weight: 600; }
 /* Streaming output scrolls inside the conversation instead of growing the page. */
 .live { flex: 0 1 auto; min-height: 3em; max-height: 50%; overflow-y: auto; margin: 0 16px; padding: 8px 12px; border-radius: 8px; border: 1px dashed var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
-.composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+.composer { position: relative; display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+.slash-menu {
+  position: absolute; left: 16px; right: 16px; bottom: calc(100% - 8px); z-index: 5; max-height: min(340px, 50vh); overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+}
+.slash-item { display: flex; gap: 12px; align-items: baseline; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+.slash-item.active { background: var(--user); }
+.slash-item code { font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
+.slash-item span { color: var(--muted); }
+.slash-menu .slash-hint { padding: 4px 8px 2px; color: var(--muted); font-size: 12px; }
 .composer textarea { flex: 1; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; }
 .composer .actions { display: flex; flex-direction: column; gap: 6px; }
 
@@ -179,6 +189,7 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .state-active { color: var(--good); }
 .state-failed, .state-dependency_cycle { color: var(--bad); }
 .state-pending { color: var(--warn); }
+.state-stopped { color: var(--muted); }
 .tools { list-style: none; padding: 0; margin: 0; }
 .tools li { padding: 3px 0; }
 

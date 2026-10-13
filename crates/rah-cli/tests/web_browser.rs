@@ -641,6 +641,76 @@ async fn the_web_ui_works_in_a_real_browser() {
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 
+    // Slash commands: `/` lists them, Tab completes, plugin ids complete
+    // after `/stop `, and Enter runs the command in the browser.
+    let typing = |text: &str| {
+        let text = serde_json::to_string(text).unwrap();
+        format!(
+            "byId('input').value = {text}; byId('input').dispatchEvent(new Event('input')); true"
+        )
+    };
+    let key = |key: &str| {
+        format!(
+            "byId('input').dispatchEvent(new KeyboardEvent('keydown', {{ key: '{key}', bubbles: true, cancelable: true }})); true"
+        )
+    };
+    let menu = "[...document.querySelectorAll('#slash-menu .slash-item code')].map((item) => item.textContent)";
+    page.eval(&typing("/")).await;
+    page.wait("the command menu", "shown(byId('slash-menu'))")
+        .await;
+    assert_eq!(
+        page.eval(&format!("{menu}.length")).await,
+        9,
+        "{}",
+        page.eval(menu).await
+    );
+    page.screenshot("slash-menu").await;
+    page.eval(&key("Escape")).await;
+    assert_eq!(page.eval("shown(byId('slash-menu'))").await, false);
+    page.eval(&typing("/st")).await;
+    assert_eq!(
+        page.eval(menu).await,
+        json!(["/stop <plugin>", "/start <plugin>"])
+    );
+    page.eval(&key("Tab")).await;
+    assert_eq!(page.eval("byId('input').value").await, "/stop ");
+    page.wait(
+        "plugin ids to complete",
+        &format!("{menu}.includes('model-mock-2')"),
+    )
+    .await;
+    assert_eq!(
+        page.eval(&format!("{menu}.includes('policy-authority')"))
+            .await,
+        false
+    );
+    page.eval(&typing("/stop model-mock-2")).await;
+    page.eval(&key("Enter")).await;
+    page.wait(
+        "the stopped plugin",
+        "rowOf('model-mock-2').cells[0].textContent.includes('Start') && \
+         rowOf('model-mock-2').cells[1].textContent === 'stopped' && \
+         notices.includes('model-mock-2: stopped') && byId('input').value === ''",
+    )
+    .await;
+    page.eval("rowAction('model-mock-2', 'Start'); true").await;
+    page.wait(
+        "the started plugin",
+        "rowOf('model-mock-2').cells[1].textContent === 'active'",
+    )
+    .await;
+    page.eval(&typing("/bogus")).await;
+    assert_eq!(page.eval("shown(byId('slash-menu'))").await, false);
+    page.eval(&key("Enter")).await;
+    page.wait(
+        "the unknown command notice",
+        "byId('notice').textContent === 'Unknown command /bogus. Type / to see the commands.'",
+    )
+    .await;
+    page.eval("true").await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+
     // A failed startup request stays reported after the socket connects.
     page.eval("window.confirm = () => true; rowAction('session-jsonl', 'Remove'); true")
         .await;

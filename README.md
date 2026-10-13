@@ -61,7 +61,10 @@ workspaces, in
 hand a task to a subagent in its own session), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
-`/sessions`, `/resume <id>`, `/rename [title]` and `/plugins`. `--prompt <text>` runs one turn and exits, and
+`/sessions`, `/resume <id>`, `/rename [title]` and `/plugins`. `/stop <plugin>`
+stops a plugin and keeps its configuration, `/start <plugin>` mounts it again
+and `/restart <plugin>` restarts it. `/` or `/help` lists the commands, and
+Ctrl-C cancels a running turn (with no turn running, it exits). `--prompt <text>` runs one turn and exits, and
 `--session <id>` resumes a session.
 
 | Preset | Model plugin | Policy |
@@ -156,9 +159,11 @@ switch the folder the tools work in, without restarting. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms; the **Plugins** panel remains for raw plugin configuration. Its Plugins panel
-adds, configures, restarts, replaces and removes plugins while `rah` runs:
+adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
-effect on the next turn without a restart. It listens on loopback only and
+effect on the next turn without a restart. Typing `/` in the message box
+lists commands (`/new`, `/plugins`, `/stop`, `/start`, `/restart`, `/cancel`)
+and completes plugin ids. It listens on loopback only and
 has no external resources.
 
 Real models use the same composition with a different model plugin:

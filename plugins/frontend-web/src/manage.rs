@@ -30,9 +30,10 @@ impl From<AdminError> for ApiError {
         let status = match error {
             AdminError::UnknownKind(_) | AdminError::Failed(_) => StatusCode::BAD_REQUEST,
             AdminError::NotMounted(_) => StatusCode::NOT_FOUND,
-            AdminError::AlreadyMounted(_) | AdminError::ReplacementFailed { .. } => {
-                StatusCode::CONFLICT
-            }
+            AdminError::AlreadyMounted(_)
+            | AdminError::ReplacementFailed { .. }
+            | AdminError::Stopped(_)
+            | AdminError::NotStopped(_) => StatusCode::CONFLICT,
             AdminError::Locked(_) => StatusCode::FORBIDDEN,
         };
         Self(status, error.to_string())
@@ -46,14 +47,25 @@ fn status_reply(id: &str, status: &PluginStatus) -> Json<Value> {
 }
 
 /// `GET /api/plugins`: status, plus kind and configuration when known.
+/// Stopped plugins are listed with the state `stopped`, sorted in by id.
 pub(crate) async fn list(State(shared): State<AppState>) -> ApiResult {
     let admin = shared.kernel.get(ADMIN);
-    let plugins: Vec<Value> = shared
+    let mounted = shared
         .kernel
         .plugins()
         .into_iter()
-        .map(|(id, status)| {
-            let mut entry = status_json(&status);
+        .map(|(id, status)| (id, status_json(&status)));
+    let stopped = admin
+        .as_ref()
+        .map(|admin| admin.stopped())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| (id, json!({ "state": "stopped", "detail": "" })));
+    let mut plugins: Vec<(PluginId, Value)> = mounted.chain(stopped).collect();
+    plugins.sort_by(|a, b| a.0.cmp(&b.0));
+    let plugins: Vec<Value> = plugins
+        .into_iter()
+        .map(|(id, mut entry)| {
             entry["id"] = json!(id.as_str());
             if let Some(instance) = admin.as_ref().and_then(|admin| admin.instance(&id)) {
                 entry["kind"] = json!(instance.kind);
@@ -108,6 +120,18 @@ pub(crate) async fn unmount(State(shared): State<AppState>, Path(id): Path<Strin
 /// `POST /api/plugins/{id}/restart`.
 pub(crate) async fn restart(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let status = admin(&shared)?.restart(&PluginId::new(id.clone())).await?;
+    Ok(status_reply(&id, &status))
+}
+
+/// `POST /api/plugins/{id}/stop`.
+pub(crate) async fn stop(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    admin(&shared)?.stop(&PluginId::new(id.clone())).await?;
+    Ok(Json(json!({ "id": id, "state": "stopped", "detail": "" })))
+}
+
+/// `POST /api/plugins/{id}/start`.
+pub(crate) async fn start(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let status = admin(&shared)?.start(&PluginId::new(id.clone())).await?;
     Ok(status_reply(&id, &status))
 }
 

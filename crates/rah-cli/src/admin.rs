@@ -54,17 +54,47 @@ pub(crate) async fn construct(
 
 /// Kind and configuration of the plugins `rah` mounted.
 #[derive(Default)]
-pub struct Registry(Mutex<BTreeMap<PluginId, (String, Value)>>);
+pub struct Registry(Mutex<BTreeMap<PluginId, Record>>);
+
+/// How a plugin was mounted, enough to mount it again.
+#[derive(Clone)]
+struct Record {
+    kind: String,
+    config: Value,
+    bind: BTreeMap<String, String>,
+    /// Unmounted by `stop`; `start` mounts it again.
+    stopped: bool,
+}
 
 impl Registry {
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PluginId, (String, Value)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PluginId, Record>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn record(&self, id: PluginId, kind: &str, config: Value) {
-        self.lock().insert(id, (kind.to_owned(), config));
+    pub(crate) fn record(
+        &self,
+        id: PluginId,
+        kind: &str,
+        config: Value,
+        bind: BTreeMap<String, String>,
+    ) {
+        let record = Record {
+            kind: kind.to_owned(),
+            config,
+            bind,
+            stopped: false,
+        };
+        self.lock().insert(id, record);
+    }
+
+    fn is_stopped(&self, id: &PluginId) -> bool {
+        self.lock().get(id).is_some_and(|record| record.stopped)
     }
 }
+
+/// Kinds that guard tool calls. They cannot be stopped: tool calls would
+/// run unguarded meanwhile.
+const POLICY_KINDS: [&str; 1] = ["policy-authority"];
 
 pub struct DistributionPlugin {
     manifest: PluginManifest,
@@ -113,6 +143,9 @@ impl Admin {
         if *id == self.own {
             return Err(AdminError::Locked(id.clone()));
         }
+        if self.registry.is_stopped(id) {
+            return Err(AdminError::Stopped(id.clone()));
+        }
         if self.kernel.status(id).is_none() {
             return Err(AdminError::NotMounted(id.clone()));
         }
@@ -120,10 +153,13 @@ impl Admin {
     }
 
     /// The requested id, or the kind, or the kind with the first free
-    /// numeric suffix when `pick_free`.
+    /// numeric suffix when `pick_free`. A stopped plugin keeps its id.
     fn new_id(&self, request: &MountRequest, pick_free: bool) -> Result<PluginId, AdminError> {
         let base = request.id.clone().unwrap_or_else(|| request.kind.clone());
-        let free = |id: &str| self.kernel.status(&PluginId::new(id)).is_none();
+        let free = |id: &str| {
+            let id = PluginId::new(id);
+            self.kernel.status(&id).is_none() && !self.registry.is_stopped(&id)
+        };
         if free(&base) {
             return Ok(PluginId::new(base));
         }
@@ -156,7 +192,8 @@ impl Admin {
             options = options.bind(service.as_str(), instance.clone());
         }
         let status = self.kernel.mount(plugin, options).await.map_err(failed)?;
-        self.registry.record(id, &request.kind, request.config);
+        self.registry
+            .record(id, &request.kind, request.config, request.bind);
         Ok(status)
     }
 }
@@ -177,16 +214,15 @@ impl PluginAdmin for Admin {
                 kind: DISTRIBUTION_PLUGIN.to_owned(),
                 config: Value::Null,
                 locked: true,
+                stopped: false,
             });
         }
-        self.registry
-            .lock()
-            .get(id)
-            .map(|(kind, config)| PluginInstance {
-                kind: kind.clone(),
-                config: config.clone(),
-                locked: false,
-            })
+        self.registry.lock().get(id).map(|record| PluginInstance {
+            kind: record.kind.clone(),
+            config: record.config.clone(),
+            locked: false,
+            stopped: record.stopped,
+        })
     }
 
     async fn mount(&self, request: MountRequest) -> Result<(PluginId, PluginStatus), AdminError> {
@@ -196,6 +232,11 @@ impl PluginAdmin for Admin {
     }
 
     async fn unmount(&self, id: &PluginId) -> Result<(), AdminError> {
+        // A stopped plugin is no longer mounted; forget it.
+        if self.registry.is_stopped(id) {
+            self.registry.lock().remove(id);
+            return Ok(());
+        }
         self.unlocked(id)?;
         self.kernel.unmount(id).await.map_err(failed)?;
         self.registry.lock().remove(id);
@@ -209,8 +250,8 @@ impl PluginAdmin for Admin {
             .update_config(id, config.clone())
             .await
             .map_err(failed)?;
-        if let Some(entry) = self.registry.lock().get_mut(id) {
-            entry.1 = config;
+        if let Some(record) = self.registry.lock().get_mut(id) {
+            record.config = config;
         }
         Ok(status)
     }
@@ -218,6 +259,58 @@ impl PluginAdmin for Admin {
     async fn restart(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
         self.unlocked(id)?;
         self.kernel.restart(id).await.map_err(failed)
+    }
+
+    async fn stop(&self, id: &PluginId) -> Result<(), AdminError> {
+        self.unlocked(id)?;
+        let kind = self
+            .registry
+            .lock()
+            .get(id)
+            .map(|record| record.kind.clone());
+        let Some(kind) = kind else {
+            // Mounted, but not through this distribution: it could not be
+            // started again.
+            return Err(failed(format!(
+                "plugin `{id}` was not mounted by this distribution and cannot be stopped"
+            )));
+        };
+        if POLICY_KINDS.contains(&kind.as_str()) {
+            return Err(failed(format!(
+                "plugin `{id}` guards tool calls and cannot be stopped"
+            )));
+        }
+        self.kernel.unmount(id).await.map_err(failed)?;
+        if let Some(record) = self.registry.lock().get_mut(id) {
+            record.stopped = true;
+        }
+        Ok(())
+    }
+
+    async fn start(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+        let record = self.registry.lock().get(id).cloned();
+        let record = match record {
+            Some(record) if record.stopped => record,
+            Some(_) => return Err(AdminError::NotStopped(id.clone())),
+            None => return Err(AdminError::NotMounted(id.clone())),
+        };
+        let request = MountRequest {
+            kind: record.kind,
+            id: Some(id.as_str().to_owned()),
+            config: record.config,
+            bind: record.bind,
+        };
+        // On failure the record stays stopped, so the start can be retried.
+        self.mount_as(id.clone(), request).await
+    }
+
+    fn stopped(&self) -> Vec<PluginId> {
+        self.registry
+            .lock()
+            .iter()
+            .filter(|(_, record)| record.stopped)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     async fn replace(
@@ -252,27 +345,34 @@ impl PluginAdmin for Admin {
         let root = plain_path(canonical);
         let value = Value::String(root.display().to_string());
         // Every mounted instance of a workspace kind, sandbox first.
-        let targets: Vec<(PluginId, Value)> = WORKSPACE_PLUGINS
+        let targets: Vec<(PluginId, Record)> = WORKSPACE_PLUGINS
             .iter()
             .flat_map(|kind| {
                 self.registry
                     .lock()
                     .iter()
-                    .filter(|(_, (instance_kind, _))| instance_kind == kind)
-                    .map(|(id, (_, config))| (id.clone(), config.clone()))
+                    .filter(|(_, record)| record.kind == *kind)
+                    .map(|(id, record)| (id.clone(), record.clone()))
                     .collect::<Vec<_>>()
             })
             .collect();
-        if targets.is_empty() {
+        if targets.iter().all(|(_, record)| record.stopped) {
             return Err(failed("no plugin that works in a workspace is mounted"));
         }
         let mut plugins = Vec::new();
-        for (id, config) in targets {
-            let mut config = match config {
+        for (id, record) in targets {
+            let mut config = match record.config {
                 Value::Object(map) => map,
                 _ => serde_json::Map::new(),
             };
             config.insert("root".to_owned(), value.clone());
+            if record.stopped {
+                // Takes the new root when it is started again.
+                if let Some(record) = self.registry.lock().get_mut(&id) {
+                    record.config = Value::Object(config);
+                }
+                continue;
+            }
             let status = self.configure(&id, Value::Object(config)).await?;
             plugins.push((id, status));
         }

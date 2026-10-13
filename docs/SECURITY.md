@@ -146,7 +146,10 @@ catalog plugin, including `policy-authority`. They are behind the same token
 and checks, and no tool can reach them, so model output cannot change the
 composition. The UI warns before unmounting the policy, and the header shows
 `UNGUARDED` whenever no `tool.before_invoke` handler is mounted. The admin
-service refuses to unmount or reconfigure the `distribution` plugin itself.
+service refuses to unmount or reconfigure the `distribution` plugin itself,
+and refuses to stop a policy plugin (`policy-authority`): a stop is meant to
+be temporary, and tool calls would run unguarded meanwhile. Unmounting the
+policy remains possible, behind the warning.
 
 Behind the same token and checks, and likewise unreachable from tools:
 

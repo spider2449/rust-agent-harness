@@ -44,7 +44,8 @@
       <ol id="transcript" class="transcript"></ol>
       <div id="live" class="live" hidden></div>
       <form id="composer" class="composer">
-        <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line)" disabled></textarea>
+        <ul id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></ul>
+        <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line, / for commands)" disabled aria-controls="slash-menu"></textarea>
         <div class="actions">
           <button id="send" type="submit" disabled>Send</button>
           <button id="cancel" type="button" class="ghost" hidden>Cancel</button>

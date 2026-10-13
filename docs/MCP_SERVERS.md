@@ -98,7 +98,8 @@ see the code and approve it before it runs. To use a hosted model instead,
 swap in `model-anthropic` or `model-openai`.
 
 To call tools without a model, for example to check the connection, swap in
-`model-mock` and pass the request with `--prompt`:
+`model-mock`. Then type `/call <tool> <json>` in the REPL, or pass it with
+`--prompt`:
 
 ```powershell
 cargo run -p rah-cli -- --config examples/mcp/blender.toml --prompt '/call mcp.blender.get_objects_summary {}'
@@ -106,9 +107,9 @@ cargo run -p rah-cli -- --config examples/mcp/blender.toml --prompt '/call mcp.b
 
 Windows PowerShell 5.1 drops the double quotes inside an argument it passes
 to a native program, so escape them:
-`'/call mcp.blender.get_object_detail_summary {\"name\":\"Camera\"}'`. Use
-`--prompt` rather than typing `/call` in the REPL (see
-[KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
+`'/call mcp.blender.get_object_detail_summary {\"name\":\"Camera\"}'`. In
+Git Bash, set `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/call` into a
+Windows path.
 
 ### Pick the right package
 

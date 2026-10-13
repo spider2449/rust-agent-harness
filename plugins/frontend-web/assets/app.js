@@ -468,9 +468,208 @@ async function startTurn(input) {
   }
 }
 
+// Slash commands in the message box. `/call` and `/notool` are turns for the
+// mock model; the others run in the browser. Typing `/` lists them.
+const SLASH_COMMANDS = [
+  { name: "/new", usage: "/new", help: "Start a new session" },
+  { name: "/plugins", usage: "/plugins", help: "Show the Plugins panel" },
+  {
+    name: "/stop", usage: "/stop <plugin>", help: "Stop a plugin, keeping its configuration",
+    // Policy plugins guard tool calls; the server refuses to stop them.
+    plugin: (p) => p.state !== "stopped" && p.kind && !p.locked && p.kind !== "policy-authority",
+  },
+  { name: "/start", usage: "/start <plugin>", help: "Start a stopped plugin", plugin: (p) => p.state === "stopped" },
+  { name: "/restart", usage: "/restart <plugin>", help: "Restart a plugin", plugin: (p) => p.state !== "stopped" && p.kind && !p.locked },
+  { name: "/cancel", usage: "/cancel", help: "Cancel the running turn" },
+  { name: "/help", usage: "/help", help: "List the commands" },
+  { name: "/call", usage: "/call <tool> <json>", help: "Run a turn that requests a tool (mock model)", turn: true },
+  { name: "/notool", usage: "/notool <text>", help: "Run a turn without tools (mock model)", turn: true },
+];
+
+const slash = { items: [], index: 0, plugins: null, loading: false };
+
+function slashCommand(name) {
+  return SLASH_COMMANDS.find((command) => command.name === name);
+}
+
+// Plugin ids for completing `/stop` and friends, loaded on first use.
+function slashPlugins() {
+  if (slash.plugins || slash.loading) return slash.plugins || [];
+  slash.loading = true;
+  api("/plugins")
+    .then((plugins) => {
+      slash.plugins = plugins;
+      updateSlashMenu();
+    })
+    .catch(() => {})
+    .finally(() => {
+      slash.loading = false;
+    });
+  return [];
+}
+
+function slashItems(value) {
+  if (!value.startsWith("/") || value.includes("\n")) return [];
+  const space = value.indexOf(" ");
+  if (space < 0) {
+    return SLASH_COMMANDS.filter((command) => command.name.startsWith(value)).map((command) => ({
+      label: command.usage,
+      detail: command.help,
+      insert: command.plugin || command.turn ? `${command.name} ` : command.name,
+    }));
+  }
+  const command = slashCommand(value.slice(0, space));
+  const argument = value.slice(space + 1);
+  if (!command || !command.plugin || argument.includes(" ")) return [];
+  return slashPlugins()
+    .filter((plugin) => command.plugin(plugin) && plugin.id.startsWith(argument))
+    .map((plugin) => ({ label: plugin.id, detail: plugin.state, insert: `${command.name} ${plugin.id}` }));
+}
+
+function hideSlashMenu() {
+  slash.items = [];
+  $("slash-menu").hidden = true;
+  $("input").removeAttribute("aria-activedescendant");
+}
+
+function updateSlashMenu() {
+  const value = $("input").value;
+  if (!value.startsWith("/")) slash.plugins = null; // Reload on the next command.
+  slash.items = slashItems(value);
+  slash.index = Math.min(slash.index, Math.max(slash.items.length - 1, 0));
+  const menu = $("slash-menu");
+  if (!slash.items.length) {
+    hideSlashMenu();
+    return;
+  }
+  const rows = slash.items.map((item, index) => {
+    const row = el("li", `slash-item${index === slash.index ? " active" : ""}`);
+    row.id = `slash-${index}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(index === slash.index));
+    row.append(el("code", "", item.label), el("span", "", item.detail));
+    // Keep the focus in the message box.
+    row.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      acceptSlash(index);
+    });
+    return row;
+  });
+  menu.replaceChildren(el("li", "slash-hint", "Tab or Enter to complete, Esc to close"), ...rows);
+  menu.hidden = false;
+  $("input").setAttribute("aria-activedescendant", `slash-${slash.index}`);
+  $(`slash-${slash.index}`)?.scrollIntoView({ block: "nearest" });
+}
+
+function acceptSlash(index) {
+  const item = slash.items[index];
+  if (!item) return;
+  $("input").value = item.insert;
+  $("input").focus();
+  slash.index = 0;
+  updateSlashMenu();
+}
+
+// Handles menu keys. Returns whether the key was used.
+function slashKey(event) {
+  if ($("slash-menu").hidden || !slash.items.length) return false;
+  const last = slash.items.length - 1;
+  switch (event.key) {
+    case "ArrowDown":
+      slash.index = slash.index >= last ? 0 : slash.index + 1;
+      break;
+    case "ArrowUp":
+      slash.index = slash.index <= 0 ? last : slash.index - 1;
+      break;
+    case "Escape":
+      hideSlashMenu();
+      break;
+    case "Tab":
+      acceptSlash(slash.index);
+      break;
+    case "Enter": {
+      if (event.shiftKey) return false;
+      // A complete command is sent; a partial one is completed first.
+      const item = slash.items[slash.index];
+      if (item.insert === $("input").value) return false;
+      acceptSlash(slash.index);
+      break;
+    }
+    default:
+      return false;
+  }
+  event.preventDefault();
+  if (event.key.startsWith("Arrow")) updateSlashMenu();
+  return true;
+}
+
+// Runs a local slash command. Returns whether `input` was one (handled or
+// rejected); turn commands and plain text return false.
+async function runSlash(input) {
+  if (!input.startsWith("/")) return false;
+  const [name, ...rest] = input.split(/\s+/);
+  const argument = rest.join(" ");
+  const command = slashCommand(name);
+  if (command?.turn) return false;
+  hideSlashMenu();
+  if (!command) {
+    showNotice(`Unknown command ${name}. Type / to see the commands.`);
+    return true;
+  }
+  if (command.plugin && (!argument || argument.includes(" "))) {
+    showNotice(`Usage: ${command.usage}`);
+    return true;
+  }
+  const path = `/plugins/${encodeURIComponent(argument)}`;
+  try {
+    switch (name) {
+      case "/new":
+        await newSession();
+        break;
+      case "/plugins":
+        $("plugins-panel").hidden = false;
+        await loadPlugins();
+        break;
+      case "/stop": {
+        const plugin = (slash.plugins || []).find((p) => p.id === argument);
+        if (plugin?.kind === "frontend-web") {
+          stopPlugin(plugin);
+          break;
+        }
+        await manage(`${path}/stop`, "POST");
+        showInfo(`${argument}: stopped`);
+        break;
+      }
+      case "/start":
+      case "/restart": {
+        const result = await manage(`${path}/${name.slice(1)}`, "POST");
+        if (result.state === "active") showInfo(`${argument}: active`);
+        break;
+      }
+      case "/cancel":
+        if (state.running) send({ type: "cancel" });
+        else showNotice("No turn is running.");
+        break;
+      case "/help":
+        $("input").value = "/";
+        updateSlashMenu();
+        return "keep";
+    }
+  } catch (error) {
+    report(error);
+  }
+  slash.plugins = null;
+  return true;
+}
+
 async function submit(event) {
   event.preventDefault();
   const input = $("input").value.trim();
+  const local = await runSlash(input);
+  if (local) {
+    if (local !== "keep") $("input").value = "";
+    return;
+  }
   if (await startTurn(input)) $("input").value = "";
 }
 
@@ -576,7 +775,7 @@ async function manage(path, method, body) {
   const options = { method };
   if (body !== undefined) options.body = JSON.stringify(body);
   const result = await api(path, options);
-  if (result.state && result.state !== "active" && result.state !== "unmounted") {
+  if (result.state && !["active", "unmounted", "stopped"].includes(result.state)) {
     showNotice(`${result.id}: ${result.state}${result.detail ? ` (${result.detail})` : ""}`);
   } else {
     showNotice("");
@@ -630,6 +829,13 @@ function removePlugin(plugin) {
   manage(`/plugins/${encodeURIComponent(plugin.id)}`, "DELETE").catch(report);
 }
 
+function stopPlugin(plugin) {
+  if (plugin.kind === "frontend-web" && !window.confirm(`Stop ${plugin.id}?
+
+This is the Web UI you are using; it will stop responding.`)) return;
+  manage(`/plugins/${encodeURIComponent(plugin.id)}/stop`, "POST").catch(report);
+}
+
 function pluginRow(plugin) {
   const row = el("tr");
   const name = el("td", "", plugin.id);
@@ -644,9 +850,16 @@ function pluginRow(plugin) {
       button.addEventListener("click", handler);
       actions.append(button);
     };
-    action("Restart", () => manage(`/plugins/${encodeURIComponent(plugin.id)}/restart`, "POST").catch(report));
-    action("Configure", () => openEditor("configure", plugin));
-    action("Replace", () => openEditor("replace", plugin));
+    const path = `/plugins/${encodeURIComponent(plugin.id)}`;
+    if (plugin.state === "stopped") {
+      action("Start", () => manage(`${path}/start`, "POST").catch(report));
+    } else {
+      // Policy plugins guard tool calls; the server refuses to stop them.
+      if (plugin.kind !== "policy-authority") action("Stop", () => stopPlugin(plugin));
+      action("Restart", () => manage(`${path}/restart`, "POST").catch(report));
+      action("Configure", () => openEditor("configure", plugin));
+      action("Replace", () => openEditor("replace", plugin));
+    }
     action("Remove", () => removePlugin(plugin));
     name.append(actions);
   }
@@ -873,8 +1086,11 @@ async function start() {
   }
   $("composer").addEventListener("submit", submit);
   $("input").addEventListener("keydown", (event) => {
+    if (slashKey(event)) return;
     if (event.key === "Enter" && !event.shiftKey) submit(event);
   });
+  $("input").addEventListener("input", updateSlashMenu);
+  $("input").addEventListener("blur", hideSlashMenu);
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   setupSettings();
