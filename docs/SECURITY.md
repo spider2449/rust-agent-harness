@@ -154,6 +154,18 @@ configuration; its messages and metadata are untrusted:
   model input like any other tool output: text inside it can try to
   instruct the model.
 
+## `context-compact`
+
+`context-compact` sends old conversation history, including tool output, to
+the mounted `model` service and puts the reply into later requests as one
+system item. The summary is model output derived from untrusted content, so
+it can carry instructions planted in a tool result into a more prominent
+position. It is labeled as background, not instructions, bounded to
+`max_summary_chars`, and grants nothing: tool calls it prompts still go
+through `ToolInvoker` and the policy. The summary request has no tools and
+no `model.before_request` hooks. Cache files in `dir` hold summaries of
+conversations in plain text; they are kept until deleted.
+
 ## `frontend-web`
 
 The Web frontend serves the agent to the local machine only:

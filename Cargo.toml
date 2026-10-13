@@ -6,6 +6,7 @@ members = [
     "crates/rah-plugin-host-process",
     "crates/rah-plugin-host-wasm",
     "crates/rah-protocol",
+    "plugins/context-compact",
     "plugins/context-default",
     "plugins/frontend-cli",
     "plugins/frontend-web",

@@ -93,6 +93,9 @@ Implemented:
   workspace-bounded `fs.read`, `fs.list`, `fs.glob` and
   `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;
+  `context-compact` (opt-in: summarizes history beyond a size limit with the
+  model before `context-default` applies its window; summaries are cached by
+  the history prefix they cover);
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`; with
   `memory_dir` one file per workspace, chosen from the sandbox root on every

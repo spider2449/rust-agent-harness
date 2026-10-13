@@ -18,12 +18,12 @@
 
 起因：`context-default` 的滑動視窗（`max_items`、`max_chars`）會直接丟掉最舊的歷史，長對話會失去前面談過的內容。
 
-- [ ] 新 plugin，掛在 `model.before_request`，排在 `context-default` 之後（hook 優先序）。歷史超過門檻時，把會被丟掉的那段交給 `model` 服務摘要，換成一則摘要訊息。
-- [ ] 摘要以附加的 metadata 行寫進 session log（不改寫既有紀錄），之後的請求重用，不重複摘要；fork 沿用父 session 的摘要，但只到 fork 點為止。
-- [ ] 摘要請求失敗或逾時時，退回滑動視窗的行為並記錄一次警告，不讓這一輪失敗。
-- [ ] 可設定：觸發門檻、保留最近幾輪原文、摘要的 system prompt、摘要用的 model plugin（預設同一個）。
-- [ ] 測試用 `model-mock`：門檻前不摘要、門檻後摘要一次並重用、摘要失敗的退回、fork 之後的摘要邊界。
-- 待決：如果需要 `SessionLog` 新增「附加 metadata」的通用方法（目前只有標題用的 metadata 行），屬於 `rah-api` 合約變更，先確認 ADR 0036 範圍內即可，或補 ADR。
+- [x] 新 plugin，掛在 `model.before_request`。hook 是優先序高的先跑，所以用 priority 10，排在 `context-default`（0）**之前**：要在視窗丟掉歷史之前就看到完整歷史（計畫原本寫「之後」是錯的）。歷史超過 `trigger_chars` 時，把最舊的部分交給 `model` 服務摘要（不帶 tool、不經過 hook），換成一則 system 摘要，保留最新的 `keep_chars`。切點一定在 user 訊息，不切進目前這一輪。
+- [x] 摘要的重用：**改用快取，不寫進 session log。** `ModelRequest` 沒有 session id，hook 不知道請求屬於哪個 session，所以改成以「摘要涵蓋的歷史前綴」的 FNV-1a hash 當 key。同一段歷史的後續請求直接重用；歷史變長時接著擴充最新的摘要；fork 只在共用的前綴上命中，自然只沿用到 fork 點。`dir` 把快取存成檔案，重啟後仍可用。這樣不需要改 `rah-api`，也不需要 ADR。
+- [x] 失敗或逾時（`timeout_secs`，預設 120）：這一輪照常進行，沿用已有的摘要（或不摘要），剩下交給 `context-default` 的視窗；同一段歷史五分鐘內不再重試，免得每一輪都卡在逾時。沒有記錄警告：plugin 目前沒有記錄管道，留給 G3 的 `telemetry-log`。
+- [x] 可設定：`trigger_chars`、`keep_chars`、`chunk_chars`（一次摘要最多送多少）、`max_summary_chars`、`instructions`（摘要的 system prompt）、`model`（provider 的 model id）、`dir`。**沒有做「指定另一個 model plugin」**：kernel 的 service 查詢只回傳一個 `model`，要選特定 instance 得透過 `bind`，`context-compact` 不宣告 `requires`，暫不支援。
+- [x] 測試：plugin 單元測試用假的 model（門檻內不變、摘要一次並重用、擴充、fork 邊界、失敗與退避、逾時、目前這一輪很大、`dir` 跨重啟、設定檢查）；`crates/rah-cli/tests/compact.rs` 用 `dev` preset 加 `model-mock` 端到端驗證它在 `context-default` 之前執行，且 session log 不變。
+- 決定：不放進任何 preset（每次摘要都是一次額外的模型請求，對付費 API 有成本），使用者自己掛載；Web UI 的 Plugins 面板可以直接加。
 
 ## G3：`telemetry-log`（診斷紀錄與用量）
 

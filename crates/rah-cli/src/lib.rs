@@ -11,6 +11,7 @@ use admin::{BuildError, construct};
 pub use admin::{DISTRIBUTION_PLUGIN, DistributionPlugin, Registry};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
+use rah_plugin_context_compact::CompactPlugin;
 use rah_plugin_context_default::ContextPlugin;
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
@@ -39,7 +40,8 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 22] = [
+    let entries: [(&'static str, Constructor); 23] = [
+        ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),

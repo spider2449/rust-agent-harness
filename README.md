@@ -151,6 +151,20 @@ use = "tools-web-search"
 config = { engines = ["duckduckgo", "bing"], max_results = 8 }   # all optional
 ```
 
+Long conversations: `context-default` keeps a window of the newest history
+and drops the rest. The opt-in `context-compact` plugin summarizes the old
+part with the mounted model instead, once the history passes
+`trigger_chars`, keeping the newest `keep_chars` as they are. Summaries are
+cached by the history they cover (on disk with `dir`), reused by later
+requests and forks, and extended as the conversation grows. Each summary is
+an extra model request, and the session log is never changed:
+
+```toml
+[[plugin]]
+use = "context-compact"
+config = { trigger_chars = 60000, keep_chars = 20000, dir = ".rah/compact" }   # all optional
+```
+
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
 on stdio ([protocol v3](docs/PROCESS_PLUGINS.md)). The Python example
 [`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools

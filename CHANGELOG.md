@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Summarizing long conversations
+
+- New opt-in plugin `context-compact` (`plugins/context-compact`). On
+  `model.before_request`, before `context-default`, it replaces history
+  beyond `trigger_chars` (default 60 000) with one system item holding a
+  summary written by the mounted model, keeping the newest `keep_chars`
+  (default 20 000) whole. The cut is always at a user message and never
+  inside the current turn. Old history is sent in chunks of at most
+  `chunk_chars`, each merged into the summary so far; tool results and
+  arguments are shortened in the transcript.
+- Summaries are cached by an FNV-1a hash of the history prefix they cover,
+  so they are reused across requests and by forks that share that prefix,
+  and a longer history extends the newest summary. `dir` keeps them on disk
+  across restarts. A failure or `timeout_secs` (default 120) leaves the
+  request as it was and is not retried for the same history for five
+  minutes. Optional `model` and `instructions` change the summary request.
+- `rah` lists the plugin in its catalog; no preset mounts it.
+
 ### File tools without Git
 
 - `tools-builtin` adds `fs.list` (`path`, `depth`, `hidden`), `fs.glob`

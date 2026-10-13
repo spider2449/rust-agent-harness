@@ -1435,6 +1435,7 @@ dependencies = [
  "clap",
  "futures",
  "rah-api",
+ "rah-plugin-context-compact",
  "rah-plugin-context-default",
  "rah-plugin-frontend-cli",
  "rah-plugin-frontend-web",
@@ -1478,6 +1479,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rah-plugin-context-compact"
+version = "0.41.0"
+dependencies = [
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
