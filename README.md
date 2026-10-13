@@ -68,6 +68,7 @@ hand a task to a subagent in its own session), `model-mock`,
 |---|---|---|
 | `default` (the default) | `model-llamacpp` | `policy-authority` |
 | `openai` | `model-openai` | `policy-authority` |
+| `anthropic` | `model-anthropic` | `policy-authority` |
 | `dev` | `model-mock` | `policy-authority` |
 | `minimal` | `model-mock` | none: `rah` prints an `UNGUARDED` warning |
 
@@ -149,7 +150,7 @@ allow or deny tool calls the policy marks `Ask`. A status line shows the
 workspace root, its Git branch and pending changes, the model and loop in
 use, and whether a policy guards tool calls. Click the workspace path to
 switch the folder the tools work in, without restarting. **Settings** sets
-the model (llama.cpp address and model, OpenAI, or the mock), the system
+the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms; the **Plugins** panel remains for raw plugin configuration. Its Plugins panel
 adds, configures, restarts, replaces and removes plugins while `rah` runs:
@@ -167,10 +168,22 @@ cargo run -p rah-cli -- --model qwen
 # OpenAI: the key is read from the backend environment, never from config.
 $env:OPENAI_API_KEY = '...'
 cargo run -p rah-cli -- --preset openai --model your-model-id
+
+# Anthropic: an API key from the Claude Console (API billing, not a
+# Claude.ai subscription). Without --model it uses claude-opus-5-5.
+$env:ANTHROPIC_API_KEY = '...'
+cargo run -p rah-cli -- --preset anthropic
+cargo run -p rah-cli -- --preset anthropic --model claude-sonnet-5-5
 ```
 
+`model-anthropic` also takes `max_tokens`, `effort` (`low` to `max`) and
+`refusal_fallback` in its configuration. Without an Anthropic key, it can
+run against llama-server's Anthropic-compatible endpoint: set `endpoint =
+"http://127.0.0.1:8080/v1/messages"` and point `api_key_env` at any
+non-empty variable.
+
 The model plugins are verified against deterministic loopback fixtures only,
-not against a live llama-server or the live OpenAI API.
+not against a live llama-server or the live OpenAI or Anthropic APIs.
 
 Compose your own plugins with a distribution file:
 

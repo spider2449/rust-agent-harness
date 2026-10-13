@@ -16,6 +16,7 @@ use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_loop_plan::PlanLoopPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
+use rah_plugin_model_anthropic::AnthropicPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
 use rah_plugin_policy_authority::PolicyAuthorityPlugin;
@@ -37,12 +38,13 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 19] = [
+    let entries: [(&'static str, Constructor); 20] = [
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
         ("loop-plan", |id| Arc::new(PlanLoopPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
+        ("model-anthropic", |id| Arc::new(AnthropicPlugin::new(id))),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),
         ("model-openai", |id| {
@@ -87,7 +89,7 @@ pub struct Preset {
 /// (background jobs and `agent.delegate`), the default loop and the terminal
 /// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
-pub const PRESETS: [Preset; 4] = [
+pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "default",
         model: "model-llamacpp",
@@ -106,6 +108,11 @@ pub const PRESETS: [Preset; 4] = [
     Preset {
         name: "openai",
         model: "model-openai",
+        guarded: true,
+    },
+    Preset {
+        name: "anthropic",
+        model: "model-anthropic",
         guarded: true,
     },
 ];
@@ -166,7 +173,7 @@ use = "frontend-cli"
 pub enum BootError {
     #[error("invalid distribution: {0}")]
     Parse(String),
-    #[error("unknown preset `{0}`; available: default, dev, minimal, openai")]
+    #[error("unknown preset `{0}`; available: default, dev, minimal, openai, anthropic")]
     UnknownPreset(String),
     #[error("unknown plugin `{0}`; available: {1}")]
     UnknownPlugin(String, String),

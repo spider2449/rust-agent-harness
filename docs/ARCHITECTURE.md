@@ -15,7 +15,7 @@ rah-kernel                           lifecycle / services / hooks / events / sco
 rah-api                              service contracts: ModelProvider, AgentLoop, Tool,
    ^                                 ToolInvoker, SessionLog, KvStore, ExecEnv, ...
 plugins/*                            depend only on rah-api and rah-protocol
-   model-openai-responses, model-llamacpp, model-mock
+   model-openai-responses, model-anthropic, model-llamacpp, model-mock
    loop-react
    tools-builtin, tools-mcp, tools-repo, tools-repo-write, tools-shell
    session-jsonl, storage-fs, sandbox-process
@@ -86,7 +86,8 @@ Implemented:
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
   `model.before_request`.
 - Plugins in `plugins/`: `model-mock`; `model-openai` and `model-llamacpp`
-  (crate `model-responses`); `loop-react` and `loop-plan` (plan-and-execute;
+  (crate `model-responses`); `model-anthropic` (Anthropic Messages API);
+  `loop-react` and `loop-plan` (plan-and-execute;
   either can replace the other at runtime); `tools-builtin` (`echo` and
   workspace-bounded `fs.read`); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;

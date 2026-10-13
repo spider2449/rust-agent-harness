@@ -8,11 +8,20 @@
 const MODEL_KINDS = {
   "model-llamacpp": "llama.cpp (local server)",
   "model-openai": "OpenAI",
+  "model-anthropic": "Anthropic (Claude)",
   "model-mock": "Mock (for testing)",
 };
 const LOOP_KINDS = {
   "loop-react": "Standard: answer and use tools step by step",
   "loop-plan": "Plan first, then carry out each step",
+};
+const EFFORTS = {
+  "": "Model default",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
 };
 const LEVELS = ["none", "read", "write", "execute"];
 
@@ -147,6 +156,17 @@ function modelForm() {
       fields.append(
         field("Model", inputs.model, "Required."),
         field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+        field("Endpoint", inputs.endpoint, "Optional."),
+      );
+    } else if (kind.value === "model-anthropic") {
+      inputs.model = textInput(value("model"), "claude-opus-5-5");
+      inputs.api_key_env = textInput(value("api_key_env"), "ANTHROPIC_API_KEY");
+      inputs.effort = select(EFFORTS, value("effort") || "");
+      inputs.endpoint = textInput(value("endpoint"), "https://api.anthropic.com/v1/messages");
+      fields.append(
+        field("Model", inputs.model, "Leave empty for claude-opus-5-5."),
+        field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+        field("Effort", inputs.effort, "How much the model thinks before answering; higher is slower and costs more."),
         field("Endpoint", inputs.endpoint, "Optional."),
       );
     } else {

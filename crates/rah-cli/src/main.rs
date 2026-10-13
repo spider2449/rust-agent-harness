@@ -17,10 +17,10 @@ use serde_json::Value;
 #[command(name = "rah", version)]
 struct Args {
     /// Built-in preset to run (ignored with --config): default (llama.cpp),
-    /// dev (mock model), minimal (mock model, no policy), openai.
+    /// dev (mock model), minimal (mock model, no policy), openai, anthropic.
     #[arg(long, default_value = "default")]
     preset: String,
-    /// Model id (model-openai, model-llamacpp).
+    /// Model id (model-openai, model-anthropic, model-llamacpp).
     #[arg(long)]
     model: Option<String>,
     /// Distribution file listing the plugins to mount.
@@ -104,11 +104,15 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         }
     }
     if let Some(model) = &args.model {
-        let openai = distribution.set_config("model-openai", "model", Value::String(model.clone()));
-        let llama =
-            distribution.set_config("model-llamacpp", "model", Value::String(model.clone()));
-        if !openai && !llama {
-            return Err("--model needs a `model-openai` or `model-llamacpp` plugin".into());
+        let mut matched = false;
+        for kind in ["model-openai", "model-anthropic", "model-llamacpp"] {
+            matched |= distribution.set_config(kind, "model", Value::String(model.clone()));
+        }
+        if !matched {
+            return Err(
+                "--model needs a `model-openai`, `model-anthropic` or `model-llamacpp` plugin"
+                    .into(),
+            );
         }
     }
     Ok(distribution)

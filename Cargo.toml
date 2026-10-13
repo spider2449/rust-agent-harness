@@ -11,6 +11,7 @@ members = [
     "plugins/frontend-web",
     "plugins/loop-plan",
     "plugins/loop-react",
+    "plugins/model-anthropic",
     "plugins/model-mock",
     "plugins/model-responses",
     "plugins/policy-authority",

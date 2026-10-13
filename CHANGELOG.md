@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Anthropic model plugin
+
+- New crate `plugins/model-anthropic` with the plugin `model-anthropic`: the
+  Anthropic Messages API with an API key (API billing; no Claude.ai or
+  Claude Code subscription login). The key is read at start from the
+  variable named by `api_key_env` (default `ANTHROPIC_API_KEY`); a missing
+  key leaves the plugin `Failed`. `endpoint` may only be the official
+  endpoint or a loopback URL. `model` defaults to `claude-opus-5-5`;
+  `max_tokens` (default 64000), `effort` and `refusal_fallback` (server-side
+  refusal fallback for the models that support it, on by default) are
+  optional.
+- Requests stream with automatic prompt caching and are never retried.
+  Leading system items become the system prompt; later ones are sent as
+  marked user text. Thinking blocks are not replayed, because neutral
+  context does not carry them. Output-limit and refusal stops are typed
+  `Rejected` errors; an overloaded provider is a `Transport` error.
+- `rah`: new preset `anthropic`; `--model` also sets `model-anthropic`.
+  Web UI Settings offers Anthropic with model, key variable, effort and
+  endpoint.
+- Also accepts llama-server's Anthropic-compatible `/v1/messages` stream
+  (tool-use starts without `input`, interleaved blocks). Checked by hand
+  against a local llama-server with a tool round; not verified against the
+  live Anthropic API.
+
 ### Web UI: show provider switches; keep the status line in place
 
 - Saving the model or loop in Settings says what is now used, for example

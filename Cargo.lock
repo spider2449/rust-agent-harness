@@ -1433,6 +1433,7 @@ dependencies = [
  "rah-plugin-host-wasm",
  "rah-plugin-loop-plan",
  "rah-plugin-loop-react",
+ "rah-plugin-model-anthropic",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
  "rah-plugin-policy-authority",
@@ -1551,6 +1552,21 @@ dependencies = [
  "rah-protocol",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-model-anthropic"
+version = "0.40.0"
+dependencies = [
+ "async-stream",
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
  "tokio",
 ]
 
