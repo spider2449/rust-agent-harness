@@ -272,6 +272,19 @@ window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta 
   .filter((button) => button.textContent === label);
 // Every notice the page shows, even one that is replaced right away.
 window.notices = [];
+// The last requests the page made, with their status or how long they have
+// been pending, for the timeout report.
+window.requests = [];
+const pageFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const request = { what: `${init?.method || 'GET'} ${String(input).split('?')[0]}`, start: Date.now() };
+  requests.push(request);
+  if (requests.length > 30) requests.shift();
+  return pageFetch(input, init).then(
+    (response) => { request.done = `${response.status} after ${Date.now() - request.start} ms`; return response; },
+    (error) => { request.done = `${error} after ${Date.now() - request.start} ms`; throw error; },
+  );
+};
 document.addEventListener('DOMContentLoaded', () => {
   new MutationObserver(() => {
     const text = byId('notice').textContent;
@@ -295,6 +308,7 @@ const SNAPSHOT: &str = r#"(async () => ({
   transcript: [...document.querySelectorAll('#transcript .entry')].map((entry) => entry.textContent),
   session: { current: state.current, running: state.running, starting: !!state.starting, workspace: state.workspace, title: document.getElementById('session-title')?.textContent },
   sessions: [...document.querySelectorAll('#sessions li.session')].map((item) => item.dataset.id + ' ' + item.textContent),
+  requests: window.requests.map((r) => `${r.what}: ${r.done || `pending for ${Date.now() - r.start} ms`}`),
 }))()"#;
 
 struct Web {

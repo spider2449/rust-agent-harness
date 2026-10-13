@@ -27,11 +27,20 @@ in the commit which entry it closes.
 - **Suspects, unconfirmed:** `resend()` in `plugins/frontend-web/assets/app.js`
   returning early (`state.running` still true, or `startTurn` refusing
   because `state.starting` is stuck), or one of its requests (fork, title,
-  `/sessions`) never completing.
+  `/sessions`) never completing. The second fits the symptom better: a
+  pending promise shows no notice and changes nothing. `idle()` reads the
+  DOM that `setRunning` changes together with `state.running`, so a stuck
+  `state.running` would also have failed the previous wait.
 - **Diagnostics in place:** a timed-out wait now prints `session`
   (`current`, `running`, `starting`, `workspace`, header title), the session
-  list and every page error (uncaught exceptions, console errors, failed
-  loads). The next failure's output should show which of the suspects it is.
+  list, every page error (uncaught exceptions, console errors, failed
+  loads) and `requests`: the page's last 30 requests with their status and
+  time, or how long they have been pending. The next failure's output
+  should show which of the suspects it is.
+- **Not reproduced on 2026-10-13** (Windows 10, Edge): 30 full
+  `cargo test --workspace` runs and 10 rounds of three parallel runs of the
+  test alone, 60 passes in all. The UI is not changed until a failure shows
+  the cause.
 - **To reproduce:** run the full suite repeatedly and keep the output, for
   example
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`
