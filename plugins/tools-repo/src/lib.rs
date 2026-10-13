@@ -3,7 +3,8 @@
 //! - `repo.status`: branch line and changed paths (`git status`).
 //! - `repo.diff`: worktree-versus-index diff, or index-versus-HEAD with
 //!   `staged`, optionally for one path.
-//! - `repo.list`: tracked direct children of the root or a subdirectory.
+//! - `repo.list`: tracked children of the root or a subdirectory, `depth`
+//!   levels deep (default 1, at most 16), so one call can show a tree.
 //! - `repo.search`: tracked paths containing `query` (`mode = "path"`), or
 //!   tracked lines containing it literally (`mode = "text"`).
 //!
@@ -294,6 +295,9 @@ impl Tool for RepoDiff {
     }
 }
 
+/// The deepest `repo.list` listing.
+const MAX_LIST_DEPTH: usize = 16;
+
 pub struct RepoList(Arc<Git>, usize);
 
 #[async_trait]
@@ -301,12 +305,21 @@ impl Tool for RepoList {
     fn definition(&self) -> ToolDefinition {
         definition(
             "repo.list",
-            "Lists the tracked direct children (files and directories) of the repository root, \
-             or of a subdirectory such as {\"path\": \"crates\"}. Pass {} for the root.",
+            "Lists the tracked files and directories of the repository root, or of a \
+             subdirectory such as {\"path\": \"crates\"}. Pass {} for the root. `depth` \
+             lists that many levels at once (default 1, at most 16), so one call with \
+             {\"depth\": 4} shows the project structure; entry names are paths relative \
+             to `path`. Prefer one deeper call over listing directories one by one.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": path_schema("Optional subdirectory relative to the repository, using `/`.")
+                    "path": path_schema("Optional subdirectory relative to the repository, using `/`."),
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_LIST_DEPTH,
+                        "description": "Levels to list; 1 lists direct children only."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -318,10 +331,17 @@ impl Tool for RepoList {
         #[serde(deny_unknown_fields)]
         struct Input {
             path: Option<String>,
+            depth: Option<usize>,
         }
         let input: Input = parse(input)?;
         if let Some(path) = &input.path {
             validate_repo_path(path)?;
+        }
+        let depth = input.depth.unwrap_or(1);
+        if !(1..=MAX_LIST_DEPTH).contains(&depth) {
+            return Err(ToolError::InvalidInput(format!(
+                "`depth` must be from 1 to {MAX_LIST_DEPTH}"
+            )));
         }
         self.0.ensure_top_level(cx.cancel.clone()).await?;
         let (files, mut truncated) = tracked_files(&self.0, input.path.as_deref(), &cx).await?;
@@ -330,18 +350,20 @@ impl Tool for RepoList {
             .as_ref()
             .map(|p| format!("{p}/"))
             .unwrap_or_default();
+        // Every path up to `depth` levels below the prefix: the ancestors of a
+        // tracked file are directories.
         let mut children: BTreeMap<&str, &str> = BTreeMap::new();
         for file in &files {
             let Some(rest) = file.strip_prefix(prefix.as_str()) else {
                 continue;
             };
-            match rest.split_once('/') {
-                Some((directory, _)) => {
-                    children.insert(directory, "dir");
-                }
-                None => {
-                    children.entry(rest).or_insert("file");
-                }
+            let mut levels = 0;
+            for (end, _) in rest.match_indices('/').take(depth) {
+                children.insert(&rest[..end], "dir");
+                levels += 1;
+            }
+            if levels < depth {
+                children.entry(rest).or_insert("file");
             }
         }
         if children.is_empty() && input.path.is_some() {

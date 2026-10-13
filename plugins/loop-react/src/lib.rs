@@ -10,6 +10,10 @@
 //! be swapped while this loop keeps running. Each turn runs as a task owned by
 //! this plugin's scope.
 //!
+//! `max_rounds` bounds the model requests that may request tools. When they
+//! are used up, one more request without tools asks the model to answer with
+//! what it has, so a long search ends with an answer instead of an error.
+//!
 //! Configuration: `{ "max_rounds": <n> }` (default 32).
 
 use std::sync::{
@@ -31,7 +35,7 @@ use rah_api::{
 use rah_protocol::{
     AgentErrorCode, AgentEvent, AgentOutput, ContextItem, Message, MessageRole, ModelEvent,
     ModelRequest, ModelRequestId, RequestId, SessionEntry, SessionId, ToolCall, ToolCallId,
-    ToolInput, ToolName,
+    ToolDefinition, ToolInput, ToolName,
 };
 use serde::Deserialize;
 
@@ -235,7 +239,7 @@ impl Turn {
             if self.cancelled() {
                 return Ok(Ended::Cancelled);
             }
-            let (text, calls) = match self.model_round(&invoker, &items).await? {
+            let (text, calls) = match self.model_round(&items, invoker.definitions()).await? {
                 Some(round) => round,
                 None => return Ok(Ended::Cancelled),
             };
@@ -259,17 +263,56 @@ impl Turn {
                     .await?;
             }
         }
-        Err(failure(
-            AgentErrorCode::Model,
-            format!("the turn exceeded {} model rounds", self.max_rounds),
-        ))
+        self.final_round(items, answer).await
     }
 
-    /// One model request. `None` means the turn was cancelled.
+    /// The tool rounds are used up: one more request, without tools, for an
+    /// answer from what the turn has gathered. The note is not recorded, so a
+    /// resumed session does not see it.
+    async fn final_round(
+        &self,
+        mut items: Vec<ContextItem>,
+        mut answer: String,
+    ) -> Result<Ended, Failure> {
+        if self.cancelled() {
+            return Ok(Ended::Cancelled);
+        }
+        items.push(ContextItem::System {
+            text: format!(
+                "This message has used all {} model rounds that may call tools. Do not \
+                 request tools. Answer now from what you have gathered, and say briefly \
+                 what remains unfinished.",
+                self.max_rounds
+            ),
+        });
+        let Some((text, _)) = self.model_round(&items, Vec::new()).await? else {
+            return Ok(Ended::Cancelled);
+        };
+        // Tool calls a provider sends anyway are not run.
+        if text.is_empty() {
+            return Err(failure(
+                AgentErrorCode::Model,
+                format!(
+                    "the turn exceeded {} model rounds and the model gave no answer",
+                    self.max_rounds
+                ),
+            ));
+        }
+        self.append(SessionEntry::AssistantMessage {
+            turn: self.id.clone(),
+            text: text.clone(),
+        })
+        .await?;
+        answer.push_str(&text);
+        Ok(Ended::Completed(answer))
+    }
+
+    /// One model request offering `tools`. `None` means the turn was
+    /// cancelled.
     async fn model_round(
         &self,
-        invoker: &ToolInvoker,
         items: &[ContextItem],
+        tools: Vec<ToolDefinition>,
     ) -> Result<Option<(String, Vec<(String, ToolName, serde_json::Value)>)>, Failure> {
         let model = self
             .kernel
@@ -278,7 +321,7 @@ impl Turn {
         let request = ModelRequest {
             model: None,
             items: items.to_vec(),
-            tools: invoker.definitions(),
+            tools,
         };
         let request = self
             .kernel

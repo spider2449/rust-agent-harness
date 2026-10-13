@@ -349,11 +349,14 @@ function loopForm() {
     for (const key of Object.keys(inputs)) delete inputs[key];
     if (kind.value === "loop-react") {
       inputs.max_rounds = numberInput(value("max_rounds"), "32");
-      fields.append(field("Most model rounds per message", inputs.max_rounds));
+      fields.append(field("Most model rounds per message", inputs.max_rounds, "Rounds that may call tools. When they are used up, the model answers from what it has gathered."));
     } else {
       inputs.max_steps = numberInput(value("max_steps"), "8");
       inputs.max_rounds_per_step = numberInput(value("max_rounds_per_step"), "16");
-      fields.append(field("Most plan steps", inputs.max_steps), field("Most model rounds per step", inputs.max_rounds_per_step));
+      fields.append(
+        field("Most plan steps", inputs.max_steps),
+        field("Most model rounds per step", inputs.max_rounds_per_step, "Rounds that may call tools. When they are used up, the step ends with what it has gathered."),
+      );
     }
   };
   kind.addEventListener("change", render);

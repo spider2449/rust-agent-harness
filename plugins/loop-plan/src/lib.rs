@@ -4,9 +4,11 @@
 //! 1. Plan: one model request without tools asks for a short numbered plan.
 //!    The plan is recorded as an assistant message.
 //! 2. Execute: each plan step (at most `max_steps`) runs as a bounded model
-//!    and tool loop (at most `max_rounds_per_step` model requests). A system
-//!    item gives the plan and the current step; results of earlier steps stay
-//!    in the context. A step ends when the model answers without tool calls.
+//!    and tool loop (at most `max_rounds_per_step` model requests that may
+//!    call tools). A system item gives the plan and the current step; results
+//!    of earlier steps stay in the context. A step ends when the model answers
+//!    without tool calls. When its tool rounds are used up, one more request
+//!    without tools asks for the step's result from what it has.
 //!
 //! The answer of the turn is the text of the last step. Like every loop, it
 //! applies `model.before_request`, routes every tool call through the
@@ -309,16 +311,9 @@ impl Turn {
                 if self.cancelled() {
                     return Ok(Ended::Cancelled);
                 }
-                if rounds == self.max_rounds {
-                    return Err(failure(
-                        AgentErrorCode::Model,
-                        format!(
-                            "step {} exceeded {} model rounds",
-                            index + 1,
-                            self.max_rounds
-                        ),
-                    ));
-                }
+                // With the tool rounds used up, one more request without
+                // tools asks for the step's result from what it has.
+                let last = rounds == self.max_rounds;
                 rounds += 1;
                 // The step instruction goes just before the turn's user message.
                 let mut context = items.clone();
@@ -327,15 +322,38 @@ impl Turn {
                     .rposition(|item| matches!(item, ContextItem::User { .. }))
                     .unwrap_or(context.len());
                 context.insert(at, instruction.clone());
-                let Some((text, calls)) = self.model_round(context, invoker.definitions()).await?
-                else {
+                let tools = if last {
+                    context.push(ContextItem::System {
+                        text: format!(
+                            "This step has used all {} model rounds that may call tools. Do \
+                             not request tools. Reply now with the step's result from what you \
+                             have gathered, and say briefly what remains unfinished.",
+                            self.max_rounds
+                        ),
+                    });
+                    Vec::new()
+                } else {
+                    invoker.definitions()
+                };
+                let Some((text, calls)) = self.model_round(context, tools).await? else {
                     return Ok(Ended::Cancelled);
                 };
+                if last && text.is_empty() {
+                    return Err(failure(
+                        AgentErrorCode::Model,
+                        format!(
+                            "step {} exceeded {} model rounds and the model gave no result",
+                            index + 1,
+                            self.max_rounds
+                        ),
+                    ));
+                }
                 self.assistant(&text).await?;
                 if !text.is_empty() {
                     items.push(ContextItem::Assistant { text: text.clone() });
                 }
-                if calls.is_empty() {
+                // Tool calls a provider sends in the last round anyway are not run.
+                if calls.is_empty() || last {
                     answer = text;
                     break;
                 }

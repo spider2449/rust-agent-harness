@@ -245,6 +245,47 @@ async fn list_shows_tracked_direct_children_with_literal_paths() {
 }
 
 #[tokio::test]
+async fn list_shows_a_tree_up_to_depth_in_one_call() {
+    let repo = Repo::new("list-depth");
+    std::fs::create_dir_all(repo.0.join("src/a/b")).unwrap();
+    repo.write("src/a/b/deep.rs", "\n");
+    repo.git(&["add", "src/a/b/deep.rs"]);
+    let (_, tools) = repo.tools(json!({}));
+    let tree = call(&tools, "repo.list", json!({ "depth": 2 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        tree["entries"],
+        json!([
+            { "name": "README.md", "kind": "file" },
+            { "name": "docs", "kind": "dir" },
+            { "name": "docs/new.md", "kind": "file" },
+            { "name": "src", "kind": "dir" },
+            { "name": "src/a", "kind": "dir" },
+            { "name": "src/lib.rs", "kind": "file" }
+        ])
+    );
+    let below = call(&tools, "repo.list", json!({ "path": "src", "depth": 16 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        below["entries"],
+        json!([
+            { "name": "a", "kind": "dir" },
+            { "name": "a/b", "kind": "dir" },
+            { "name": "a/b/deep.rs", "kind": "file" },
+            { "name": "lib.rs", "kind": "file" }
+        ])
+    );
+    for depth in [0, 17] {
+        assert!(matches!(
+            call(&tools, "repo.list", json!({ "depth": depth })).await,
+            Err(ToolError::InvalidInput(_))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn search_finds_paths_and_literal_text() {
     let repo = Repo::new("search");
     let (_, tools) = repo.tools(json!({}));
