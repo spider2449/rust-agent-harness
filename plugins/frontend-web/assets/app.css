@@ -197,6 +197,33 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .entry.tool { background: var(--tool); font-size: 13px; }
 .entry .tool-image { display: block; max-width: 100%; max-height: 480px; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
 .entry.failed { border-color: var(--bad); color: var(--bad); }
+/* Rendered Markdown of the model's replies (markdown.js). */
+.md { margin-top: 4px; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md blockquote, .md pre, .md .md-table, .md hr { margin: 0 0 8px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; line-height: 1.3; }
+.md h1 { font-size: 1.35em; }
+.md h2 { font-size: 1.2em; }
+.md h3 { font-size: 1.08em; }
+.md h4, .md h5, .md h6 { font-size: 1em; }
+.md ul, .md ol { padding-left: 1.5em; }
+.md ul { list-style: disc; }
+.md ul ul { list-style: circle; }
+.md ol { list-style: decimal; }
+.md li > ul, .md li > ol { margin: 2px 0; }
+.md li.task { list-style: none; margin-left: -1.3em; }
+.md li.task input { margin: 0 6px 0 0; vertical-align: -1px; }
+.md blockquote { padding: 2px 10px; border-left: 3px solid var(--line); color: var(--muted); }
+.md code { font: 12.5px ui-monospace, Consolas, monospace; padding: 1px 4px; border-radius: 4px; background: var(--tool); }
+.md pre.md-code { padding: 8px 10px; border-radius: 6px; background: var(--tool); border: 1px solid var(--line); overflow-x: auto; white-space: pre; }
+.md pre.md-code code { padding: 0; background: none; font-size: 12px; }
+.md .md-table { overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: 13px; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.md th { background: var(--tool); }
+.md hr { border: 0; border-top: 1px solid var(--line); }
+.md a { color: var(--accent); }
 .entry .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center; }
 .entry .meta .spacer { flex: 1; }
 .entry .fork { font-size: 12px; padding: 0 8px; }

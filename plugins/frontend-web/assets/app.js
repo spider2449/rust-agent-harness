@@ -10,6 +10,8 @@ const state = {
   sessions: [],
   current: null,
   running: false,
+  // Display preferences (`/api/preferences`).
+  prefs: { raw_markdown: false },
   liveText: "",
   retry: 500,
   // Last seen model and loop providers, to announce a switch.
@@ -463,7 +465,7 @@ function entryNode(record) {
   const node = el("li", "entry");
   node.dataset.seq = record.seq;
   const meta = el("div", "meta");
-  const body = el("pre");
+  let body = el("pre");
   let images = [];
   switch (entry.kind) {
     case "turn_started":
@@ -474,7 +476,13 @@ function entryNode(record) {
     case "assistant_message":
       node.classList.add("assistant");
       meta.append(el("span", "", "assistant"));
-      body.textContent = entry.text;
+      if (state.prefs.raw_markdown) {
+        body.textContent = entry.text;
+      } else {
+        // Rendered Markdown (see markdown.js); the source is untrusted.
+        body = el("div", "md");
+        body.append(Markdown.render(entry.text));
+      }
       break;
     case "tool_call":
       node.classList.add("tool");
@@ -1855,6 +1863,11 @@ async function start() {
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   setupSettings();
+  try {
+    state.prefs = { ...state.prefs, ...(await api("/preferences")) };
+  } catch {
+    // Older servers have no preferences; the defaults apply.
+  }
   $("session-search").addEventListener("input", renderSessions);
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));

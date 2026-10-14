@@ -208,3 +208,46 @@ async fn remember(shared: &Shared, slot: &str, saved: &Saved) -> bool {
         .await
         .is_ok()
 }
+
+/// Display preferences of the Web UI, shared by every browser on this
+/// `rah` (`GET|PUT /api/preferences`), stored under the key `preferences`.
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Preferences {
+    /// Show the model's replies as Markdown source instead of rendered.
+    #[serde(default)]
+    raw_markdown: bool,
+}
+
+const PREFERENCES: &str = "preferences";
+
+/// `GET /api/preferences`; the defaults when nothing is stored.
+pub(crate) async fn preferences(State(shared): State<AppState>) -> ApiResult {
+    let stored = match shared.kernel.get(STORAGE) {
+        Some(storage) => storage
+            .get(shared.id.as_str(), PREFERENCES)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok()),
+        None => None,
+    };
+    Ok(Json(json!(stored.unwrap_or_default())))
+}
+
+/// `PUT /api/preferences`.
+pub(crate) async fn set_preferences(
+    State(shared): State<AppState>,
+    Json(preferences): Json<Preferences>,
+) -> ApiResult {
+    let remembered = match (shared.kernel.get(STORAGE), serde_json::to_vec(&preferences)) {
+        (Some(storage), Ok(bytes)) => storage
+            .put(shared.id.as_str(), PREFERENCES, &bytes)
+            .await
+            .is_ok(),
+        _ => false,
+    };
+    let mut reply = json!(preferences);
+    reply["remembered"] = json!(remembered);
+    Ok(Json(reply))
+}

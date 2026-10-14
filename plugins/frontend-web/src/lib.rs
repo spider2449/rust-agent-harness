@@ -32,6 +32,8 @@
 //!   config}` saves the Settings forms (`model`, `assistant`, `tools`,
 //!   `loop`) the same way, rolled back when the plugin does not start, and
 //!   applies them again at the next start (see [`settings`]).
+//!   `GET|PUT /api/preferences {raw_markdown}` keeps display preferences the
+//!   same way.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -103,6 +105,7 @@ const APP_JS: &str = include_str!("../assets/app.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
 const SETTINGS_JS: &str = include_str!("../assets/settings.js");
 const HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
+const MARKDOWN_JS: &str = include_str!("../assets/markdown.js");
 
 pub struct WebFrontendPlugin {
     manifest: PluginManifest,
@@ -202,6 +205,10 @@ fn router(shared: AppState) -> Router {
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/web-search", get(web_search::get).put(web_search::set))
         .route("/settings/{slot}", put(settings::save))
+        .route(
+            "/preferences",
+            get(settings::preferences).put(settings::set_preferences),
+        )
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))
@@ -236,6 +243,10 @@ fn router(shared: AppState) -> Router {
         .route(
             "/highlight.js",
             get(|| async { asset("text/javascript; charset=utf-8", HIGHLIGHT_JS) }),
+        )
+        .route(
+            "/markdown.js",
+            get(|| async { asset("text/javascript; charset=utf-8", MARKDOWN_JS) }),
         )
         .route(
             "/app.css",

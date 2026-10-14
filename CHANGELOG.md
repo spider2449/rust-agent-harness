@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Formatted replies
+
+- The Web UI renders the model's replies as Markdown (headings, lists and
+  task lists, tables, block quotes, highlighted code blocks, links) with a
+  local renderer (`markdown.js`) that builds DOM nodes only: HTML in a reply
+  stays text, only `http`, `https` and `mailto` links are made, and images
+  are shown as links, never loaded.
+- **Settings → Display → Show replies as raw Markdown** shows the source
+  instead. `frontend-web` stores it through `GET|PUT /api/preferences` in
+  `storage`, so it is the same in every browser and after a restart.
+
 ### Remembered settings and a busy line
 
 - The Web UI's Settings (model, assistant, tools, loop) are remembered:

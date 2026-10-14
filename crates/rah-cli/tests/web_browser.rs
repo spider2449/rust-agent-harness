@@ -1332,6 +1332,84 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert_eq!(policy["decisions"]["web.*"], "ask", "{policy}");
     assert_eq!(policy["decisions"]["echo"], "deny", "{policy}");
 
+    // Display: replies are formatted Markdown by default; the source is
+    // untrusted, so HTML stays text and only web links become links.
+    page.send_message(
+        "/notool intro\n# Title\n**bold** and `code` [ok](https://example.com/a) [bad](javascript:alert(1)) <img src=x onerror=alert(1)>\n\n- one\n- [x] done\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\n```rust\nfn main() {}\n```",
+    )
+    .await;
+    let reply = "[...document.querySelectorAll('.entry.assistant')].pop()";
+    page.wait(
+        "the formatted reply",
+        &format!("idle() && !!{reply}?.querySelector('.md h1')"),
+    )
+    .await;
+    page.eval("byId('settings-close').click(); true").await;
+    page.screenshot("markdown-formatted").await;
+    page.eval("byId('open-settings').click(); true").await;
+    let formatted = page
+        .eval(&format!(
+            "(() => {{ const r = {reply}; return {{ strong: r.querySelector('strong')?.textContent, \
+             code: r.querySelector('p code')?.textContent, links: [...r.querySelectorAll('a')].map((a) => a.href), \
+             images: r.querySelectorAll('img').length, text: r.textContent, items: r.querySelectorAll('li').length, \
+             checked: r.querySelector('li.task input')?.checked, cells: r.querySelectorAll('td').length, \
+             align: r.querySelector('td:last-child')?.style.textAlign, \
+             highlighted: r.querySelectorAll('pre.md-code [class^=tok-]').length }}; }})()"
+        ))
+        .await;
+    assert_eq!(formatted["strong"], "bold", "{formatted}");
+    assert_eq!(formatted["code"], "code", "{formatted}");
+    assert_eq!(
+        formatted["links"],
+        json!(["https://example.com/a"]),
+        "{formatted}"
+    );
+    assert_eq!(formatted["images"], 0, "{formatted}");
+    // The unsafe link keeps only its label, as text.
+    assert!(
+        formatted["text"].as_str().unwrap().contains("ok bad <img"),
+        "{formatted}"
+    );
+    assert!(
+        formatted["text"]
+            .as_str()
+            .unwrap()
+            .contains("<img src=x onerror=alert(1)>"),
+        "{formatted}"
+    );
+    assert_eq!(formatted["items"], 2, "{formatted}");
+    assert_eq!(formatted["checked"], true, "{formatted}");
+    assert_eq!(formatted["cells"], 2, "{formatted}");
+    assert_eq!(formatted["align"], "right", "{formatted}");
+    assert!(
+        formatted["highlighted"].as_u64().unwrap() > 0,
+        "{formatted}"
+    );
+
+    page.eval(&TAB.replace("{tab}", "display")).await;
+    page.wait(
+        "the display form",
+        "!!byId('raw-markdown') && !byId('raw-markdown').checked",
+    )
+    .await;
+    page.eval("byId('raw-markdown').click(); true").await;
+    page.wait(
+        "the raw reply",
+        &format!(
+            "byId('settings-message').textContent === 'Replies are shown as Markdown source.' && \
+             !{reply}.querySelector('.md') && {reply}.querySelector('pre').textContent.includes('**bold**')"
+        ),
+    )
+    .await;
+    let preferences = page.eval("api('/preferences')").await;
+    assert_eq!(preferences, json!({ "raw_markdown": true }));
+    page.eval("byId('raw-markdown').click(); true").await;
+    page.wait(
+        "the formatted reply again",
+        &format!("!!{reply}.querySelector('.md strong')"),
+    )
+    .await;
+
     // Loop: switch to plan-and-execute.
     page.eval(&TAB.replace("{tab}", "loop")).await;
     page.wait(

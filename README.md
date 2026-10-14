@@ -243,7 +243,8 @@ use, and whether a policy guards tool calls. Click the workspace path to
 switch the folder the tools work in, without restarting. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
-forms; what you save there is remembered (in `storage`) and applied again at
+forms, and under **Display** whether replies show formatted (the default:
+headings, lists, tables, highlighted code) or as raw Markdown; what you save there is remembered (in `storage`) and applied again at
 the next start, and replaces that plugin's configuration from the preset or
 `rah.toml`. While a turn runs, a line above the message box shows what it is
 doing (waiting for the model, thinking, writing, running a tool, waiting for

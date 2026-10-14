@@ -1,5 +1,5 @@
 // RAH Web UI settings: forms over the configuration of the built-in plugins
-// (model, context, policy, loop). Each form starts from the plugin's current
+// (model, context, policy, loop), and display preferences. Each form starts from the plugin's current
 // configuration, changes only its own fields and saves through
 // `/api/settings/{slot}`, so options it does not show are kept and the
 // result is remembered for the next start. Other plugins stay
@@ -401,9 +401,45 @@ function loopForm() {
   return form;
 }
 
+// ---- Display ----------------------------------------------------------------
+
+// How the conversation looks. Saved at once on the server, for every browser
+// on this rah, and remembered for the next start.
+function displayForm() {
+  const form = el("div", "form");
+  const box = el("input");
+  box.type = "checkbox";
+  box.id = "raw-markdown";
+  box.checked = Boolean(state.prefs.raw_markdown);
+  box.addEventListener("change", async () => {
+    box.disabled = true;
+    settingsMessage("");
+    try {
+      const result = await api("/preferences", {
+        method: "PUT",
+        body: JSON.stringify({ ...state.prefs, raw_markdown: box.checked }),
+      });
+      delete result.remembered;
+      state.prefs = { ...state.prefs, ...result };
+      await loadTranscript();
+      settingsMessage(box.checked ? "Replies are shown as Markdown source." : "Replies are shown formatted.");
+    } catch (error) {
+      box.checked = !box.checked;
+      settingsMessage(error.message, true);
+    } finally {
+      box.disabled = false;
+    }
+  });
+  const row = el("label", "field switch");
+  row.append(box, el("span", "label", "Show replies as raw Markdown"));
+  row.append(el("small", "", "Off: the model's replies are formatted (headings, lists, tables, code). On: they are shown as the Markdown text the model wrote."));
+  form.append(row);
+  return form;
+}
+
 // ---- Dialog ---------------------------------------------------------------
 
-const FORMS = { model: modelForm, assistant: assistantForm, tools: toolsForm, loop: loopForm };
+const FORMS = { model: modelForm, assistant: assistantForm, tools: toolsForm, loop: loopForm, display: displayForm };
 
 function renderSettings() {
   for (const button of document.querySelectorAll("#settings-tabs button")) {

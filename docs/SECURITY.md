@@ -220,7 +220,12 @@ The Web frontend serves the agent to the local machine only:
   cross-site WebSocket hijacking).
 - The UI is embedded static HTML, CSS and JavaScript served with a strict
   Content-Security-Policy (`default-src 'self'`, no framing). Model and tool
-  output is inserted as text only.
+  output is inserted as text only. The model's replies are rendered as
+  Markdown by default (`markdown.js`): it builds elements with fixed tags and
+  text content, never HTML, so HTML in a reply stays visible text; links are
+  made only for `http`, `https` and `mailto` URLs and open in a new tab
+  without a referrer; images are shown as links and never loaded. The
+  Display setting (`raw_markdown`) shows the source instead.
 - `Ask` decisions go to the connected browsers. With no browser connected the
   frontend does not answer (a denial); an unanswered request is denied after
   `approval_timeout_secs` (300).
@@ -238,6 +243,8 @@ policy remains possible, behind the warning.
 
 Behind the same token and checks, and likewise unreachable from tools:
 
+- `PUT /api/preferences {raw_markdown}` stores display preferences in
+  `storage` (key `preferences`); they change only how the page looks.
 - `PUT /api/web-search {enabled}` is the Web UI's web search switch. On,
   it first adds `decisions = { "web.*" = "ask" }` to every mounted
   `policy-authority` that does not already decide `web.*`, then mounts
