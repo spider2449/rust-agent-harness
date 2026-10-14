@@ -83,6 +83,43 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
     entries.into_iter().collect()
 }
 
+/// An example configuration for each mountable kind, mostly its defaults,
+/// from the plugin crates (`<Plugin>::CONFIG_EXAMPLE`).
+pub fn config_example(kind: &str) -> Option<&'static str> {
+    let example = match kind {
+        "context-compact" => CompactPlugin::CONFIG_EXAMPLE,
+        "context-default" => ContextPlugin::CONFIG_EXAMPLE,
+        "frontend-cli" => CliFrontendPlugin::CONFIG_EXAMPLE,
+        "frontend-web" => WebFrontendPlugin::CONFIG_EXAMPLE,
+        "loop-plan" => PlanLoopPlugin::CONFIG_EXAMPLE,
+        "loop-react" => ReactLoopPlugin::CONFIG_EXAMPLE,
+        "model-anthropic" => AnthropicPlugin::CONFIG_EXAMPLE,
+        "model-llamacpp" => LlamaCppPlugin::CONFIG_EXAMPLE,
+        "model-mock" => MockModelPlugin::CONFIG_EXAMPLE,
+        "model-openai" => OpenAiResponsesPlugin::CONFIG_EXAMPLE,
+        "policy-authority" => PolicyAuthorityPlugin::CONFIG_EXAMPLE,
+        "sandbox-os" => SandboxOsPlugin::CONFIG_EXAMPLE,
+        "sandbox-process" => SandboxProcessPlugin::CONFIG_EXAMPLE,
+        "scheduler-basic" => SchedulerPlugin::CONFIG_EXAMPLE,
+        "session-jsonl" => JsonlSessionPlugin::CONFIG_EXAMPLE,
+        "session-titles" => SessionTitlesPlugin::CONFIG_EXAMPLE,
+        "skills-fs" => SkillsPlugin::CONFIG_EXAMPLE,
+        "storage-fs" => StorageFsPlugin::CONFIG_EXAMPLE,
+        "telemetry-log" => TelemetryPlugin::CONFIG_EXAMPLE,
+        "tools-builtin" => BuiltinToolsPlugin::CONFIG_EXAMPLE,
+        "tools-mcp" => McpToolsPlugin::CONFIG_EXAMPLE,
+        "tools-mcp-http" => McpHttpToolsPlugin::CONFIG_EXAMPLE,
+        "tools-repo" => RepoToolsPlugin::CONFIG_EXAMPLE,
+        "tools-repo-write" => RepoWriteToolsPlugin::CONFIG_EXAMPLE,
+        "tools-shell" => ShellToolsPlugin::CONFIG_EXAMPLE,
+        "tools-web-search" => WebSearchPlugin::CONFIG_EXAMPLE,
+        PROCESS_PLUGIN => rah_plugin_host_process::ProcessPlugin::CONFIG_EXAMPLE,
+        WASM_PLUGIN => rah_plugin_host_wasm::WasmPlugin::CONFIG_EXAMPLE,
+        _ => return None,
+    };
+    Some(example)
+}
+
 /// A built-in preset: a named composition of catalog plugins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preset {

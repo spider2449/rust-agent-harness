@@ -78,9 +78,16 @@ pub(crate) async fn list(State(shared): State<AppState>) -> ApiResult {
     Ok(Json(json!(plugins)))
 }
 
-/// `GET /api/catalog`.
+/// `GET /api/catalog`: the mountable kinds and, where the distribution has
+/// one, an example configuration for each.
 pub(crate) async fn catalog(State(shared): State<AppState>) -> ApiResult {
-    Ok(Json(json!({ "kinds": admin(&shared)?.kinds() })))
+    let admin = admin(&shared)?;
+    let kinds = admin.kinds();
+    let examples: serde_json::Map<String, Value> = kinds
+        .iter()
+        .filter_map(|kind| Some((kind.clone(), admin.config_example(kind)?)))
+        .collect();
+    Ok(Json(json!({ "kinds": kinds, "examples": examples })))
 }
 
 #[derive(Deserialize)]

@@ -376,3 +376,10 @@ fn socket_filter() -> Result<Vec<libc::sock_filter>, String> {
 fn socket_filter() -> Result<Vec<libc::sock_filter>, String> {
     Err("denying the network needs an x86-64 or AArch64 host; set `network = true`".into())
 }
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(crate::SandboxOsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

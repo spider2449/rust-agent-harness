@@ -182,5 +182,39 @@ impl Plugin for LlamaCppPlugin {
     }
 }
 
+impl LlamaCppPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "endpoint": "http://127.0.0.1:8080",
+  "model": "<served model id>",
+  "api_key_env": "RAH_LLAMA_CPP_API_KEY"
+}"#;
+}
+
+impl OpenAiResponsesPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "model": "<model id>",
+  "api_key_env": "OPENAI_API_KEY"
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration_llamacpp() {
+    let parsed: Result<LlamaConfig, _> = serde_json::from_str(LlamaCppPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration_openai() {
+    let parsed: Result<OpenAiConfig, _> =
+        serde_json::from_str(OpenAiResponsesPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

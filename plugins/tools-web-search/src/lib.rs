@@ -71,6 +71,22 @@ use serde_json::{Value, json};
 
 mod fetch;
 mod parse;
+impl WebSearchPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "engines": [
+    "duckduckgo",
+    "bing"
+  ],
+  "searxng": [],
+  "max_results": 8,
+  "timeout_secs": 15,
+  "accept_language": "en-US,en;q=0.9",
+  "fetch_max_chars": 20000
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -893,4 +909,11 @@ impl Tool for MultiSearch {
             is_error: false,
         })
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(WebSearchPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

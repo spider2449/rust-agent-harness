@@ -127,7 +127,9 @@ Implemented:
   with an embedded Web UI (`rah --web`), which answers `tool.approval` in the
   browser.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
-  (mount, unmount, configure, restart, replace, stop, start). `stop` unmounts
+  (mount, unmount, configure, restart, replace, stop, start) and an example
+  configuration per mountable kind (`config_example`; each plugin crate
+  keeps its own as `<Plugin>::CONFIG_EXAMPLE`). `stop` unmounts
   a plugin but keeps its kind, configuration and bindings, so `start` can
   mount it again under the same id; its dependents wait as `Pending`. The
   kernel has no stopped state: the distribution remembers stopped plugins.

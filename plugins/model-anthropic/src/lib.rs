@@ -163,5 +163,24 @@ impl Plugin for AnthropicPlugin {
     }
 }
 
+impl AnthropicPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "model": "claude-opus-5-5",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "max_tokens": 64000,
+  "effort": "high",
+  "refusal_fallback": true
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(AnthropicPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

@@ -278,5 +278,22 @@ impl Tool for LoadSkill {
     }
 }
 
+impl SkillsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "dir": ".rah/skills",
+  "max_skills": 64,
+  "max_skill_bytes": 65536
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(SkillsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

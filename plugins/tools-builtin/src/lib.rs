@@ -213,6 +213,22 @@ impl Tool for FsRead {
     }
 }
 
+impl BuiltinToolsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "root": ".",
+  "max_bytes": 262144,
+  "max_results": 500,
+  "max_scan": 20000,
+  "skip_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ]
+}"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,4 +339,11 @@ mod tests {
             Err(ToolError::InvalidInput(message)) if message.contains("outside")
         ));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(BuiltinToolsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

@@ -496,5 +496,23 @@ impl Tool for RepoSearch {
     }
 }
 
+impl RepoToolsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "git": "git",
+  "timeout_ms": 15000,
+  "max_output_bytes": 1048576,
+  "max_results": 500
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<RepoConfig, _> = serde_json::from_str(RepoToolsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

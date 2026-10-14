@@ -642,6 +642,39 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.eval("byId('add-plugin').click(); true").await;
     page.wait("the add editor", "shown(byId('editor-id-row'))")
         .await;
+    // The empty configuration shows the chosen kind's example as a hint.
+    assert_eq!(
+        page.eval(
+            "const kind = byId('editor-kind'); kind.value = 'loop-react'; \
+             kind.dispatchEvent(new Event('change')); \
+             byId('editor-config').value === '' && \
+             byId('editor-config').placeholder.includes('\"max_rounds\": 32')"
+        )
+        .await,
+        true
+    );
+    // "Fill in example" copies it; an example value still in angle brackets
+    // is refused at save.
+    assert_eq!(
+        page.eval(
+            "byId('editor-example').click(); \
+             JSON.parse(byId('editor-config').value).max_rounds === 32"
+        )
+        .await,
+        true
+    );
+    page.eval(
+        "window.confirm = () => true; byId('editor-kind').value = 'context-compact'; \
+         byId('editor-kind').dispatchEvent(new Event('change')); \
+         byId('editor-example').click(); byId('editor-save').click(); true",
+    )
+    .await;
+    page.wait(
+        "the refused example value",
+        "shown(byId('notice')) && byId('notice').textContent.includes('<provider model id>') \
+         && shown(byId('editor')) && !rowOf('context-compact')",
+    )
+    .await;
     page.eval(
         "byId('editor-kind').value = 'model-mock'; byId('editor-id').value = 'spare'; \
          byId('editor-config').value = '{}'; byId('editor-save').click(); true",
@@ -664,8 +697,8 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     page.eval("byId('editor-cancel').click(); true").await;
     let notices = page.eval("notices").await;
-    // The reconnect notice and the JSON error.
-    assert_eq!(notices.as_array().unwrap().len(), 2, "notices: {notices:#}");
+    // The reconnect notice, the refused example value and the JSON error.
+    assert_eq!(notices.as_array().unwrap().len(), 3, "notices: {notices:#}");
 
     // A reload keeps the token for the tab, without the fragment.
     page.call("Page.reload", json!({})).await;

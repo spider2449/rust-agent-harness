@@ -580,3 +580,19 @@ fn status_text(status: &PluginStatus) -> String {
         other => format!("{other:?}").to_lowercase(),
     }
 }
+
+impl CliFrontendPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "session": "<session id>",
+  "prompt": "<one prompt, then exit>"
+}"#;
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<ReplOptions, _> = serde_json::from_str(CliFrontendPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

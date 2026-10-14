@@ -16,7 +16,7 @@ use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
-use crate::{PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog};
+use crate::{PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example};
 
 /// The id `rah` mounts the distribution plugin under.
 pub const DISTRIBUTION_PLUGIN: &str = "distribution";
@@ -206,6 +206,10 @@ impl PluginAdmin for Admin {
         kinds.push(WASM_PLUGIN.to_owned());
         kinds.sort();
         kinds
+    }
+
+    fn config_example(&self, kind: &str) -> Option<Value> {
+        serde_json::from_str(config_example(kind)?).ok()
     }
 
     fn instance(&self, id: &PluginId) -> Option<PluginInstance> {

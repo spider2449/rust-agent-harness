@@ -206,5 +206,26 @@ fn render(output: &ExecOutput) -> Value {
     })
 }
 
+impl ShellToolsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "allow_programs": [
+    "git",
+    "cargo"
+  ],
+  "default_timeout_ms": 30000,
+  "max_timeout_ms": 300000,
+  "max_output_bytes": 65536
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<ShellConfig, _> = serde_json::from_str(ShellToolsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

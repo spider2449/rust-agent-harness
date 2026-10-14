@@ -67,6 +67,13 @@ pub trait PluginAdmin: Send + Sync {
     /// Kinds this distribution can mount, sorted.
     fn kinds(&self) -> Vec<String>;
 
+    /// An example configuration for `kind`, mostly its defaults, for a
+    /// frontend to show as a reference. It is never applied.
+    fn config_example(&self, kind: &str) -> Option<Value> {
+        let _ = kind;
+        None
+    }
+
     /// Kind and configuration of a mounted plugin, if this distribution
     /// mounted it.
     fn instance(&self, id: &PluginId) -> Option<PluginInstance>;

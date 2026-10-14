@@ -562,5 +562,25 @@ fn apply(mut request: ModelRequest, split: usize, summary: &Summary) -> ModelReq
     request
 }
 
+impl CompactPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "trigger_chars": 60000,
+  "keep_chars": 20000,
+  "chunk_chars": 40000,
+  "max_summary_chars": 6000,
+  "timeout_secs": 120,
+  "model": "<provider model id>"
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<CompactConfig, _> = serde_json::from_str(CompactPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

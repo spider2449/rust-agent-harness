@@ -1523,6 +1523,48 @@ function connect() {
 // ---- Plugin management ----------------------------------------------------
 
 const editor = { mode: null, target: null };
+// Example configurations by kind, from `/api/catalog`.
+let configExamples = {};
+
+function isEmptyConfig(config) {
+  return config == null || (typeof config === "object" && !Array.isArray(config) && Object.keys(config).length === 0);
+}
+
+function editorKind() {
+  return editor.mode === "configure" ? editor.target?.kind : $("editor-kind").value;
+}
+
+// Example values such as "<model id>" stand for something only the user
+// knows; a configuration still holding one is not saved.
+function placeholderValues(config) {
+  return JSON.stringify(config ?? null).match(/"<[^"<>]*>"/g) || [];
+}
+
+// Shows the kind's example configuration in the empty editor, as a
+// reference only: an empty editor still means the defaults.
+function showConfigExample() {
+  const example = configExamples[editorKind()];
+  $("editor-example").hidden = example === undefined;
+  const textarea = $("editor-config");
+  textarea.placeholder = example === undefined
+    ? "{}"
+    : `Example (not applied; leave empty for the defaults):\n${JSON.stringify(example, null, 2)}`;
+  const lines = Math.max(textarea.value.split("\n").length, textarea.placeholder.split("\n").length);
+  textarea.rows = Math.min(18, Math.max(6, lines));
+}
+
+// Copies the example into the editor to start from.
+function fillConfigExample() {
+  const example = configExamples[editorKind()];
+  const textarea = $("editor-config");
+  if (example === undefined) return;
+  if (textarea.value.trim() && !window.confirm("Replace the current configuration with the example?")) return;
+  textarea.value = JSON.stringify(example, null, 2);
+  showConfigExample();
+  const missing = placeholderValues(example);
+  showNotice(missing.length ? `Replace ${missing.join(", ")} before saving.` : "");
+  textarea.focus();
+}
 
 function report(error) {
   showNotice(error.message);
@@ -1551,8 +1593,9 @@ function openEditor(mode, plugin) {
   $("editor-id-row").hidden = mode === "configure";
   $("editor-kind").value = plugin?.kind || $("editor-kind").options[0]?.value || "";
   $("editor-id").value = "";
-  const config = plugin && plugin.config !== undefined ? plugin.config : {};
-  $("editor-config").value = JSON.stringify(config ?? {}, null, 2);
+  const config = mode === "add" ? null : plugin?.config;
+  $("editor-config").value = isEmptyConfig(config) ? "" : JSON.stringify(config, null, 2);
+  showConfigExample();
   $("editor").hidden = false;
   $("editor-config").focus();
 }
@@ -1564,6 +1607,11 @@ async function saveEditor(event) {
     config = JSON.parse($("editor-config").value || "null");
   } catch (error) {
     showNotice(`The configuration is not valid JSON: ${error.message}`);
+    return;
+  }
+  const missing = placeholderValues(config);
+  if (missing.length) {
+    showNotice(`Replace ${missing.join(", ")} before saving.`);
     return;
   }
   const request = { kind: $("editor-kind").value, id: $("editor-id").value.trim() || null, config };
@@ -1627,6 +1675,7 @@ function pluginRow(plugin) {
 async function loadCatalog() {
   try {
     const catalog = await api("/catalog");
+    configExamples = catalog.examples || {};
     $("editor-kind").replaceChildren(...catalog.kinds.map((kind) => {
       const option = el("option", "", kind);
       option.value = kind;
@@ -1911,6 +1960,8 @@ async function start() {
   $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
   $("add-plugin").addEventListener("click", () => openEditor("add", null));
   $("editor").addEventListener("submit", saveEditor);
+  $("editor-kind").addEventListener("change", showConfigExample);
+  $("editor-example").addEventListener("click", fillConfigExample);
   $("editor-cancel").addEventListener("click", () => {
     $("editor").hidden = true;
   });

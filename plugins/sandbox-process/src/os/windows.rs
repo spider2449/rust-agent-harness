@@ -971,3 +971,10 @@ fn plain(path: &Path) -> PathBuf {
         _ => path.to_path_buf(),
     }
 }
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(crate::SandboxOsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

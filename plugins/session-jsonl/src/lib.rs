@@ -508,6 +508,14 @@ impl SessionLog for JsonlSessions {
     }
 }
 
+impl JsonlSessionPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "dir": ".rah/sessions"
+}"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,4 +783,11 @@ mod tests {
         let kept = dir.0.join(DELETED_DIR).join(format!("{}.jsonl", parent.id));
         assert!(kept.exists(), "the deleted log is kept for recovery");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(JsonlSessionPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

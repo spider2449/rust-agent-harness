@@ -618,6 +618,18 @@ fn tool_output(result: &Value) -> Result<ToolOutput, ToolError> {
     Ok(ToolOutput { content, is_error })
 }
 
+impl ProcessPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "program": "python",
+  "args": [
+    "my_plugin.py"
+  ],
+  "plugin": {}
+}"#;
+}
+
 #[cfg(test)]
 mod tests {
     use rah_protocol::ImageContent;
@@ -656,4 +668,11 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<ProcessConfig, _> = serde_json::from_str(ProcessPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

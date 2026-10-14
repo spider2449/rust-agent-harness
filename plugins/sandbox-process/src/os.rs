@@ -117,3 +117,27 @@ async fn resolve(root: &Path, paths: Vec<PathBuf>, key: &str) -> Result<Vec<Path
     }
     Ok(resolved)
 }
+
+impl SandboxOsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    #[cfg(windows)]
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "root": ".",
+  "writable": [],
+  "network": true,
+  "max_timeout_ms": 600000
+}"#;
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    #[cfg(not(windows))]
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "root": ".",
+  "readable": [
+    "/"
+  ],
+  "writable": [],
+  "network": false,
+  "max_timeout_ms": 600000
+}"#;
+}

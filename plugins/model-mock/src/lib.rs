@@ -205,6 +205,14 @@ fn estimated_usage(request: &ModelRequest, events: &[ModelEvent]) -> ModelUsage 
     }
 }
 
+impl MockModelPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "label": "mock"
+}"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,4 +311,11 @@ mod tests {
         );
         assert!(joined(&respond("/call echo {")).starts_with("[C] invalid arguments"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(MockModelPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

@@ -36,7 +36,8 @@
 //!   same way.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
-//! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
+//! - With an `admin` service: `GET /api/catalog` (`{kinds, examples}`, an
+//!   example configuration per kind), `POST /api/plugins {kind,
 //!   id, config, bind}`, `DELETE /api/plugins/{id}`,
 //!   `POST /api/plugins/{id}/restart`, `POST /api/plugins/{id}/stop` and
 //!   `/start` (stopped plugins are listed with the state `stopped`),
@@ -476,4 +477,20 @@ async fn export_session(
         body,
     )
         .into_response())
+}
+
+impl WebFrontendPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "bind": "127.0.0.1:8765",
+  "approval_timeout_secs": 300
+}"#;
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(WebFrontendPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

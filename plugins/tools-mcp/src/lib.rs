@@ -508,5 +508,52 @@ fn mcp_image(item: &Value) -> ToolContent {
 
 #[cfg(test)]
 mod http_tests;
+impl McpToolsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "server": "files",
+  "program": "mcp-files",
+  "args": [
+    "--root",
+    "."
+  ],
+  "tools": {
+    "read_file": "read",
+    "write_file": "write"
+  },
+  "call_timeout_ms": 30000,
+  "startup_timeout_ms": 10000
+}"#;
+}
+
+impl McpHttpToolsPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "server": "docs",
+  "url": "https://mcp.example.com/mcp",
+  "bearer_token_env": "DOCS_MCP_TOKEN",
+  "tools": {
+    "search": "read"
+  },
+  "call_timeout_ms": 30000
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration_stdio() {
+    let parsed: Result<McpConfig, _> = serde_json::from_str(McpToolsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration_http() {
+    let parsed: Result<McpHttpConfig, _> = serde_json::from_str(McpHttpToolsPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

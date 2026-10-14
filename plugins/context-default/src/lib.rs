@@ -385,5 +385,24 @@ impl Tool for Remember {
     }
 }
 
+impl ContextPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "system": "<system prompt>",
+  "max_items": 200,
+  "max_chars": 200000,
+  "memory_dir": ".rah/memory",
+  "max_memory_bytes": 16384
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<ContextConfig, _> = serde_json::from_str(ContextPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

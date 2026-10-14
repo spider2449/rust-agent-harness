@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Example configurations in the plugin editor
+
+- The Web UI's plugin editor shows the kind's example configuration (mostly
+  its defaults) as a grey hint when the configuration is empty, and changes
+  it with the kind. It is only a reference: an empty editor still means the
+  defaults, and an empty configuration is shown empty instead of `{}`.
+- **Fill in example** copies the example into the editor (asking first when
+  it is not empty). Example values in angle brackets, such as
+  `"<model id>"`, must be replaced: the editor refuses to save while one is
+  left and names it.
+- Every catalog plugin, `process` and `wasm` has `CONFIG_EXAMPLE`, tested to
+  parse as its configuration. `PluginAdmin` gains `config_example` (a
+  default method returning `None`), and `GET /api/catalog` returns
+  `examples` by kind.
+
 ### OS sandbox on Windows
 
 - `sandbox-os` now runs on Windows (ADR 0043): every program gets a Low

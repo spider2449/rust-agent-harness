@@ -433,6 +433,15 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
         kinds.contains(&json!("model-mock")) && kinds.contains(&json!("process")),
         "{catalog}"
     );
+    // Every kind comes with an example configuration for the editor.
+    for kind in kinds {
+        let example = &catalog["examples"][kind.as_str().unwrap()];
+        assert!(example.is_object(), "{kind}: {example}");
+    }
+    assert_eq!(
+        catalog["examples"]["loop-react"],
+        json!({ "max_rounds": 32 })
+    );
     let plugins = web.json(web.get("/api/plugins")).await;
     let find = |plugins: &Value, id: &str| {
         plugins

@@ -628,5 +628,23 @@ pub fn read_records(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+impl TelemetryPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "dir": ".rah/telemetry",
+  "max_file_bytes": 10485760,
+  "keep_days": 14,
+  "include_arguments": false
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<TelemetryConfig, _> = serde_json::from_str(TelemetryPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}

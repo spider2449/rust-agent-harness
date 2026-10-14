@@ -515,6 +515,15 @@ impl Turn {
     }
 }
 
+impl PlanLoopPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "max_steps": 8,
+  "max_rounds_per_step": 16
+}"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::steps;
@@ -530,4 +539,11 @@ mod tests {
         assert_eq!(steps("1. a\n2. b\n3. c", 2), ["a", "b"]);
         assert_eq!(steps("2024 was a year", 8), ["2024 was a year"]);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<Config, _> = serde_json::from_str(PlanLoopPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
 }

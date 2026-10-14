@@ -259,5 +259,36 @@ fn level_name(level: PermissionLevel) -> &'static str {
     }
 }
 
+impl PolicyAuthorityPlugin {
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "allow": [
+    "none",
+    "read"
+  ],
+  "ask": [
+    "write",
+    "execute"
+  ],
+  "tools": {
+    "fs.*": "read",
+    "repo.*": "read",
+    "shell.exec": "execute"
+  },
+  "decisions": {
+    "web.*": "ask"
+  }
+}"#;
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn the_config_example_is_a_valid_configuration() {
+    let parsed: Result<PolicyConfig, _> =
+        serde_json::from_str(PolicyAuthorityPlugin::CONFIG_EXAMPLE);
+    assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
