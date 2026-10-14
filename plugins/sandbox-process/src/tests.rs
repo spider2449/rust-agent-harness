@@ -389,3 +389,267 @@ async fn an_environment_without_a_scope_refuses_to_spawn() {
         Err(ExecError::InvalidSpec(_))
     ));
 }
+
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn sandbox_os_refuses_to_start_off_linux() {
+    let dir = TempDir::new("os-unsupported");
+    let kernel = Kernel::new();
+    let status = kernel
+        .mount(
+            Arc::new(SandboxOsPlugin::new("sandbox")),
+            MountOptions::with_config(serde_json::json!({ "root": dir.0 })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&status, rah_api::PluginStatus::Failed { .. }),
+        "{status:?}"
+    );
+    assert!(kernel.handle().get(SANDBOX).is_none());
+}
+
+/// Tries what a confined program must not do, and what it may, and reports
+/// each outcome as `<name>=ok`, `<name>=denied` or `<name>=error:<message>`.
+#[test]
+#[ignore = "helper program"]
+fn helper_probe() {
+    use std::io::Write;
+    fn report(name: &str, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => println!("{name}=ok"),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                println!("{name}=denied");
+            }
+            Err(error) => println!("{name}=error:{error}"),
+        }
+    }
+    let var = |name: &str| std::env::var(name).unwrap();
+    let tmp = std::env::temp_dir();
+    println!("tmpdir={}", tmp.display());
+    report("inside", std::fs::write("inside.txt", b"x"));
+    report("tmp", std::fs::write(tmp.join("tmp.txt"), b"x"));
+    report(
+        "outside",
+        std::fs::write(PathBuf::from(var("RAH_TEST_OUTSIDE")).join("out.txt"), b"x"),
+    );
+    report("read", std::fs::read(var("RAH_TEST_READ")).map(|_| ()));
+    report(
+        "tcp",
+        std::net::TcpStream::connect(var("RAH_TEST_ADDR"))
+            .and_then(|mut stream| stream.write_all(b"x")),
+    );
+    report("udp", std::net::UdpSocket::bind("127.0.0.1:0").map(|_| ()));
+}
+
+#[cfg(target_os = "linux")]
+mod os {
+    use super::*;
+
+    /// Whether this kernel can run `sandbox-os`; says why when it cannot.
+    fn supported() -> bool {
+        match crate::os::linux::landlock_abi() {
+            Ok(abi) if abi >= 3 => true,
+            other => {
+                eprintln!("skipped: sandbox-os needs landlock ABI 3 or later ({other:?})");
+                false
+            }
+        }
+    }
+
+    async fn mount(config: serde_json::Value) -> (Kernel, rah_api::PluginStatus) {
+        let kernel = Kernel::new();
+        let status = kernel
+            .mount(
+                Arc::new(SandboxOsPlugin::new("sandbox")),
+                MountOptions::with_config(config),
+            )
+            .await
+            .unwrap();
+        (kernel, status)
+    }
+
+    struct Probe {
+        text: String,
+        outside: TempDir,
+    }
+
+    impl Probe {
+        fn line(&self, name: &str) -> &str {
+            let prefix = format!("{name}=");
+            self.text
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .unwrap_or_else(|| panic!("no `{name}` in {}", self.text))
+        }
+    }
+
+    /// Runs `helper_probe` in a sandbox rooted at `dir`. `config` is merged
+    /// into the plugin configuration; the value `"<outside>"` stands for a
+    /// list holding the directory outside the root.
+    async fn probe(dir: &TempDir, name: &str, config: serde_json::Value) -> (Kernel, Probe) {
+        let outside = TempDir::new(&format!("{name}-outside"));
+        std::fs::write(outside.0.join("secret.txt"), b"readable").unwrap();
+        let mut full = serde_json::json!({ "root": dir.0, "max_timeout_ms": 60_000 });
+        for (key, value) in config.as_object().unwrap() {
+            full[key] = match value.as_str() {
+                Some("<outside>") => serde_json::json!([outside.0]),
+                _ => value.clone(),
+            };
+        }
+        let (kernel, status) = mount(full).await;
+        assert_eq!(status, rah_api::PluginStatus::Active);
+        let sandbox = kernel.handle().get(SANDBOX).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut spec = helper("helper_probe", Duration::from_secs(30));
+        let outside_path = outside.0.display().to_string();
+        let secret = outside.0.join("secret.txt").display().to_string();
+        let address = listener.local_addr().unwrap().to_string();
+        spec.env.insert("RAH_TEST_OUTSIDE".into(), outside_path);
+        spec.env.insert("RAH_TEST_READ".into(), secret);
+        spec.env.insert("RAH_TEST_ADDR".into(), address);
+        let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+        let text = format!(
+            "{}{}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.termination, None, "{text}");
+        (kernel, Probe { text, outside })
+    }
+
+    #[tokio::test]
+    async fn confines_writes_and_the_network() {
+        if !supported() {
+            return;
+        }
+        let dir = TempDir::new("os-confined");
+        let (kernel, probe) = probe(&dir, "os-confined", serde_json::json!({})).await;
+        assert_eq!(probe.line("inside"), "ok");
+        assert_eq!(probe.line("tmp"), "ok");
+        assert_eq!(probe.line("read"), "ok");
+        assert_eq!(probe.line("outside"), "denied");
+        assert_eq!(probe.line("tcp"), "denied");
+        assert_eq!(probe.line("udp"), "denied");
+        assert!(dir.0.join("inside.txt").exists());
+        assert!(!probe.outside.0.join("out.txt").exists());
+
+        // The private temporary directory goes away with the plugin.
+        let tmpdir = PathBuf::from(probe.line("tmpdir"));
+        assert!(tmpdir.starts_with(std::env::temp_dir()), "{}", probe.text);
+        assert!(tmpdir.is_dir());
+        kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+        assert!(!tmpdir.exists());
+    }
+
+    #[tokio::test]
+    async fn writable_paths_and_the_network_can_be_allowed() {
+        if !supported() {
+            return;
+        }
+        let dir = TempDir::new("os-allowed");
+        let config = serde_json::json!({ "writable": "<outside>", "network": true });
+        let (_kernel, probe) = probe(&dir, "os-allowed", config).await;
+        assert_eq!(probe.line("outside"), "ok");
+        assert_eq!(probe.line("tcp"), "ok");
+        assert_eq!(probe.line("udp"), "ok");
+        assert!(probe.outside.0.join("out.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn readable_paths_can_be_narrowed() {
+        if !supported() {
+            return;
+        }
+        let dir = TempDir::new("os-narrow");
+        // The helper is this test binary, so its directory stays readable,
+        // with the system directories its shared libraries come from.
+        let exe = std::env::current_exe().unwrap();
+        let mut readable = vec![exe.parent().unwrap().to_path_buf()];
+        for system in ["/usr", "/etc", "/lib", "/lib64"] {
+            if Path::new(system).exists() {
+                readable.push(PathBuf::from(system));
+            }
+        }
+        let config = serde_json::json!({ "readable": readable });
+        let (_kernel, probe) = probe(&dir, "os-narrow", config).await;
+        assert_eq!(probe.line("read"), "denied");
+        assert_eq!(probe.line("inside"), "ok");
+    }
+
+    #[tokio::test]
+    async fn confined_programs_are_still_terminated() {
+        if !supported() {
+            return;
+        }
+        let dir = TempDir::new("os-terminate");
+        let config = serde_json::json!({ "root": dir.0, "max_timeout_ms": 60_000 });
+        let (kernel, status) = mount(config).await;
+        assert_eq!(status, rah_api::PluginStatus::Active);
+        let sandbox = kernel.handle().get(SANDBOX).unwrap();
+
+        let output = sandbox
+            .run(
+                helper("helper_sleep", Duration::from_millis(300)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.termination, Some(Termination::TimedOut));
+
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        let (output, ()) = tokio::join!(
+            sandbox.run(helper("helper_sleep", Duration::from_secs(30)), cancel),
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                trigger.cancel();
+            }
+        );
+        assert_eq!(output.unwrap().termination, Some(Termination::Cancelled));
+
+        // Descendants holding the pipes are terminated after the exit.
+        let started = Instant::now();
+        let output = sandbox
+            .run(
+                helper("helper_orphan", Duration::from_secs(60)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(started.elapsed() < Duration::from_secs(20));
+
+        let spawned = sandbox.spawn(spawn_spec("helper_sleep")).await.unwrap();
+        kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+        let code = tokio::time::timeout(Duration::from_secs(10), spawned.process.wait())
+            .await
+            .unwrap();
+        assert_eq!(code, None);
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_fails_the_plugin() {
+        if !supported() {
+            return;
+        }
+        let dir = TempDir::new("os-invalid");
+        for extra in [
+            serde_json::json!({ "writable": ["/rah/does/not/exist"] }),
+            serde_json::json!({ "readable": ["missing"] }),
+            serde_json::json!({ "network": "yes" }),
+            serde_json::json!({ "unknown": true }),
+        ] {
+            let mut config = serde_json::json!({ "root": dir.0 });
+            for (key, value) in extra.as_object().unwrap() {
+                config[key] = value.clone();
+            }
+            let (kernel, status) = mount(config.clone()).await;
+            assert!(
+                matches!(status, rah_api::PluginStatus::Failed { .. }),
+                "{config}: {status:?}"
+            );
+            assert!(kernel.handle().get(SANDBOX).is_none());
+        }
+    }
+}

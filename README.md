@@ -105,6 +105,19 @@ config = { allow_programs = ["git", "cargo"] }   # optional allow list
 a timeout, bounded output and process-tree termination. With the mock model,
 `/call shell.exec {"program":"git","args":["status"]}` exercises it.
 
+On Linux (landlock ABI 3, Linux 6.2 or later), `sandbox-os` can take the
+place of `sandbox-process` and also confines what programs touch: writes
+only under the root, a private `TMPDIR` and `writable`, reads under
+`readable` (default `/`), and no network sockets unless `network = true`.
+It refuses to start elsewhere. See `docs/SECURITY.md` for what it does not
+cover.
+
+```toml
+[[plugin]]
+use = "sandbox-os"
+config = { root = ".", writable = ["/home/me/.cargo/registry"], network = false }
+```
+
 MCP servers are mounted one `tools-mcp` (stdio) or `tools-mcp-http`
 (Streamable HTTP) instance per server. Only the tools listed in `tools` are exposed, as
 `mcp.<server>.<tool>`, with the permission level written there; the policy

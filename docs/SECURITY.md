@@ -93,6 +93,20 @@ a bounded stderr tail and no timeout. Its supervision tasks belong to the
 `sandbox-process` scope, so unmounting the sandbox, or dropping the returned
 handle, terminates the process tree.
 
+`sandbox-os` (ADR 0042) provides the same service with the same
+supervision plus OS-level confinement, **on Linux only**: landlock (ABI 3,
+Linux 6.2, or later) limits writes to the root, a private `TMPDIR` and the
+configured `writable` paths, and reads to `readable` (default `/`); unless
+`network = true`, a seccomp filter denies every socket except Unix-domain
+ones, and `io_uring`. Confinement is applied before `exec`, so it covers
+every descendant. It refuses to start without landlock ABI 3 or seccomp,
+and on every other platform; it never falls back to plain supervision. It
+does not hide readable files (the default `readable` includes the user's
+credentials), does not stop connections to Unix socket files such as
+`ssh-agent` or `docker.sock`, does not restrict the network with
+`network = true`, and sets no CPU, memory or disk limits. No preset mounts
+it.
+
 `tools-shell` provides `shell.exec` with `execute` permission and requires
 `sandbox`. It accepts `program`, `args`, `cwd` and `timeout_ms` only, and can
 be restricted further with `allow_programs`. A program terminated by the
@@ -225,7 +239,7 @@ policy remains possible, behind the warning.
 Behind the same token and checks, and likewise unreachable from tools:
 
 - `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
-  `tools-builtin`, `tools-repo-write`) at another existing directory, as
+  `sandbox-os`, `tools-builtin`, `tools-repo-write`) at another existing directory, as
   `rah --root` does at start. It widens what tools can reach to that folder,
   which is the user's choice; a policy still decides every call.
 - `GET /api/fs/dirs` lists the subdirectory names of any host directory the

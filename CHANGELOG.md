@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### OS sandbox on Linux
+
+- New opt-in plugin `sandbox-os` (ADR 0042), in the `sandbox-process`
+  crate: the `sandbox` service with `sandbox-process` supervision plus,
+  on Linux, landlock confinement (writes only under the root, a private
+  `TMPDIR` removed on unmount, and `writable`; reads and execution only
+  under `readable`, default `/`) and, unless `network = true`, a seccomp
+  filter that denies every non-Unix socket and `io_uring`. It needs
+  landlock ABI 3 (Linux 6.2) and, without network, an x86-64 or AArch64
+  host; otherwise, and on every other platform, it fails to start rather
+  than run programs unconfined. It is a workspace plugin (`--root`,
+  `set_workspace`) and not in any preset.
+
 ### Plugin storage
 
 - `rah-api` adds the `storage` service (ADR 0041): `KvStore` with `get`,

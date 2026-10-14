@@ -2,7 +2,7 @@
 name = "rah-plugin-sandbox-process"
 version.workspace = true
 edition.workspace = true
-description = "Process supervision sandbox plugin (not an OS sandbox): provides the `sandbox` service"
+description = "Sandbox plugins providing the `sandbox` service: `sandbox-process` (process supervision, not an OS sandbox) and `sandbox-os` (landlock and seccomp confinement on Linux)"
 
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }
@@ -10,6 +10,7 @@ serde.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 
 # Process-tree termination: a Job Object on Windows, a process group on Unix.
+# Linux confinement (`sandbox-os`): landlock and seccomp system calls.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

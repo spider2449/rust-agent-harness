@@ -24,9 +24,15 @@
 //! "max_timeout_ms": <n> }`. `root` defaults to the current directory;
 //! `inherit_env` defaults to a small platform list (see
 //! [`DEFAULT_INHERIT_ENV`]); `max_timeout_ms` defaults to 10 minutes.
+//!
+//! The crate also provides `sandbox-os` ([`SandboxOsPlugin`]), the same
+//! service with OS-level confinement on Linux.
 
+mod os;
 mod spawn;
 mod supervise;
+
+pub use os::SandboxOsPlugin;
 
 use std::{
     collections::BTreeMap,
@@ -44,6 +50,8 @@ use rah_api::{
 };
 use serde::Deserialize;
 use tokio::process::Command;
+
+use os::Confinement;
 
 /// Variables copied from the RAH process environment by default. The home
 /// directory variables let programs find the user's own configuration (Git
@@ -100,37 +108,51 @@ impl Plugin for SandboxProcessPlugin {
         } else {
             scope.config_as()?
         };
-        let root = config.root.unwrap_or_else(|| PathBuf::from("."));
-        let root = tokio::fs::canonicalize(&root)
-            .await
-            .map_err(|error| format!("sandbox root `{}`: {error}", root.display()))?;
-        let names = config.inherit_env.unwrap_or_else(|| {
-            DEFAULT_INHERIT_ENV
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect()
-        });
-        let mut base_env = BTreeMap::new();
-        for name in names {
-            validate_env_name(&name).map_err(|message| format!("inherit_env: {message}"))?;
-            if let Some(value) = std::env::var_os(&name) {
-                base_env.insert(OsString::from(name), value);
-            }
-        }
-        let max_timeout = match config.max_timeout_ms {
-            Some(0) => return Err("max_timeout_ms must be greater than zero".into()),
-            Some(ms) => Duration::from_millis(ms),
-            None => DEFAULT_MAX_TIMEOUT,
-        };
         let env = ProcessEnv {
-            root,
-            base_env,
-            max_timeout,
+            root: canonical_root(config.root).await?,
+            base_env: inherited_env(config.inherit_env)?,
+            max_timeout: max_timeout(config.max_timeout_ms)?,
             stop: scope.spawner().cancellation(),
             spawner: Some(scope.spawner()),
+            confinement: None,
         };
         scope.provide(SANDBOX, Arc::new(env))?;
         Ok(())
+    }
+}
+
+/// The configured root, canonicalized; the current directory by default.
+async fn canonical_root(root: Option<PathBuf>) -> Result<PathBuf, String> {
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    tokio::fs::canonicalize(&root)
+        .await
+        .map_err(|error| format!("sandbox root `{}`: {error}", root.display()))
+}
+
+/// The base environment: the named variables of the RAH process that are
+/// set, [`DEFAULT_INHERIT_ENV`] when `names` is `None`.
+fn inherited_env(names: Option<Vec<String>>) -> Result<BTreeMap<OsString, OsString>, String> {
+    let names = names.unwrap_or_else(|| {
+        DEFAULT_INHERIT_ENV
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    });
+    let mut base_env = BTreeMap::new();
+    for name in names {
+        validate_env_name(&name).map_err(|message| format!("inherit_env: {message}"))?;
+        if let Some(value) = std::env::var_os(&name) {
+            base_env.insert(OsString::from(name), value);
+        }
+    }
+    Ok(base_env)
+}
+
+fn max_timeout(ms: Option<u64>) -> Result<Duration, String> {
+    match ms {
+        Some(0) => Err("max_timeout_ms must be greater than zero".into()),
+        Some(ms) => Ok(Duration::from_millis(ms)),
+        None => Ok(DEFAULT_MAX_TIMEOUT),
     }
 }
 
@@ -144,6 +166,9 @@ pub struct ProcessEnv {
     /// Owns the supervision tasks of spawned programs; `None` without a
     /// scope, which disables `spawn`.
     spawner: Option<Spawner>,
+    /// OS-level confinement applied to every program (`sandbox-os`); `None`
+    /// for plain supervision.
+    confinement: Option<Arc<Confinement>>,
 }
 
 impl ProcessEnv {
@@ -160,6 +185,7 @@ impl ProcessEnv {
             max_timeout,
             stop: CancellationToken::new(),
             spawner: None,
+            confinement: None,
         }
     }
 
@@ -203,6 +229,9 @@ impl ProcessEnv {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         supervise::configure(&mut command);
+        if let Some(confinement) = &self.confinement {
+            confinement.configure(&mut command);
+        }
         command
     }
 

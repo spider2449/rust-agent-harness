@@ -40,16 +40,17 @@
 
 ## G4：`sandbox-os`（OS 層隔離）
 
-**暫緩（2026-10-13，使用者決定）：等本機有 WSL 可以驗證 Linux 再做。** 待決事項：Windows AppContainer 需要在工作目錄加上永久的 ACL（改動主機設定），而且裝在使用者目錄的工具（例如 `~/.cargo` 的 rustup）在容器內讀不到；Linux 的 landlock 目前只能靠 CI 驗證。
+2026-10-13 暫緩（等 WSL）；2026-10-14 本機有 WSL（Ubuntu 24.04、Linux 6.18、landlock ABI 7）後先做 Linux。
 
 起因：`sandbox-process` 只是程序監督（Job Object／process group），不是隔離；`shell.exec` 跑的程式可以讀寫使用者能存取的任何東西，也能連網。
 
-- [ ] 先寫 ADR：威脅模型、各平台採用的機制、能宣稱和不能宣稱的保證（遵守 AGENTS.md「不宣稱未實作的隔離」）。
-- [ ] Windows：AppContainer 或受限 token，加上對工作目錄的 ACL；Linux：landlock（檔案）和 seccomp 或 network namespace（網路），不可用時拒絕啟動，不默默退回。
-- [ ] 提供同一個 `sandbox` 服務，可以用 `admin` 的 `replace` 直接換掉 `sandbox-process`。
-- [ ] 設定：可寫的路徑清單、是否允許網路。
-- [ ] 測試：寫入工作目錄外失敗、連網被擋（設定禁止時）、取消和逾時仍終止整個 process tree。不支援的平台上測試要明確略過並說明。
-- 這段工作量最大，可能拆成「Windows」和「Linux」兩個 commit。
+- [x] ADR 0042：威脅模型、機制、能宣稱和不能宣稱的保證（預設 `readable = "/"` 不隱藏憑證；Unix socket 檔案（`ssh-agent`、`docker.sock`）擋不住；沒有 CPU／記憶體限制；`setsid` 的子孫可逃離 process group）。
+- [x] Linux：landlock（ABI 3 以上，處理 kernel 支援的所有檔案權限，含 `TRUNCATE`）＋ seccomp（`network = false` 時拒絕 `AF_UNIX` 以外的 socket 和 `io_uring_setup`，其他架構的 syscall 直接終止）。ABI 6 以上另外限制 signal 和 abstract Unix socket。在 `fork` 之後、`exec` 之前套用，所以涵蓋所有子孫。不可用時拒絕啟動，不退回。
+  - 網路改用 seccomp 而不是 network namespace：Ubuntu 24.04（CI runner）用 AppArmor 限制非特權 user namespace，netns 在 CI 上無法驗證。代價是 loopback 也被擋。
+- [x] 提供同一個 `sandbox` 服務；放在 `sandbox-process` crate 裡當第二個 catalog plugin（共用監督程式碼，`model-responses`、`tools-mcp` 已有一個 crate 兩個 plugin 的先例），`rah-api` 和 protocol 不變。加入 `WORKSPACE_PLUGINS`，`--root` 和 `set_workspace` 會移動它的 root。不放進 preset（Windows 不能用；預設不能連網）。
+- [x] 設定：`readable`（預設 `/`）、`writable`（相對路徑以 `root` 為準，必須存在）、`network`（預設 `false`），加上 `sandbox-process` 原有的 `root`、`inherit_env`、`max_timeout_ms`。另外建立權限 0700 的私人暫存目錄當 `TMPDIR`，unmount 時刪除。
+- [x] 測試（WSL 實跑；CI 是 ubuntu-latest）：寫入工作目錄外失敗、TCP 和 UDP 被擋、`writable` 和 `network = true` 可以開放、縮小 `readable` 後讀不到、逾時／取消／孤兒子孫／unmount 仍終止 process tree、無效設定、`TMPDIR` 在 unmount 後刪除；`crates/rah-cli/tests/sandbox_os.rs` 端到端經過 `policy-authority` 和 `shell.exec`。landlock ABI 低於 3 的 kernel 印出原因後略過；非 Linux 平台則斷言 plugin 拒絕啟動。
+- [ ] Windows：仍未做，`sandbox-os` 在 Windows 上拒絕啟動並指出 `sandbox-process` 沒有隔離。待決事項不變：AppContainer 需要在工作目錄加上永久的 ACL（改動主機設定），裝在使用者目錄的工具（例如 `~/.cargo` 的 rustup）在容器內讀不到。
 
 ## G5：`storage-fs`
 

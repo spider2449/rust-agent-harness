@@ -42,7 +42,7 @@ struct Args {
     #[arg(long)]
     session_dir: Option<PathBuf>,
     /// Workspace root for file tools and processes (tools-builtin,
-    /// sandbox-process).
+    /// tools-repo-write, sandbox-process, sandbox-os).
     #[arg(long)]
     root: Option<PathBuf>,
 }
@@ -100,7 +100,7 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             matched |= distribution.set_config(kind, "root", root.clone());
         }
         if !matched {
-            return Err("--root needs a `tools-builtin` or `sandbox-process` plugin".into());
+            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
         }
     }
     if let Some(model) = &args.model {

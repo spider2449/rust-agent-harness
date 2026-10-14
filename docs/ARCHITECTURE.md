@@ -110,7 +110,9 @@ Implemented:
   request);
   `skills-fs` (skills listed through `model.before_request`, loaded with
   `skills.load`); `sandbox-process` (supervised processes, not an OS
-  sandbox); `tools-repo`
+  sandbox); `sandbox-os` (opt-in, Linux only: the same supervision plus
+  landlock file confinement and a seccomp network filter, ADR 0042);
+  `tools-repo`
   (read-only Git tools, requires `sandbox`); `tools-repo-write`
   (`repo.create-file`, `repo.edit-files`, `repo.patch`, declared `write`);
   `tools-mcp` (one MCP stdio server

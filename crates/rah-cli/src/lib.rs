@@ -21,7 +21,7 @@ use rah_plugin_model_anthropic::AnthropicPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
 use rah_plugin_policy_authority::PolicyAuthorityPlugin;
-use rah_plugin_sandbox_process::SandboxProcessPlugin;
+use rah_plugin_sandbox_process::{SandboxOsPlugin, SandboxProcessPlugin};
 use rah_plugin_scheduler_basic::SchedulerPlugin;
 use rah_plugin_session_jsonl::JsonlSessionPlugin;
 use rah_plugin_session_titles::SessionTitlesPlugin;
@@ -42,7 +42,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 25] = [
+    let entries: [(&'static str, Constructor); 26] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
@@ -58,6 +58,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("policy-authority", |id| {
             Arc::new(PolicyAuthorityPlugin::new(id))
         }),
+        ("sandbox-os", |id| Arc::new(SandboxOsPlugin::new(id))),
         ("sandbox-process", |id| {
             Arc::new(SandboxProcessPlugin::new(id))
         }),
@@ -277,9 +278,14 @@ impl Distribution {
 
 /// Plugin kinds that work in a workspace directory, through their `root`
 /// configuration: what `rah --root` sets at start and what the `admin`
-/// service's `set_workspace` changes at runtime. The sandbox comes first, so
-/// the tools that depend on it restart with the new root.
-pub const WORKSPACE_PLUGINS: [&str; 3] = ["sandbox-process", "tools-builtin", "tools-repo-write"];
+/// service's `set_workspace` changes at runtime. The sandboxes come first, so
+/// the tools that depend on them restart with the new root.
+pub const WORKSPACE_PLUGINS: [&str; 4] = [
+    "sandbox-process",
+    "sandbox-os",
+    "tools-builtin",
+    "tools-repo-write",
+];
 
 /// The `use` name of out-of-process plugins (protocol v3); their `config`
 /// says how to start them.
