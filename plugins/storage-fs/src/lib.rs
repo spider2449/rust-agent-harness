@@ -150,6 +150,24 @@ impl FsStore {
     }
 }
 
+/// Renames `from` over `to`. On Windows the replace fails with "Access is
+/// denied" for a moment while another writer replaces the same file or a
+/// scanner holds it open, so that is retried a few times.
+async fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::rename(from, to).await {
+            Err(error)
+                if cfg!(windows) && error.kind() == ErrorKind::PermissionDenied && attempt < 10 =>
+            {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(5 * attempt)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn io(error: std::io::Error) -> StorageError {
     StorageError::Io(error.to_string())
 }
@@ -181,7 +199,7 @@ impl KvStore for FsStore {
             file.write_all(value).await?;
             file.sync_all().await?;
             drop(file);
-            tokio::fs::rename(&temp, &path).await
+            replace(&temp, &path).await
         }
         .await;
         if let Err(error) = written {

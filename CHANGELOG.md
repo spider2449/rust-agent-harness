@@ -9,6 +9,12 @@
   needs `WRITE_OWNER`, so it failed with "Access is denied"; the user is now
   granted `WRITE_OWNER` there first, and the grant stays like the label
   (ADR 0043, amended).
+- `sandbox-os` on Windows no longer fails to start a program with "All pipe
+  instances are busy" when two instances in one process name a pipe at the
+  same instant; pipe names now include the instance.
+- `storage-fs` retries a `put` whose final rename Windows briefly refuses
+  ("Access is denied") while another writer replaces the same entry or a
+  scanner holds it open.
 
 ## v0.42.0 (2026-10-14)
 

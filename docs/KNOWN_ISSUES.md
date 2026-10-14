@@ -41,6 +41,10 @@ in the commit which entry it closes.
   `cargo test --workspace` runs and 10 rounds of three parallel runs of the
   test alone, 60 passes in all. The UI is not changed until a failure shows
   the cause.
+- **Not reproduced on 2026-10-14** (Windows 11, Edge, standard user): 11
+  full `cargo test --workspace` runs with the browser tests. Those runs did
+  find two other intermittent failures, fixed the same day: a `sandbox-os`
+  pipe name collision and a refused `storage-fs` rename.
 - **To reproduce:** run the full suite repeatedly and keep the output, for
   example
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`

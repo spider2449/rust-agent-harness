@@ -509,9 +509,12 @@ impl Confinement {
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
+        // The token handle tells apart the instances alive in this process,
+        // which may pick a pipe at the same instant.
         let name = format!(
-            r"\\.\pipe\rah-sandbox-os-{}-{nanos:x}-{}",
+            r"\\.\pipe\rah-sandbox-os-{}-{:x}-{nanos:x}-{}",
             std::process::id(),
+            self.token.as_raw_handle() as usize,
             self.pipes.fetch_add(1, Ordering::Relaxed)
         );
         // One instance, created first: nothing else can serve or take it.

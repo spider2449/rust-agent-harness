@@ -7,7 +7,7 @@ description = "Storage plugin: the namespaced key-value store as one file per en
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }
 serde.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "time"] }
 
 [dev-dependencies]
 serde_json.workspace = true
