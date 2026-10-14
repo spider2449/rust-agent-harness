@@ -307,7 +307,7 @@ impl StorageFsPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "dir": ".rah/storage",
+  "dir": "storage",
   "max_value_bytes": 16777216
 }"#;
 }

@@ -392,7 +392,7 @@ impl ContextPlugin {
   "system": "<system prompt>",
   "max_items": 200,
   "max_chars": 200000,
-  "memory_dir": ".rah/memory",
+  "memory_dir": "memory",
   "max_memory_bytes": 16384
 }"#;
 }

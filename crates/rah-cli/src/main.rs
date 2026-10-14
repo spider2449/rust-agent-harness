@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -9,7 +9,7 @@ use rah_api::{
     host::{ExitRequested, FrontendListening, Interrupt},
     tools::ToolInvoker,
 };
-use rah_cli::{Distribution, boot};
+use rah_cli::{Distribution, boot, default_data_home};
 use serde_json::Value;
 
 /// RAH: a plugin-kernel agent harness.
@@ -18,8 +18,10 @@ use serde_json::Value;
 struct Args {
     /// Built-in preset to run (ignored with --config): default (llama.cpp),
     /// dev (mock model), minimal (mock model, no policy), openai, anthropic.
-    #[arg(long, default_value = "default")]
-    preset: String,
+    /// Without --preset and --config, `rah.toml` in the data directory runs
+    /// when it exists, otherwise `default`.
+    #[arg(long)]
+    preset: Option<String>,
     /// Model id (model-openai, model-anthropic, model-llamacpp).
     #[arg(long)]
     model: Option<String>,
@@ -38,7 +40,13 @@ struct Args {
     /// Resume this session (frontend-cli).
     #[arg(long)]
     session: Option<String>,
-    /// Session log directory (session-jsonl).
+    /// Data directory for sessions, storage, memory, skills and telemetry;
+    /// relative data paths in the configuration resolve against it.
+    /// Default: RAH_HOME, else `.rah` in the user's home directory.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Session log directory (session-jsonl), instead of `sessions` in the
+    /// data directory.
     #[arg(long)]
     session_dir: Option<PathBuf>,
     /// Workspace root for file tools and processes (tools-builtin,
@@ -47,15 +55,46 @@ struct Args {
     root: Option<PathBuf>,
 }
 
+/// `path` made absolute against the current directory, so a relative path
+/// given on the command line means what it says where it was typed.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    std::path::absolute(path).map_err(|error| format!("`{}`: {error}", path.display()))
+}
+
+/// `--data-dir`, else the default data home; `.rah` in the current directory
+/// only when no home directory is known.
+fn data_home(args: &Args) -> Result<PathBuf, String> {
+    let home = args
+        .data_dir
+        .clone()
+        .or_else(default_data_home)
+        .unwrap_or_else(|| PathBuf::from(".rah"));
+    absolute(&home)
+}
+
+/// The user's own distribution file in the data directory.
+const USER_CONFIG: &str = "rah.toml";
+
+fn read_config(path: &Path) -> Result<Distribution, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
+    Distribution::parse(&text).map_err(|error| format!("`{}`: {error}", path.display()))
+}
+
 fn distribution(args: &Args) -> Result<Distribution, String> {
-    let mut distribution = match &args.config {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
-            Distribution::parse(&text).map_err(|error| error.to_string())?
+    let home = data_home(args)?;
+    let user_config = home.join(USER_CONFIG);
+    let mut distribution = match (&args.config, &args.preset) {
+        (Some(path), _) => read_config(path)?,
+        (None, Some(preset)) => Distribution::preset(preset).map_err(|error| error.to_string())?,
+        (None, None) if user_config.is_file() => {
+            eprintln!("rah: using `{}`", user_config.display());
+            read_config(&user_config)?
         }
-        None => Distribution::preset(&args.preset).map_err(|error| error.to_string())?,
+        (None, None) => Distribution::preset("default").map_err(|error| error.to_string())?,
     };
+    distribution.data_home = Some(home);
+    let session_dir = args.session_dir.as_deref().map(absolute).transpose()?;
     if args.web {
         if args.prompt.is_some() || args.session.is_some() {
             return Err("--web cannot be combined with --prompt or --session".into());
@@ -79,9 +118,7 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         (
             "session-jsonl",
             "dir",
-            args.session_dir
-                .as_ref()
-                .map(|p| Value::String(p.display().to_string())),
+            session_dir.map(|p| Value::String(p.display().to_string())),
         ),
     ];
     for (kind, key, value) in overrides {

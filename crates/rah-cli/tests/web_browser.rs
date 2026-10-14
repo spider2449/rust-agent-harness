@@ -40,7 +40,7 @@ type Socket =
 struct Browser {
     child: Child,
     port: u16,
-    _profile: TempDir,
+    profile: TempDir,
 }
 
 impl Browser {
@@ -92,8 +92,14 @@ impl Browser {
         Self {
             child,
             port,
-            _profile: profile,
+            profile,
         }
+    }
+
+    /// Where downloads go: inside the temporary profile, never the user's
+    /// download folder.
+    fn downloads(&self) -> PathBuf {
+        self.profile.0.join("downloads")
     }
 
     async fn page(&self) -> Page {
@@ -120,6 +126,11 @@ impl Browser {
         for domain in ["Page", "Runtime", "Log"] {
             page.call(&format!("{domain}.enable"), json!({})).await;
         }
+        page.call(
+            "Browser.setDownloadBehavior",
+            json!({ "behavior": "allow", "downloadPath": self.downloads().display().to_string() }),
+        )
+        .await;
         page.call(
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": HELPERS }),
@@ -931,14 +942,75 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
         markdown.as_str().unwrap().starts_with("# Kyoto trip\n"),
         "{markdown}"
     );
-    // The buttons' handler, awaited so the downloads finish before the delete.
+    // The buttons' handler, awaited so the exports finish before the delete.
+    // With a save dialog, the file goes where the user picks; the stub
+    // records what would be written.
     assert_eq!(
         page.eval("shown(byId('export-md')) && shown(byId('export-json'))")
             .await,
         true
     );
+    page.eval(
+        "window.saved = [];          window.showSaveFilePicker = async (options) => ({ createWritable: async () => {            const parts = [];            return { write: async (part) => { parts.push(part); }, abort: async () => {},              close: async () => { saved.push({ name: options.suggestedName,                type: Object.keys(options.types[0].accept)[0],                text: await new Blob(parts).text() }); } }; } }); true",
+    )
+    .await;
     page.eval("Promise.all([exportSession('md'), exportSession('json')]).then(() => true)")
         .await;
+    let saved = page.eval("saved").await;
+    let current = page.eval("state.current").await;
+    let current = current.as_str().unwrap();
+    let saved = saved.as_array().unwrap();
+    assert_eq!(saved.len(), 2, "{saved:#?}");
+    let md = saved
+        .iter()
+        .find(|file| file["type"] == "text/markdown")
+        .unwrap();
+    assert_eq!(md["name"], format!("rah-session-{current}.md"));
+    assert!(md["text"].as_str().unwrap().starts_with(
+        "# Kyoto trip
+"
+    ));
+    let json_file = saved
+        .iter()
+        .find(|file| file["type"] == "application/json")
+        .unwrap();
+    assert_eq!(json_file["name"], format!("rah-session-{current}.json"));
+    serde_json::from_str::<Value>(json_file["text"].as_str().unwrap()).unwrap();
+
+    // Cancelling the dialog saves nothing and reports nothing.
+    page.eval(
+        "window.showSaveFilePicker = async () => {            throw new DOMException('The user aborted a request.', 'AbortError'); };          exportSession('md').then(() => true)",
+    )
+    .await;
+    assert_eq!(page.eval("saved.length").await, 2);
+
+    // Without a save dialog, the browser downloads the file.
+    page.eval("delete window.showSaveFilePicker; exportSession('md').then(() => true)")
+        .await;
+    let download = browser
+        .downloads()
+        .join(format!("rah-session-{current}.md"));
+    let deadline = Instant::now() + TIMEOUT;
+    let text = loop {
+        match std::fs::read_to_string(&download) {
+            Ok(text) if !text.is_empty() => break text,
+            _ => {
+                assert!(
+                    Instant::now() < deadline,
+                    "no download at {}",
+                    download.display()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    assert!(
+        text.starts_with(
+            "# Kyoto trip
+"
+        ),
+        "{text}"
+    );
 
     // Delete the current branch from the header.
     page.eval("window.confirm = () => true; byId('session-delete').click(); true")
@@ -1034,6 +1106,11 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     .await;
     page.eval("byId('ws-cancel').click(); true").await;
     assert_eq!(page.eval("byId('workspace-dialog').open").await, false);
+    page.wait(
+        "the saved recent folders",
+        "api('/preferences').then((p) => p.recent_workspaces?.[0]?.endsWith('other'))",
+    )
+    .await;
 
     // Sessions are grouped by folder: the current one (empty) is open, the
     // old one is listed closed, and the open session of the old folder was
@@ -1104,11 +1181,12 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
             .await,
         "0.550"
     );
-    assert_eq!(
-        page.eval("JSON.parse(localStorage.getItem('rah-side')).treeRatio")
-            .await,
-        0.55
-    );
+    // Remembered by the server, with the rest of the preferences.
+    page.wait(
+        "the saved split",
+        "api('/preferences').then((p) => p.side?.tree_ratio === 0.55)",
+    )
+    .await;
     page.eval("treeButton('docs').click(); true").await;
     page.wait(
         "the opened folder",
@@ -1156,6 +1234,35 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
         true,
         "{}",
         page.eval("byId('activity').textContent").await
+    );
+
+    // Deleting a folder deletes all its sessions, forks first. The current
+    // workspace stays listed, empty.
+    assert!(page.eval("state.sessions.length").await.as_u64().unwrap() >= 2);
+    let folder = page
+        .eval(
+            "(() => { const box = folderItems().find((item) => item.dataset.folder.endsWith('workspace'))              .getBoundingClientRect(); return [box.x + box.width / 2, box.y + box.height / 2]; })()",
+        )
+        .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseMoved", "x": folder[0], "y": folder[1] }),
+    )
+    .await;
+    page.screenshot("folder-delete").await;
+    page.eval(
+        "window.confirm = () => true;          folderItems().find((item) => item.dataset.folder.endsWith('workspace'))          .querySelector('[aria-label=\"Delete folder sessions\"]').click(); true",
+    )
+    .await;
+    page.wait(
+        "the emptied folder",
+        "state.sessions.length === 0 && sessionItems().length === 0 &&          !shown(byId('session-head')) &&          byId('sessions').textContent.includes('No sessions in this folder yet') &&          !folderItems()[0].querySelector('[aria-label=\"Delete folder sessions\"]')",
+    )
+    .await;
+    assert_eq!(
+        page.eval("byId('notice').textContent.includes('not deleted')")
+            .await,
+        false
     );
 }
 
@@ -1436,7 +1543,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     )
     .await;
     let preferences = page.eval("api('/preferences')").await;
-    assert_eq!(preferences, json!({ "raw_markdown": true }));
+    assert_eq!(preferences["raw_markdown"], true, "{preferences}");
     page.eval("byId('raw-markdown').click(); true").await;
     page.wait(
         "the formatted reply again",

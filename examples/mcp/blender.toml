@@ -25,9 +25,10 @@
 use = "policy-authority"
 config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "mcp.blender.*" = "read", "mcp.blender.execute_blender_code" = "execute" } }
 
+# Sessions go to `sessions` in the data home (`--data-dir`, RAH_HOME or
+# `~/.rah`), like every relative data path.
 [[plugin]]
 use = "session-jsonl"
-config = { dir = ".rah/sessions" }
 
 [[plugin]]
 use = "tools-builtin"
@@ -56,7 +57,7 @@ config = { server = "blender", program = "uvx", args = ["--from", "git+https://p
 
 [[plugin]]
 use = "context-default"
-config = { memory_dir = ".rah/memory" }
+config = { memory_dir = "memory" }
 
 # A local llama-server on http://127.0.0.1:8080, like the `default` preset;
 # the plugin starts without it and fails on the first request instead. Swap

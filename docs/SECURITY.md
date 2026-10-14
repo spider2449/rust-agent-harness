@@ -193,7 +193,7 @@ position. It is labeled as background, not instructions, bounded to
 through `ToolInvoker` and the policy. The summary request has no tools and
 no `model.before_request` hooks. With a `storage` provider, summaries of
 conversations are kept there in plain text (with `storage-fs`, under
-`.rah/storage/context-compact`) until deleted.
+`storage/context-compact` in the data directory) until deleted.
 
 ## `storage`
 
@@ -257,15 +257,27 @@ policy remains possible, behind the warning.
 
 Behind the same token and checks, and likewise unreachable from tools:
 
-- `PUT /api/preferences {raw_markdown}` stores display preferences in
-  `storage` (key `preferences`); they change only how the page looks.
+- `PUT /api/preferences` stores the UI's preferences in `storage` (key
+  `preferences`): the display setting, recent workspaces (paths the user
+  picked; at most 8), the folders open in the session list (at most 1000)
+  and the side panel layout. They change only how the page looks and what
+  the folder picker suggests.
+- Successful changes through `/api/plugins` are stored in `storage` (key
+  `plugins`, at most 256 plugin ids) and applied again when `frontend-web`
+  starts, after the Settings forms: mounted or configured (rolled back when
+  the plugin does not start), stopped, or unmounted. Stopping or removing a
+  policy plugin is never stored or replayed, so a start never comes up
+  unguarded because of it; a stored policy configuration is applied with
+  the same rollback as the Settings form. Whoever can write the `storage`
+  directory can therefore choose the plugins of the next start, as with
+  `rah.toml`.
 - `PUT /api/web-search {enabled}` is the Web UI's web search switch. On,
   it first adds `decisions = { "web.*" = "ask" }` to every mounted
   `policy-authority` that does not already decide `web.*`, then mounts
   `tools-web-search`; off, it unmounts `tools-web-search` and leaves the
   rule. The choice is stored in `storage` (namespace: the frontend's id,
   key `web-search`) and applied again when `frontend-web` starts, so
-  whoever can write `.rah/storage` can turn web search on, still behind
+  whoever can write the `storage` directory can turn web search on, still behind
   the ask rule.
 - `PUT /api/settings/{slot} {id, kind, config}` saves the Settings forms
   (`model`, `assistant`, `tools`, `loop`): configure, replace or mount
@@ -273,10 +285,13 @@ Behind the same token and checks, and likewise unreachable from tools:
   plugin does not start (a broken policy never stays failed), then stored
   in `storage` (key `settings-<slot>`) and applied again at the next start,
   the policy first. The stored `tools` settings are the whole
-  `policy-authority` configuration, so whoever can write `.rah/storage`
-  controls the policy of the next start. The repository write tools refuse
-  paths under `.rah/` for this reason (see below); `shell.exec`, when
-  mounted and approved, is not restricted this way.
+  `policy-authority` configuration, so whoever can write the `storage`
+  directory controls the policy of the next start. The data directory
+  (`~/.rah` by default, or `--data-dir`/`RAH_HOME`) is outside the workspace
+  unless the workspace contains it; the repository write tools also refuse
+  paths under `.rah/` for this reason (see below). A data directory with
+  another name inside the workspace is not protected that way, and
+  `shell.exec`, when mounted and approved, is not restricted either.
 - `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
   `sandbox-os`, `tools-builtin`, `tools-repo-write`) at another existing directory, as
   `rah --root` does at start. It widens what tools can reach to that folder,
@@ -356,7 +371,8 @@ through a temporary file and a rename. `repo.patch` runs `git apply --check`
 then `git apply` through the `sandbox` service, only when Git's top level is
 the configured root; `git apply` rejects paths outside the work tree. None
 of them writes under `.rah/`, where RAH keeps sessions, memory, skills and
-`storage` (with the saved Web UI settings, the policy among them):
+`storage` (with the saved Web UI settings, the policy among them) when the
+workspace contains the default data directory:
 `repo.patch` lists the patch's paths with `git apply --numstat` first,
 renames included. A failure after the first write is recorded as an
 `uncertain` effect.

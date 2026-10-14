@@ -78,13 +78,15 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 }
 .sessions { list-style: none; margin: 0; padding: 0; }
 .sessions li.group { padding: 10px 8px 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.sessions li.folder { margin-top: 6px; }
-.sessions li.folder button {
+.sessions li.folder { position: relative; margin-top: 6px; }
+.sessions li.folder button.folder-toggle {
   display: flex; width: 100%; gap: 6px; align-items: center; text-align: left; font: inherit; font-size: 13px; font-weight: 600;
   padding: 4px 6px; border: none; border-radius: 6px; background: none; color: var(--text); cursor: pointer;
 }
-.sessions li.folder button:hover { background: var(--tool); }
-.sessions li.folder.here button { color: var(--accent); }
+.sessions li.folder button.folder-toggle:hover { background: var(--tool); }
+.sessions li.folder.here button.folder-toggle { color: var(--accent); }
+.sessions li.folder .item-actions { top: 3px; }
+.sessions li.folder:hover .count, .sessions li.folder:focus-within .count { visibility: hidden; }
 .sessions .caret { width: 1em; flex: none; color: var(--muted); font-size: 10px; }
 .sessions .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sessions .count { flex: none; color: var(--muted); font-size: 11px; font-weight: normal; }
@@ -100,7 +102,8 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 .sessions .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 44px; }
 .sessions small { display: block; color: var(--muted); font-weight: normal; }
 .sessions .item-actions { position: absolute; top: 4px; right: 4px; display: none; gap: 2px; }
-.sessions li.session:hover .item-actions, .sessions li.session:focus-within .item-actions { display: flex; }
+.sessions li.session:hover .item-actions, .sessions li.session:focus-within .item-actions,
+.sessions li.folder:hover .item-actions, .sessions li.folder:focus-within .item-actions { display: flex; }
 button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
 .title-input { width: 100%; font: inherit; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--accent); background: var(--bg); color: var(--text); }
 

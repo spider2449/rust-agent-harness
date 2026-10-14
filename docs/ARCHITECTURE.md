@@ -103,7 +103,9 @@ Implemented:
   model before `context-default` applies its window; summaries are cached by
   the history prefix they cover, and kept in `storage` when it is mounted);
   `storage-fs` (the `storage` service as one file per entry under
-  `.rah/storage`, mounted by every preset);
+  `storage` in the data directory, mounted by every preset; `rah` resolves
+  every plugin's data paths against one data directory, `~/.rah` unless
+  `--data-dir` or `RAH_HOME` says otherwise);
   `context-default` (system prompt, sliding history window and file-backed
   memory notes through `model.before_request`, plus `memory.remember`; with
   `memory_dir` one file per workspace, chosen from the sandbox root on every

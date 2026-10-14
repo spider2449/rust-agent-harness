@@ -46,18 +46,18 @@ cargo run -p rah-cli -- --preset dev
 ```
 
 The `dev` preset mounts `policy-authority`, `storage-fs` (plugin state in
-`.rah/storage`), `session-jsonl` (logs in
-`.rah/sessions`), `session-titles` (names each session from its first turn),
+`~/.rah/storage`), `session-jsonl` (logs in
+`~/.rah/sessions`), `session-titles` (names each session from its first turn),
 `tools-builtin` (`echo` and `fs.read` bounded to the current
 directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 `repo.diff`, `repo.list` and `repo.search` over Git), `tools-repo-write`
 (`repo.create-file`, `repo.edit-files` and `repo.patch`, each asking for
 approval), `context-default` (a
 sliding history window and memory notes kept per workspace in
-`.rah/memory/<folder>-<hash>.md`, which the model can extend with
+`~/.rah/memory/<folder>-<hash>.md`, which the model can extend with
 `memory.remember` after you approve), `skills-fs` (skills, shared by all
 workspaces, in
-`.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
+`~/.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
 `skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
 hand a task to a subagent in its own session), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
@@ -197,16 +197,32 @@ use = "context-compact"
 config = { trigger_chars = 60000, keep_chars = 20000 }   # all optional
 ```
 
+Data directory: everything RAH keeps between runs (sessions, plugin
+storage, memory notes, skills and telemetry) lives in one directory,
+`~/.rah` (`%USERPROFILE%\.rah` on Windows), whichever directory `rah`
+starts in. `--data-dir <dir>` or the `RAH_HOME` environment variable moves
+it. A relative data path in a configuration (`dir`, `memory_dir`,
+`memory_file`) is relative to the data directory, an absolute one is used
+as is, and `--session-dir` overrides only the session logs.
+
+Your settings live there too. Without `--preset` and `--config`, `rah` runs
+`rah.toml` in the data directory when it exists (your own plugin
+composition, see below), otherwise the `default` preset. What you change in
+the Web UI is kept under `storage/frontend-web`: the Settings forms, the
+web search switch, changes made in the **Plugins** panel, the display
+preference, the recent workspaces, which folders of the session list are
+open and the layout of the side panel.
+
 Plugin state: `storage-fs`, mounted by every preset, provides the `storage`
 service (ADR 0041), a key-value store in which each plugin keeps its
-entries under its own id, one file per entry in `.rah/storage`
-(`config = { dir = ".rah/storage", max_value_bytes = 16777216 }`).
+entries under its own id, one file per entry in `~/.rah/storage`
+(`config = { dir = "storage", max_value_bytes = 16777216 }`).
 `context-compact` keeps its summaries there, and process and WASM plugins
 that list `storage` in `requires` can keep state between calls and
 restarts.
 
 Diagnostics: the opt-in `telemetry-log` plugin writes one JSON line per
-turn, model request and tool call to `.rah/telemetry/<date>.jsonl`, with
+turn, model request and tool call to `~/.rah/telemetry/<date>.jsonl`, with
 durations, the policy decision of each tool call and the token usage
 providers report (ADR 0040). It sees every turn, including background and
 subagent turns, and never records message text or tool output. The Web UI
@@ -216,7 +232,7 @@ was loaded.
 ```toml
 [[plugin]]
 use = "telemetry-log"
-config = { dir = ".rah/telemetry", keep_days = 14, include_arguments = false }   # all optional
+config = { dir = "telemetry", keep_days = 14, include_arguments = false }   # all optional
 ```
 
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
@@ -245,7 +261,9 @@ cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
 URL. The UI lists sessions grouped by the folder they worked in (the current
 workspace first and open, the others folded, ten per folder until "Show
 more") and searchable, with titles the model generates after the first turn; you can rename, delete
-(moved to `.rah/sessions/deleted/`), export (Markdown or JSON) and fork them,
+(moved to `~/.rah/sessions/deleted/`; the ✕ on a folder deletes all its
+sessions, forks first, and leaves the folder's files alone), export (Markdown or JSON, saved where
+you pick in browsers with a save dialog, otherwise as a download) and fork them,
 regenerate the last answer or edit an earlier message and send it again (both
 in a new branch, so the original is kept). It streams turns and asks you to
 allow or deny tool calls the policy marks `Ask`. A status line shows the
@@ -268,7 +286,10 @@ activity log of the open session's turns and tool calls; it can be resized
 or hidden. Its **Plugins** tab remains for raw plugin configuration: it
 adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
-effect on the next turn without a restart. Typing `/` in the message box
+effect on the next turn without a restart. These changes are remembered and
+applied again at the next start, after the Settings forms (saving a form for
+the same plugin replaces its panel change); stopping or removing the policy
+is never carried over. Typing `/` in the message box
 lists commands (`/new`, `/plugins`, `/stop`, `/start`, `/restart`, `/cancel`)
 and completes plugin ids. It listens on loopback only and
 has no external resources.
@@ -303,14 +324,13 @@ not against a live llama-server or the live OpenAI or Anthropic APIs.
 Compose your own plugins with a distribution file:
 
 ```toml
-# rah.toml — run with: rah --config rah.toml
+# rah.toml — run with: rah --config rah.toml, or save it as ~/.rah/rah.toml
 [[plugin]]
 use = "policy-authority"
 config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read" } }
 
 [[plugin]]
-use = "session-jsonl"
-config = { dir = ".rah/sessions" }
+use = "session-jsonl"     # logs in `sessions` under the data directory
 
 [[plugin]]
 use = "tools-builtin"

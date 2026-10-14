@@ -139,11 +139,13 @@ config = {{ prompt = "say hello" }}
         ),
     )
     .unwrap();
+    let home = dir.0.join("home");
     let output = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_rah"))
             .arg("--config")
             .arg(&config)
             .env(KEY_ENV, "fixture-key")
+            .env("RAH_HOME", home)
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -197,6 +199,7 @@ fn anthropic_preset_without_a_key_runs_but_reports_the_inactive_model() {
         .arg("--root")
         .arg(dir.workspace())
         .env_remove("ANTHROPIC_API_KEY")
+        .env("RAH_HOME", dir.0.join("home"))
         .stdin(Stdio::null())
         .output()
         .unwrap();

@@ -10,9 +10,10 @@
 //! back, so a bad policy never leaves tool calls unguarded. At start the
 //! stored settings are applied again (the policy first), then the web search
 //! switch. A stored setting replaces the distribution's configuration of
-//! that plugin as a whole.
+//! that plugin as a whole. Changes made in the Plugins panel are applied
+//! after them (see [`crate::panel`]).
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use axum::{
     Json,
@@ -27,7 +28,7 @@ use rah_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ApiError, ApiResult, AppState, Shared, manage::admin, status_json, web_search};
+use crate::{ApiError, ApiResult, AppState, Shared, manage::admin, panel, status_json, web_search};
 
 /// Slots and the plugin kinds each may hold, in the order they are restored.
 const SLOTS: [(&str, &[&str]); 4] = [
@@ -93,8 +94,14 @@ pub(crate) async fn save(
         kind: save.kind,
         config: save.config,
     };
-    let (id, status) = apply(admin.as_ref(), current, &saved).await?;
+    let (id, status) = apply(admin.as_ref(), current.clone(), &saved).await?;
     let remembered = status == PluginStatus::Active && remember(&shared, &slot, &saved).await;
+    if remembered {
+        // The form now decides this plugin, not an earlier panel change.
+        for id in current.iter().chain([&id]) {
+            panel::forget(&shared, id).await;
+        }
+    }
     let mut reply = status_json(&status);
     reply["id"] = json!(id.as_str());
     reply["remembered"] = json!(remembered);
@@ -145,6 +152,7 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
             }
         }
     }
+    panel::restore(&shared, admin.as_ref()).await;
     web_search::restore(&shared, admin.as_ref()).await;
 }
 
@@ -209,17 +217,79 @@ async fn remember(shared: &Shared, slot: &str, saved: &Saved) -> bool {
         .is_ok()
 }
 
-/// Display preferences of the Web UI, shared by every browser on this
-/// `rah` (`GET|PUT /api/preferences`), stored under the key `preferences`.
+/// Preferences of the Web UI, shared by every browser on this `rah`
+/// (`GET|PUT /api/preferences`), stored under the key `preferences`: kept
+/// with the rest of the user's data instead of one browser's storage.
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Preferences {
     /// Show the model's replies as Markdown source instead of rendered.
     #[serde(default)]
     raw_markdown: bool,
+    /// Folders of the session list the user opened (`true`) or closed, by
+    /// lowercase path (`""`: sessions without a folder).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    folders: BTreeMap<String, bool>,
+    /// Workspaces picked recently, the latest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recent_workspaces: Vec<String>,
+    /// Layout of the side panel.
+    #[serde(default, skip_serializing_if = "SidePanel::is_empty")]
+    side: SidePanel,
+}
+
+#[derive(Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SidePanel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    open: Option<bool>,
+    /// `files` or `plugins`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<String>,
+    /// Width in CSS pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<f64>,
+    /// Share of the file tree in the files view, between 0 and 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_ratio: Option<f64>,
+}
+
+impl SidePanel {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 const PREFERENCES: &str = "preferences";
+/// The most folders remembered, and the longest path kept.
+const MAX_FOLDERS: usize = 1000;
+const MAX_PATH_CHARS: usize = 4096;
+/// The most recent workspaces kept.
+const MAX_RECENT: usize = 8;
+
+impl Preferences {
+    /// Refuses what no UI sends, so a client cannot grow the stored entry
+    /// without bound; trims the recent workspaces to the most recent.
+    fn checked(mut self) -> Result<Self, ApiError> {
+        let bad = |message: &str| Err(ApiError(StatusCode::BAD_REQUEST, message.to_owned()));
+        if self.folders.len() > MAX_FOLDERS {
+            return bad("too many folders in `folders`");
+        }
+        let long = |path: &String| path.chars().count() > MAX_PATH_CHARS;
+        if self.folders.keys().any(long) || self.recent_workspaces.iter().any(long) {
+            return bad("a path in the preferences is too long");
+        }
+        if matches!(&self.side.view, Some(view) if view != "files" && view != "plugins") {
+            return bad("`side.view` must be `files` or `plugins`");
+        }
+        let finite = |value: Option<f64>| value.is_none_or(f64::is_finite);
+        if !finite(self.side.width) || !finite(self.side.tree_ratio) {
+            return bad("`side` sizes must be numbers");
+        }
+        self.recent_workspaces.truncate(MAX_RECENT);
+        Ok(self)
+    }
+}
 
 /// `GET /api/preferences`; the defaults when nothing is stored.
 pub(crate) async fn preferences(State(shared): State<AppState>) -> ApiResult {
@@ -240,6 +310,7 @@ pub(crate) async fn set_preferences(
     State(shared): State<AppState>,
     Json(preferences): Json<Preferences>,
 ) -> ApiResult {
+    let preferences = preferences.checked()?;
     let remembered = match (shared.kernel.get(STORAGE), serde_json::to_vec(&preferences)) {
         (Some(storage), Ok(bytes)) => storage
             .put(shared.id.as_str(), PREFERENCES, &bytes)

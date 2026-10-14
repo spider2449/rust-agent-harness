@@ -446,3 +446,56 @@ async fn a_stopped_plugin_keeps_its_configuration_and_its_dependents_wait() {
     admin.unmount(&model).await.unwrap();
     assert!(admin.stopped().is_empty() && admin.instance(&model).is_none());
 }
+
+#[tokio::test]
+async fn data_paths_resolve_against_the_data_home_also_for_admin_mounts() {
+    let dir = TempDir::new("data-home");
+    let home = dir.0.join("home");
+    let mut distribution = headless(&dir);
+    // The preset's own sessions and memory paths, relative again.
+    distribution.set_config("session-jsonl", "dir", json!("logs"));
+    distribution.set_config("context-default", "memory_dir", json!("memory"));
+    distribution.data_home = Some(home.clone());
+    let kernel = kernel(&distribution).await;
+    let handle = kernel.handle();
+    let admin = handle.get(ADMIN).unwrap();
+    let under_home = |name: &str| json!(home.join(name).display().to_string());
+
+    let sessions = admin
+        .instance(&PluginId::new("session-jsonl"))
+        .unwrap()
+        .config;
+    assert_eq!(sessions["dir"], under_home("logs"));
+    new_session(&handle).await;
+    assert!(home.join("logs").is_dir());
+    let context = admin
+        .instance(&PluginId::new("context-default"))
+        .unwrap()
+        .config;
+    assert_eq!(context["memory_dir"], under_home("memory"));
+
+    // Mounted at runtime without a path: the default under the home.
+    let (id, status) = admin
+        .mount(rah_api::admin::MountRequest {
+            kind: "telemetry-log".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, PluginStatus::Active);
+    assert_eq!(
+        admin.instance(&id).unwrap().config["dir"],
+        under_home("telemetry")
+    );
+
+    // Configured at runtime with a relative path: joined to the home.
+    admin
+        .configure(&id, json!({ "dir": "diagnostics", "keep_days": 3 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        admin.instance(&id).unwrap().config["dir"],
+        under_home("diagnostics")
+    );
+    kernel.shutdown().await.unwrap();
+}

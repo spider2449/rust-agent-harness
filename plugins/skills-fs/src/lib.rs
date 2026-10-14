@@ -282,7 +282,7 @@ impl SkillsPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "dir": ".rah/skills",
+  "dir": "skills",
   "max_skills": 64,
   "max_skill_bytes": 65536
 }"#;

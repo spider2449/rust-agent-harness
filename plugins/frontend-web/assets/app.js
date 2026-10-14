@@ -10,7 +10,8 @@ const state = {
   sessions: [],
   current: null,
   running: false,
-  // Display preferences (`/api/preferences`).
+  // Preferences kept by the server (`/api/preferences`): display, the
+  // folders opened in the session list, recent workspaces, the side panel.
   prefs: { raw_markdown: false },
   liveText: "",
   retry: 500,
@@ -66,6 +67,16 @@ async function api(path, options = {}) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
   return body;
+}
+
+// Saves `state.prefs` on the server, once changes stop for a moment (a drag
+// saves once). Not remembered when the save fails; nothing depends on it.
+let prefsTimer = null;
+function savePrefs() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    api("/preferences", { method: "PUT", body: JSON.stringify(state.prefs) }).catch(() => {});
+  }, 300);
 }
 
 // Images are shown separately (contentImages); the text names them.
@@ -144,19 +155,12 @@ function folderName(path) {
 // first, then the other folders by their latest session, then those without
 // a recorded folder. A folder shows its first sessions until "Show more".
 const FOLDER_PAGE = 10;
-const FOLDERS_KEY = "rah-folders";
 
 // {key: true|false} for folders the user opened or closed; the others follow
 // the default (only the current workspace is open).
 function folderChoices() {
-  if (!state.folderChoices) {
-    try {
-      state.folderChoices = JSON.parse(localStorage.getItem(FOLDERS_KEY) || "{}") || {};
-    } catch {
-      state.folderChoices = {};
-    }
-  }
-  return state.folderChoices;
+  if (!state.prefs.folders || typeof state.prefs.folders !== "object") state.prefs.folders = {};
+  return state.prefs.folders;
 }
 
 function folderKey(path) {
@@ -171,11 +175,7 @@ function folderOpen(key, here, searching) {
 
 function toggleFolder(key, open) {
   folderChoices()[key] = open;
-  try {
-    localStorage.setItem(FOLDERS_KEY, JSON.stringify(folderChoices()));
-  } catch {
-    // Not remembered.
-  }
+  savePrefs();
   renderSessions();
 }
 
@@ -201,7 +201,7 @@ function sessionGroups(visible) {
 function folderItem(group, open, here) {
   const item = el("li", here ? "folder here" : "folder");
   item.dataset.folder = group.path || "";
-  const button = el("button");
+  const button = el("button", "folder-toggle");
   button.type = "button";
   button.title = group.path ? `${group.path}${here ? "\nThe current workspace" : ""}` : "Sessions without a recorded folder";
   button.setAttribute("aria-expanded", String(open));
@@ -212,7 +212,43 @@ function folderItem(group, open, here) {
   );
   button.addEventListener("click", () => toggleFolder(group.key, !open));
   item.append(button);
+  if (group.sessions.length) {
+    const actions = el("span", "item-actions");
+    const remove = el("button", "ghost icon", "✕");
+    remove.type = "button";
+    remove.title = "Delete all sessions in this folder";
+    remove.setAttribute("aria-label", "Delete folder sessions");
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteFolder(group).catch(report);
+    });
+    actions.append(remove);
+    item.append(actions);
+  }
   return item;
+}
+
+// Deletes every session of a folder in the list, also those a search hides.
+// The folder itself and its files are not touched.
+async function deleteFolder(group) {
+  const infos = state.sessions.filter((info) => folderKey(info.workspace || null) === group.key);
+  if (!infos.length) return;
+  const name = group.path || "No folder recorded";
+  const count = infos.length === 1 ? "the 1 session" : `all ${infos.length} sessions`;
+  const question = `Delete ${count} in "${name}"?
+
+The logs are moved to the sessions' deleted folder. The folder and its files are not touched.`;
+  if (!window.confirm(question)) return;
+  const result = await api("/sessions/delete", {
+    method: "POST",
+    body: JSON.stringify({ ids: infos.map((info) => info.id) }),
+  });
+  if (result.deleted.includes(state.current)) closeSession();
+  await loadSessions();
+  if (result.failed.length) {
+    const first = result.failed[0].error;
+    showNotice(`${result.failed.length} of ${infos.length} sessions were not deleted: ${first}`);
+  }
 }
 
 function renderSessions() {
@@ -359,17 +395,49 @@ async function deleteSession(info) {
   await loadSessions();
 }
 
-// Downloads go through fetch, since the API needs the token header.
+const EXPORT_TYPES = {
+  md: { description: "Markdown", accept: { "text/markdown": [".md"] } },
+  json: { description: "JSON", accept: { "application/json": [".json"] } },
+};
+
+// Exports go through fetch, since the API needs the token header. Where the
+// browser has a save dialog (File System Access API), the user picks the
+// file; otherwise the browser downloads it to its download folder.
 async function exportSession(format) {
+  const name = `rah-session-${state.current}.${format}`;
+  let handle = null;
+  if (window.showSaveFilePicker) {
+    // Asked first, while the click still counts as a user gesture.
+    try {
+      handle = await window.showSaveFilePicker({
+        suggestedName: name,
+        types: [EXPORT_TYPES[format]],
+      });
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      throw error;
+    }
+  }
   const response = await fetch(`/api/sessions/${state.current}/export?format=${format}`, {
     headers: { Authorization: `Bearer ${state.token}` },
   });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  const name = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "");
-  const url = URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  if (handle) {
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(blob);
+    } catch (error) {
+      await writable.abort();
+      throw error;
+    }
+    await writable.close();
+    return;
+  }
+  const url = URL.createObjectURL(blob);
   const link = el("a");
   link.href = url;
-  link.download = name ? name[1] : `rah-session.${format}`;
+  link.download = name;
   document.body.append(link);
   link.click();
   link.remove();
@@ -951,7 +1019,6 @@ function showApproval(request) {
 
 // The right-hand panel: the workspace's files (read-only), the files opened
 // from them, and an activity log of the open session; or the plugins.
-const SIDE_KEY = "rah-side";
 const files = {
   root: null,
   // Directory path ("" is the root) -> its listing, once loaded.
@@ -963,19 +1030,12 @@ const files = {
 };
 
 function sidePrefs() {
-  try {
-    return JSON.parse(localStorage.getItem(SIDE_KEY) || "{}") || {};
-  } catch {
-    return {};
-  }
+  return state.prefs.side || {};
 }
 
 function saveSidePrefs(change) {
-  try {
-    localStorage.setItem(SIDE_KEY, JSON.stringify({ ...sidePrefs(), ...change }));
-  } catch {
-    // Not remembered.
-  }
+  state.prefs.side = { ...sidePrefs(), ...change };
+  savePrefs();
 }
 
 function sideView() {
@@ -1360,7 +1420,7 @@ function gitSignature(state) {
 function setupSplitter() {
   const pane = $("tree-pane");
   const apply = (ratio) => pane.style.setProperty("--tree-ratio", String(ratio));
-  const saved = Number(sidePrefs().treeRatio);
+  const saved = Number(sidePrefs().tree_ratio);
   if (saved > 0 && saved < 1) apply(saved);
   const handle = $("pane-splitter");
   handle.addEventListener("pointerdown", (event) => {
@@ -1376,7 +1436,7 @@ function setupSplitter() {
     const done = () => {
       handle.classList.remove("dragging");
       handle.removeEventListener("pointermove", move);
-      if (ratio !== null) saveSidePrefs({ treeRatio: Number(ratio.toFixed(3)) });
+      if (ratio !== null) saveSidePrefs({ tree_ratio: Number(ratio.toFixed(3)) });
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", done, { once: true });
@@ -1389,7 +1449,7 @@ function setupSplitter() {
     const current = Number(getComputedStyle(pane).getPropertyValue("--tree-ratio")) || 0.6;
     const next = Math.min(Math.max(current + (event.key === "ArrowUp" ? -0.05 : 0.05), 0.1), 0.9);
     apply(next.toFixed(3));
-    saveSidePrefs({ treeRatio: Number(next.toFixed(3)) });
+    saveSidePrefs({ tree_ratio: Number(next.toFixed(3)) });
   });
 }
 
@@ -1792,25 +1852,14 @@ function refreshStatus() {
 
 // ---- Workspace picker -----------------------------------------------------
 
-const RECENT_KEY = "rah-recent-workspaces";
-
-// Browser storage is a convenience: it may be unavailable.
 function recentWorkspaces() {
-  try {
-    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
-    return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
+  const list = state.prefs.recent_workspaces;
+  return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
 }
 
 function rememberWorkspace(path) {
-  const list = [path, ...recentWorkspaces().filter((item) => item !== path)].slice(0, 8);
-  try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
-  } catch {
-    // Not remembered; nothing else depends on it.
-  }
+  state.prefs.recent_workspaces = [path, ...recentWorkspaces().filter((item) => item !== path)].slice(0, 8);
+  savePrefs();
 }
 
 function folderButton(label, path, git, onClick) {

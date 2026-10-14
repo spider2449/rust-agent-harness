@@ -14,7 +14,7 @@ use rah_api::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ApiError, ApiResult, AppState, status_json};
+use crate::{ApiError, ApiResult, AppState, panel, status_json};
 
 pub(crate) fn admin(shared: &AppState) -> Result<Arc<dyn PluginAdmin>, ApiError> {
     shared.kernel.get(ADMIN).ok_or_else(|| {
@@ -112,16 +112,30 @@ impl Mount {
     }
 }
 
-/// `POST /api/plugins`.
+/// `POST /api/plugins`. Changes that succeed are remembered for the next
+/// start (see [`crate::panel`]).
 pub(crate) async fn mount(State(shared): State<AppState>, Json(mount): Json<Mount>) -> ApiResult {
-    let (id, status) = admin(&shared)?.mount(mount.request()).await?;
+    let request = mount.request();
+    let (id, status) = admin(&shared)?.mount(request.clone()).await?;
+    panel::mounted(&shared, &id, &request).await;
     Ok(status_reply(id.as_str(), &status))
 }
 
 /// `DELETE /api/plugins/{id}`.
 pub(crate) async fn unmount(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    admin(&shared)?.unmount(&PluginId::new(id.clone())).await?;
+    let admin = admin(&shared)?;
+    let plugin = PluginId::new(id.clone());
+    let kind = admin.instance(&plugin).map(|instance| instance.kind);
+    admin.unmount(&plugin).await?;
+    panel::removed(&shared, &plugin, kind.as_deref()).await;
     Ok(Json(json!({ "id": id, "state": "unmounted" })))
+}
+
+/// Records the current configuration of `id` as started or stopped.
+async fn record(shared: &AppState, admin: &dyn PluginAdmin, id: &PluginId, stopped: bool) {
+    if let Some(instance) = admin.instance(id) {
+        panel::configured(shared, id, &instance.kind, instance.config, stopped).await;
+    }
 }
 
 /// `POST /api/plugins/{id}/restart`.
@@ -132,13 +146,19 @@ pub(crate) async fn restart(State(shared): State<AppState>, Path(id): Path<Strin
 
 /// `POST /api/plugins/{id}/stop`.
 pub(crate) async fn stop(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    admin(&shared)?.stop(&PluginId::new(id.clone())).await?;
+    let admin = admin(&shared)?;
+    let plugin = PluginId::new(id.clone());
+    admin.stop(&plugin).await?;
+    record(&shared, admin.as_ref(), &plugin, true).await;
     Ok(Json(json!({ "id": id, "state": "stopped", "detail": "" })))
 }
 
 /// `POST /api/plugins/{id}/start`.
 pub(crate) async fn start(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    let status = admin(&shared)?.start(&PluginId::new(id.clone())).await?;
+    let admin = admin(&shared)?;
+    let plugin = PluginId::new(id.clone());
+    let status = admin.start(&plugin).await?;
+    record(&shared, admin.as_ref(), &plugin, false).await;
     Ok(status_reply(&id, &status))
 }
 
@@ -154,9 +174,12 @@ pub(crate) async fn configure(
     Path(id): Path<String>,
     Json(configure): Json<Configure>,
 ) -> ApiResult {
-    let status = admin(&shared)?
-        .configure(&PluginId::new(id.clone()), configure.config)
-        .await?;
+    let admin = admin(&shared)?;
+    let plugin = PluginId::new(id.clone());
+    let status = admin.configure(&plugin, configure.config.clone()).await?;
+    if let Some(instance) = admin.instance(&plugin) {
+        panel::configured(&shared, &plugin, &instance.kind, configure.config, false).await;
+    }
     Ok(status_reply(&id, &status))
 }
 
@@ -167,8 +190,12 @@ pub(crate) async fn replace(
     Path(id): Path<String>,
     Json(mount): Json<Mount>,
 ) -> ApiResult {
-    let (id, status) = admin(&shared)?
-        .replace(&PluginId::new(id), mount.request())
-        .await?;
+    let admin = admin(&shared)?;
+    let old = PluginId::new(id);
+    let kind = admin.instance(&old).map(|instance| instance.kind);
+    let request = mount.request();
+    let (id, status) = admin.replace(&old, request.clone()).await?;
+    panel::removed(&shared, &old, kind.as_deref()).await;
+    panel::mounted(&shared, &id, &request).await;
     Ok(status_reply(id.as_str(), &status))
 }

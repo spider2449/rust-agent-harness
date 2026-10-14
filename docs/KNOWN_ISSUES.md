@@ -46,6 +46,20 @@ in the commit which entry it closes.
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`
   with `RAH_TEST_BROWSER` set, then search `run.txt` for `timed out waiting`.
 
+## Environment: `sandbox-os` Low-integrity tests fail inside an agent sandbox
+
+- **Tests:** `plugins/sandbox-process/src/tests.rs`, the seven
+  `tests::os::*` tests, and `crates/rah-cli/tests/sandbox_os.rs`,
+  `shell_exec_cannot_write_outside_the_workspace`.
+- **Seen:** 2026-10-14, Windows 10, when `cargo test` ran from a coding
+  agent's sandboxed shell. The same failures happen at `c6bfb26` (v0.42.0),
+  so they predate the data-home change made that day.
+- **Symptom:** the Low-integrity child exits with `-1073741502`
+  (`0xC0000142`, `STATUS_DLL_INIT_FAILED`) and no output.
+- **Suspect, unconfirmed:** the restricted token or job of the calling shell
+  stops a Low-integrity process from initializing. Run the tests again from a
+  normal terminal; remove this entry if they pass there.
+
 ## Setting up another development machine
 
 - **Browser tests** run only when `RAH_TEST_BROWSER` names Chrome, Chromium

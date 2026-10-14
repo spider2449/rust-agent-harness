@@ -32,8 +32,8 @@
 //!   config}` saves the Settings forms (`model`, `assistant`, `tools`,
 //!   `loop`) the same way, rolled back when the plugin does not start, and
 //!   applies them again at the next start (see [`settings`]).
-//!   `GET|PUT /api/preferences {raw_markdown}` keeps display preferences the
-//!   same way.
+//!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
+//!   side}` keeps the UI's preferences the same way, for every browser.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog` (`{kinds, examples}`, an
@@ -44,9 +44,13 @@
 //!   `PUT /api/plugins/{id}/config
 //!   {config}` and `POST /api/plugins/{id}/replace {kind, id, config, bind}`
 //!   (mounts the replacement, then unmounts `{id}` once it is active).
+//!   Changes that succeed are applied again at the next start (see
+//!   [`panel`]).
 //! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
 //!   delay_secs, every_secs}` and `DELETE /api/jobs/{id}`.
 //! - `GET|POST /api/sessions`, `GET|DELETE /api/sessions/{id}`,
+//!   `POST /api/sessions/delete {ids}` (several at once, such as a folder of
+//!   the session list: forks before the sessions they came from),
 //!   `POST /api/sessions/{id}/fork {at}`, `PUT /api/sessions/{id}/title
 //!   {title}` (`null` clears it) and `GET /api/sessions/{id}/export?format=md|json`
 //!   (a download).
@@ -71,13 +75,14 @@ mod files;
 mod git;
 mod jobs;
 mod manage;
+mod panel;
 mod settings;
 mod status;
 mod web_search;
 mod workspace;
 mod ws;
 
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -137,6 +142,8 @@ pub(crate) struct Shared {
     pub approvals: Approvals,
     /// Cancelled when the plugin scope is disposed.
     pub stop: CancellationToken,
+    /// Serializes updates of the recorded Plugins panel changes.
+    pub panel: tokio::sync::Mutex<()>,
 }
 
 pub(crate) type AppState = Arc<Shared>;
@@ -168,6 +175,7 @@ impl Plugin for WebFrontendPlugin {
             hosts: access::allowed_hosts(address),
             approvals: Approvals::new(timeout),
             stop: scope.spawner().cancellation(),
+            panel: tokio::sync::Mutex::new(()),
         });
         let asker = shared.clone();
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
@@ -219,6 +227,7 @@ fn router(shared: AppState) -> Router {
         .route("/plugins/{id}/config", put(manage::configure))
         .route("/plugins/{id}/replace", post(manage::replace))
         .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/delete", post(delete_sessions))
         .route("/sessions/{id}", get(read_session).delete(delete_session))
         .route("/sessions/{id}/fork", post(fork_session))
         .route("/sessions/{id}/title", put(rename_session))
@@ -425,6 +434,71 @@ async fn rename_session(
 async fn delete_session(State(shared): State<AppState>, Path(id): Path<String>) -> ApiResult {
     sessions(&shared)?.delete(&session_id(&id)?).await?;
     Ok(Json(json!({ "id": id, "deleted": true })))
+}
+
+/// The most sessions one `POST /api/sessions/delete` takes.
+const MAX_DELETE: usize = 10_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteMany {
+    ids: Vec<String>,
+}
+
+/// `POST /api/sessions/delete {ids}`: deletes the sessions, each fork before
+/// the session it was forked from, so a fork tree inside `ids` goes as a
+/// whole. A session that still has forks outside `ids` is refused, as with
+/// a single delete. Replies with what was deleted and what was not.
+async fn delete_sessions(
+    State(shared): State<AppState>,
+    Json(request): Json<DeleteMany>,
+) -> ApiResult {
+    if request.ids.len() > MAX_DELETE {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("at most {MAX_DELETE} sessions at once"),
+        ));
+    }
+    let wanted: HashSet<SessionId> = request
+        .ids
+        .iter()
+        .map(|id| session_id(id))
+        .collect::<Result<_, _>>()?;
+    let log = sessions(&shared)?;
+    let infos = log.list().await?;
+    let known: HashSet<&SessionId> = infos.iter().map(|info| &info.id).collect();
+    let mut failed: Vec<Value> = wanted
+        .iter()
+        .filter(|id| !known.contains(id))
+        .map(|id| json!({ "id": id, "error": SessionError::NotFound(id.clone()).to_string() }))
+        .collect();
+    let mut remaining: Vec<(SessionId, Option<SessionId>)> = infos
+        .into_iter()
+        .filter(|info| wanted.contains(&info.id))
+        .map(|info| (info.id, info.parent.map(|parent| parent.session)))
+        .collect();
+    let mut deleted = Vec::new();
+    // Each round deletes the sessions no remaining one was forked from.
+    while !remaining.is_empty() {
+        let parents: HashSet<SessionId> = remaining
+            .iter()
+            .filter_map(|(_, parent)| parent.clone())
+            .collect();
+        let (leaves, rest): (Vec<_>, Vec<_>) = remaining
+            .into_iter()
+            .partition(|(id, _)| !parents.contains(id));
+        remaining = rest;
+        if leaves.is_empty() {
+            break;
+        }
+        for (id, _) in leaves {
+            match log.delete(&id).await {
+                Ok(()) => deleted.push(id),
+                Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
+            }
+        }
+    }
+    Ok(Json(json!({ "deleted": deleted, "failed": failed })))
 }
 
 #[derive(Deserialize)]

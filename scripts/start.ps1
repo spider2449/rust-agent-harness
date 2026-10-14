@@ -10,7 +10,8 @@ llama-server answers, and only warns if it does not.
 
 .EXAMPLE
 .\scripts\start.ps1
-Web UI with llama.cpp (the `default` preset).
+Web UI with your own `rah.toml` in the data directory (`~\.rah`) when it
+exists, otherwise with llama.cpp (the `default` preset).
 
 .EXAMPLE
 .\scripts\start.ps1 -Preset dev
@@ -27,14 +28,19 @@ Your own plugin composition, built with optimizations.
 [CmdletBinding()]
 param(
     # Built-in preset: default (llama.cpp), dev (mock model), minimal, openai.
+    # Without it (and -Config), rah.toml in the data directory runs when it
+    # exists, otherwise `default`.
     [ValidateSet("default", "dev", "minimal", "openai")]
-    [string]$Preset = "default",
+    [string]$Preset,
     # A distribution file; overrides -Preset.
     [string]$Config,
     # Model id for model-llamacpp or model-openai.
     [string]$Model,
     # Workspace root for file tools and processes (default: current directory).
     [string]$Root,
+    # Data directory for sessions, settings and the rest (default: RAH_HOME,
+    # else ~\.rah).
+    [string]$DataDir,
     # Session log directory.
     [string]$SessionDir,
     # Web UI address, loopback only.
@@ -55,7 +61,14 @@ $repo = Split-Path -Parent $PSScriptRoot
 $cargoArgs = @("run", "--quiet", "-p", "rah-cli")
 if ($Release) { $cargoArgs += "--release" }
 $cargoArgs += "--"
-if ($Config) { $cargoArgs += @("--config", $Config) } else { $cargoArgs += @("--preset", $Preset) }
+# Relative to where the script was called from, not the repository it runs in.
+if ($DataDir) { $DataDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataDir) }
+$dataHome = if ($DataDir) { $DataDir } elseif ($env:RAH_HOME) { $env:RAH_HOME } else { Join-Path $env:USERPROFILE ".rah" }
+$userConfig = Join-Path $dataHome "rah.toml"
+# The preset that runs: none with a configuration file.
+$runPreset = if ($Config) { "" } elseif ($Preset) { $Preset } elseif (Test-Path -LiteralPath $userConfig -PathType Leaf) { "" } else { "default" }
+if ($Config) { $cargoArgs += @("--config", $Config) } elseif ($Preset) { $cargoArgs += @("--preset", $Preset) }
+if ($DataDir) { $cargoArgs += @("--data-dir", $DataDir) }
 if ($Model) { $cargoArgs += @("--model", $Model) }
 if ($Root) { $cargoArgs += @("--root", $Root) }
 if ($SessionDir) { $cargoArgs += @("--session-dir", $SessionDir) }
@@ -65,7 +78,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo was not found on PATH; install Rust from https://rustup.rs"
 }
 
-if (-not $Config -and $Preset -eq "default") {
+if ($runPreset -eq "default") {
     try {
         Invoke-WebRequest -Uri "$LlamaServer/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
         Write-Host "llama-server is up at $LlamaServer"
@@ -73,7 +86,7 @@ if (-not $Config -and $Preset -eq "default") {
         Write-Warning "llama-server does not answer at $LlamaServer/health. Start it first (for example: llama-server -m model.gguf --port 8080 --jinja), or use -Preset dev."
     }
 }
-if (-not $Config -and $Preset -eq "openai" -and -not $env:OPENAI_API_KEY) {
+if ($runPreset -eq "openai" -and -not $env:OPENAI_API_KEY) {
     Write-Warning "OPENAI_API_KEY is not set; the openai preset needs it."
 }
 

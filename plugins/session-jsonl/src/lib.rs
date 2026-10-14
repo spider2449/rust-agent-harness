@@ -512,7 +512,7 @@ impl JsonlSessionPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "dir": ".rah/sessions"
+  "dir": "sessions"
 }"#;
 }
 

@@ -16,7 +16,9 @@ use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
-use crate::{PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example};
+use crate::{
+    PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example, resolve_data_paths,
+};
 
 /// The id `rah` mounts the distribution plugin under.
 pub const DISTRIBUTION_PLUGIN: &str = "distribution";
@@ -99,6 +101,7 @@ const POLICY_KINDS: [&str; 1] = ["policy-authority"];
 pub struct DistributionPlugin {
     manifest: PluginManifest,
     registry: Arc<Registry>,
+    data_home: Option<PathBuf>,
 }
 
 impl DistributionPlugin {
@@ -107,7 +110,15 @@ impl DistributionPlugin {
             manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION"))
                 .provides(["admin"]),
             registry,
+            data_home: None,
         }
+    }
+
+    /// Resolves the data paths of the plugins it mounts or configures
+    /// against `data_home` (see [`crate::Distribution::data_home`]).
+    pub fn with_data_home(mut self, data_home: Option<PathBuf>) -> Self {
+        self.data_home = data_home;
+        self
     }
 }
 
@@ -122,6 +133,7 @@ impl Plugin for DistributionPlugin {
             kernel: scope.kernel(),
             registry: self.registry.clone(),
             own: scope.id().clone(),
+            data_home: self.data_home.clone(),
         };
         scope.provide(ADMIN, Arc::new(admin) as Arc<dyn PluginAdmin>)?;
         Ok(())
@@ -132,6 +144,7 @@ struct Admin {
     kernel: KernelHandle,
     registry: Arc<Registry>,
     own: PluginId,
+    data_home: Option<PathBuf>,
 }
 
 fn failed(error: impl std::fmt::Display) -> AdminError {
@@ -150,6 +163,12 @@ impl Admin {
             return Err(AdminError::NotMounted(id.clone()));
         }
         Ok(())
+    }
+
+    fn resolve(&self, kind: &str, config: &mut Value) {
+        if let Some(home) = &self.data_home {
+            resolve_data_paths(kind, config, home);
+        }
     }
 
     /// The requested id, or the kind, or the kind with the first free
@@ -176,8 +195,9 @@ impl Admin {
     async fn mount_as(
         &self,
         id: PluginId,
-        request: MountRequest,
+        mut request: MountRequest,
     ) -> Result<PluginStatus, AdminError> {
+        self.resolve(&request.kind, &mut request.config);
         if (request.kind == PROCESS_PLUGIN || request.kind == WASM_PLUGIN) && request.id.is_none() {
             return Err(failed(format!("a `{}` plugin needs an `id`", request.kind)));
         }
@@ -247,8 +267,20 @@ impl PluginAdmin for Admin {
         Ok(())
     }
 
-    async fn configure(&self, id: &PluginId, config: Value) -> Result<PluginStatus, AdminError> {
+    async fn configure(
+        &self,
+        id: &PluginId,
+        mut config: Value,
+    ) -> Result<PluginStatus, AdminError> {
         self.unlocked(id)?;
+        let kind = self
+            .registry
+            .lock()
+            .get(id)
+            .map(|record| record.kind.clone());
+        if let Some(kind) = kind {
+            self.resolve(&kind, &mut config);
+        }
         let status = self
             .kernel
             .update_config(id, config.clone())

@@ -178,6 +178,7 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
         .arg("--root")
         .arg(dir.workspace())
         .env_remove("OPENAI_API_KEY")
+        .env("RAH_HOME", dir.0.join("home"))
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -193,6 +194,7 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
         .args(["--preset", "dev", "--model", "x", "--prompt", "hi"])
+        .env("RAH_HOME", dir.0.join("home"))
         .stdin(Stdio::null())
         .output()
         .unwrap();

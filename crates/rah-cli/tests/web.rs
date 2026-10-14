@@ -1244,3 +1244,232 @@ config = { bind = "127.0.0.1:0" }
     );
     assert_eq!(instance(&restarted, "policy-authority").unwrap().1, changed);
 }
+
+#[tokio::test]
+async fn preferences_are_kept_bounded_and_survive_a_restart() {
+    use reqwest::Method;
+    let web = start("web-preferences", |_| {}).await;
+    let put = |body: Value| web.request(Method::PUT, "/api/preferences").json(&body);
+    let recent: Vec<String> = (0..10).map(|n| format!("C:/work/{n}")).collect();
+    let (status, saved) = web
+        .status(put(json!({
+            "raw_markdown": true,
+            "folders": { "c:/work/0": false, "": true },
+            "recent_workspaces": recent,
+            "side": { "open": true, "view": "plugins", "width": 480, "tree_ratio": 0.4 },
+        })))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["remembered"], true, "{saved}");
+    // Only the latest recent workspaces are kept.
+    assert_eq!(saved["recent_workspaces"].as_array().unwrap().len(), 8);
+
+    // Refused: unknown fields, an unknown view, too many folders.
+    for body in [
+        json!({ "colour": "red" }),
+        json!({ "side": { "view": "elsewhere" } }),
+        json!({ "folders": (0..1001).map(|n| (n.to_string(), json!(true))).collect::<serde_json::Map<_, _>>() }),
+    ] {
+        let (status, refused) = web.status(put(body)).await;
+        // 422 from the JSON extractor, 400 from the checks.
+        assert!(status == 400 || status == 422, "{status}: {refused}");
+    }
+
+    // A new start with the same storage reads them back.
+    let mut distribution = headless(&web.dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0" }
+"#,
+    ));
+    web.kernel.shutdown().await.unwrap();
+    let restarted = Kernel::new();
+    let url = Arc::new(Mutex::new(None));
+    let seen = url.clone();
+    let _subscription = restarted
+        .handle()
+        .subscribe(move |listening: &FrontendListening| {
+            *seen.lock().unwrap() = Some(listening.url.clone());
+        });
+    boot(&restarted, &distribution).await.unwrap();
+    let url = url.lock().unwrap().clone().unwrap();
+    let (address, token) = url
+        .strip_prefix("http://")
+        .unwrap()
+        .split_once("/#token=")
+        .unwrap();
+    let stored: Value = reqwest::Client::new()
+        .get(format!("http://{address}/api/preferences"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["raw_markdown"], true, "{stored}");
+    assert_eq!(stored["folders"], json!({ "c:/work/0": false, "": true }));
+    assert_eq!(stored["recent_workspaces"][0], "C:/work/0");
+    assert_eq!(stored["side"]["view"], "plugins");
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn plugins_panel_changes_are_applied_again_at_the_next_start() {
+    use reqwest::Method;
+    let web = start("web-panel-kept", |_| {}).await;
+    let ok = |(status, body): (u16, Value)| assert_eq!(status, 200, "{body}");
+
+    // Mount a second model, configure one from the distribution, stop one
+    // and remove one.
+    ok(web
+        .status(web.request(Method::POST, "/api/plugins").json(
+            &json!({ "kind": "model-mock", "id": "model-extra", "config": { "label": "X" } }),
+        ))
+        .await);
+    ok(web
+        .status(
+            web.request(Method::PUT, "/api/plugins/model-mock/config")
+                .json(&json!({ "config": { "label": "Y" } })),
+        )
+        .await);
+    ok(web
+        .status(web.request(Method::POST, "/api/plugins/scheduler-basic/stop"))
+        .await);
+    ok(web
+        .status(web.request(Method::DELETE, "/api/plugins/session-titles"))
+        .await);
+    // Removing the policy works now, but is not carried to the next start.
+    ok(web
+        .status(web.request(Method::DELETE, "/api/plugins/policy-authority"))
+        .await);
+    web.kernel.shutdown().await.unwrap();
+
+    let mut distribution = headless(&web.dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0" }
+"#,
+    ));
+    let restarted = Kernel::new();
+    boot(&restarted, &distribution).await.unwrap();
+    let admin = restarted.handle().get(rah_api::admin::ADMIN).unwrap();
+    let mut applied = false;
+    for _ in 0..200 {
+        applied = instance(&restarted, "model-extra").map(|(_, c)| c)
+            == Some(json!({ "label": "X" }))
+            && instance(&restarted, "model-mock").map(|(_, c)| c) == Some(json!({ "label": "Y" }))
+            && admin.stopped() == [PluginId::new("scheduler-basic")]
+            && instance(&restarted, "session-titles").is_none();
+        if applied {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(applied, "plugins: {:?}", restarted.plugins());
+    assert!(wait_active(&restarted, "policy-authority").await);
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn several_sessions_are_deleted_at_once_forks_first() {
+    let web = start("web-delete-many", |_| {}).await;
+    let web = &web;
+    let new_session = || async {
+        web.json(web.post("/api/sessions")).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let fork = |parent: String| async move {
+        web.json(
+            web.post(&format!("/api/sessions/{parent}/fork"))
+                .json(&json!({ "at": 0 })),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // root <- child <- grandchild, listed parents first; and a lone session.
+    let root = new_session().await;
+    let child = fork(root.clone()).await;
+    let grandchild = fork(child.clone()).await;
+    let lone = new_session().await;
+    let kept = new_session().await;
+
+    let reply = web
+        .json(
+            web.post("/api/sessions/delete")
+                .json(&json!({ "ids": [root, child, grandchild, lone] })),
+        )
+        .await;
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+    let mut deleted: Vec<&str> = reply["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect();
+    // Forks went before the sessions they came from.
+    let position = |id: &str| deleted.iter().position(|d| *d == id).unwrap();
+    assert!(position(&grandchild) < position(&child));
+    assert!(position(&child) < position(&root));
+    deleted.sort_unstable();
+    let mut expected = vec![
+        root.as_str(),
+        child.as_str(),
+        grandchild.as_str(),
+        lone.as_str(),
+    ];
+    expected.sort_unstable();
+    assert_eq!(deleted, expected);
+    let listed = web.json(web.get("/api/sessions")).await;
+    let ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|info| info["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [kept.as_str()]);
+
+    // A parent whose fork is not in the request is refused; the rest goes.
+    let parent = new_session().await;
+    let outside = fork(parent.clone()).await;
+    let other = new_session().await;
+    let reply = web
+        .json(
+            web.post("/api/sessions/delete")
+                .json(&json!({ "ids": [parent, other, "00000000-0000-0000-0000-000000000000"] })),
+        )
+        .await;
+    assert_eq!(reply["deleted"], json!([other]), "{reply}");
+    let failed = reply["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 2, "{reply}");
+    let refusal = failed.iter().find(|f| f["id"] == parent.as_str()).unwrap();
+    assert!(
+        refusal["error"].as_str().unwrap().contains(&outside),
+        "{reply}"
+    );
+
+    // Not a session id: nothing is deleted.
+    let (status, _) = web
+        .status(
+            web.post("/api/sessions/delete")
+                .json(&json!({ "ids": [kept, "nope"] })),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        web.json(web.get("/api/sessions"))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}

@@ -4,11 +4,13 @@
 //! manage catalog plugins at runtime.
 
 mod admin;
+mod data;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use admin::{BuildError, construct};
 pub use admin::{DISTRIBUTION_PLUGIN, DistributionPlugin, Registry};
+pub use data::{DATA_HOME_ENV, default_data_home, resolve_data_paths};
 
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_context_compact::CompactPlugin;
@@ -130,11 +132,12 @@ pub struct Preset {
     pub guarded: bool,
 }
 
-/// Built-in presets. All share `storage-fs` (`.rah/storage`), built-in tools, read-only repository tools
+/// Built-in presets. All share `storage-fs`, built-in tools, read-only repository tools
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
-/// and memory notes per workspace in `.rah/memory`), `skills-fs` (`.rah/skills`), `scheduler-basic`
+/// and memory notes per workspace), `skills-fs`, `scheduler-basic`
 /// (background jobs and `agent.delegate`), the default loop and the terminal
-/// frontend. None mounts `tools-shell`. Every preset except `minimal` mounts
+/// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
+/// None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
 pub const PRESETS: [Preset; 5] = [
     Preset {
@@ -175,11 +178,9 @@ config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo 
 const PRESET_TEMPLATE: &str = r#"
 [[plugin]]
 use = "storage-fs"
-config = { dir = ".rah/storage" }
 
 [[plugin]]
 use = "session-jsonl"
-config = { dir = ".rah/sessions" }
 
 [[plugin]]
 use = "session-titles"
@@ -201,11 +202,10 @@ config = { root = "." }
 
 [[plugin]]
 use = "context-default"
-config = { memory_dir = ".rah/memory" }
+config = { memory_dir = "memory" }
 
 [[plugin]]
 use = "skills-fs"
-config = { dir = ".rah/skills" }
 
 [[plugin]]
 use = "{MODEL}"
@@ -264,6 +264,13 @@ impl PluginSpec {
 pub struct Distribution {
     #[serde(default)]
     pub plugin: Vec<PluginSpec>,
+    /// The data home. When set, the data paths of the plugins (sessions,
+    /// storage, memory, skills, telemetry) resolve against it at mount,
+    /// also for plugins mounted later through the `admin` service: a missing
+    /// path defaults under it and a relative one is joined to it. When unset,
+    /// the plugins resolve relative paths against the current directory.
+    #[serde(skip)]
+    pub data_home: Option<PathBuf>,
 }
 
 impl Distribution {
@@ -344,18 +351,25 @@ pub async fn boot(
     let registry = Arc::new(Registry::default());
     kernel
         .mount(
-            Arc::new(DistributionPlugin::new(registry.clone())),
+            Arc::new(
+                DistributionPlugin::new(registry.clone())
+                    .with_data_home(distribution.data_home.clone()),
+            ),
             MountOptions::default(),
         )
         .await?;
     for spec in &distribution.plugin {
+        let mut config = spec.config.clone();
+        if let Some(home) = &distribution.data_home {
+            resolve_data_paths(&spec.kind, &mut config, home);
+        }
         if (spec.kind == PROCESS_PLUGIN || spec.kind == WASM_PLUGIN) && spec.id.is_none() {
             return Err(BootError::Process(format!(
                 "a `{}` plugin needs an `id`",
                 spec.kind
             )));
         }
-        let plugin = construct(&spec.kind, spec.plugin_id(), &spec.config)
+        let plugin = construct(&spec.kind, spec.plugin_id(), &config)
             .await
             .map_err(|error| match error {
                 BuildError::UnknownKind(kind) => {
@@ -367,17 +381,12 @@ pub async fn boot(
                 }
                 BuildError::Process(message) => BootError::Process(message),
             })?;
-        let mut options = MountOptions::with_config(spec.config.clone());
+        let mut options = MountOptions::with_config(config.clone());
         for (service, instance) in &spec.bind {
             options = options.bind(service.as_str(), instance.clone());
         }
         let status = kernel.mount(plugin, options).await?;
-        registry.record(
-            spec.plugin_id(),
-            &spec.kind,
-            spec.config.clone(),
-            spec.bind.clone(),
-        );
+        registry.record(spec.plugin_id(), &spec.kind, config, spec.bind.clone());
         if spec.kind == "policy-authority" && status != PluginStatus::Active {
             return Err(BootError::PolicyInactive(
                 spec.plugin_id(),
