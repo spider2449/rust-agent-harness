@@ -20,6 +20,7 @@ use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_loop_plan::PlanLoopPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
 use rah_plugin_model_anthropic::AnthropicPlugin;
+use rah_plugin_model_chat_completions::ChatCompletionsPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
 use rah_plugin_policy_authority::PolicyAuthorityPlugin;
@@ -44,7 +45,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 26] = [
+    let entries: [(&'static str, Constructor); 27] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
@@ -52,6 +53,9 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("loop-plan", |id| Arc::new(PlanLoopPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
         ("model-anthropic", |id| Arc::new(AnthropicPlugin::new(id))),
+        ("model-chat-completions", |id| {
+            Arc::new(ChatCompletionsPlugin::new(id))
+        }),
         ("model-llamacpp", |id| Arc::new(LlamaCppPlugin::new(id))),
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),
         ("model-openai", |id| {
@@ -96,6 +100,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "loop-plan" => PlanLoopPlugin::CONFIG_EXAMPLE,
         "loop-react" => ReactLoopPlugin::CONFIG_EXAMPLE,
         "model-anthropic" => AnthropicPlugin::CONFIG_EXAMPLE,
+        "model-chat-completions" => ChatCompletionsPlugin::CONFIG_EXAMPLE,
         "model-llamacpp" => LlamaCppPlugin::CONFIG_EXAMPLE,
         "model-mock" => MockModelPlugin::CONFIG_EXAMPLE,
         "model-openai" => OpenAiResponsesPlugin::CONFIG_EXAMPLE,
@@ -128,6 +133,9 @@ pub struct Preset {
     pub name: &'static str,
     /// The model plugin it mounts.
     pub model: &'static str,
+    /// The model plugin's configuration, as a TOML inline table, when it
+    /// needs one.
+    pub model_config: Option<&'static str>,
     /// Whether it mounts `policy-authority`.
     pub guarded: bool,
 }
@@ -139,30 +147,41 @@ pub struct Preset {
 /// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
 /// None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
-pub const PRESETS: [Preset; 5] = [
+pub const PRESETS: [Preset; 6] = [
     Preset {
         name: "default",
         model: "model-llamacpp",
+        model_config: None,
         guarded: true,
     },
     Preset {
         name: "dev",
         model: "model-mock",
+        model_config: None,
         guarded: true,
     },
     Preset {
         name: "minimal",
         model: "model-mock",
+        model_config: None,
         guarded: false,
     },
     Preset {
         name: "openai",
         model: "model-openai",
+        model_config: None,
         guarded: true,
     },
     Preset {
         name: "anthropic",
         model: "model-anthropic",
+        model_config: None,
+        guarded: true,
+    },
+    Preset {
+        name: "deepseek",
+        model: "model-chat-completions",
+        model_config: Some(r#"{ provider = "deepseek" }"#),
         guarded: true,
     },
 ];
@@ -208,7 +227,7 @@ config = { memory_dir = "memory" }
 use = "skills-fs"
 
 [[plugin]]
-use = "{MODEL}"
+use = "{MODEL}"{MODEL_CONFIG}
 
 [[plugin]]
 use = "loop-react"
@@ -224,7 +243,7 @@ use = "frontend-cli"
 pub enum BootError {
     #[error("invalid distribution: {0}")]
     Parse(String),
-    #[error("unknown preset `{0}`; available: default, dev, minimal, openai, anthropic")]
+    #[error("unknown preset `{0}`; available: default, dev, minimal, openai, anthropic, deepseek")]
     UnknownPreset(String),
     #[error("unknown plugin `{0}`; available: {1}")]
     UnknownPlugin(String, String),
@@ -284,9 +303,15 @@ impl Distribution {
             .find(|preset| preset.name == name)
             .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
         let policy = if preset.guarded { POLICY_TEMPLATE } else { "" };
+        let model_config = preset
+            .model_config
+            .map(|config| format!("\nconfig = {config}"))
+            .unwrap_or_default();
         Self::parse(&format!(
             "{policy}{}",
-            PRESET_TEMPLATE.replace("{MODEL}", preset.model)
+            PRESET_TEMPLATE
+                .replace("{MODEL_CONFIG}", &model_config)
+                .replace("{MODEL}", preset.model)
         ))
     }
 

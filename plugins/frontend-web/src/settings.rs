@@ -39,6 +39,7 @@ const SLOTS: [(&str, &[&str]); 4] = [
             "model-llamacpp",
             "model-openai",
             "model-anthropic",
+            "model-chat-completions",
             "model-mock",
         ],
     ),

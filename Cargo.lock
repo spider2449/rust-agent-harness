@@ -1444,6 +1444,7 @@ dependencies = [
  "rah-plugin-loop-plan",
  "rah-plugin-loop-react",
  "rah-plugin-model-anthropic",
+ "rah-plugin-model-chat-completions",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
  "rah-plugin-policy-authority",
@@ -1583,6 +1584,21 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-model-anthropic"
+version = "0.42.0"
+dependencies = [
+ "async-stream",
+ "futures",
+ "rah-api",
+ "rah-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-model-chat-completions"
 version = "0.42.0"
 dependencies = [
  "async-stream",

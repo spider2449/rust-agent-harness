@@ -10,7 +10,17 @@ const MODEL_KINDS = {
   "model-llamacpp": "llama.cpp (local server)",
   "model-openai": "OpenAI",
   "model-anthropic": "Anthropic (Claude)",
+  "model-chat-completions": "OpenAI-compatible (DeepSeek, Ollama, vLLM, …)",
   "model-mock": "Mock (for testing)",
+};
+// Known servers of model-chat-completions; the plugin fills in their
+// address, model and key variable.
+const CHAT_PROVIDERS = {
+  "": "Other server (enter its address)",
+  deepseek: "DeepSeek (DEEPSEEK_API_KEY)",
+  ollama: "Ollama (local)",
+  llamacpp: "llama.cpp server (local)",
+  vllm: "vLLM (local)",
 };
 const LOOP_KINDS = {
   "loop-react": "Standard: answer and use tools step by step",
@@ -167,6 +177,17 @@ function modelForm() {
         field("Effort", inputs.effort, "How much the model thinks before answering; higher is slower and costs more."),
         field("Endpoint", inputs.endpoint, "Optional."),
       );
+    } else if (kind.value === "model-chat-completions") {
+      inputs.provider = select(CHAT_PROVIDERS, value("provider") || "");
+      inputs.base_url = textInput(value("base_url"), "https://… or http://127.0.0.1:…/v1");
+      inputs.model = textInput(value("model"), "for example deepseek-chat");
+      inputs.api_key_env = textInput(value("api_key_env"), "DEEPSEEK_API_KEY");
+      fields.append(
+        field("Server", inputs.provider, "A known server fills in the address, model and key variable; the fields below override them."),
+        field("Address", inputs.base_url, "The base URL, before /chat/completions. HTTPS, or http to this machine. Required for another server."),
+        field("Model", inputs.model, "Leave empty for the server's default, or when it runs one model."),
+        field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+      );
     } else {
       inputs.label = textInput(value("label"), "model-mock");
       fields.append(field("Label", inputs.label, "Shown in the mock model's replies."));
@@ -181,6 +202,9 @@ function modelForm() {
         if (input.isConnected) put(next, key, input.value.trim());
       }
       if (kind.value === "model-openai" && !next.model) throw new Error("Enter the OpenAI model.");
+      if (kind.value === "model-chat-completions" && !next.provider && !next.base_url) {
+        throw new Error("Choose a server or enter its address.");
+      }
       // The provider connects lazily, so the next message is the first
       // request to the new address or model.
       const model = next.model ? ` · ${next.model}` : "";

@@ -73,6 +73,7 @@ Ctrl-C cancels a running turn (with no turn running, it exits). `--prompt <text>
 | `default` (the default) | `model-llamacpp` | `policy-authority` |
 | `openai` | `model-openai` | `policy-authority` |
 | `anthropic` | `model-anthropic` | `policy-authority` |
+| `deepseek` | `model-chat-completions` (`provider = "deepseek"`) | `policy-authority` |
 | `dev` | `model-mock` | `policy-authority` |
 | `minimal` | `model-mock` | none: `rah` prints an `UNGUARDED` warning |
 
@@ -312,7 +313,34 @@ cargo run -p rah-cli -- --preset openai --model your-model-id
 $env:ANTHROPIC_API_KEY = '...'
 cargo run -p rah-cli -- --preset anthropic
 cargo run -p rah-cli -- --preset anthropic --model claude-sonnet-5-5
+
+# DeepSeek, or any OpenAI-compatible Chat Completions server.
+$env:DEEPSEEK_API_KEY = '...'
+cargo run -p rah-cli -- --preset deepseek                     # deepseek-chat
+cargo run -p rah-cli -- --preset deepseek --model deepseek-reasoner  # unverified, see below
 ```
+
+`model-chat-completions` speaks the Chat Completions format
+(`<base_url>/chat/completions`) that DeepSeek, Ollama, vLLM, llama-server and
+many gateways serve. `provider` (`deepseek`, `ollama`, `llamacpp`, `vllm`)
+fills in the address, model and key variable; `base_url`, `model`,
+`api_key_env`, `max_tokens` and `temperature` override them, so another
+server is just `base_url`:
+
+```toml
+[[plugin]]
+use = "model-chat-completions"
+config = { provider = "ollama", model = "qwen3:8b" }
+# or: config = { base_url = "https://gateway.example/v1", model = "some-model", api_key_env = "GATEWAY_KEY" }
+```
+
+`base_url` must be HTTPS, or plain HTTP to a loopback address, so a key never
+crosses the network in clear text. Without a model, the server's sole model
+(from `<base_url>/models`) is used. Images in tool results are sent as a
+short text, since many servers accept only text in a tool message.
+Reasoning is not sent back in later requests; if a thinking model (such as
+`deepseek-reasoner`) requires its reasoning between tool calls, it may
+reject the request after a tool call.
 
 `model-anthropic` also takes `max_tokens`, `effort` (`low` to `max`) and
 `refusal_fallback` in its configuration. Without an Anthropic key, it can
@@ -320,8 +348,10 @@ run against llama-server's Anthropic-compatible endpoint: set `endpoint =
 "http://127.0.0.1:8080/v1/messages"` and point `api_key_env` at any
 non-empty variable.
 
-The model plugins are verified against deterministic loopback fixtures only,
-not against a live llama-server or the live OpenAI or Anthropic APIs.
+The model plugins are tested against deterministic loopback fixtures.
+`model-chat-completions` was also run against a live llama-server (tool
+calls, reasoning and token usage); the live OpenAI, Anthropic and DeepSeek
+APIs have not been verified.
 
 Compose your own plugins with a distribution file:
 

@@ -17,12 +17,14 @@ use serde_json::Value;
 #[command(name = "rah", version)]
 struct Args {
     /// Built-in preset to run (ignored with --config): default (llama.cpp),
-    /// dev (mock model), minimal (mock model, no policy), openai, anthropic.
+    /// dev (mock model), minimal (mock model, no policy), openai, anthropic,
+    /// deepseek (DEEPSEEK_API_KEY).
     /// Without --preset and --config, `rah.toml` in the data directory runs
     /// when it exists, otherwise `default`.
     #[arg(long)]
     preset: Option<String>,
-    /// Model id (model-openai, model-anthropic, model-llamacpp).
+    /// Model id (model-openai, model-anthropic, model-llamacpp,
+    /// model-chat-completions).
     #[arg(long)]
     model: Option<String>,
     /// Distribution file listing the plugins to mount.
@@ -142,12 +144,18 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     }
     if let Some(model) = &args.model {
         let mut matched = false;
-        for kind in ["model-openai", "model-anthropic", "model-llamacpp"] {
+        for kind in [
+            "model-openai",
+            "model-anthropic",
+            "model-llamacpp",
+            "model-chat-completions",
+        ] {
             matched |= distribution.set_config(kind, "model", Value::String(model.clone()));
         }
         if !matched {
             return Err(
-                "--model needs a `model-openai`, `model-anthropic` or `model-llamacpp` plugin"
+                "--model needs a `model-openai`, `model-anthropic`, `model-llamacpp` \
+                 or `model-chat-completions` plugin"
                     .into(),
             );
         }

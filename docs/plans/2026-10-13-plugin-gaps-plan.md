@@ -71,6 +71,9 @@
 
 ## 備註
 
-- **`model-chat-completions`：暫緩。** `model-responses` 只支援 `/v1/responses`，DeepSeek 官方 API、Ollama、vLLM 等只有 `/v1/chat/completions` 的服務目前接不上。使用者目前沒有預算購買 API key，先不做。之後要做時：放在新 plugin（不改 `model-responses`），wire format 留在 plugin 內；自動化測試用本機假伺服器，不需要 key；實際驗證可以先用本機的 Ollama 或 llama-server（不需要 key），DeepSeek 等付費服務等有 key 再驗。
+- **`model-chat-completions`：2026-10-14 完成。** 原本暫緩（`model-responses` 只支援 `/v1/responses`，DeepSeek 官方 API、Ollama、vLLM 等只有 `/v1/chat/completions` 的服務接不上；使用者沒有預算買 API key）。做法照原計畫：新 plugin `plugins/model-chat-completions`（不改 `model-responses`），wire format 留在 plugin 內，`rah-api` 和 protocol 不變，不需要 ADR。
+  - `provider`（`deepseek`、`ollama`、`llamacpp`、`vllm`）帶入位址、模型和 key 變數，其他欄位可覆寫；`base_url` 必須是 HTTPS，或是 loopback 的 HTTP。沒設模型時用 `<base_url>/models` 唯一的模型。新增 `deepseek` preset，`--model` 和 Web UI 模型設定都支援。
+  - 測試：loopback 假伺服器的單元測試和 `crates/rah-cli/tests/model_chat_completions.rs` 端到端；本機 llama-server 實測一輪（工具呼叫、推理、token 用量含 cached）。DeepSeek 官方 API 等有 key 再驗。
+  - 已知限制：推理內容不重送（中性 context 沒有這個欄位）。若 DeepSeek 的 thinking 模式在工具呼叫之間要求帶回 `reasoning_content`，`deepseek-reasoner` 可能會被拒，要等實測確認。
 - **`frontend-tauri`**：pivot 計畫已列為選配，`frontend-web` 足夠，不排入。
 - 每段完成時跑 AGENTS.md 的完整驗證（fmt、check、test、clippy、`git diff --check`），並更新 `docs/ARCHITECTURE.md` 的 plugin 清單。

@@ -13,6 +13,7 @@ members = [
     "plugins/loop-plan",
     "plugins/loop-react",
     "plugins/model-anthropic",
+    "plugins/model-chat-completions",
     "plugins/model-mock",
     "plugins/model-responses",
     "plugins/policy-authority",

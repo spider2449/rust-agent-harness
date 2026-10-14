@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### `model-chat-completions`
+
+- New crate `plugins/model-chat-completions` with the plugin
+  `model-chat-completions`: streamed OpenAI-compatible Chat Completions
+  (`<base_url>/chat/completions`) for DeepSeek, Ollama, vLLM, llama-server
+  and gateways. `provider` (`deepseek`, `ollama`, `llamacpp`, `vllm`) fills
+  in the address, model and key variable; `base_url`, `model`, `api_key_env`,
+  `max_tokens` and `temperature` override them. `base_url` must be HTTPS or
+  plain HTTP to a loopback address. Without a model, the sole model of
+  `<base_url>/models` is used.
+- Tool calls are streamed as fragments by index (whole calls, calls without
+  an index or id, and object arguments are also accepted) and validated:
+  one choice, consistent ids and names, JSON object arguments, a required
+  finish reason (`length` and `content_filter` fail the request). Reasoning
+  (`reasoning_content` or `reasoning`) is a signal only; usage, including
+  DeepSeek's `prompt_cache_hit_tokens`, is reported (ADR 0040). Images in
+  tool results become a short text.
+- `rah`: new preset `deepseek` (`DEEPSEEK_API_KEY`); `--model` also sets
+  `model-chat-completions`. The Web UI's model settings offer it with a
+  server choice.
+- Tested against loopback fixtures and run once against a live
+  llama-server; the live DeepSeek API is not verified.
+
 ### Fixes
 
 - `sandbox-os` on Windows now starts for a standard user whose root or
