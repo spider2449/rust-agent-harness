@@ -59,6 +59,12 @@ in the commit which entry it closes.
 - **Suspect, unconfirmed:** the restricted token or job of the calling shell
   stops a Low-integrity process from initializing. Run the tests again from a
   normal terminal; remove this entry if they pass there.
+- **Not reproduced on 2026-10-14** (Windows 11, standard user, from the same
+  kind of sandboxed agent shell): all the tests pass there, both inside and
+  outside the agent's sandbox. That machine first failed earlier, with
+  "Access is denied" while labeling (the `WRITE_OWNER` fix in ADR 0043),
+  which is a different cause. The `0xC0000142` failure is still open on the
+  Windows 10 machine.
 
 ## Setting up another development machine
 

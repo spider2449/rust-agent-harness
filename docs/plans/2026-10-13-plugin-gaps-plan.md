@@ -54,7 +54,8 @@
   - token：`CreateRestrictedToken`（拿掉所有 privilege，Administrators 改為 deny-only）再降到 Low。std 不能指定 token（`raw_attribute` 仍 unstable），所以自己用 `CreateProcessAsUserW`：suspended 啟動、先加入 Job Object 再 resume（`sandbox-process` 的逃脫空檔不存在）、只繼承三個標準 handle、標準輸出入走 named pipe。supervise 和 spawn 改用共用的 `Process` 抽象，兩種 child 都適用。
   - root、`writable` 和私人 `TEMP` 加上可繼承的 Low label（會套用到既有檔案）。**label 不移除**（使用者確認）；已有 label 就略過。拒絕磁碟根目錄、使用者目錄和 Windows 目錄。
   - 讀取和網路都不限制：`readable` 直接拒絕，`network` 必須設 `true`（預設 `false` 時拒絕啟動）。batch 檔拒絕，要明確用 `cmd.exe /c`。
-  - 測試在本機 Windows 跑（CI 只有 Linux）；本機是 elevated token，一般使用者帳號未測。
+  - 測試在本機 Windows 跑（CI 只有 Linux）；起初只在 elevated token 下測過。
+  - 2026-10-14 以一般使用者帳號（Medium、非系統管理員）實測：設 label 需要 `WRITE_OWNER`，只有 Modify 權限的目錄（非系統磁碟的預設 ACL）會 Access denied。改為被拒時先給目前使用者加一個可繼承的 `WRITE_OWNER` ACE 再設 label，ACE 和 label 一樣保留（使用者確認；ADR 0043 修訂）。
 
 ## G5：`storage-fs`
 

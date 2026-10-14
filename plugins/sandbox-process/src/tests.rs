@@ -763,6 +763,35 @@ mod os {
             }
         }
 
+        /// Labeling needs `WRITE_OWNER`; a user holding only Modify (a
+        /// standard user on a non-system drive) is granted it first.
+        #[tokio::test]
+        async fn a_root_the_user_may_only_modify_is_labeled() {
+            let dir = TempDir::new("os-modify");
+            let old = dir.0.join("sub").join("old.txt");
+            std::fs::write(&old, b"x").unwrap();
+            let whoami = std::process::Command::new("whoami")
+                .args(["/user", "/fo", "csv", "/nh"])
+                .output()
+                .unwrap();
+            let user = String::from_utf8(whoami.stdout).unwrap();
+            let sid = user.trim().rsplit(',').next().unwrap().trim_matches('"');
+            let modify = format!("*{sid}:(OI)(CI)M");
+            let icacls = std::process::Command::new("icacls")
+                .arg(&dir.0)
+                .args(["/inheritance:r", "/grant:r", &modify, "*S-1-5-18:(OI)(CI)F"])
+                .output()
+                .unwrap();
+            assert!(icacls.status.success(), "{icacls:?}");
+
+            let (_kernel, sandbox) = mounted(base(&dir)).await;
+            let args = ["/c", r"echo new> sub\old.txt"].map(str::to_owned).to_vec();
+            let spec = ProgramSpec::new("cmd".to_owned(), args, Duration::from_secs(30));
+            let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+            assert_eq!(output.exit_code, Some(0), "{output:?}");
+            assert!(std::fs::read_to_string(&old).unwrap().starts_with("new"));
+        }
+
         #[tokio::test]
         async fn spawned_programs_talk_over_pipes() {
             let dir = TempDir::new("os-spawn");

@@ -111,7 +111,9 @@ only under the root, a private `TMPDIR` and `writable`, reads under
 `readable` (default `/`), and no network sockets unless `network = true`.
 On Windows it runs programs at Low integrity: writes only under the root, a
 private `TEMP` and `writable`, which it labels Low (the label stays on them;
-`icacls "<dir>" /setintegritylevel "(OI)(CI)medium"` removes it). Reads and
+`icacls "<dir>" /setintegritylevel "(OI)(CI)medium"` removes it; where the
+user lacks the `WRITE_OWNER` right labeling needs, it grants the user that
+too, and that grant also stays). Reads and
 the network are not restricted there, so `network = true` is required. It
 refuses to start elsewhere. See `docs/SECURITY.md` for what it does not
 cover.

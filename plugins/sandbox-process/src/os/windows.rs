@@ -41,24 +41,29 @@ use tokio::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree, STILL_ACTIVE,
+        ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        STILL_ACTIVE,
     },
     Security::{
         ACL,
         Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-            GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+            EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE,
+            SDDL_REVISION_1, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+            TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
         },
-        CONTAINER_INHERIT_ACE, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, EqualSid, GetAce,
-        GetLengthSid, GetSecurityDescriptorSacl, GetTokenInformation, LABEL_SECURITY_INFORMATION,
-        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES,
+        CONTAINER_INHERIT_ACE, CreateRestrictedToken, DACL_SECURITY_INFORMATION,
+        DISABLE_MAX_PRIVILEGE, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorSacl,
+        GetTokenInformation, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR,
+        PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
         SYSTEM_MANDATORY_LABEL_ACE, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
-        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-        TokenGroups, TokenIntegrityLevel,
+        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenIntegrityLevel,
+        TokenUser,
     },
     Storage::FileSystem::{
         CreateFileW, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+        FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, WRITE_OWNER,
     },
     System::{
         SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW},
@@ -193,6 +198,10 @@ fn private_temp_dir() -> Result<PathBuf, String> {
 
 /// Gives `path` and everything below it the inheritable Low label, unless it
 /// already has it.
+///
+/// Setting a label needs `WRITE_OWNER`, which a standard user often lacks
+/// where it holds only Modify (the default on a non-system drive). Then the
+/// user is granted it first; see [`grant_write_owner`].
 fn label_low(path: &Path) -> io::Result<()> {
     let name = wide(plain(path).as_os_str());
     if has_low_label(&name)? {
@@ -223,6 +232,21 @@ fn label_low(path: &Path) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
+    match set_label(&name, sacl) {
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            grant_write_owner(&name).map_err(|grant| {
+                io::Error::new(
+                    grant.kind(),
+                    format!("{error}; granting the user WRITE_OWNER failed: {grant}"),
+                )
+            })?;
+            set_label(&name, sacl)
+        }
+        result => result,
+    }
+}
+
+fn set_label(name: &[u16], sacl: *const ACL) -> io::Result<()> {
     // SAFETY: `name` is NUL-terminated and `sacl` valid. Setting the label
     // also propagates it to the existing children.
     let error = unsafe {
@@ -237,6 +261,78 @@ fn label_low(path: &Path) -> io::Result<()> {
         )
     };
     win32_result(error)
+}
+
+/// Adds an inheritable ACE granting the current user `WRITE_OWNER` to `name`,
+/// so it reaches everything below. It stays, as the label does. The owner
+/// may rewrite the DACL anyway, and without privileges `WRITE_OWNER` only
+/// lets the user make itself the owner, so the user gains no access it could
+/// not take. Fails when the user may not change the DACL.
+fn grant_write_owner(name: &[u16]) -> io::Result<()> {
+    let token = current_token(TOKEN_QUERY)?;
+    let user = token_information(&token, TokenUser)?;
+    // SAFETY: the buffer holds a `TOKEN_USER`; its SID points into the buffer,
+    // which outlives every use below.
+    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `name` is NUL-terminated; the descriptor is freed by `Local`.
+    let error = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    win32_result(error)?;
+    let _descriptor = Local(descriptor);
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: WRITE_OWNER,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: sid.cast(),
+        },
+    };
+    let mut updated: *mut ACL = null_mut();
+    // SAFETY: `access` and its SID outlive the call; `dacl` points into the
+    // live descriptor; the new ACL is freed by `Local`.
+    win32_result(unsafe { SetEntriesInAclW(1, &access, dacl, &mut updated) })?;
+    let _updated = Local(updated.cast());
+    // SAFETY: `name` is NUL-terminated and `updated` valid. The inheritable
+    // ACE is propagated to the existing children.
+    let error = unsafe {
+        SetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            updated,
+            null(),
+        )
+    };
+    win32_result(error)
+}
+
+/// The token of this process, opened with `access`.
+fn current_token(access: u32) -> io::Result<OwnedHandle> {
+    let mut raw: HANDLE = null_mut();
+    // SAFETY: the pseudo handle of the current process is always valid.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), access, &mut raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a new token handle that nothing else owns.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
 /// Whether `name` carries an inheritable no-write-up Low label, explicit or
@@ -296,20 +392,9 @@ pub(crate) struct Confinement {
 
 impl Confinement {
     fn new() -> io::Result<Self> {
-        let mut raw: HANDLE = null_mut();
-        // SAFETY: the pseudo handle of the current process is always valid.
-        let opened = unsafe {
-            OpenProcessToken(
-                GetCurrentProcess(),
-                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
-                &mut raw,
-            )
-        };
-        if opened == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a new token handle that nothing else owns.
-        let process_token = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let process_token = current_token(
+            TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
+        )?;
         let administrators = Sid::parse("BA")?;
         let disable: Vec<SID_AND_ATTRIBUTES> = if has_group(&process_token, &administrators)? {
             vec![SID_AND_ATTRIBUTES {
@@ -520,17 +605,18 @@ impl Confinement {
     }
 }
 
-fn has_group(token: &OwnedHandle, sid: &Sid) -> io::Result<bool> {
+/// The `class` information of `token`, in a buffer of `u64` elements, which
+/// keeps it aligned for the structures it may hold.
+fn token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
     let mut size = 0;
     // SAFETY: a size query; nothing is written.
-    unsafe { GetTokenInformation(token.as_raw_handle(), TokenGroups, null_mut(), 0, &mut size) };
-    // `u64` elements keep the buffer aligned for `TOKEN_GROUPS`.
+    unsafe { GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut size) };
     let mut buffer = vec![0_u64; (size as usize).div_ceil(8)];
     // SAFETY: the buffer holds `size` bytes.
     let read = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenGroups,
+            class,
             buffer.as_mut_ptr().cast(),
             size,
             &mut size,
@@ -539,7 +625,12 @@ fn has_group(token: &OwnedHandle, sid: &Sid) -> io::Result<bool> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the buffer now holds a `TOKEN_GROUPS` with `GroupCount` entries.
+    Ok(buffer)
+}
+
+fn has_group(token: &OwnedHandle, sid: &Sid) -> io::Result<bool> {
+    let buffer = token_information(token, TokenGroups)?;
+    // SAFETY: the buffer holds a `TOKEN_GROUPS` with `GroupCount` entries.
     let groups = unsafe {
         let groups = &*buffer.as_ptr().cast::<TOKEN_GROUPS>();
         std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize)

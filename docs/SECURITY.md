@@ -114,7 +114,11 @@ private `TEMP` and the `writable` paths Low, so the program cannot write
 anything else the user owns (only places already labeled Low, such as
 `AppData\LocalLow`). **The label stays on the root and `writable` after
 unmount**, and new files there inherit it; `icacls "<dir>"
-/setintegritylevel "(OI)(CI)medium"` removes it. Drive roots, the user
+/setintegritylevel "(OI)(CI)medium"` removes it. Labeling needs
+`WRITE_OWNER`; where the user lacks it (a standard user holding only Modify,
+as on a non-system drive), `sandbox-os` first adds an inheritable ACE
+granting the user `WRITE_OWNER`, which also stays. The owner could grant
+that anyway, so it gives the user no access it could not take. Drive roots, the user
 profile and the Windows directory are refused. It does **not** restrict
 reads or the network: `readable` is refused and `network` must be set to
 `true`, so a program can read the user's credentials and send them away. A

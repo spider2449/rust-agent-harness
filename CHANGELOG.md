@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixes
+
+- `sandbox-os` on Windows now starts for a standard user whose root or
+  `writable` path grants only Modify, as on a non-system drive. Labeling
+  needs `WRITE_OWNER`, so it failed with "Access is denied"; the user is now
+  granted `WRITE_OWNER` there first, and the grant stays like the label
+  (ADR 0043, amended).
+
 ## v0.42.0 (2026-10-14)
 
 > The plugin-gaps plan (G1-G5): file tools without Git, `context-compact`,

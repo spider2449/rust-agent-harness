@@ -54,6 +54,17 @@ process with another token, and its process-attribute support
    carries the label is not relabeled, so later mounts are fast. `icacls
    "<dir>" /setintegritylevel "(OI)(CI)medium"` restores the default.
 
+   Setting a label needs `WRITE_OWNER`. An elevated token has it through
+   Administrators, but a standard user often holds only Modify (the default
+   ACL of a non-system drive grants Authenticated Users Modify), and the
+   label is then denied. When that happens `sandbox-os` adds an inheritable
+   ACE granting the current user `WRITE_OWNER` to the directory and labels
+   again. *(Amended 2026-10-14, after the first run as a standard user.)*
+   The ACE stays like the label. It gives the user nothing it could not
+   take: the owner may rewrite the DACL anyway, and without privileges
+   `WRITE_OWNER` only lets the user make itself the owner. A user that may
+   not change the DACL gets the error, and the plugin fails.
+
    A drive root, the user profile or a directory holding it, and the Windows
    directory or anything under it are refused as root or `writable`: every
    Low integrity process of the user could write there afterwards.
@@ -133,5 +144,6 @@ It does **not**:
   backslashes arrive unchanged, programs are found on `PATH`, and batch
   files and invalid configurations are refused.
 - CI runs on Linux only, so the Windows code is checked by the local test
-  runs. They ran with an elevated token; a standard user account has not
-  been tested.
+  runs. They ran first with an elevated token, then as a standard user
+  (Medium, not an administrator), which found the `WRITE_OWNER` case above;
+  a test reproduces it with a root whose DACL grants the user only Modify.
