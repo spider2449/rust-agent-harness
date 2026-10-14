@@ -12,14 +12,13 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rah_api::{PluginError, Scope, sandbox::SANDBOX};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::resolve;
+use super::{create_temp_dir, resolve};
 use crate::{ProcessEnv, canonical_root, inherited_env, max_timeout};
 
 #[derive(Default, Deserialize)]
@@ -71,16 +70,7 @@ pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
 
 /// A new directory only the current user can enter, used as `TMPDIR`.
 fn private_temp_dir() -> Result<PathBuf, String> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let path =
-        std::env::temp_dir().join(format!("rah-sandbox-os-{}-{nanos:x}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&path)
-        .map_err(|error| format!("temporary directory `{}`: {error}", path.display()))?;
+    let path = create_temp_dir(|path| std::fs::DirBuilder::new().mode(0o700).create(path))?;
     std::fs::canonicalize(&path).map_err(|error| error.to_string())
 }
 

@@ -141,3 +141,26 @@ impl SandboxOsPlugin {
   "max_timeout_ms": 600000
 }"#;
 }
+
+/// Creates a new directory under the system temporary directory, named after
+/// this process and the time, with `create`. Instances mounted at the same
+/// instant would pick the same name, so a taken name gets a counter.
+#[cfg(any(target_os = "linux", windows))]
+fn create_temp_dir(create: impl Fn(&Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let base = format!("rah-sandbox-os-{}-{nanos:x}", std::process::id());
+    for attempt in 0..64 {
+        let path = std::env::temp_dir().join(format!("{base}-{attempt}"));
+        match create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("temporary directory `{}`: {error}", path.display())),
+        }
+    }
+    Err(format!(
+        "temporary directory: every name like `{base}-<n>` is taken"
+    ))
+}

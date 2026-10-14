@@ -77,7 +77,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::resolve;
+use super::{create_temp_dir, resolve};
 use crate::{
     ProcessEnv, Stdin, canonical_root, inherited_env, max_timeout,
     process::{Process, Reader, Writer},
@@ -188,15 +188,7 @@ fn refuse_broad(path: &Path) -> Result<(), String> {
 
 /// A new directory under the user's temporary directory, used as `TEMP`.
 fn private_temp_dir() -> Result<PathBuf, String> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let path =
-        std::env::temp_dir().join(format!("rah-sandbox-os-{}-{nanos:x}", std::process::id()));
-    std::fs::create_dir(&path)
-        .map_err(|error| format!("temporary directory `{}`: {error}", path.display()))?;
-    Ok(path)
+    create_temp_dir(|path| std::fs::create_dir(path))
 }
 
 /// Gives `path` and everything below it the inheritable Low label, unless it
