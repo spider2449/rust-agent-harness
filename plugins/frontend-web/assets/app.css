@@ -203,6 +203,17 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .effect-uncertain { color: var(--warn); font-weight: 600; }
 /* Streaming output scrolls inside the conversation instead of growing the page. */
 .live { flex: 0 1 auto; min-height: 3em; max-height: 50%; overflow-y: auto; margin: 0 16px; padding: 8px 12px; border-radius: 8px; border: 1px dashed var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* What the running turn is doing; animated so it reads as alive at a glance. */
+.busy { display: flex; align-items: center; gap: 10px; margin: 8px 16px 0; padding: 6px 12px; border-radius: 8px; background: var(--user); color: var(--text); font-size: 13px; }
+.busy[hidden] { display: none; }
+.busy-time { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.busy-dots { display: inline-flex; gap: 4px; }
+.busy-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: busy-pulse 1.2s ease-in-out infinite; }
+.busy-dots i:nth-child(2) { animation-delay: 0.15s; }
+.busy-dots i:nth-child(3) { animation-delay: 0.3s; }
+.busy.waiting .busy-dots i { background: var(--warn); }
+@keyframes busy-pulse { 0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .busy-dots i { animation: none; opacity: 0.8; } }
 .composer { position: relative; display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
 .slash-menu {
   position: absolute; left: 16px; right: 16px; bottom: calc(100% - 8px); z-index: 5; max-height: min(340px, 50vh); overflow-y: auto;

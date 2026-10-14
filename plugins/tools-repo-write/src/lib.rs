@@ -313,6 +313,30 @@ impl Tool for Patch {
         }
         let file = git.root.scratch_file(&input.patch).await?;
         let path = file.path().display().to_string();
+        // Every path the patch names, old and new names of renames included.
+        let (code, listing, stderr) = git
+            .run(
+                vec![
+                    "apply".into(),
+                    "--numstat".into(),
+                    "-z".into(),
+                    "--".into(),
+                    path.clone(),
+                ],
+                &cx,
+            )
+            .await?;
+        if code != 0 {
+            return Err(ToolError::InvalidInput(format!(
+                "the patch does not apply: {stderr}"
+            )));
+        }
+        if let Some(name) = listing
+            .split(['\0', '\t'])
+            .find(|name| fsops::is_harness_state(name))
+        {
+            return Err(fsops::harness_state(name));
+        }
         let (code, _, stderr) = git
             .run(
                 vec!["apply".into(), "--check".into(), "--".into(), path.clone()],

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Remembered settings and a busy line
+
+- The Web UI's Settings (model, assistant, tools, loop) are remembered:
+  `frontend-web` saves them through `PUT /api/settings/{slot}` into
+  `storage` and applies them again at the next start (the policy first). A
+  saved configuration that does not start is rolled back, so a broken
+  policy never leaves tool calls unguarded.
+- While a turn runs, an animated line above the message box shows what it
+  is doing and for how long; it turns amber while it waits for your
+  approval, and the tab title is marked `● RAH — working`.
+- `tools-repo-write` refuses paths under `.rah/` (sessions, memory, skills,
+  storage with the saved settings); `repo.patch` checks every path in the
+  patch, renames included. **Breaking** for a model that edited `.rah/skills`
+  through these tools.
+
 ### Web search switch
 
 - The Web UI's **Settings → Tools** has a **Web search** checkbox. Ticking

@@ -28,7 +28,10 @@
 //! - With an `admin` service: `GET|PUT /api/web-search {enabled}` turns
 //!   web search on (the policy asks before `web.*`, then `tools-web-search`
 //!   is mounted) or off, and remembers the choice in `storage` for the next
-//!   start (see [`web_search`]).
+//!   start (see [`web_search`]). `PUT /api/settings/{slot} {id, kind,
+//!   config}` saves the Settings forms (`model`, `assistant`, `tools`,
+//!   `loop`) the same way, rolled back when the plugin does not start, and
+//!   applies them again at the next start (see [`settings`]).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -65,6 +68,7 @@ mod files;
 mod git;
 mod jobs;
 mod manage;
+mod settings;
 mod status;
 mod web_search;
 mod workspace;
@@ -173,7 +177,7 @@ impl Plugin for WebFrontendPlugin {
                 .with_graceful_shutdown(stop.cancelled_owned())
                 .await;
         });
-        if !started || !scope.spawn(web_search::restore(shared.clone())) {
+        if !started || !scope.spawn(settings::restore(shared.clone())) {
             return Err("the plugin scope is already disposed".into());
         }
         scope.kernel().emit(&FrontendListening {
@@ -197,6 +201,7 @@ fn router(shared: AppState) -> Router {
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/web-search", get(web_search::get).put(web_search::set))
+        .route("/settings/{slot}", put(settings::save))
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))

@@ -1111,3 +1111,127 @@ config = { bind = "127.0.0.1:0" }
             .any(|(id, _)| id.as_str() == "tools-web-search")
     );
 }
+
+/// The kind and configuration of `kernel`'s plugin `id`, through `admin`.
+fn instance(kernel: &Kernel, id: &str) -> Option<(String, Value)> {
+    let admin = kernel.handle().get(rah_api::admin::ADMIN)?;
+    let instance = admin.instance(&PluginId::new(id))?;
+    Some((instance.kind, instance.config))
+}
+
+/// Waits until `kernel` has an active plugin of `kind`; returns its id.
+async fn wait_kind(kernel: &Kernel, kind: &str) -> Option<String> {
+    for _ in 0..200 {
+        let found = kernel.plugins().into_iter().find(|(id, status)| {
+            *status == rah_api::PluginStatus::Active
+                && instance(kernel, id.as_str()).is_some_and(|(k, _)| k == kind)
+        });
+        if let Some((id, _)) = found {
+            return Some(id.as_str().to_owned());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn settings_are_saved_rolled_back_when_invalid_and_restored_at_start() {
+    use reqwest::Method;
+    let web = start("web-settings-saved", |_| {}).await;
+    let put = |slot: &str, body: Value| {
+        web.request(Method::PUT, &format!("/api/settings/{slot}"))
+            .json(&body)
+    };
+
+    // The model keeps its kind: configured in place.
+    let (status, saved) = web
+        .status(put(
+            "model",
+            json!({ "id": "model-mock", "kind": "model-mock", "config": { "label": "Z" } }),
+        ))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["state"], "active", "{saved}");
+    assert_eq!(saved["remembered"], true, "{saved}");
+    // The loop changes kind: replaced.
+    let (status, saved) = web
+        .status(put(
+            "loop",
+            json!({ "id": "loop-react", "kind": "loop-plan", "config": { "max_steps": 3 } }),
+        ))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    // The policy: one decision changed, the rest kept.
+    let (_, policy) = instance(&web.kernel, "policy-authority").unwrap();
+    let mut changed = policy.clone();
+    changed["decisions"] = json!({ "echo": "deny" });
+    let (status, saved) = web
+        .status(put(
+            "tools",
+            json!({ "id": "policy-authority", "kind": "policy-authority", "config": changed }),
+        ))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+
+    // A policy configuration that does not start is rolled back and not
+    // remembered; tool calls stay guarded.
+    let (status, refused) = web
+        .status(put(
+            "tools",
+            json!({ "id": "policy-authority", "kind": "policy-authority", "config": { "unknown": 1 } }),
+        ))
+        .await;
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("previous settings were kept"),
+        "{refused}"
+    );
+    assert!(wait_active(&web.kernel, "policy-authority").await);
+    assert_eq!(
+        instance(&web.kernel, "policy-authority").unwrap().1,
+        changed
+    );
+    // Unknown slots and kinds that do not fit a slot are refused.
+    let (status, _) = web
+        .status(put("nothing", json!({ "kind": "model-mock" })))
+        .await;
+    assert_eq!(status, 400);
+    let (status, _) = web
+        .status(put("model", json!({ "kind": "loop-plan" })))
+        .await;
+    assert_eq!(status, 400);
+
+    // A new start with the same storage applies all three.
+    let mut distribution = headless(&web.dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0" }
+"#,
+    ));
+    let restarted = Kernel::new();
+    boot(&restarted, &distribution).await.unwrap();
+    let plan = wait_kind(&restarted, "loop-plan").await.expect("loop-plan");
+    assert_eq!(
+        instance(&restarted, &plan).unwrap().1,
+        json!({ "max_steps": 3 })
+    );
+    assert!(wait_kind(&restarted, "loop-react").await.is_none());
+    for _ in 0..200 {
+        let model = instance(&restarted, "model-mock").map(|(_, config)| config);
+        let policy = instance(&restarted, "policy-authority").map(|(_, config)| config);
+        if model == Some(json!({ "label": "Z" })) && policy.as_ref() == Some(&changed) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        instance(&restarted, "model-mock").unwrap().1,
+        json!({ "label": "Z" })
+    );
+    assert_eq!(instance(&restarted, "policy-authority").unwrap().1, changed);
+}

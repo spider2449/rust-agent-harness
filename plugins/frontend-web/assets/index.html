@@ -40,6 +40,11 @@
       <div id="notice" class="notice" hidden></div>
       <ol id="transcript" class="transcript"></ol>
       <div id="live" class="live" hidden></div>
+      <div id="busy" class="busy" role="status" aria-live="polite" hidden>
+        <span class="busy-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span id="busy-text"></span>
+        <span id="busy-time" class="busy-time"></span>
+      </div>
       <form id="composer" class="composer">
         <ul id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></ul>
         <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line, / for commands)" disabled aria-controls="slash-menu"></textarea>

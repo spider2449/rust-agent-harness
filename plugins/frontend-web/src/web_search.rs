@@ -8,8 +8,6 @@
 //! kept in the `storage` service, when one is mounted, under this plugin's
 //! id, and applied again when the plugin starts.
 
-use std::{sync::Arc, time::Duration};
-
 use axum::{Json, extract::State};
 use rah_api::{
     PluginId, PluginStatus,
@@ -50,39 +48,20 @@ pub(crate) async fn set(State(shared): State<AppState>, Json(switch): Json<Switc
     Ok(Json(reply))
 }
 
-/// Applies a stored "on" once this plugin is active, so a choice made in
-/// the Web UI survives a restart of `rah`.
-pub(crate) async fn restore(shared: Arc<Shared>) {
-    let id = shared.id.clone();
+/// Turns web search on when "on" is stored, at start (see
+/// [`crate::settings::restore`]).
+pub(crate) async fn restore(shared: &Shared, admin: &dyn PluginAdmin) {
     let Some(storage) = shared.kernel.get(STORAGE) else {
         return;
     };
-    if !matches!(storage.get(id.as_str(), KEY).await, Ok(Some(value)) if value == b"on") {
-        return;
-    }
-    // Mounting from inside this plugin's own start would race the boot.
-    for _ in 0..200 {
-        let active = shared
-            .kernel
-            .plugins()
-            .into_iter()
-            .any(|(plugin, status)| plugin == id && status == PluginStatus::Active);
-        if active {
-            if let Some(admin) = shared.kernel.get(ADMIN) {
-                let _ = enable(&shared, admin.as_ref()).await;
-            }
-            return;
-        }
-        tokio::select! {
-            () = shared.stop.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
+    if matches!(storage.get(shared.id.as_str(), KEY).await, Ok(Some(value)) if value == b"on") {
+        let _ = enable(shared, admin).await;
     }
 }
 
 /// Mounted (or stopped) plugins of `kind`, with their status; `None` for a
 /// stopped one.
-fn instances(
+pub(crate) fn instances(
     shared: &Shared,
     admin: &dyn PluginAdmin,
     kind: &str,

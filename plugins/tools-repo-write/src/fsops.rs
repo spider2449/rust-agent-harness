@@ -23,8 +23,12 @@ fn invalid(message: impl Into<String>) -> ToolError {
 }
 
 /// Accepts `a/b/c`: nonempty components separated by `/`, without `.`,
-/// `..`, `.git`, backslashes, colons, NUL or a leading `-`.
+/// `..`, `.git`, backslashes, colons, NUL or a leading `-`, and not under
+/// `.rah/` (see [`is_harness_state`]).
 pub(crate) fn validate(path: &str) -> Result<(), ToolError> {
+    if is_harness_state(path) {
+        return Err(harness_state(path));
+    }
     let valid = !path.is_empty()
         && path.len() <= 1024
         && !path.starts_with('-')
@@ -43,6 +47,22 @@ pub(crate) fn validate(path: &str) -> Result<(), ToolError> {
              backslashes, colons or a leading `-`)"
         )))
     }
+}
+
+/// Whether `path` is under `.rah/`, where RAH keeps its own state: sessions,
+/// memory, skills and `storage` (which holds the Web UI's saved settings,
+/// the tool policy among them). A model-requested write there could change
+/// what a later start trusts.
+pub(crate) fn is_harness_state(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .find(|component| !component.is_empty() && *component != ".")
+        .is_some_and(|first| first.eq_ignore_ascii_case(".rah"))
+}
+
+pub(crate) fn harness_state(path: &str) -> ToolError {
+    invalid(format!(
+        "`{path}` is under `.rah/`, where RAH keeps its own state; the repository tools do not write there"
+    ))
 }
 
 /// A temporary file removed on drop.

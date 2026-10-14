@@ -528,12 +528,84 @@ async function loadTranscript() {
 // ---- Turns ----------------------------------------------------------------
 
 function setRunning(running) {
+  const was = state.running;
   state.running = running;
   $("send").disabled = running || !state.current;
   $("cancel").hidden = !running;
+  if (running && !was) startBusy();
   if (!running) {
+    stopBusy();
     state.liveText = "";
     $("live").hidden = true;
+  }
+}
+
+// The busy line above the message box: what the running turn is doing and
+// for how long. The tab title gets a marker too, for when it is in the
+// background.
+const busy = { started: 0, timer: null, tool: "" };
+
+function startBusy() {
+  busy.started = Date.now();
+  setBusyPhase("Sending…");
+  $("busy").hidden = false;
+  tickBusy();
+  clearInterval(busy.timer);
+  busy.timer = setInterval(tickBusy, 1000);
+  document.title = "● RAH — working";
+}
+
+function stopBusy() {
+  clearInterval(busy.timer);
+  busy.timer = null;
+  $("busy").hidden = true;
+  document.title = "RAH";
+}
+
+function tickBusy() {
+  const seconds = Math.floor((Date.now() - busy.started) / 1000);
+  $("busy-time").textContent = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function setBusyPhase(text, waiting) {
+  $("busy-text").textContent = text;
+  $("busy").classList.toggle("waiting", Boolean(waiting));
+}
+
+function busyEvent(event) {
+  if (!state.running) return;
+  // Turn events and approval requests arrive on different paths; an open
+  // approval card wins until it is answered.
+  if (document.querySelector("#approvals .approval")) {
+    if (event.type === "tool_requested") busy.tool = event.tool_call.name;
+    return;
+  }
+  switch (event.type) {
+    case "model_request_started":
+      setBusyPhase("Waiting for the model…");
+      break;
+    case "model_reasoning_started":
+      setBusyPhase("Thinking…");
+      break;
+    case "model_delta":
+      setBusyPhase("Writing…");
+      break;
+    case "tool_requested":
+      busy.tool = event.tool_call.name;
+      setBusyPhase(`Running ${busy.tool}…`);
+      break;
+    case "tool_started":
+      // Only an id here; the name came with `tool_requested`.
+      setBusyPhase(`Running ${busy.tool || "a tool"}…`);
+      break;
+    case "approval_required":
+      setBusyPhase("Waiting for your approval", true);
+      break;
+    case "tool_finished":
+      setBusyPhase("Waiting for the model…");
+      break;
+    default:
+      break;
   }
 }
 
@@ -810,6 +882,7 @@ function onEvent(session, event) {
   }
   if (session !== state.current) return;
   eventActivity(event);
+  busyEvent(event);
   switch (event.type) {
     case "model_delta":
       showLive(event.delta);
@@ -1416,8 +1489,13 @@ function connect() {
   socket.addEventListener("message", (message) => {
     const data = JSON.parse(message.data);
     if (data.type === "event") onEvent(data.session, data.event);
-    else if (data.type === "approval_required") showApproval(data);
-    else if (data.type === "approval_resolved") $(`approval-${data.id}`)?.remove();
+    else if (data.type === "approval_required") {
+      showApproval(data);
+      if (state.running) setBusyPhase("Waiting for your approval", true);
+    } else if (data.type === "approval_resolved") {
+      $(`approval-${data.id}`)?.remove();
+      if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
+    }
     else if (data.type === "error") {
       showNotice(data.message);
       setRunning(false);

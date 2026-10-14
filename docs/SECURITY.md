@@ -246,6 +246,16 @@ Behind the same token and checks, and likewise unreachable from tools:
   key `web-search`) and applied again when `frontend-web` starts, so
   whoever can write `.rah/storage` can turn web search on, still behind
   the ask rule.
+- `PUT /api/settings/{slot} {id, kind, config}` saves the Settings forms
+  (`model`, `assistant`, `tools`, `loop`): configure, replace or mount
+  through `admin`, rolled back to the previous configuration when the
+  plugin does not start (a broken policy never stays failed), then stored
+  in `storage` (key `settings-<slot>`) and applied again at the next start,
+  the policy first. The stored `tools` settings are the whole
+  `policy-authority` configuration, so whoever can write `.rah/storage`
+  controls the policy of the next start. The repository write tools refuse
+  paths under `.rah/` for this reason (see below); `shell.exec`, when
+  mounted and approved, is not restricted this way.
 - `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
   `sandbox-os`, `tools-builtin`, `tools-repo-write`) at another existing directory, as
   `rah --root` does at start. It widens what tools can reach to that folder,
@@ -323,8 +333,12 @@ it; `repo.create-file` never overwrites. `repo.edit-files` validates every
 edit (exactly one match each) before writing anything and replaces files
 through a temporary file and a rename. `repo.patch` runs `git apply --check`
 then `git apply` through the `sandbox` service, only when Git's top level is
-the configured root; `git apply` rejects paths outside the work tree. A
-failure after the first write is recorded as an `uncertain` effect.
+the configured root; `git apply` rejects paths outside the work tree. None
+of them writes under `.rah/`, where RAH keeps sessions, memory, skills and
+`storage` (with the saved Web UI settings, the policy among them):
+`repo.patch` lists the patch's paths with `git apply --numstat` first,
+renames included. A failure after the first write is recorded as an
+`uncertain` effect.
 
 ## `tools-repo`
 

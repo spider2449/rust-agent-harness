@@ -1,7 +1,8 @@
 // RAH Web UI settings: forms over the configuration of the built-in plugins
 // (model, context, policy, loop). Each form starts from the plugin's current
-// configuration, changes only its own fields and saves through the plugin
-// management API, so options it does not show are kept. Other plugins stay
+// configuration, changes only its own fields and saves through
+// `/api/settings/{slot}`, so options it does not show are kept and the
+// result is remembered for the next start. Other plugins stay
 // in the Plugins panel's JSON editor.
 "use strict";
 
@@ -82,20 +83,14 @@ function pluginOfKinds(kinds, preferred) {
   return candidates.find((plugin) => plugin.id === preferred) || candidates.find((p) => p.state === "active") || candidates[0];
 }
 
-// Saves `config` for `plugin`, or replaces it with `kind` when that differs.
-// `done` is the message shown once the plugin is active again.
-async function savePlugin(plugin, kind, config, label, done) {
-  let result;
-  if (plugin && plugin.kind === kind) {
-    result = await api(`/plugins/${encodeURIComponent(plugin.id)}/config`, { method: "PUT", body: JSON.stringify({ config }) });
-  } else if (plugin) {
-    result = await api(`/plugins/${encodeURIComponent(plugin.id)}/replace`, {
-      method: "POST",
-      body: JSON.stringify({ kind, config }),
-    });
-  } else {
-    result = await api("/plugins", { method: "POST", body: JSON.stringify({ kind, config }) });
-  }
+// Saves the `slot` settings: the server configures `plugin`, replaces it
+// when `kind` differs, or mounts one, and remembers the result for the next
+// start. `done` is the message shown once the plugin is active again.
+async function savePlugin(slot, plugin, kind, config, label, done) {
+  const result = await api(`/settings/${slot}`, {
+    method: "PUT",
+    body: JSON.stringify({ id: plugin?.id ?? null, kind, config }),
+  });
   await reloadSettings();
   loadPlugins().catch(() => {});
   // The status may announce the switch itself; refresh it first so that the
@@ -104,7 +99,8 @@ async function savePlugin(plugin, kind, config, label, done) {
   if (result.state && result.state !== "active") {
     settingsMessage(`${label} saved, but ${result.id} is ${result.state}${result.detail ? `: ${result.detail}` : ""}`, true);
   } else {
-    settingsMessage(`${label} saved.${done ? ` ${done(result.id)}` : ""}`);
+    const kept = result.remembered ? "" : " It is not remembered after rah restarts (no storage plugin).";
+    settingsMessage(`${label} saved.${done ? ` ${done(result.id)}` : ""}${kept}`);
     // Also under the conversation, where it stays after the dialog closes.
     if (done) showInfo(done(result.id));
   }
@@ -188,7 +184,7 @@ function modelForm() {
       // The provider connects lazily, so the next message is the first
       // request to the new address or model.
       const model = next.model ? ` · ${next.model}` : "";
-      await savePlugin(current, kind.value, next, "Model", (id) =>
+      await savePlugin("model", current, kind.value, next, "Model", (id) =>
         `Reconnected: ${MODEL_KINDS[kind.value]} as ${id}${model}. The next message uses it.`);
     }),
   );
@@ -220,7 +216,7 @@ function assistantForm() {
       put(next, "system", system.value.trim());
       put(next, "max_items", numberOrEmpty(maxItems));
       put(next, "max_chars", numberOrEmpty(maxChars));
-      await savePlugin(plugin, plugin.kind, next, "Assistant");
+      await savePlugin("assistant", plugin, plugin.kind, next, "Assistant");
     }),
   );
   return form;
@@ -349,7 +345,7 @@ function toolsForm() {
       }
       put(next, "decisions", Object.keys(decisions).length ? decisions : "");
       if (writing.value === "allow" && !window.confirm("Let the model edit files and run programs without asking?")) return;
-      await savePlugin(plugin, plugin.kind, next, "Tools");
+      await savePlugin("tools", plugin, plugin.kind, next, "Tools");
     }),
   );
   return form;
@@ -399,7 +395,7 @@ function loopForm() {
     saveButton("Save loop", async () => {
       const next = kind.value === current?.kind ? { ...config } : {};
       for (const [key, input] of Object.entries(inputs)) put(next, key, numberOrEmpty(input));
-      await savePlugin(current, kind.value, next, "Loop", (id) => `Switched to loop ${id}. The next message uses it.`);
+      await savePlugin("loop", current, kind.value, next, "Loop", (id) => `Switched to loop ${id}. The next message uses it.`);
     }),
   );
   return form;

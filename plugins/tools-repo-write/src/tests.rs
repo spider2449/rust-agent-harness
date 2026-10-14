@@ -105,6 +105,8 @@ async fn create_file_creates_new_files_only_inside_the_root() {
         "docs/new/notes.md",
         "../escape.txt",
         ".git/config",
+        ".rah/storage/frontend-web/settings-tools",
+        ".RAH/x",
         "/abs",
         "a\\b",
     ] {
@@ -197,6 +199,27 @@ async fn patch_applies_checked_diffs_only() {
     let escape = "--- a/../outside.txt\n+++ b/../outside.txt\n@@ -0,0 +1 @@\n+x\n";
     assert!(patch.call(json!({ "patch": escape }), cx()).await.is_err());
     assert!(!repo.0.parent().unwrap().join("outside.txt").exists());
+    // Nothing under `.rah/`, also as the new name of a rename.
+    for diff in [
+        "--- /dev/null
++++ b/.rah/storage/x
+@@ -0,0 +1 @@
++x
+",
+        "diff --git a/src/lib.rs b/.rah/lib.rs
+similarity index 100%
+rename from src/lib.rs
+rename to .rah/lib.rs
+",
+    ] {
+        let error = patch
+            .call(json!({ "patch": diff }), cx())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("`.rah/`"), "{error}");
+    }
+    assert!(!repo.0.join(".rah").exists());
+    assert!(repo.0.join("src/lib.rs").exists());
 
     // A sandbox whose repository is not the configured root is refused.
     let tools = repo

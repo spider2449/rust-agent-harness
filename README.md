@@ -243,7 +243,11 @@ use, and whether a policy guards tool calls. Click the workspace path to
 switch the folder the tools work in, without restarting. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
-forms. The right-hand panel (**Workspace** in the header) shows the
+forms; what you save there is remembered (in `storage`) and applied again at
+the next start, and replaces that plugin's configuration from the preset or
+`rah.toml`. While a turn runs, a line above the message box shows what it is
+doing (waiting for the model, thinking, writing, running a tool, waiting for
+your approval) and for how long, and the tab title is marked. The right-hand panel (**Workspace** in the header) shows the
 workspace's files as a tree, opens them read-only in tabs (with syntax
 highlighting for common languages), shows the branch and the Git changes
 (by folder) under the tree, with a splitter between the two, opens a

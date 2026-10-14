@@ -265,7 +265,7 @@ window.rowAction = (id, label) => [...rowOf(id).querySelectorAll('button')]
 window.approval = () => document.querySelector('#approvals .approval');
 window.answer = (label) => [...approval().querySelectorAll('button')]
   .find((button) => button.textContent === label).click();
-window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(byId('live'));
+window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(byId('live')) && !shown(byId('busy'));
 window.sessionItems = () => [...document.querySelectorAll('#sessions li.session')];
 window.folderItems = () => [...document.querySelectorAll('#sessions li.folder')];
 window.treeButton = (path) => document.querySelector(`#tree button[data-path="${path}"]`);
@@ -542,6 +542,16 @@ async fn the_web_ui_works_in_a_real_browser() {
     )
     .await;
     assert_eq!(page.eval("shown(byId('cancel'))").await, true);
+    // The busy line says what the turn waits for, with a running clock, and
+    // the tab title is marked.
+    page.wait(
+        "the busy line",
+        "shown(byId('busy')) && byId('busy-text').textContent === 'Waiting for your approval' && \
+         byId('busy').classList.contains('waiting') && /^\\d+s$/.test(byId('busy-time').textContent)",
+    )
+    .await;
+    page.screenshot("busy-approval").await;
+    assert_eq!(page.eval("document.title").await, "● RAH — working");
     assert_eq!(
         page.eval("approval().querySelector('div').textContent")
             .await,
@@ -553,6 +563,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         "transcript().includes('echo returned: allowed call') && idle() && !approval()",
     )
     .await;
+    assert_eq!(page.eval("document.title").await, "RAH");
 
     page.send_message("denied call").await;
     page.wait("the second approval card", "shown(approval())")
