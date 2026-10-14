@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.42.0 (2026-10-14)
+
+> The plugin-gaps plan (G1-G5): file tools without Git, `context-compact`,
+> `telemetry-log` with token usage, `sandbox-os` on Linux (ADR 0042) and
+> Windows (ADR 0043), the `storage` service with `storage-fs` (ADR 0041);
+> plus process-plugin hooks and events (ADR 0039), a keyless web search
+> plugin, Markdown replies, remembered Web UI settings and example plugin
+> configurations.
+
 ### Example configurations in the plugin editor
 
 - The Web UI's plugin editor shows the kind's example configuration (mostly
