@@ -424,10 +424,15 @@ function displayForm() {
       await loadTranscript();
       settingsMessage(box.checked ? "Replies are shown as Markdown source." : "Replies are shown formatted.");
     } catch (error) {
-      box.checked = !box.checked;
       settingsMessage(error.message, true);
     } finally {
       box.disabled = false;
+      // The form may have been rendered again meanwhile (a settings reload
+      // finishing), from the preferences before this save: show the saved
+      // value in whichever box is on the page now.
+      const shown = $("raw-markdown");
+      if (shown) shown.checked = Boolean(state.prefs.raw_markdown);
+      box.checked = Boolean(state.prefs.raw_markdown);
     }
   });
   const row = el("label", "field switch");

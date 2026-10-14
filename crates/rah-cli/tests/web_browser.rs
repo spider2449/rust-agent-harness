@@ -1397,6 +1397,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         "the raw reply",
         &format!(
             "byId('settings-message').textContent === 'Replies are shown as Markdown source.' && \
+             byId('raw-markdown').checked && !byId('raw-markdown').disabled && \
              !{reply}.querySelector('.md') && {reply}.querySelector('pre').textContent.includes('**bold**')"
         ),
     )
