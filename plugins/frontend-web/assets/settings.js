@@ -25,7 +25,7 @@ const EFFORTS = {
 };
 const LEVELS = ["none", "read", "write", "execute"];
 
-const settings = { tab: "model", plugins: [], tools: [], status: null };
+const settings = { tab: "model", plugins: [], tools: [], status: null, webSearch: null };
 
 function field(label, input, hint) {
   const row = el("label", "field");
@@ -259,9 +259,41 @@ function groupDecision(policy, levels) {
   return "deny";
 }
 
+// One switch for web search: the server makes the policy ask before each
+// `web.*` call, mounts tools-web-search and remembers the choice.
+function webSearchField() {
+  const state = settings.webSearch;
+  if (!state?.available) return null;
+  const box = el("input");
+  box.type = "checkbox";
+  box.id = "web-search-switch";
+  box.checked = Boolean(state.enabled);
+  box.addEventListener("change", async () => {
+    box.disabled = true;
+    settingsMessage("");
+    try {
+      const result = await api("/web-search", { method: "PUT", body: JSON.stringify({ enabled: box.checked }) });
+      await reloadSettings();
+      loadPlugins().catch(() => {});
+      const kept = result.remembered ? "" : " It will be off again after rah restarts (no storage plugin).";
+      settingsMessage(result.enabled ? `Web search is on. The model asks before each search or page fetch.${kept}` : "Web search is off.");
+    } catch (error) {
+      box.checked = !box.checked;
+      box.disabled = false;
+      settingsMessage(error.message, true);
+    }
+  });
+  const row = el("label", "field switch");
+  row.append(box, el("span", "label", "Web search"));
+  row.append(el("small", "", "Lets the model search the web (DuckDuckGo, Bing) and read pages. Queries go to those sites, so it asks you before each one."));
+  return row;
+}
+
 function toolsForm() {
   const plugin = pluginOfKinds(["policy-authority"]);
   const form = el("div", "form");
+  const webSearch = webSearchField();
+  if (webSearch) form.append(webSearch);
   if (!plugin) {
     form.append(el("p", "settings-message bad", "No policy plugin is mounted: every tool call runs without checks. Mount policy-authority in the Plugins panel to control tools here."));
     return form;
@@ -386,8 +418,14 @@ function renderSettings() {
 }
 
 async function reloadSettings() {
-  const [plugins, info, status] = await Promise.all([api("/plugins"), api("/info"), api("/status").catch(() => null)]);
+  const [plugins, info, status, webSearch] = await Promise.all([
+    api("/plugins"),
+    api("/info"),
+    api("/status").catch(() => null),
+    api("/web-search").catch(() => null),
+  ]);
   settings.plugins = plugins;
+  settings.webSearch = webSearch;
   settings.tools = info.tools;
   settings.status = status;
   renderSettings();

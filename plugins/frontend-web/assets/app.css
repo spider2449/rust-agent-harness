@@ -146,6 +146,9 @@ button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
   background: var(--bg); color: var(--text);
 }
 .field textarea { resize: vertical; }
+.field.switch { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; }
+.field.switch input { width: 16px; height: 16px; padding: 0; margin: 0; }
+.field.switch small { grid-column: 2; }
 .form .buttons { display: flex; justify-content: flex-end; }
 .tool-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tool-table th { text-align: left; color: var(--muted); font-weight: normal; font-size: 12px; }

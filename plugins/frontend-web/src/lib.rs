@@ -25,6 +25,10 @@
 //!   workspace root and cannot leave it. `GET /api/git/changes` and
 //!   `/api/git/diff?path=` are read-only Git views of the workspace (one
 //!   `git` run each, through the `sandbox` service).
+//! - With an `admin` service: `GET|PUT /api/web-search {enabled}` turns
+//!   web search on (the policy asks before `web.*`, then `tools-web-search`
+//!   is mounted) or off, and remembers the choice in `storage` for the next
+//!   start (see [`web_search`]).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog`, `POST /api/plugins {kind,
@@ -62,6 +66,7 @@ mod git;
 mod jobs;
 mod manage;
 mod status;
+mod web_search;
 mod workspace;
 mod ws;
 
@@ -116,6 +121,8 @@ struct Config {
 }
 
 pub(crate) struct Shared {
+    /// This plugin's id, also its `storage` namespace.
+    pub id: PluginId,
     pub kernel: KernelHandle,
     pub token: String,
     pub hosts: Vec<String>,
@@ -147,6 +154,7 @@ impl Plugin for WebFrontendPlugin {
             .map_err(|error| format!("cannot read the listening address: {error}"))?;
         let timeout = Duration::from_secs(config.approval_timeout_secs.unwrap_or(300).max(1));
         let shared = Arc::new(Shared {
+            id: scope.id().clone(),
             kernel: scope.kernel(),
             token: access::new_token(),
             hosts: access::allowed_hosts(address),
@@ -165,7 +173,7 @@ impl Plugin for WebFrontendPlugin {
                 .with_graceful_shutdown(stop.cancelled_owned())
                 .await;
         });
-        if !started {
+        if !started || !scope.spawn(web_search::restore(shared.clone())) {
             return Err("the plugin scope is already disposed".into());
         }
         scope.kernel().emit(&FrontendListening {
@@ -188,6 +196,7 @@ fn router(shared: AppState) -> Router {
         .route("/git/diff", get(git::diff))
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
+        .route("/web-search", get(web_search::get).put(web_search::set))
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))

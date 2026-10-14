@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::{ApiError, ApiResult, AppState, status_json};
 
-fn admin(shared: &AppState) -> Result<Arc<dyn PluginAdmin>, ApiError> {
+pub(crate) fn admin(shared: &AppState) -> Result<Arc<dyn PluginAdmin>, ApiError> {
     shared.kernel.get(ADMIN).ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,

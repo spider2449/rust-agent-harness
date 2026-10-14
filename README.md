@@ -140,6 +140,12 @@ working directory inside the sandbox root) and ends with the plugin.
 with Blender ([`examples/mcp/blender.toml`](examples/mcp/blender.toml)) as
 the example.
 
+Web search is off by default. The simplest way to turn it on: in the Web UI
+(`rah --web`), open **Settings → Tools** and tick **Web search**. That mounts
+`tools-web-search`, makes the policy ask before every search or page fetch,
+and is remembered (in `storage`) for the next start; untick it to turn it
+off. In a distribution file it looks like the example below.
+
 Web search is the opt-in `tools-web-search` plugin: `web.search` needs no
 API key and tries DuckDuckGo, Bing, then any configured SearXNG instances
 until one answers (a rate-limited or blocked engine cools down). An optional

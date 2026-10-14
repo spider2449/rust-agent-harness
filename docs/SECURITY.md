@@ -238,6 +238,14 @@ policy remains possible, behind the warning.
 
 Behind the same token and checks, and likewise unreachable from tools:
 
+- `PUT /api/web-search {enabled}` is the Web UI's web search switch. On,
+  it first adds `decisions = { "web.*" = "ask" }` to every mounted
+  `policy-authority` that does not already decide `web.*`, then mounts
+  `tools-web-search`; off, it unmounts `tools-web-search` and leaves the
+  rule. The choice is stored in `storage` (namespace: the frontend's id,
+  key `web-search`) and applied again when `frontend-web` starts, so
+  whoever can write `.rah/storage` can turn web search on, still behind
+  the ask rule.
 - `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
   `sandbox-os`, `tools-builtin`, `tools-repo-write`) at another existing directory, as
   `rah --root` does at start. It widens what tools can reach to that folder,

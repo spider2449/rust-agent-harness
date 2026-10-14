@@ -985,3 +985,129 @@ async fn git_changes_and_diffs_are_shown_read_only() {
         assert_eq!(status, 400, "{refused}: {body}");
     }
 }
+
+/// Waits until `kind`'s default instance is active in `kernel`.
+async fn wait_active(kernel: &Kernel, id: &str) -> bool {
+    for _ in 0..200 {
+        let active = kernel.plugins().into_iter().any(|(plugin, status)| {
+            plugin.as_str() == id && status == rah_api::PluginStatus::Active
+        });
+        if active {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn web_search_is_switched_on_asks_first_and_is_remembered() {
+    use reqwest::Method;
+    let web = start("web-search-switch", |_| {}).await;
+    let state = web.json(web.get("/api/web-search")).await;
+    assert_eq!(state, json!({ "available": true, "enabled": false }));
+
+    let (status, on) = web
+        .status(
+            web.request(Method::PUT, "/api/web-search")
+                .json(&json!({ "enabled": true })),
+        )
+        .await;
+    assert_eq!(status, 200, "{on}");
+    assert_eq!(on["enabled"], true, "{on}");
+    assert_eq!(on["remembered"], true, "{on}");
+    let plugins = web.json(web.get("/api/plugins")).await;
+    let policy = plugins
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["kind"] == "policy-authority")
+        .unwrap();
+    assert_eq!(policy["config"]["decisions"]["web.*"], "ask", "{policy}");
+    // The preset's own rules are kept.
+    assert_eq!(policy["config"]["tools"]["fs.*"], "read", "{policy}");
+    let info = web.json(web.get("/api/info")).await;
+    assert!(
+        info["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "web.search"),
+        "{info}"
+    );
+
+    // A call asks first; refusing it sends nothing anywhere.
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+    let input = r#"/call web.search {"query":"rah"}"#;
+    send(
+        &mut socket,
+        json!({ "type": "turn", "session": session, "input": input }),
+    )
+    .await;
+    let mut asked = false;
+    let mut text = String::new();
+    loop {
+        let message = next_json(&mut socket).await;
+        match message["type"].as_str().unwrap() {
+            "approval_required" => {
+                assert_eq!(message["tool"], "web.search", "{message}");
+                asked = true;
+                send(
+                    &mut socket,
+                    json!({ "type": "approval", "id": message["id"], "approve": false }),
+                )
+                .await;
+            }
+            "event" => match message["event"]["type"].as_str().unwrap() {
+                "model_delta" => text.push_str(message["event"]["delta"].as_str().unwrap()),
+                "completed" | "failed" | "cancelled" => break,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert!(asked);
+    assert!(text.contains("denied: rejected by the user"), "{text}");
+
+    // A new start with the same storage turns it on again.
+    let mut distribution = headless(&web.dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0" }
+"#,
+    ));
+    let restarted = Kernel::new();
+    boot(&restarted, &distribution).await.unwrap();
+    assert!(wait_active(&restarted, "tools-web-search").await);
+
+    let (status, off) = web
+        .status(
+            web.request(Method::PUT, "/api/web-search")
+                .json(&json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(status, 200, "{off}");
+    assert_eq!(off["enabled"], false, "{off}");
+    assert!(
+        !web.kernel
+            .plugins()
+            .iter()
+            .any(|(id, _)| id.as_str() == "tools-web-search")
+    );
+    // Off is remembered too.
+    let again = Kernel::new();
+    boot(&again, &distribution).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !again
+            .plugins()
+            .iter()
+            .any(|(id, _)| id.as_str() == "tools-web-search")
+    );
+}

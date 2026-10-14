@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Web search switch
+
+- The Web UI's **Settings → Tools** has a **Web search** checkbox. Ticking
+  it makes the policy ask before every `web.*` call (unless it already
+  decides `web.*`), then mounts `tools-web-search`; unticking unmounts it.
+  `frontend-web` serves it as `GET|PUT /api/web-search {enabled}` and keeps
+  the choice in `storage`, applying it again at the next start.
+
 ### OS sandbox on Linux
 
 - New opt-in plugin `sandbox-os` (ADR 0042), in the `sandbox-process`

@@ -1299,6 +1299,28 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         "assignments are kept: {policy}"
     );
 
+    // Web search: one switch mounts the tools and makes the policy ask.
+    page.eval(&TAB.replace("{tab}", "tools")).await;
+    page.wait(
+        "the web search switch",
+        "!!byId('web-search-switch') && !byId('web-search-switch').checked",
+    )
+    .await;
+    page.eval("byId('web-search-switch').click(); true").await;
+    page.wait(
+        "web search on",
+        "byId('settings-message').textContent.startsWith('Web search is on.') && \
+         byId('web-search-switch').checked && \
+         !!document.querySelector('#settings-body select[data-tool=\"web.search\"]')",
+    )
+    .await;
+    page.screenshot("settings-web-search").await;
+    let policy = page
+        .eval("api('/plugins').then((list) => list.find((p) => p.kind === 'policy-authority').config)")
+        .await;
+    assert_eq!(policy["decisions"]["web.*"], "ask", "{policy}");
+    assert_eq!(policy["decisions"]["echo"], "deny", "{policy}");
+
     // Loop: switch to plan-and-execute.
     page.eval(&TAB.replace("{tab}", "loop")).await;
     page.wait(
