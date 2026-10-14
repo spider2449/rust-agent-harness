@@ -26,9 +26,10 @@
 //! [`DEFAULT_INHERIT_ENV`]); `max_timeout_ms` defaults to 10 minutes.
 //!
 //! The crate also provides `sandbox-os` ([`SandboxOsPlugin`]), the same
-//! service with OS-level confinement on Linux.
+//! service with OS-level confinement on Linux and Windows.
 
 mod os;
+mod process;
 mod spawn;
 mod supervise;
 
@@ -52,6 +53,14 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use os::Confinement;
+use process::Process;
+
+/// What a started program reads as standard input.
+#[derive(Clone, Copy)]
+enum Stdin {
+    Null,
+    Piped,
+}
 
 /// Variables copied from the RAH process environment by default. The home
 /// directory variables let programs find the user's own configuration (Git
@@ -229,10 +238,39 @@ impl ProcessEnv {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         supervise::configure(&mut command);
+        #[cfg(not(windows))]
         if let Some(confinement) = &self.confinement {
             confinement.configure(&mut command);
         }
         command
+    }
+
+    /// Starts a validated program, confined when this environment confines.
+    async fn start(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: PathBuf,
+        env: &BTreeMap<String, String>,
+        stdin: Stdin,
+    ) -> Result<Process, ExecError> {
+        let failed = |error: std::io::Error| ExecError::Spawn {
+            program: program.to_owned(),
+            message: error.to_string(),
+        };
+        #[cfg(windows)]
+        if let Some(confinement) = &self.confinement {
+            return confinement
+                .spawn(program, args, &cwd, &self.base_env, env, stdin)
+                .await
+                .map_err(failed);
+        }
+        let mut command = self.command(program, args, cwd, env);
+        command.stdin(match stdin {
+            Stdin::Null => Stdio::null(),
+            Stdin::Piped => Stdio::piped(),
+        });
+        command.spawn().map(Process::from_tokio).map_err(failed)
     }
 
     fn validate(&self, spec: &ProgramSpec) -> Result<(), ExecError> {
@@ -299,12 +337,9 @@ impl ExecEnv for ProcessEnv {
         if cancel.is_cancelled() || self.stop.is_cancelled() {
             return Err(ExecError::InvalidSpec("cancelled before start".into()));
         }
-        let mut command = self.command(&spec.program, &spec.args, cwd, &spec.env);
-        command.stdin(Stdio::null());
-        let child = command.spawn().map_err(|error| ExecError::Spawn {
-            program: spec.program.clone(),
-            message: error.to_string(),
-        })?;
+        let child = self
+            .start(&spec.program, &spec.args, cwd, &spec.env, Stdin::Null)
+            .await?;
         supervise::supervise(child, &spec, &cancel, &self.stop).await
     }
 
@@ -326,12 +361,9 @@ impl ExecEnv for ProcessEnv {
                 "the sandbox is shutting down".into(),
             ));
         }
-        let mut command = self.command(&spec.program, &spec.args, cwd, &spec.env);
-        command.stdin(Stdio::piped());
-        let child = command.spawn().map_err(|error| ExecError::Spawn {
-            program: spec.program.clone(),
-            message: error.to_string(),
-        })?;
+        let child = self
+            .start(&spec.program, &spec.args, cwd, &spec.env, Stdin::Piped)
+            .await?;
         spawn::start(child, spec.stderr_bytes, spawner, self.stop.child_token())
     }
 }

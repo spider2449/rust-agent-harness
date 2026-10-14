@@ -1,6 +1,7 @@
 //! G4 acceptance for `sandbox-os`: `shell.exec` over the confined sandbox
-//! writes inside the workspace but not outside it. Off Linux the plugin
-//! refuses to start, so the shell tool never runs unconfined.
+//! writes inside the workspace but not outside it, on Linux (landlock) and
+//! Windows (Low integrity). Elsewhere the plugin refuses to start, so the
+//! shell tool never runs unconfined.
 
 mod common;
 
@@ -11,6 +12,15 @@ use std::{
 };
 
 use common::TempDir;
+
+/// Windows cannot deny the network, so `sandbox-os` needs it allowed there,
+/// and files are created with `cmd` instead of `touch`.
+const NETWORK: &str = if cfg!(windows) {
+    ", network = true"
+} else {
+    ""
+};
+const PROGRAM: &str = if cfg!(windows) { "cmd" } else { "touch" };
 
 fn config(dir: &TempDir) -> std::path::PathBuf {
     let toml_path = |path: std::path::PathBuf| path.display().to_string().replace('\\', "/");
@@ -31,11 +41,11 @@ config = {{ dir = "{sessions}" }}
 
 [[plugin]]
 use = "sandbox-os"
-config = {{ root = "{workspace}" }}
+config = {{ root = "{workspace}"{NETWORK} }}
 
 [[plugin]]
 use = "tools-shell"
-config = {{ allow_programs = ["touch"] }}
+config = {{ allow_programs = ["{PROGRAM}"] }}
 
 [[plugin]]
 use = "model-mock"
@@ -52,9 +62,14 @@ use = "frontend-cli"
     path
 }
 
-/// Runs `touch <target>` through `shell.exec`, approving the call.
+/// Creates `target` through `shell.exec`, approving the call.
 fn touch(config: &Path, target: &Path) -> Output {
-    let arguments = serde_json::json!({ "program": "touch", "args": [target] });
+    let args = if cfg!(windows) {
+        serde_json::json!(["/c", format!("echo x>{}", target.display())])
+    } else {
+        serde_json::json!([target])
+    };
+    let arguments = serde_json::json!({ "program": PROGRAM, "args": args });
     let prompt = format!("/call shell.exec {arguments}");
     let mut child = Command::new(env!("CARGO_BIN_EXE_rah"))
         .arg("--config")
@@ -69,7 +84,7 @@ fn touch(config: &Path, target: &Path) -> Output {
     child.wait_with_output().unwrap()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn shell_exec_cannot_write_outside_the_workspace() {
     let dir = TempDir::new("sandbox-os");
@@ -90,11 +105,13 @@ fn shell_exec_cannot_write_outside_the_workspace() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[tool error]"), "{stdout}");
     assert!(stdout.contains(r#""exit_code":1"#), "{stdout}");
-    assert!(stdout.contains("Permission denied"), "{stdout}");
+    if cfg!(target_os = "linux") {
+        assert!(stdout.contains("Permission denied"), "{stdout}");
+    }
     assert!(!outside.exists());
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[test]
 fn sandbox_os_refuses_to_start_and_the_shell_never_runs() {
     let dir = TempDir::new("sandbox-os-unsupported");
@@ -103,7 +120,10 @@ fn sandbox_os_refuses_to_start_and_the_shell_never_runs() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = format!("{stdout}\n{stderr}");
-    assert!(text.contains("sandbox-os supports only Linux"), "{text}");
+    assert!(
+        text.contains("sandbox-os supports only Linux and Windows"),
+        "{text}"
+    );
     assert!(!stdout.contains("[tool"), "{text}");
     assert!(!inside.exists());
 }

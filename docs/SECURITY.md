@@ -94,18 +94,32 @@ a bounded stderr tail and no timeout. Its supervision tasks belong to the
 handle, terminates the process tree.
 
 `sandbox-os` (ADR 0042) provides the same service with the same
-supervision plus OS-level confinement, **on Linux only**: landlock (ABI 3,
+supervision plus OS-level confinement. **On Linux**, landlock (ABI 3,
 Linux 6.2, or later) limits writes to the root, a private `TMPDIR` and the
 configured `writable` paths, and reads to `readable` (default `/`); unless
 `network = true`, a seccomp filter denies every socket except Unix-domain
 ones, and `io_uring`. Confinement is applied before `exec`, so it covers
 every descendant. It refuses to start without landlock ABI 3 or seccomp,
-and on every other platform; it never falls back to plain supervision. It
-does not hide readable files (the default `readable` includes the user's
-credentials), does not stop connections to Unix socket files such as
-`ssh-agent` or `docker.sock`, does not restrict the network with
-`network = true`, and sets no CPU, memory or disk limits. No preset mounts
-it.
+and on platforms other than Linux and Windows; it never falls back to plain
+supervision. On Linux it does not hide readable files (the default
+`readable` includes the user's credentials), does not stop connections to
+Unix socket files such as `ssh-agent` or `docker.sock`, does not restrict
+the network with `network = true`, and sets no CPU, memory or disk limits.
+No preset mounts it.
+
+On **Windows**, `sandbox-os` (ADR 0043) runs every program with a Low
+integrity token without privileges (Administrators deny-only), started
+suspended so it joins the Job Object before it runs. It labels the root, a
+private `TEMP` and the `writable` paths Low, so the program cannot write
+anything else the user owns (only places already labeled Low, such as
+`AppData\LocalLow`). **The label stays on the root and `writable` after
+unmount**, and new files there inherit it; `icacls "<dir>"
+/setintegritylevel "(OI)(CI)medium"` removes it. Drive roots, the user
+profile and the Windows directory are refused. It does **not** restrict
+reads or the network: `readable` is refused and `network` must be set to
+`true`, so a program can read the user's credentials and send them away. A
+file moved into the root keeps its own label and stays unwritable. Batch
+files are refused; run `cmd.exe /c` explicitly.
 
 `tools-shell` provides `shell.exec` with `execute` permission and requires
 `sandbox`. It accepts `program`, `args`, `cwd` and `timeout_ms` only, and can

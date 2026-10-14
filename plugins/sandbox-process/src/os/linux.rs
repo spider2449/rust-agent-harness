@@ -19,6 +19,7 @@ use rah_api::{PluginError, Scope, sandbox::SANDBOX};
 use serde::Deserialize;
 use tokio::process::Command;
 
+use super::resolve;
 use crate::{ProcessEnv, canonical_root, inherited_env, max_timeout};
 
 #[derive(Default, Deserialize)]
@@ -66,19 +67,6 @@ pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
     };
     scope.provide(SANDBOX, Arc::new(env))?;
     Ok(())
-}
-
-/// Canonical paths; relative ones are relative to `root`. Every path must
-/// exist, so a typo cannot silently grant nothing.
-async fn resolve(root: &Path, paths: Vec<PathBuf>, key: &str) -> Result<Vec<PathBuf>, String> {
-    let mut resolved = Vec::with_capacity(paths.len());
-    for path in paths {
-        let canonical = tokio::fs::canonicalize(root.join(&path))
-            .await
-            .map_err(|error| format!("{key}: `{}`: {error}", path.display()))?;
-        resolved.push(canonical);
-    }
-    Ok(resolved)
 }
 
 /// A new directory only the current user can enter, used as `TMPDIR`.

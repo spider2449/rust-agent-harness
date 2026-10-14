@@ -390,9 +390,9 @@ async fn an_environment_without_a_scope_refuses_to_spawn() {
     ));
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[tokio::test]
-async fn sandbox_os_refuses_to_start_off_linux() {
+async fn sandbox_os_refuses_to_start_on_this_platform() {
     let dir = TempDir::new("os-unsupported");
     let kernel = Kernel::new();
     let status = kernel
@@ -442,11 +442,26 @@ fn helper_probe() {
     report("udp", std::net::UdpSocket::bind("127.0.0.1:0").map(|_| ()));
 }
 
-#[cfg(target_os = "linux")]
+/// Prints each argument after `--` on its own line, as `arg=<argument>`.
+#[test]
+#[ignore = "helper program"]
+fn helper_args() {
+    let args: Vec<String> = std::env::args().collect();
+    let start = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map_or(args.len(), |at| at + 1);
+    for arg in &args[start..] {
+        println!("arg={arg}");
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 mod os {
     use super::*;
 
-    /// Whether this kernel can run `sandbox-os`; says why when it cannot.
+    /// Whether this host can run `sandbox-os`; says why when it cannot.
+    #[cfg(target_os = "linux")]
     fn supported() -> bool {
         match crate::os::linux::landlock_abi() {
             Ok(abi) if abi >= 3 => true,
@@ -455,6 +470,21 @@ mod os {
                 false
             }
         }
+    }
+
+    #[cfg(windows)]
+    fn supported() -> bool {
+        true
+    }
+
+    /// The configuration every test starts from: Windows cannot deny the
+    /// network, so it must be allowed there.
+    fn base(dir: &TempDir) -> serde_json::Value {
+        let mut config = serde_json::json!({ "root": dir.0, "max_timeout_ms": 60_000 });
+        if cfg!(windows) {
+            config["network"] = true.into();
+        }
+        config
     }
 
     async fn mount(config: serde_json::Value) -> (Kernel, rah_api::PluginStatus) {
@@ -467,6 +497,13 @@ mod os {
             .await
             .unwrap();
         (kernel, status)
+    }
+
+    async fn mounted(config: serde_json::Value) -> (Kernel, Arc<dyn ExecEnv>) {
+        let (kernel, status) = mount(config).await;
+        assert_eq!(status, rah_api::PluginStatus::Active);
+        let sandbox = kernel.handle().get(SANDBOX).unwrap();
+        (kernel, sandbox)
     }
 
     struct Probe {
@@ -485,21 +522,19 @@ mod os {
     }
 
     /// Runs `helper_probe` in a sandbox rooted at `dir`. `config` is merged
-    /// into the plugin configuration; the value `"<outside>"` stands for a
+    /// into the base configuration; the value `"<outside>"` stands for a
     /// list holding the directory outside the root.
     async fn probe(dir: &TempDir, name: &str, config: serde_json::Value) -> (Kernel, Probe) {
         let outside = TempDir::new(&format!("{name}-outside"));
         std::fs::write(outside.0.join("secret.txt"), b"readable").unwrap();
-        let mut full = serde_json::json!({ "root": dir.0, "max_timeout_ms": 60_000 });
+        let mut full = base(dir);
         for (key, value) in config.as_object().unwrap() {
             full[key] = match value.as_str() {
                 Some("<outside>") => serde_json::json!([outside.0]),
                 _ => value.clone(),
             };
         }
-        let (kernel, status) = mount(full).await;
-        assert_eq!(status, rah_api::PluginStatus::Active);
-        let sandbox = kernel.handle().get(SANDBOX).unwrap();
+        let (kernel, sandbox) = mounted(full).await;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mut spec = helper("helper_probe", Duration::from_secs(30));
         let outside_path = outside.0.display().to_string();
@@ -518,6 +553,18 @@ mod os {
         (kernel, Probe { text, outside })
     }
 
+    /// The private temporary directory is under the system one and goes
+    /// away with the plugin.
+    async fn assert_private_temp(kernel: Kernel, probe: &Probe) {
+        let tmpdir = PathBuf::from(probe.line("tmpdir"));
+        let system = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let canonical = std::fs::canonicalize(&tmpdir).unwrap();
+        assert!(canonical.starts_with(system), "{}", probe.text);
+        kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+        assert!(!tmpdir.exists());
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn confines_writes_and_the_network() {
         if !supported() {
@@ -533,13 +580,25 @@ mod os {
         assert_eq!(probe.line("udp"), "denied");
         assert!(dir.0.join("inside.txt").exists());
         assert!(!probe.outside.0.join("out.txt").exists());
+        assert_private_temp(kernel, &probe).await;
+    }
 
-        // The private temporary directory goes away with the plugin.
-        let tmpdir = PathBuf::from(probe.line("tmpdir"));
-        assert!(tmpdir.starts_with(std::env::temp_dir()), "{}", probe.text);
-        assert!(tmpdir.is_dir());
-        kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
-        assert!(!tmpdir.exists());
+    /// Writes are confined to the labeled directories; reads and the
+    /// network are not restricted on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn confines_writes_at_low_integrity() {
+        let dir = TempDir::new("os-confined");
+        let (kernel, probe) = probe(&dir, "os-confined", serde_json::json!({})).await;
+        assert_eq!(probe.line("inside"), "ok");
+        assert_eq!(probe.line("tmp"), "ok");
+        assert_eq!(probe.line("read"), "ok");
+        assert_eq!(probe.line("outside"), "denied");
+        assert_eq!(probe.line("tcp"), "ok");
+        assert_eq!(probe.line("udp"), "ok");
+        assert!(dir.0.join("inside.txt").exists());
+        assert!(!probe.outside.0.join("out.txt").exists());
+        assert_private_temp(kernel, &probe).await;
     }
 
     #[tokio::test]
@@ -556,6 +615,7 @@ mod os {
         assert!(probe.outside.0.join("out.txt").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn readable_paths_can_be_narrowed() {
         if !supported() {
@@ -583,10 +643,7 @@ mod os {
             return;
         }
         let dir = TempDir::new("os-terminate");
-        let config = serde_json::json!({ "root": dir.0, "max_timeout_ms": 60_000 });
-        let (kernel, status) = mount(config).await;
-        assert_eq!(status, rah_api::PluginStatus::Active);
-        let sandbox = kernel.handle().get(SANDBOX).unwrap();
+        let (kernel, sandbox) = mounted(base(&dir)).await;
 
         let output = sandbox
             .run(
@@ -634,13 +691,28 @@ mod os {
             return;
         }
         let dir = TempDir::new("os-invalid");
-        for extra in [
+        let mut invalid = vec![
             serde_json::json!({ "writable": ["/rah/does/not/exist"] }),
-            serde_json::json!({ "readable": ["missing"] }),
             serde_json::json!({ "network": "yes" }),
             serde_json::json!({ "unknown": true }),
-        ] {
-            let mut config = serde_json::json!({ "root": dir.0 });
+        ];
+        if cfg!(target_os = "linux") {
+            invalid.push(serde_json::json!({ "readable": ["missing"] }));
+        } else {
+            // Reads and the network cannot be restricted on Windows, and the
+            // configuration may not pretend otherwise.
+            invalid.push(serde_json::json!({ "readable": ["."] }));
+            invalid.push(serde_json::json!({ "network": false }));
+            // A Low label there would let every Low program write there.
+            let drive = dir.0.ancestors().last().unwrap().to_path_buf();
+            invalid.push(serde_json::json!({ "writable": [drive] }));
+            let profile = std::env::var_os("USERPROFILE").unwrap();
+            invalid.push(serde_json::json!({ "writable": [profile] }));
+            let system = std::env::var_os("SystemRoot").unwrap();
+            invalid.push(serde_json::json!({ "root": system }));
+        }
+        for extra in invalid {
+            let mut config = base(&dir);
             for (key, value) in extra.as_object().unwrap() {
                 config[key] = value.clone();
             }
@@ -650,6 +722,107 @@ mod os {
                 "{config}: {status:?}"
             );
             assert!(kernel.handle().get(SANDBOX).is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use std::os::windows::ffi::OsStrExt;
+
+        use tokio::io::AsyncWriteExt;
+
+        use super::*;
+
+        #[tokio::test]
+        async fn the_network_must_be_acknowledged() {
+            let dir = TempDir::new("os-network");
+            let (_kernel, status) = mount(serde_json::json!({ "root": dir.0 })).await;
+            let rah_api::PluginStatus::Failed { message: error } = status else {
+                panic!("{status:?}");
+            };
+            assert!(error.contains("network = true"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn the_root_keeps_its_low_label() {
+            let dir = TempDir::new("os-label");
+            let old = dir.0.join("sub").join("old.txt");
+            std::fs::write(&old, b"x").unwrap();
+            let (kernel, sandbox) = mounted(base(&dir)).await;
+            // The label reached the files that existed before the mount.
+            let args = ["/c", r"echo new> sub\old.txt"].map(str::to_owned).to_vec();
+            let spec = ProgramSpec::new("cmd".to_owned(), args, Duration::from_secs(30));
+            let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+            assert_eq!(output.exit_code, Some(0), "{output:?}");
+            assert!(std::fs::read_to_string(&old).unwrap().starts_with("new"));
+            kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+            for path in [dir.0.clone(), dir.0.join("sub")] {
+                let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+                let labeled = crate::os::windows::has_low_label(&name).unwrap();
+                assert!(labeled, "{}", path.display());
+            }
+        }
+
+        #[tokio::test]
+        async fn spawned_programs_talk_over_pipes() {
+            let dir = TempDir::new("os-spawn");
+            let (_kernel, sandbox) = mounted(base(&dir)).await;
+            let mut spawned = sandbox.spawn(spawn_spec("helper_echo")).await.unwrap();
+            spawned.stdin.write_all(b"hello\n").await.unwrap();
+            let line = read_line_starting(spawned.stdout.as_mut(), "echo:").await;
+            assert_eq!(line.as_deref(), Some("echo:hello"));
+            drop(spawned.stdin);
+            let code = tokio::time::timeout(Duration::from_secs(10), spawned.process.wait())
+                .await
+                .unwrap();
+            assert_eq!(code, Some(0));
+            assert!(spawned.process.stderr().contains("echo-ready"));
+        }
+
+        #[tokio::test]
+        async fn arguments_reach_the_program_unchanged() {
+            let dir = TempDir::new("os-args");
+            let (_kernel, sandbox) = mounted(base(&dir)).await;
+            let tricky = [
+                "plain",
+                "with space",
+                "",
+                r#"quote " inside"#,
+                r"trailing\",
+                r"back\\slash and space\",
+                "\ttab",
+            ];
+            let mut spec = helper("helper_args", Duration::from_secs(30));
+            spec.args.push("--".into());
+            spec.args.extend(tricky.iter().map(|arg| (*arg).to_owned()));
+            let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+            let text = stdout(&output);
+            let args: Vec<&str> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("arg="))
+                .collect();
+            assert_eq!(args, tricky, "{text}");
+        }
+
+        #[tokio::test]
+        async fn programs_are_found_on_the_path_and_batch_files_refused() {
+            let dir = TempDir::new("os-lookup");
+            std::fs::write(dir.0.join("run.cmd"), b"@echo hi\r\n").unwrap();
+            let (_kernel, sandbox) = mounted(base(&dir)).await;
+            let args = ["/c", "echo", "found"].map(str::to_owned).to_vec();
+            let spec = ProgramSpec::new("cmd".to_owned(), args, Duration::from_secs(30));
+            let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+            assert_eq!(output.exit_code, Some(0));
+            assert!(stdout(&output).contains("found"), "{output:?}");
+
+            for program in ["run.cmd", "./run.cmd", "missing-program"] {
+                let spec = ProgramSpec::new(program.to_owned(), Vec::new(), Duration::from_secs(5));
+                let result = sandbox.run(spec, CancellationToken::new()).await;
+                assert!(
+                    matches!(result, Err(ExecError::Spawn { .. })),
+                    "{program}: {result:?}"
+                );
+            }
         }
     }
 }

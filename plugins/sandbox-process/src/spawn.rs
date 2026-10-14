@@ -12,19 +12,21 @@ use rah_api::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::Child,
     sync::watch,
     time,
 };
 
-use crate::supervise::{GRACE, ProcessTree};
+use crate::{
+    process::Process,
+    supervise::{GRACE, ProcessTree},
+};
 
 /// `None` while running; `Some(exit code)` once ended.
 type Exit = Option<Option<i32>>;
 
 /// Hands the child to scope-owned supervision tasks and returns its handle.
 pub(crate) fn start(
-    mut child: Child,
+    mut child: Process,
     stderr_bytes: usize,
     spawner: &Spawner,
     stop: CancellationToken,
@@ -36,6 +38,9 @@ pub(crate) fn start(
             return Err(ExecError::Supervision(error));
         }
     };
+    child
+        .resume()
+        .map_err(|error| ExecError::Supervision(error.to_string()))?;
     let missing = || ExecError::Supervision("a pipe of the spawned program is missing".into());
     let stdin = child.stdin.take().ok_or_else(missing)?;
     let stdout = child.stdout.take().ok_or_else(missing)?;
@@ -53,20 +58,20 @@ pub(crate) fn start(
         ));
     }
     Ok(Spawned {
-        stdin: Box::new(stdin),
-        stdout: Box::new(stdout),
+        stdin,
+        stdout,
         process: Box::new(SpawnedProcess { stop, exited, tail }),
     })
 }
 
 async fn supervise(
-    mut child: Child,
+    mut child: Process,
     mut tree: ProcessTree,
     stop: CancellationToken,
     exit: watch::Sender<Exit>,
 ) {
     let code = tokio::select! {
-        status = child.wait() => status.ok().and_then(|status| status.code()),
+        status = child.wait() => status.ok().flatten(),
         () = stop.cancelled() => {
             let _ = tree.terminate();
             let _ = child.start_kill();

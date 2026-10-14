@@ -1,6 +1,6 @@
 # ADR 0042: `sandbox-os`, OS-Level Confinement on Linux
 
-Status: Accepted
+Status: Accepted; Windows decided in ADR 0043
 
 Date: 2026-10-14
 
@@ -80,7 +80,8 @@ Two platform questions were open when G4 was deferred:
 6. **Other platforms are not supported yet.** On Windows and macOS
    `sandbox-os` fails to start with a message that names `sandbox-process`
    as the unisolated alternative. A Windows implementation needs its own
-   decision on the ACL and user-profile questions above.
+   decision on the ACL and user-profile questions above. (ADR 0043 made it:
+   a Low integrity token, not AppContainer.)
 
 7. **Not in any preset.** Presets keep `sandbox-process`, because
    `sandbox-os` does not run on Windows and its defaults (no network) break

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### OS sandbox on Windows
+
+- `sandbox-os` now runs on Windows (ADR 0043): every program gets a Low
+  integrity token without privileges (Administrators deny-only), is started
+  suspended with `CreateProcessAsUserW` and joins the Job Object before it
+  runs, with named pipes for its standard streams. The root, a private
+  `TEMP`/`TMP` removed on unmount, and `writable` are labeled Low, so
+  nothing else the user owns can be written. **The label stays on the root
+  and `writable`** (new files inherit it; a labeled root is not relabeled).
+  Drive roots, the user profile and the Windows directory are refused.
+- Reads and the network are not restricted on Windows: `readable` is
+  refused and `network = true` is required. Batch files are refused (run
+  `cmd.exe /c`). AppContainer was tried and rejected: the `NUL` device is
+  denied inside it, so Git cannot start.
+
 ### Formatted replies
 
 - The Web UI renders the model's replies as Markdown (headings, lists and

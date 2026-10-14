@@ -110,8 +110,10 @@ Implemented:
   request);
   `skills-fs` (skills listed through `model.before_request`, loaded with
   `skills.load`); `sandbox-process` (supervised processes, not an OS
-  sandbox); `sandbox-os` (opt-in, Linux only: the same supervision plus
-  landlock file confinement and a seccomp network filter, ADR 0042);
+  sandbox); `sandbox-os` (opt-in: the same supervision plus, on Linux,
+  landlock file confinement and a seccomp network filter, ADR 0042, and on
+  Windows a Low integrity token with Low-labeled writable directories,
+  ADR 0043);
   `tools-repo`
   (read-only Git tools, requires `sandbox`); `tools-repo-write`
   (`repo.create-file`, `repo.edit-files`, `repo.patch`, declared `write`);

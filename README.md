@@ -109,13 +109,24 @@ On Linux (landlock ABI 3, Linux 6.2 or later), `sandbox-os` can take the
 place of `sandbox-process` and also confines what programs touch: writes
 only under the root, a private `TMPDIR` and `writable`, reads under
 `readable` (default `/`), and no network sockets unless `network = true`.
-It refuses to start elsewhere. See `docs/SECURITY.md` for what it does not
+On Windows it runs programs at Low integrity: writes only under the root, a
+private `TEMP` and `writable`, which it labels Low (the label stays on them;
+`icacls "<dir>" /setintegritylevel "(OI)(CI)medium"` removes it). Reads and
+the network are not restricted there, so `network = true` is required. It
+refuses to start elsewhere. See `docs/SECURITY.md` for what it does not
 cover.
 
 ```toml
 [[plugin]]
 use = "sandbox-os"
 config = { root = ".", writable = ["/home/me/.cargo/registry"], network = false }
+```
+
+```toml
+# Windows
+[[plugin]]
+use = "sandbox-os"
+config = { root = ".", network = true }
 ```
 
 MCP servers are mounted one `tools-mcp` (stdio) or `tools-mcp-http`

@@ -2,7 +2,7 @@
 name = "rah-plugin-sandbox-process"
 version.workspace = true
 edition.workspace = true
-description = "Sandbox plugins providing the `sandbox` service: `sandbox-process` (process supervision, not an OS sandbox) and `sandbox-os` (landlock and seccomp confinement on Linux)"
+description = "Sandbox plugins providing the `sandbox` service: `sandbox-process` (process supervision, not an OS sandbox) and `sandbox-os` (landlock and seccomp on Linux, a Low integrity token on Windows)"
 
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }
@@ -14,10 +14,18 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "s
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows confinement (`sandbox-os`): a Low integrity token, file labels,
+# `CreateProcessAsUserW` and named pipes for the standard streams.
 [target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net", "rt"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }
 

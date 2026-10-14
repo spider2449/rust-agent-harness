@@ -50,7 +50,11 @@
 - [x] 提供同一個 `sandbox` 服務；放在 `sandbox-process` crate 裡當第二個 catalog plugin（共用監督程式碼，`model-responses`、`tools-mcp` 已有一個 crate 兩個 plugin 的先例），`rah-api` 和 protocol 不變。加入 `WORKSPACE_PLUGINS`，`--root` 和 `set_workspace` 會移動它的 root。不放進 preset（Windows 不能用；預設不能連網）。
 - [x] 設定：`readable`（預設 `/`）、`writable`（相對路徑以 `root` 為準，必須存在）、`network`（預設 `false`），加上 `sandbox-process` 原有的 `root`、`inherit_env`、`max_timeout_ms`。另外建立權限 0700 的私人暫存目錄當 `TMPDIR`，unmount 時刪除。
 - [x] 測試（WSL 實跑；CI 是 ubuntu-latest）：寫入工作目錄外失敗、TCP 和 UDP 被擋、`writable` 和 `network = true` 可以開放、縮小 `readable` 後讀不到、逾時／取消／孤兒子孫／unmount 仍終止 process tree、無效設定、`TMPDIR` 在 unmount 後刪除；`crates/rah-cli/tests/sandbox_os.rs` 端到端經過 `policy-authority` 和 `shell.exec`。landlock ABI 低於 3 的 kernel 印出原因後略過；非 Linux 平台則斷言 plugin 拒絕啟動。
-- [ ] Windows：仍未做，`sandbox-os` 在 Windows 上拒絕啟動並指出 `sandbox-process` 沒有隔離。待決事項不變：AppContainer 需要在工作目錄加上永久的 ACL（改動主機設定），裝在使用者目錄的工具（例如 `~/.cargo` 的 rustup）在容器內讀不到。
+- [x] Windows（2026-10-14，ADR 0043）：用 Low integrity token，不用 AppContainer。原型結果：AppContainer 必須建立 profile，且容器內打不開 `NUL`，Git 一啟動就失敗；Low IL 下 Git、`NUL`、`cmd` 都正常。
+  - token：`CreateRestrictedToken`（拿掉所有 privilege，Administrators 改為 deny-only）再降到 Low。std 不能指定 token（`raw_attribute` 仍 unstable），所以自己用 `CreateProcessAsUserW`：suspended 啟動、先加入 Job Object 再 resume（`sandbox-process` 的逃脫空檔不存在）、只繼承三個標準 handle、標準輸出入走 named pipe。supervise 和 spawn 改用共用的 `Process` 抽象，兩種 child 都適用。
+  - root、`writable` 和私人 `TEMP` 加上可繼承的 Low label（會套用到既有檔案）。**label 不移除**（使用者確認）；已有 label 就略過。拒絕磁碟根目錄、使用者目錄和 Windows 目錄。
+  - 讀取和網路都不限制：`readable` 直接拒絕，`network` 必須設 `true`（預設 `false` 時拒絕啟動）。batch 檔拒絕，要明確用 `cmd.exe /c`。
+  - 測試在本機 Windows 跑（CI 只有 Linux）；本機是 elevated token，一般使用者帳號未測。
 
 ## G5：`storage-fs`
 

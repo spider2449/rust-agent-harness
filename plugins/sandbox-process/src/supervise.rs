@@ -2,7 +2,7 @@
 //! future: there are no detached reader tasks, and dropping the future kills
 //! the process tree (`kill_on_drop` plus [`ProcessTree`]'s `Drop`).
 
-use std::{process::ExitStatus, time::Duration};
+use std::time::Duration;
 
 use rah_api::{
     CancellationToken,
@@ -10,9 +10,11 @@ use rah_api::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::{Child, Command},
+    process::Command,
     time::{self, Instant},
 };
+
+use crate::process::Process;
 
 const CHUNK_BYTES: usize = 8 * 1024;
 /// How long pipes may stay open after the program exits (descendants holding
@@ -20,7 +22,7 @@ const CHUNK_BYTES: usize = 8 * 1024;
 pub(crate) const GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) async fn supervise(
-    mut child: Child,
+    mut child: Process,
     spec: &ProgramSpec,
     cancel: &CancellationToken,
     stop: &CancellationToken,
@@ -33,13 +35,16 @@ pub(crate) async fn supervise(
             return Err(supervision(error));
         }
     };
+    child
+        .resume()
+        .map_err(|error| supervision(error.to_string()))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut out_chunk = vec![0_u8; CHUNK_BYTES];
     let mut err_chunk = vec![0_u8; CHUNK_BYTES];
-    let mut status: Option<ExitStatus> = None;
+    let mut status: Option<Option<i32>> = None;
     let mut termination = None;
     let deadline = Instant::now() + spec.timeout;
     let mut pipe_deadline: Option<Instant> = None;
@@ -98,9 +103,7 @@ pub(crate) async fn supervise(
     Ok(ExecOutput {
         stdout: out,
         stderr: err,
-        exit_code: status
-            .filter(|_| termination.is_none())
-            .and_then(|s| s.code()),
+        exit_code: status.filter(|_| termination.is_none()).flatten(),
         termination,
     })
 }
@@ -150,7 +153,8 @@ pub(crate) fn configure(_command: &mut Command) {}
 
 /// Owns the child's process tree until disarmed; dropping it terminates the
 /// tree. Windows assigns the child to a kill-on-close Job Object right after
-/// spawn, so a process the child starts before assignment can escape.
+/// spawn, so a process the child starts before assignment can escape, unless
+/// the child was started suspended (`sandbox-os`).
 #[cfg(windows)]
 pub(crate) struct ProcessTree {
     job: Option<std::os::windows::io::OwnedHandle>,
@@ -158,7 +162,7 @@ pub(crate) struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Process) -> Result<Self, String> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -227,7 +231,7 @@ pub(crate) struct ProcessTree {
 
 #[cfg(unix)]
 impl ProcessTree {
-    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Process) -> Result<Self, String> {
         let pid = child
             .id()
             .ok_or_else(|| "the spawned process has no id".to_owned())?;
@@ -258,7 +262,7 @@ pub(crate) struct ProcessTree;
 
 #[cfg(not(any(unix, windows)))]
 impl ProcessTree {
-    fn attach(_child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(_child: &Process) -> Result<Self, String> {
         Ok(Self)
     }
 
