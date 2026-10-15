@@ -300,10 +300,10 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 
 ### P0：凍結 legacy、建立新規範
 - [x] v0.35.0 legacy 最終版本發布（tag＋GitHub Release＋`legacy/authority-first` branch）
-- [ ] 撰寫並 accept **ADR 0036：Plugin kernel（everything is a plugin）**，明確 supersede 0001、0002、0003、0011、0021–0026、0033 中衝突的部分
-- [ ] 重寫 `AGENTS.md`；舊版移到 `docs/legacy/AGENTS.authority-first.md`
-- [ ] 將 legacy 文件移到 `docs/legacy/`（第 5.3 節）
-- [ ] 從 workspace 刪除 `rah-runtime-codex`、`rah-core`；desktop 移出 default members
+- [x] 撰寫並 accept **ADR 0036：Plugin kernel（everything is a plugin）**，明確 supersede 0001、0002、0003、0011、0021–0026、0033 中衝突的部分（2026-10-11 完成）
+- [x] 重寫 `AGENTS.md`；舊版移到 `docs/legacy/AGENTS.authority-first.md`（2026-10-11 完成）
+- [x] 將 legacy 文件移到 `docs/legacy/`（第 5.3 節；2026-10-11 完成）
+- [x] 從 workspace 刪除 `rah-runtime-codex`、`rah-core`；desktop 移出 default members（2026-10-11 完成；Desktop 在 P5 刪除）
 - 驗收：workspace 仍可 build 和 test；CI 綠燈
 
 ### P1：`rah-kernel`
@@ -335,7 +335,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 
 ### P3：真實模型
 - [x] `model-openai`、`model-llamacpp`（2026-10-11 完成；同一個 crate `plugins/model-responses`，從 `rah-runtime-openai` 移植 SSE、Responses 驗證和 llama.cpp normalizer）
-- [ ] 刪除 `rah-runtime-openai`、`rah-model`、`rah-runtime` → **延到 P5**（2026-10-11 決定：legacy Desktop 仍依賴這三個 crate，和 Desktop 一起移除）
+- [x] 刪除 `rah-runtime-openai`、`rah-model`、`rah-runtime` → **延到 P5**（2026-10-11 決定：legacy Desktop 仍依賴這三個 crate，和 Desktop 一起移除；2026-10-12 在 P5d 完成）
 - 驗收：fixture 測試全綠；本機 llama-server 手動驗證（不進 CI）
 - 結果：fixture 測試全綠（plugin 13 個、`rah-cli` e2e 2 個）。**本機 llama-server 尚未手動驗證**：這台機器上沒有在執行的 llama-server；未啟動時 `rah --preset llamacpp` 會回報 unreachable 並以 exit code 1 結束。OpenAI 同樣只有 fixture 驗證（`OPENAI_LIVE_NOT_VERIFIED`）。
 - 實作備註：
@@ -353,7 +353,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - [x] `tools-mcp`（2026-10-12 完成）
 - [x] `rah-plugin-host-process`（protocol v2）＋一個非 Rust 範例 plugin（Python 寫的 tool；2026-10-12 完成）
 - [x] 刪除 `rah-session`（2026-10-12）
-- [ ] 刪除 `rah-tools-plugin`、`rah-profile-composition` → **延到 P5**（2026-10-12 決定：legacy Desktop 透過 `rah-profile-composition` 依賴它和 `rah-tools-mcp`，和 Desktop 一起移除）
+- [x] 刪除 `rah-tools-plugin`、`rah-profile-composition` → **延到 P5**（2026-10-12 決定：legacy Desktop 透過 `rah-profile-composition` 依賴它和 `rah-tools-mcp`，和 Desktop 一起移除；2026-10-12 在 P5d 完成）
 - 驗收：沒有 policy 時啟動會警告；有 policy 時未指派的 tool 被拒；process plugin 呼叫 `requires` 以外的 service 會被拒
 - 結果（2026-10-12）：三項驗收都有自動化測試（`crates/rah-cli/tests/binary.rs`、`policy.rs`；`crates/rah-plugin-host-process/tests/process.rs`）。
 - 實作備註（policy-authority，2026-10-12）：
@@ -393,7 +393,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - `rah` 的 `use = "process"` 必須有 `id`。
 
 ### P5：Web frontend
-- [ ] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin）
+- [x] `frontend-web`：HTTP＋WebSocket API、Web UI（對話、activity、session 列表、fork 和 resume、`Ask` 確認、plugin 管理頁可以啟用、停用、設定 plugin；2026-10-12 在 P5a、P5b 完成）
 - [x] `context-default`（sliding window、記憶；2026-10-12 完成）
 - [x] 刪除 `rah-desktop`（2026-10-12；不做 `frontend-tauri` 殼）；同時刪除 Desktop 依賴的 `rah-runtime-openai`、`rah-model`、`rah-runtime`（從 P3 延後）、`rah-profile-composition`、`rah-tools-plugin`、`rah-tools-mcp`、`rah-tools`、`rah-sandbox`（從 P4 延後）
 - 驗收：功能上可以取代 desktop 的日常使用；**在 UI 上切換 model 和 loop plugin 不需要重啟**
