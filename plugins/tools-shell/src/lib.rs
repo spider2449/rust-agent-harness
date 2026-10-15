@@ -105,6 +105,26 @@ impl ShellExec {
         })
     }
 
+    /// Tells the model what the tool is for, in the words a user asks with
+    /// ("run git pull"), and which programs it may name.
+    fn description(&self) -> String {
+        let programs = match &self.allow_programs {
+            Some(allowed) if !allowed.is_empty() => {
+                let names: Vec<String> = allowed.iter().map(|name| format!("`{name}`")).collect();
+                format!("Allowed programs: {}. ", names.join(", "))
+            }
+            Some(_) => "No program is allowed in this configuration. ".to_owned(),
+            None => String::new(),
+        };
+        format!(
+            "Runs a command-line program in the workspace and returns its exit code, \
+             stdout and stderr. Use it whenever the user asks to run a command, for \
+             example `git pull` as {{\"program\": \"git\", \"args\": [\"pull\"]}}. \
+             {programs}There is no shell: pipes, redirection, globbing and `&&` are not \
+             interpreted, so run one program per call."
+        )
+    }
+
     fn spec(&self, input: Value) -> Result<ProgramSpec, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -152,17 +172,32 @@ impl Tool for ShellExec {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new("shell.exec"),
-            description: "Runs one program with an argument vector (no shell syntax: pipes, \
-                          redirection and globbing are not interpreted) in the workspace. \
-                          `cwd` is relative to the workspace root."
-                .into(),
+            description: self.description(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "program": { "type": "string" },
-                    "args": { "type": "array", "items": { "type": "string" } },
-                    "cwd": { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 1 }
+                    "program": {
+                        "type": "string",
+                        "description": "The program to run, without arguments, such as `git`."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "One string per argument, such as [\"pull\"] or [\"commit\", \"-m\", \"message\"]."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory relative to the workspace root; the root when omitted."
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": self.max_timeout.as_millis(),
+                        "description": format!(
+                            "Timeout in milliseconds; {} when omitted.",
+                            self.default_timeout.as_millis()
+                        )
+                    }
                 },
                 "required": ["program"],
                 "additionalProperties": false

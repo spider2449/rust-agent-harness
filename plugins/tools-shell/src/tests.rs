@@ -124,6 +124,32 @@ async fn invalid_input_is_rejected_before_the_sandbox() {
 }
 
 #[test]
+fn the_definition_names_its_use_and_the_allowed_programs() {
+    let env = FakeEnv::new(exited(0));
+    let definition = tool(&env, json!({ "allow_programs": ["git", "cargo"] })).definition();
+    assert!(
+        definition.description.contains("command-line program"),
+        "{}",
+        definition.description
+    );
+    assert!(definition.description.contains("`git pull`"));
+    assert!(
+        definition
+            .description
+            .contains("Allowed programs: `git`, `cargo`.")
+    );
+    assert_eq!(
+        definition.input_schema["properties"]["timeout_ms"]["maximum"],
+        json!(DEFAULT_MAX_TIMEOUT_MS)
+    );
+
+    let open = tool(&env, json!({})).definition();
+    assert!(!open.description.contains("Allowed programs"));
+    let closed = tool(&env, json!({ "allow_programs": [] })).definition();
+    assert!(closed.description.contains("No program is allowed"));
+}
+
+#[test]
 fn invalid_configuration_is_rejected() {
     let env = FakeEnv::new(exited(0));
     for config in [

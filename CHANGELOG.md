@@ -6,6 +6,11 @@
   (`--preset`, else `default`) as `rah.toml` in the data directory, or to
   `--config <file>`, as a starting point to edit, with the opt-in
   `tools-shell` commented out. It never overwrites an existing file.
+- `shell.exec` tells the model what it is for: its description says it
+  runs command-line programs (with `git pull` as an example), lists the
+  programs `allow_programs` permits, and each input field is described,
+  so a model can pick it for "git pull for me" without being told the tool
+  name.
 
 ## v0.43.0 (2026-10-15)
 
