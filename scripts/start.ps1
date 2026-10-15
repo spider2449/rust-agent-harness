@@ -22,6 +22,11 @@ Web UI with the mock model; needs no model server.
 Terminal REPL, with file and Git tools rooted at another repository.
 
 .EXAMPLE
+.\scripts\start.ps1 -InitConfig -Preset openai
+Writes the preset as `rah.toml` in the data directory to edit, and exits;
+an existing file is never overwritten.
+
+.EXAMPLE
 .\scripts\start.ps1 -Config .\rah.toml -Release
 Your own plugin composition, built with optimizations.
 #>
@@ -52,7 +57,10 @@ param(
     # Build with optimizations (slower first build, faster runs).
     [switch]$Release,
     # llama-server address checked before starting the `default` preset.
-    [string]$LlamaServer = "http://127.0.0.1:8080"
+    [string]$LlamaServer = "http://127.0.0.1:8080",
+    # Write the preset (-Preset, else `default`) as rah.toml in the data
+    # directory, or as -Config, and exit.
+    [switch]$InitConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +84,23 @@ if (-not $Cli) { $cargoArgs += @("--web", "--bind", $Bind) }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo was not found on PATH; install Rust from https://rustup.rs"
+}
+
+if ($InitConfig) {
+    $initArgs = @("run", "--quiet", "-p", "rah-cli")
+    if ($Release) { $initArgs += "--release" }
+    $initArgs += @("--", "--init-config")
+    if ($Preset) { $initArgs += @("--preset", $Preset) }
+    # Relative to where the script was called from, like -DataDir.
+    if ($Config) { $initArgs += @("--config", $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Config)) }
+    if ($DataDir) { $initArgs += @("--data-dir", $DataDir) }
+    Push-Location $repo
+    try {
+        & cargo @initArgs
+        exit $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
 }
 
 if ($runPreset -eq "default") {

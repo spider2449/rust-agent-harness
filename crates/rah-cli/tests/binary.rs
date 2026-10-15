@@ -248,3 +248,66 @@ config = { prompt = "/notool hello" }
     assert!(output.status.success(), "{stdout}");
     assert!(!stdout.contains("[mine]"), "{stdout}");
 }
+
+#[test]
+fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
+    let dir = TempDir::new("bin-init-config");
+    let home = dir.0.join("home");
+    let output = rah(&dir)
+        .args(["--init-config", "--preset", "dev"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let path = home.join("rah.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("use = \"model-mock\""), "{text}");
+    assert!(text.contains("# use = \"tools-shell\""), "{text}");
+
+    // The written file is what runs without --preset and --config.
+    let output = rah(&dir)
+        .args(["--prompt", "hello", "--root"])
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stderr.contains("rah.toml"), "{stderr}");
+    assert!(!stderr.contains("UNGUARDED"), "{stderr}");
+    assert!(
+        stdout.contains("[model-mock] echo returned: hello"),
+        "{stdout}"
+    );
+
+    // A second run leaves the file alone.
+    std::fs::write(&path, "# mine\n").unwrap();
+    let output = rah(&dir).arg("--init-config").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+
+    // --config names another target; an unknown preset writes nothing.
+    let other = dir.0.join("other.toml");
+    let output = rah(&dir)
+        .arg("--init-config")
+        .arg("--config")
+        .arg(&other)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        std::fs::read_to_string(&other)
+            .unwrap()
+            .contains("model-llamacpp")
+    );
+    let missing = dir.0.join("missing.toml");
+    let output = rah(&dir)
+        .args(["--init-config", "--preset", "nope", "--config"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!missing.exists());
+}

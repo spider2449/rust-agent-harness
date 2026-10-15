@@ -55,6 +55,11 @@ struct Args {
     /// tools-repo-write, sandbox-process, sandbox-os).
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Write the preset (--preset, else `default`) as a distribution file and
+    /// exit: to --config when given, else `rah.toml` in the data directory.
+    /// An existing file is never overwritten.
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "prompt", "session", "session_dir", "root"])]
+    init_config: bool,
 }
 
 /// `path` made absolute against the current directory, so a relative path
@@ -81,6 +86,53 @@ fn read_config(path: &Path) -> Result<Distribution, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
     Distribution::parse(&text).map_err(|error| format!("`{}`: {error}", path.display()))
+}
+
+/// Appended to a file written by `--init-config`: the opt-in plugins no
+/// preset mounts, commented out.
+const INIT_CONFIG_FOOTER: &str = r#"
+# Opt-in: program execution (`shell.exec`), here limited to `git`.
+# Uncomment it and add `"shell.exec" = "execute"` to the policy's `tools`.
+# The `sandbox-process` above is process supervision, not an OS sandbox.
+#
+# [[plugin]]
+# use = "tools-shell"
+# config = { allow_programs = ["git"] }
+"#;
+
+/// `--init-config`: writes the preset's distribution file; returns its path.
+fn init_config(args: &Args) -> Result<PathBuf, String> {
+    let path = match &args.config {
+        Some(path) => absolute(path)?,
+        None => data_home(args)?.join(USER_CONFIG),
+    };
+    let preset = args.preset.as_deref().unwrap_or("default");
+    let text = rah_cli::preset_text(preset).map_err(|error| error.to_string())?;
+    let text = format!(
+        "# RAH distribution, written by `rah --init-config` from the `{preset}` preset.\n\
+         # Without --preset and --config, `rah` runs `rah.toml` in the data directory.\n\
+         # Settings saved in the Web UI are kept in `storage` and replace a plugin's\n\
+         # configuration from this file at the next start.\n{text}{INIT_CONFIG_FOOTER}"
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
+    }
+    // `create_new` refuses an existing file without a check-then-write race.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "`{}` already exists; remove or rename it first",
+                path.display()
+            ),
+            _ => format!("cannot create `{}`: {error}", path.display()),
+        })?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
+    Ok(path)
 }
 
 fn distribution(args: &Args) -> Result<Distribution, String> {
@@ -164,6 +216,18 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
 }
 
 async fn run(args: Args) -> i32 {
+    if args.init_config {
+        return match init_config(&args) {
+            Ok(path) => {
+                eprintln!("rah: wrote `{}`", path.display());
+                0
+            }
+            Err(message) => {
+                eprintln!("rah: {message}");
+                2
+            }
+        };
+    }
     let distribution = match distribution(&args) {
         Ok(distribution) => distribution,
         Err(message) => {

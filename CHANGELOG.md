@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `rah --init-config` (`scripts\start.ps1 -InitConfig`) writes a preset
+  (`--preset`, else `default`) as `rah.toml` in the data directory, or to
+  `--config <file>`, as a starting point to edit, with the opt-in
+  `tools-shell` commented out. It never overwrites an existing file.
+
 ## v0.43.0 (2026-10-15)
 
 > One data home for everything RAH keeps between runs, a new

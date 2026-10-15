@@ -210,7 +210,10 @@ as is, and `--session-dir` overrides only the session logs.
 
 Your settings live there too. Without `--preset` and `--config`, `rah` runs
 `rah.toml` in the data directory when it exists (your own plugin
-composition, see below), otherwise the `default` preset. What you change in
+composition, see below), otherwise the `default` preset. `rah --init-config`
+(or `scripts\start.ps1 -InitConfig`) writes a preset (`--preset`, else
+`default`) there as a starting point, or to `--config <file>`, with the
+opt-in `tools-shell` commented out; it never overwrites a file. What you change in
 the Web UI is kept under `storage/frontend-web`: the Settings forms, the
 web search switch, changes made in the **Plugins** panel, the display
 preference, the recent workspaces, which folders of the session list are

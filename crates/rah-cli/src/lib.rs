@@ -298,21 +298,7 @@ impl Distribution {
     }
 
     pub fn preset(name: &str) -> Result<Self, BootError> {
-        let preset = PRESETS
-            .iter()
-            .find(|preset| preset.name == name)
-            .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
-        let policy = if preset.guarded { POLICY_TEMPLATE } else { "" };
-        let model_config = preset
-            .model_config
-            .map(|config| format!("\nconfig = {config}"))
-            .unwrap_or_default();
-        Self::parse(&format!(
-            "{policy}{}",
-            PRESET_TEMPLATE
-                .replace("{MODEL_CONFIG}", &model_config)
-                .replace("{MODEL}", preset.model)
-        ))
+        Self::parse(&preset_text(name)?)
     }
 
     /// Replaces every plugin of kind `from` with a plugin of kind `to` and an
@@ -343,6 +329,25 @@ impl Distribution {
         }
         matched
     }
+}
+
+/// The distribution file of a built-in preset, as `rah.toml` text.
+pub fn preset_text(name: &str) -> Result<String, BootError> {
+    let preset = PRESETS
+        .iter()
+        .find(|preset| preset.name == name)
+        .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
+    let policy = if preset.guarded { POLICY_TEMPLATE } else { "" };
+    let model_config = preset
+        .model_config
+        .map(|config| format!("\nconfig = {config}"))
+        .unwrap_or_default();
+    Ok(format!(
+        "{policy}{}",
+        PRESET_TEMPLATE
+            .replace("{MODEL_CONFIG}", &model_config)
+            .replace("{MODEL}", preset.model)
+    ))
 }
 
 /// Plugin kinds that work in a workspace directory, through their `root`
