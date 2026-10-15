@@ -19,10 +19,7 @@
 //!
 //! Configuration: `{ "max_steps": 8, "max_rounds_per_step": 16 }`.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use futures::{StreamExt, channel::mpsc};
 use rah_api::{
@@ -73,12 +70,13 @@ impl Plugin for PlanLoopPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let plan = PlanLoop {
             kernel: scope.kernel(),
             session: scope.inject(SESSION)?,
@@ -480,21 +478,21 @@ impl Turn {
             session_id: self.sid.clone(),
             tool_call: tool_call.clone(),
         });
-        let started = AtomicBool::new(false);
         let invocation = Invocation {
             session: self.sid.clone(),
             call: tool_call.clone(),
             cancel: self.cancel.clone(),
         };
+        // Sent when the policy has allowed the call and the tool starts, so a
+        // frontend can show it running (and not while it waits for approval).
         let outcome = invoker
-            .invoke(invocation, || started.store(true, Ordering::SeqCst))
+            .invoke(invocation, || {
+                self.emit(AgentEvent::ToolStarted {
+                    session_id: self.sid.clone(),
+                    tool_call_id: tool_call.id.clone(),
+                });
+            })
             .await;
-        if started.load(Ordering::SeqCst) {
-            self.emit(AgentEvent::ToolStarted {
-                session_id: self.sid.clone(),
-                tool_call_id: tool_call.id.clone(),
-            });
-        }
         self.append(SessionEntry::ToolResult {
             turn: self.id.clone(),
             call_id: call_id.clone(),

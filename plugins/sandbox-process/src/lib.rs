@@ -118,12 +118,15 @@ impl Plugin for SandboxProcessPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: Config = rah_api::config::parse(config)?;
+        inherited_env(config.inherit_env, config.inherit_env_extra)?;
+        max_timeout(config.max_timeout_ms)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let env = ProcessEnv {
             root: canonical_root(config.root).await?,
             base_env: inherited_env(config.inherit_env, config.inherit_env_extra)?,

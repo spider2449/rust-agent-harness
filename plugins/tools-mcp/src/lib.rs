@@ -214,6 +214,18 @@ impl Plugin for McpToolsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config = McpConfig::deserialize(config)?;
+        check_names(&config.server, &config.tools)?;
+        Limits::new(
+            config.call_timeout_ms,
+            config.startup_timeout_ms,
+            config.max_message_bytes,
+            config.max_outstanding,
+        )?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let config: McpConfig = scope.config_as()?;
         check_names(&config.server, &config.tools)?;
@@ -261,6 +273,19 @@ impl Plugin for McpToolsPlugin {
 impl Plugin for McpHttpToolsPlugin {
     fn manifest(&self) -> &PluginManifest {
         &self.manifest
+    }
+
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config = McpHttpConfig::deserialize(config)?;
+        check_names(&config.server, &config.tools)?;
+        Limits::new(
+            config.call_timeout_ms,
+            config.startup_timeout_ms,
+            config.max_message_bytes,
+            config.max_outstanding,
+        )?;
+        http::endpoint(&config.url)?;
+        Ok(())
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {

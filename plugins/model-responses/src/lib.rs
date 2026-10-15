@@ -115,16 +115,25 @@ struct OpenAiConfig {
     endpoint: Option<String>,
 }
 
+fn openai_config(config: &serde_json::Value) -> Result<OpenAiConfig, String> {
+    OpenAiConfig::deserialize(config)
+        .map_err(|error| format!("configuration needs `model`: {error}"))
+}
+
 #[async_trait]
 impl Plugin for OpenAiResponsesPlugin {
     fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config = openai_config(config)?;
+        openai_endpoint(config.endpoint.as_deref())?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: OpenAiConfig = scope
-            .config_as()
-            .map_err(|error| format!("configuration needs `model`: {error}"))?;
+        let config = openai_config(scope.config())?;
         let variable = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
         let key = read_key(variable, true)?;
         let endpoint = openai_endpoint(config.endpoint.as_deref())?;
@@ -160,12 +169,19 @@ impl Plugin for LlamaCppPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: LlamaConfig = rah_api::config::parse(config)?;
+        llamacpp_origin(
+            config
+                .endpoint
+                .as_deref()
+                .unwrap_or(DEFAULT_LLAMACPP_ENDPOINT),
+        )?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: LlamaConfig = if scope.config().is_null() {
-            LlamaConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: LlamaConfig = rah_api::config::parse(scope.config())?;
         let origin = llamacpp_origin(
             config
                 .endpoint

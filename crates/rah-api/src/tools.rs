@@ -58,6 +58,44 @@ struct ToolSet(Vec<Arc<dyn Tool>>);
 
 const TOOLS: ServiceKey<ToolSet> = ServiceKey::new(TOOLS_SERVICE);
 
+/// Service name of tool admission providers (ADR 0045).
+pub const TOOL_ADMISSION_SERVICE: &str = "tool-admission";
+
+/// Tool admission providers. Every mounted instance is asked; the first
+/// refusal wins.
+pub const TOOL_ADMISSION: ServiceKey<dyn ToolAdmission> = ServiceKey::new(TOOL_ADMISSION_SERVICE);
+
+/// Admits authorized tool calls before they start, for example to bound how
+/// many calls run at once. The [`ToolInvoker`] asks every provider after the
+/// policy allowed a call and holds the permits while the tool runs, so a
+/// count is released however the call ends: completion, failure,
+/// cancellation or a dropped invocation.
+pub trait ToolAdmission: Send + Sync {
+    /// Admits the call or refuses it with a reason. It must not wait; a
+    /// refused call is not started and its effect is `none`.
+    fn admit(&self, request: &ToolRequestContext) -> Result<ToolPermit, String>;
+}
+
+/// Held while an admitted call runs; dropping it releases the admission.
+pub struct ToolPermit {
+    _guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl ToolPermit {
+    /// A permit that drops `guard` when the call ends.
+    pub fn new(guard: impl std::any::Any + Send + Sync) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+}
+
+impl std::fmt::Debug for ToolPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ToolPermit")
+    }
+}
+
 /// Registers this plugin's tools. The manifest must declare `provides = ["tools"]`.
 pub fn provide_tools(scope: &mut Scope, tools: Vec<Arc<dyn Tool>>) -> Result<(), ScopeError> {
     scope.provide(TOOLS, Arc::new(ToolSet(tools)))
@@ -148,6 +186,19 @@ impl ToolInvoker {
         }
     }
 
+    /// Asks every [`ToolAdmission`] provider; the first refusal wins and
+    /// releases the permits already given. A panicking provider refuses.
+    fn admit(&self, request: &ToolRequestContext) -> Result<Vec<ToolPermit>, String> {
+        let mut permits = Vec::new();
+        for (instance, admission) in self.kernel.get_all(TOOL_ADMISSION) {
+            let admitted =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| admission.admit(request)))
+                    .unwrap_or_else(|_| Err(format!("tool admission `{instance}` panicked")));
+            permits.push(admitted?);
+        }
+        Ok(permits)
+    }
+
     /// Authorizes and runs one call. `on_authorized` runs after the policy
     /// allowed the call and before the tool starts. Never retries.
     pub async fn invoke(
@@ -183,6 +234,12 @@ impl ToolInvoker {
             }
             Some(Ok(())) => {}
         }
+        // Held until the tool has returned or was cancelled; dropping the
+        // invocation releases them too.
+        let permits = match self.admit(&request) {
+            Ok(permits) => permits,
+            Err(reason) => return rejected(format!("not started: {reason}")),
+        };
         on_authorized();
 
         let mutating = matches!(
@@ -198,6 +255,7 @@ impl ToolInvoker {
             () = cancel.cancelled() => Err(ToolError::Cancelled),
             result = tool.call(call.input.0, cx) => result,
         };
+        drop(permits);
         let uncertain = if mutating {
             ToolEffect::Uncertain
         } else {

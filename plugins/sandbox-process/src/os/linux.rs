@@ -35,12 +35,18 @@ struct Config {
     network: bool,
 }
 
+pub(super) fn check_config(config: &serde_json::Value) -> Result<(), PluginError> {
+    parse_config(config).map(drop)
+}
+
+fn parse_config(config: &serde_json::Value) -> Result<Config, PluginError> {
+    let config: Config = rah_api::config::parse(config)?;
+    max_timeout(config.max_timeout_ms)?;
+    Ok(config)
+}
+
 pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
-    let config: Config = if scope.config().is_null() {
-        Config::default()
-    } else {
-        scope.config_as()?
-    };
+    let config = parse_config(scope.config())?;
     let root = canonical_root(config.root).await?;
     let mut base_env = inherited_env(config.inherit_env, config.inherit_env_extra)?;
     let max_timeout = max_timeout(config.max_timeout_ms)?;

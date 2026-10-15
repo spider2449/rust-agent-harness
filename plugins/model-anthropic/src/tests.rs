@@ -464,8 +464,11 @@ async fn plugin_fails_closed_on_missing_credentials_and_bad_configuration() {
             MountOptions::with_config(json!({"modle":"x"})),
         )
         .await
-        .unwrap();
-    assert!(matches!(status, PluginStatus::Failed { .. }));
+        .unwrap_err();
+    assert!(matches!(
+        status,
+        rah_api::kernel::KernelError::InvalidConfig { .. }
+    ));
     for (bad, message) in [
         (json!({"effort": "extreme"}), "effort must be"),
         (json!({"max_tokens": 0}), "max_tokens must be"),

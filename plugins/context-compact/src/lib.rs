@@ -94,23 +94,29 @@ pub struct CompactConfig {
     pub instructions: Option<String>,
 }
 
+fn parse_config(config: &serde_json::Value) -> Result<CompactConfig, PluginError> {
+    let config: CompactConfig = rah_api::config::parse(config)?;
+    let trigger_chars = config.trigger_chars.unwrap_or(DEFAULT_TRIGGER_CHARS);
+    if config.keep_chars.unwrap_or(DEFAULT_KEEP_CHARS) >= trigger_chars {
+        return Err("`keep_chars` must be smaller than `trigger_chars`".into());
+    }
+    Ok(config)
+}
+
 #[async_trait]
 impl Plugin for CompactPlugin {
     fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        parse_config(config).map(drop)
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: CompactConfig = if scope.config().is_null() {
-            CompactConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config = parse_config(scope.config())?;
         let trigger_chars = config.trigger_chars.unwrap_or(DEFAULT_TRIGGER_CHARS);
         let keep_chars = config.keep_chars.unwrap_or(DEFAULT_KEEP_CHARS);
-        if keep_chars >= trigger_chars {
-            return Err("`keep_chars` must be smaller than `trigger_chars`".into());
-        }
         let compactor = Arc::new(Compactor {
             kernel: scope.kernel(),
             limits: Limits {

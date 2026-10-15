@@ -193,7 +193,11 @@ async fn apply(
     if instance.kind != saved.kind {
         return admin.replace(&id, request).await;
     }
-    let status = admin.configure(&id, saved.config.clone()).await?;
+    // A refused configuration changed nothing.
+    let status = admin
+        .configure(&id, saved.config.clone())
+        .await
+        .map_err(|error| AdminError::Failed(format!("{error}; the previous settings were kept")))?;
     if status == PluginStatus::Active {
         return Ok((id, status));
     }

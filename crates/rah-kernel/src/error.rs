@@ -14,6 +14,8 @@ pub enum KernelError {
     UnknownPlugin(PluginId),
     #[error("invalid manifest for plugin `{id}`: {reason}")]
     InvalidManifest { id: PluginId, reason: String },
+    #[error("invalid configuration for plugin `{id}`: {reason}")]
+    InvalidConfig { id: PluginId, reason: String },
     #[error("plugin `{id}` targets kernel API {found}; this kernel provides {expected}")]
     IncompatibleApi {
         id: PluginId,

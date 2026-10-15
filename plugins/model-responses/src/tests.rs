@@ -523,16 +523,16 @@ async fn plugins_fail_closed_on_missing_credentials_and_bad_configuration() {
             MountOptions::default(),
         )
         .await
-        .unwrap();
-    assert!(matches!(status, PluginStatus::Failed { .. }));
+        .unwrap_err();
+    assert!(status.to_string().contains("configuration needs `model`"));
     let status = kernel
         .mount(
             Arc::new(LlamaCppPlugin::new("remote-llama")),
             MountOptions::with_config(json!({"endpoint":"http://192.168.1.5:8080"})),
         )
         .await
-        .unwrap();
-    assert!(matches!(&status, PluginStatus::Failed { message } if message.contains("loopback")));
+        .unwrap_err();
+    assert!(status.to_string().contains("loopback"), "{status}");
     let status = kernel
         .mount(
             Arc::new(LlamaCppPlugin::new("llama")),

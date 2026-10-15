@@ -63,12 +63,13 @@ impl Plugin for ShellToolsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<ShellConfig>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: ShellConfig = if scope.config().is_null() {
-            ShellConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: ShellConfig = rah_api::config::parse(scope.config())?;
         let sandbox = scope.inject(SANDBOX)?;
         let tool = ShellExec::new(sandbox, config)?;
         provide_tools(scope, vec![Arc::new(tool)])?;

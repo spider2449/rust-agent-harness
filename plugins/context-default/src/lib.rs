@@ -73,25 +73,31 @@ pub struct ContextConfig {
     pub max_memory_bytes: Option<u64>,
 }
 
+const BOTH_MEMORY_LOCATIONS: &str = "set either `memory_file` or `memory_dir`, not both";
+
 #[async_trait]
 impl Plugin for ContextPlugin {
     fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: ContextConfig = rah_api::config::parse(config)?;
+        if config.memory_file.is_some() && config.memory_dir.is_some() {
+            return Err(BOTH_MEMORY_LOCATIONS.into());
+        }
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: ContextConfig = if scope.config().is_null() {
-            ContextConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: ContextConfig = rah_api::config::parse(scope.config())?;
         let window = Window {
             max_items: config.max_items.unwrap_or(DEFAULT_MAX_ITEMS).max(1),
             max_chars: config.max_chars.unwrap_or(DEFAULT_MAX_CHARS).max(1),
         };
         let location = match (config.memory_file.clone(), config.memory_dir.clone()) {
             (Some(_), Some(_)) => {
-                return Err("set either `memory_file` or `memory_dir`, not both".into());
+                return Err(BOTH_MEMORY_LOCATIONS.into());
             }
             (Some(path), None) => Some(Location::File(path)),
             (None, Some(dir)) => Some(Location::PerWorkspace {

@@ -230,8 +230,15 @@ async fn mount(config: Value) -> (Kernel, PluginStatus) {
             Arc::new(McpHttpToolsPlugin::new("mcp-http")),
             MountOptions::with_config(config),
         )
-        .await
-        .unwrap();
+        .await;
+    // A configuration the check refuses fails like one `apply` refuses.
+    let status = match status {
+        Ok(status) => status,
+        Err(rah_api::kernel::KernelError::InvalidConfig { reason, .. }) => {
+            PluginStatus::Failed { message: reason }
+        }
+        Err(error) => panic!("{error}"),
+    };
     (kernel, status)
 }
 

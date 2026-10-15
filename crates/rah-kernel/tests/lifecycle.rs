@@ -7,8 +7,8 @@ use std::sync::{
 
 use common::{GREETER, Log, consumer, plugin, provider};
 use rah_kernel::{
-    KERNEL_API, Kernel, KernelError, MountOptions, PluginId, PluginManifest, PluginStatus,
-    PluginStatusChanged, ServiceName,
+    KERNEL_API, Kernel, KernelError, MountOptions, Plugin, PluginError, PluginId, PluginManifest,
+    PluginStatus, PluginStatusChanged, Scope, ServiceName,
 };
 use serde_json::json;
 
@@ -307,6 +307,76 @@ async fn update_config_restarts_plugin_and_its_dependents() {
         ]
     );
     assert_eq!(seen.take(), ["consumer=hello", "consumer=bonjour"]);
+}
+
+/// Wraps a plugin with a configuration check that refuses a non-string
+/// `greeting` and panics on `{"panic": true}`.
+struct Checked(Arc<dyn Plugin>);
+
+#[async_trait::async_trait]
+impl Plugin for Checked {
+    fn manifest(&self) -> &PluginManifest {
+        self.0.manifest()
+    }
+
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        assert!(config["panic"] != json!(true), "check panicked");
+        match &config["greeting"] {
+            serde_json::Value::Null | serde_json::Value::String(_) => Ok(()),
+            _ => Err("`greeting` must be a string".into()),
+        }
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        self.0.apply(scope).await
+    }
+}
+
+#[tokio::test]
+async fn a_refused_configuration_fails_the_mount_or_update_and_keeps_the_instance() {
+    let (kernel, log, seen) = (Kernel::new(), Log::default(), Log::default());
+    let refused = kernel
+        .mount(
+            Arc::new(Checked(provider("provider", &log))),
+            MountOptions::with_config(json!({"greeting": 1})),
+        )
+        .await;
+    assert_eq!(
+        refused,
+        Err(KernelError::InvalidConfig {
+            id: id("provider"),
+            reason: "`greeting` must be a string".into(),
+        })
+    );
+    assert_eq!(kernel.status(&id("provider")), None, "nothing was mounted");
+
+    kernel
+        .mount(
+            Arc::new(Checked(provider("provider", &log))),
+            MountOptions::with_config(json!({"greeting": "hello"})),
+        )
+        .await
+        .unwrap();
+    kernel
+        .mount(consumer("consumer", &log, &seen), MountOptions::default())
+        .await
+        .unwrap();
+    log.take();
+
+    for config in [json!({"greeting": false}), json!({"panic": true})] {
+        let refused = kernel.update_config(&id("provider"), config).await;
+        assert!(
+            matches!(refused, Err(KernelError::InvalidConfig { .. })),
+            "{refused:?}"
+        );
+    }
+    assert!(log.take().is_empty(), "nothing was stopped or restarted");
+    assert_eq!(kernel.status(&id("provider")), Some(PluginStatus::Active));
+    assert_eq!(kernel.status(&id("consumer")), Some(PluginStatus::Active));
+
+    // The old configuration is still the one a restart applies.
+    kernel.restart(&id("provider")).await.unwrap();
+    assert_eq!(seen.take(), ["consumer=hello", "consumer=hello"]);
 }
 
 #[tokio::test]

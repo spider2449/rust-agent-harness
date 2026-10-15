@@ -69,12 +69,13 @@ impl Plugin for TelemetryPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<TelemetryConfig>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: TelemetryConfig = if scope.config().is_null() {
-            TelemetryConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: TelemetryConfig = rah_api::config::parse(scope.config())?;
         let (records, mut queue) = mpsc::unbounded_channel::<Record>();
         let mut writer = Writer {
             dir: config.dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),

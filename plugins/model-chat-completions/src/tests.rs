@@ -557,7 +557,10 @@ async fn plugin_mounts_for_local_servers_and_fails_closed_without_a_required_key
                 MountOptions::with_config(config),
             )
             .await
-            .unwrap();
-        assert!(matches!(status, PluginStatus::Failed { .. }), "{status:?}");
+            .unwrap_err();
+        assert!(
+            matches!(status, rah_api::kernel::KernelError::InvalidConfig { .. }),
+            "{status:?}"
+        );
     }
 }

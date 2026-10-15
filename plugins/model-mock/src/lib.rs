@@ -53,12 +53,13 @@ impl Plugin for MockModelPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let label = config.label.unwrap_or_else(|| scope.id().to_string());
         scope.provide(MODEL, Arc::new(MockModel { label }))?;
         Ok(())

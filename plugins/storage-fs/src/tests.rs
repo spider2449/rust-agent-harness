@@ -239,6 +239,9 @@ async fn unknown_configuration_fails_the_mount() {
             MountOptions::with_config(json!({ "path": "x" })),
         )
         .await
-        .unwrap();
-    assert!(matches!(status, PluginStatus::Failed { .. }), "{status:?}");
+        .unwrap_err();
+    assert!(
+        matches!(status, rah_api::kernel::KernelError::InvalidConfig { .. }),
+        "{status:?}"
+    );
 }

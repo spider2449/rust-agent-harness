@@ -1591,15 +1591,19 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert_eq!(page.eval("byId('settings-dialog').open").await, false);
 
     page.eval("true").await;
-    // The refused model answers 409; that network error is expected.
+    // The refused model configuration answers 400; that network error is
+    // expected.
     let unexpected: Vec<_> = page
         .errors()
         .into_iter()
         .filter(|event| {
-            !event["params"]["entry"]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("409")
+            let entry = &event["params"]["entry"];
+            let refused = entry["text"].as_str().unwrap_or_default().contains("400")
+                && entry["url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .ends_with("/api/settings/model");
+            !refused
         })
         .collect();
     assert!(unexpected.is_empty(), "page errors: {unexpected:#?}");

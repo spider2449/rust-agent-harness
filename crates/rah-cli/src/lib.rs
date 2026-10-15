@@ -427,7 +427,12 @@ pub async fn boot(
         for (service, instance) in &spec.bind {
             options = options.bind(service.as_str(), instance.clone());
         }
-        let status = kernel.mount(plugin, options).await?;
+        let status = match kernel.mount(plugin, options).await {
+            Err(KernelError::InvalidConfig { reason, .. }) if spec.kind == "policy-authority" => {
+                return Err(BootError::PolicyInactive(spec.plugin_id(), reason));
+            }
+            mounted => mounted?,
+        };
         registry.record(spec.plugin_id(), &spec.kind, config, spec.bind.clone());
         if spec.kind == "policy-authority" && status != PluginStatus::Active {
             return Err(BootError::PolicyInactive(

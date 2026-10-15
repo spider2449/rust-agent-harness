@@ -314,18 +314,20 @@ async fn invalid_configuration_fails_the_plugin() {
         serde_json::json!({ "root": "/rah/does/not/exist" }),
         serde_json::json!({ "unknown": true }),
     ] {
-        let status = kernel
+        let mounted = kernel
             .mount(
                 Arc::new(SandboxProcessPlugin::new("sandbox")),
                 MountOptions::with_config(config.clone()),
             )
-            .await
-            .unwrap();
-        assert!(
-            matches!(status, rah_api::PluginStatus::Failed { .. }),
-            "{config}: {status:?}"
-        );
-        kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+            .await;
+        match mounted {
+            // Refused by the configuration check: nothing was mounted.
+            Err(rah_api::kernel::KernelError::InvalidConfig { .. }) => {}
+            Ok(rah_api::PluginStatus::Failed { .. }) => {
+                kernel.unmount(&PluginId::new("sandbox")).await.unwrap();
+            }
+            other => panic!("{config}: {other:?}"),
+        }
     }
 }
 
@@ -534,13 +536,20 @@ mod os {
 
     async fn mount(config: serde_json::Value) -> (Kernel, rah_api::PluginStatus) {
         let kernel = Kernel::new();
-        let status = kernel
+        let mounted = kernel
             .mount(
                 Arc::new(SandboxOsPlugin::new("sandbox")),
                 MountOptions::with_config(config),
             )
-            .await
-            .unwrap();
+            .await;
+        // A configuration the check refuses fails like one `apply` refuses.
+        let status = match mounted {
+            Ok(status) => status,
+            Err(rah_api::kernel::KernelError::InvalidConfig { reason, .. }) => {
+                rah_api::PluginStatus::Failed { message: reason }
+            }
+            Err(error) => panic!("{error}"),
+        };
         (kernel, status)
     }
 

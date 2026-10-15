@@ -5,12 +5,15 @@ use std::sync::{
 
 use rah_api::{
     Kernel, MountOptions, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
-    hooks::{ToolAfterInvoke, ToolApproval, ToolBeforeInvoke, ToolDecision},
+    hooks::{ToolAfterInvoke, ToolApproval, ToolBeforeInvoke, ToolDecision, ToolRequestContext},
     protocol::{
         PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolEffect,
         ToolInput, ToolName, ToolOutput,
     },
-    tools::{Invocation, Tool, ToolContext, ToolError, ToolInvoker, provide_tools},
+    tools::{
+        Invocation, TOOL_ADMISSION, TOOL_ADMISSION_SERVICE, Tool, ToolAdmission, ToolContext,
+        ToolError, ToolInvoker, ToolPermit, provide_tools,
+    },
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -318,4 +321,149 @@ async fn after_invoke_rewrites_output_and_tools_follow_provider_lifecycle() {
 
     kernel.unmount(&PluginId::new("tools")).await.unwrap();
     assert!(invoker.definitions().is_empty());
+}
+
+/// Admits at most `max` calls at once; `max == usize::MAX` panics instead.
+struct Limit {
+    max: usize,
+    held: Arc<AtomicUsize>,
+}
+
+struct Held(Arc<AtomicUsize>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ToolAdmission for Limit {
+    fn admit(&self, request: &ToolRequestContext) -> Result<ToolPermit, String> {
+        assert!(self.max != usize::MAX, "admission bug");
+        if self.held.load(Ordering::SeqCst) >= self.max {
+            return Err(format!("`{}` waits for a free slot", request.call.name));
+        }
+        self.held.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolPermit::new(Held(self.held.clone())))
+    }
+}
+
+async fn mount_limit(kernel: &Kernel, max: usize) -> Arc<AtomicUsize> {
+    let held = Arc::new(AtomicUsize::new(0));
+    let limit = {
+        let held = held.clone();
+        plugin(
+            PluginManifest::new("limit", "1").provides([TOOL_ADMISSION_SERVICE]),
+            move |scope| {
+                let limit = Limit {
+                    max,
+                    held: held.clone(),
+                };
+                scope.provide(TOOL_ADMISSION, Arc::new(limit))?;
+                Ok(())
+            },
+        )
+    };
+    kernel.mount(limit, MountOptions::default()).await.unwrap();
+    held
+}
+
+/// A tool that signals when it starts and then never returns.
+struct Hang(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl Tool for Hang {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("hang"),
+            description: "never returns".into(),
+            input_schema: json!({"type": "object"}),
+            permission: PermissionLevel::Read,
+        }
+    }
+
+    async fn call(&self, _input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn admission_refuses_calls_over_the_limit_and_releases_on_every_ending() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Read, None).await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let hang = {
+        let started = started.clone();
+        plugin(
+            PluginManifest::new("hang", "1").provides(["tools"]),
+            move |scope| {
+                provide_tools(scope, vec![Arc::new(Hang(started.clone()))])?;
+                Ok(())
+            },
+        )
+    };
+    kernel.mount(hang, MountOptions::default()).await.unwrap();
+    let held = mount_limit(&kernel, 1).await;
+    let invoker = ToolInvoker::new(kernel.handle());
+
+    // A cancelled call releases its slot.
+    let hanging = invocation("hang");
+    let cancel = hanging.cancel.clone();
+    let running = invoker.invoke(hanging, || {});
+    let refuse_then_cancel = async {
+        started.notified().await;
+        assert_eq!(held.load(Ordering::SeqCst), 1);
+        let refused = invoker
+            .invoke(invocation("count"), || panic!("must not start"))
+            .await;
+        cancel.cancel();
+        refused
+    };
+    let (cancelled, refused) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(running, refuse_then_cancel)
+    })
+    .await
+    .expect("the call ends when cancelled");
+    assert!(!refused.authorized && refused.output.is_error);
+    assert_eq!(
+        text(&refused.output),
+        "not started: `count` waits for a free slot"
+    );
+    assert_eq!(refused.effect, ToolEffect::None);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(text(&cancelled.output).contains("cancelled"));
+    assert_eq!(held.load(Ordering::SeqCst), 0);
+
+    // A dropped invocation releases its slot.
+    {
+        let running = invoker.invoke(invocation("hang"), || {});
+        tokio::pin!(running);
+        tokio::select! {
+            _ = &mut running => panic!("the tool never returns"),
+            () = started.notified() => {}
+        }
+        assert_eq!(held.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(held.load(Ordering::SeqCst), 0);
+
+    // A completed call releases its slot.
+    let outcome = invoker.invoke(invocation("count"), || {}).await;
+    assert!(outcome.authorized && !outcome.output.is_error);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(held.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_panicking_admission_refuses_the_call() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Read, None).await;
+    mount_limit(&kernel, usize::MAX).await;
+    let outcome = ToolInvoker::new(kernel.handle())
+        .invoke(invocation("count"), || panic!("must not start"))
+        .await;
+    assert!(!outcome.authorized);
+    assert_eq!(
+        text(&outcome.output),
+        "not started: tool admission `limit` panicked"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

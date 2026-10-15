@@ -313,7 +313,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
 - 實作備註（與第 3.3 節草案的差異）：
   - `rah-kernel` 不依賴任何 RAH crate（連 `rah-protocol` 都不依賴），由架構測試強制。
   - `kernel_api` 用單一整數 `KERNEL_API = 1`，不引入 `semver` 依賴；`version` 為字串。
-  - `config_schema` 會被保存但尚未驗證；設定以 `serde_json::Value` 傳入，`Scope::config_as::<T>()` 做型別化解析。Schema 驗證延到需要時再加。
+  - 設定以 `serde_json::Value` 傳入，`Scope::config_as::<T>()` 做型別化解析。（2026-10-15：`config_schema` 從未使用，已移除；改由 `Plugin::check_config` 在 mount 和 `update_config` 前檢查，見 ADR 0044。）
   - Hook 分成三個 typed trait：`BailHook`、`WaterfallHook`、`SerialHook`。handler panic 會回傳 `HookError::Panicked`，安全相關呼叫端必須視為拒絕（fail closed）。
   - Service、hook、event handler 只能在 `apply` 期間註冊，`apply` 成功才一次 commit；task 和 dispose effect 綁在 scope 上。
   - 在 `apply` 或 dispose effect 內呼叫 lifecycle 操作會回傳 `Reentrant`，不會 deadlock。巢狀 plugin（`scope.plugin(...)`）延後。
@@ -331,7 +331,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 每個 turn 是 `loop-react` scope 擁有的 task；loop 被卸載時 turn 會被取消，事件串流結束。
   - Session log 重建 context 時，沒有結果的 tool call 會補上「結果未記錄、效果未知、不重放」的錯誤結果。
   - `dev` preset 不掛 policy，啟動時印 `UNGUARDED` 警告；有 policy 的 `default` preset 在 P4。
-  - 尚未做：REPL 的 Ctrl-C 只會結束程式，不會只取消當前 turn；`ToolStarted` 事件在 tool 執行完後才送出（順序正確，但時間點延後）。
+  - 原本尚未做的兩項都已完成：REPL 的 Ctrl-C 只取消當前 turn（8c5fcb5，`host.interrupt`）；`ToolStarted` 在 policy 允許、tool 開始時送出（2026-10-15）。
 
 ### P3：真實模型
 - [x] `model-openai`、`model-llamacpp`（2026-10-11 完成；同一個 crate `plugins/model-responses`，從 `rah-runtime-openai` 移植 SSE、Responses 驗證和 llama.cpp normalizer）
@@ -347,7 +347,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - `rah` 新增 `llamacpp`、`openai` preset 和 `--model` flag。
 
 ### P4：policy、tools、sandbox、process plugin
-- [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限未搬，見下方備註）
+- [x] `policy-authority`（搬 `authorized_dispatch`、未指派 fail-closed、Allow／Deny／Ask；2026-10-12 完成。in-flight 上限 2026-10-15 補上，見下方備註）
 - [x] `sandbox-process`、`tools-shell`（opt-in）＋ CLI 的 `Ask` 確認（2026-10-12 完成）
 - [x] `tools-repo`（唯讀；2026-10-12 完成）
 - [x] `tools-mcp`（2026-10-12 完成）
@@ -361,7 +361,7 @@ rah (bin)     -> rah-kernel, rah-api, 所有內建 plugin（distribution；用 f
   - 決策只看 policy 自己的設定：沒有指派 → Deny；有效 level 取「指派」和「tool 自報」中較嚴格者，所以 tool metadata 只能收緊、不能授權（legacy 的 external permission 指派規則推廣到所有 tool）。
   - Preset 改為 `default`（llama.cpp，也是 `--preset` 的預設值）、`openai`、`dev`（mock）、`minimal`（mock，不掛 policy，印 `UNGUARDED`）。`llamacpp` preset 改名為 `default`。除了 `minimal`，policy 都是第一個掛載。
   - 設定了 `policy-authority` 但它沒有變成 Active 時，`rah` 會在掛載後續 plugin 前中止啟動（exit 2），不會退化成 unguarded 執行。
-  - legacy 的 in-flight 上限沒有搬：只靠 hook 無法可靠地在拒絕、取消和 Ask 失敗時釋放計數，之後若需要，改由 `ToolInvoker` 或獨立 hook 處理。
+  - legacy 的 in-flight 上限當時沒有搬：只靠 hook 無法可靠地在拒絕、取消和 Ask 失敗時釋放計數。（2026-10-15：改由 `ToolInvoker` 持有 `tool-admission` 的 permit，`policy-authority` 的 `max_in_flight` 預設 128，見 ADR 0045。）
 
 - 實作備註（sandbox-process、tools-shell，2026-10-12）：
   - `rah-api` 新增 `sandbox` service。與第 4 節草案不同：`ExecEnv::run(ProgramSpec, cancel) -> ExecOutput` 一次跑到結束，不回傳 `SupervisedChild`；串流輸出等真的需要時再加。

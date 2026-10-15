@@ -82,7 +82,10 @@ its own configuration; tool metadata can only make a decision stricter. The
 presets assign `echo` (`none`), `fs.*` and `repo.*` (`read`), allow `none` and `read`,
 and ask for `write` and `execute`. `frontend-cli` asks on the terminal and
 approves only an explicit `y`; end of input denies. If a configured policy
-plugin fails to start, `rah` refuses to run.
+plugin fails to start, `rah` refuses to run. The policy also runs at most
+`max_in_flight` tool calls at once (default 128) and refuses one over the
+limit. A plugin configuration with a typo is refused before it is applied, so
+a refused change at runtime leaves the running plugin as it was.
 
 General program execution is opt-in. Add `tools-shell` to a distribution file
 next to `sandbox-process` (process supervision, not an OS sandbox), and assign

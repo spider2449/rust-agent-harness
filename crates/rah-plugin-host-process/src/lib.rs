@@ -376,6 +376,11 @@ impl Plugin for ProcessPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &Value) -> Result<(), PluginError> {
+        ProcessConfig::deserialize(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let launch: ProcessConfig = scope.config_as()?;
         let requires = self.described.requires.clone();

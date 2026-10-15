@@ -369,7 +369,14 @@ impl PluginAdmin for Admin {
     ) -> Result<(PluginId, PluginStatus), AdminError> {
         self.unlocked(old)?;
         let id = self.new_id(&replacement, true)?;
-        let status = self.mount_as(id.clone(), replacement).await?;
+        let status = self
+            .mount_as(id.clone(), replacement)
+            .await
+            .map_err(|error| match error {
+                // A refused configuration mounted nothing.
+                AdminError::Failed(reason) => failed(format!("{reason}; `{old}` was kept")),
+                other => other,
+            })?;
         if status != PluginStatus::Active {
             let _ = self.kernel.unmount(&id).await;
             self.registry.lock().remove(&id);

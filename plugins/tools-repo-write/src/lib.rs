@@ -68,12 +68,13 @@ impl Plugin for RepoWriteToolsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<RepoWriteConfig>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: RepoWriteConfig = if scope.config().is_null() {
-            RepoWriteConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: RepoWriteConfig = rah_api::config::parse(scope.config())?;
         let sandbox = scope.inject(SANDBOX)?;
         provide_tools(scope, write_tools(sandbox, config).await?)?;
         Ok(())

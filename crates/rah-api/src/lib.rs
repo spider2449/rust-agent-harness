@@ -13,6 +13,7 @@
 
 pub mod admin;
 pub mod agent_loop;
+pub mod config;
 pub mod hooks;
 pub mod host;
 pub mod model;

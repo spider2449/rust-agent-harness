@@ -253,18 +253,126 @@ async fn the_plugin_guards_the_invoker_and_fails_closed() {
 }
 
 #[tokio::test]
-async fn an_invalid_configuration_fails_the_plugin() {
+async fn an_invalid_configuration_is_refused_and_a_running_policy_keeps_its_own() {
     let kernel = Kernel::new();
-    let status = kernel
+    let policy = PluginId::new("policy");
+    for config in [
+        json!({ "tools": { "a*b": "read" } }),
+        json!({ "max_in_flight": 0 }),
+        json!({ "allow": ["read"], "ask": ["read"] }),
+        json!({ "tool": {} }),
+    ] {
+        let refused = kernel
+            .mount(
+                Arc::new(PolicyAuthorityPlugin::new("policy")),
+                MountOptions::with_config(config.clone()),
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(rah_api::kernel::KernelError::InvalidConfig { .. })
+            ),
+            "{config}: {refused:?}"
+        );
+        assert_eq!(kernel.status(&policy), None);
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tools = Tools(
+        PluginManifest::new("tools", "1").provides(["tools"]),
+        calls.clone(),
+    );
+    kernel
+        .mount(Arc::new(tools), MountOptions::default())
+        .await
+        .unwrap();
+    kernel
         .mount(
             Arc::new(PolicyAuthorityPlugin::new("policy")),
-            MountOptions::with_config(json!({ "tools": { "a*b": "read" } })),
+            MountOptions::with_config(json!({ "tools": { "echo": "none" } })),
         )
         .await
         .unwrap();
+    // A typo in a new configuration must not leave tools unguarded.
+    let refused = kernel
+        .update_config(&policy, json!({ "tools": { "echo": "nothing" } }))
+        .await;
     assert!(
-        matches!(status, rah_api::PluginStatus::Failed { ref message } if message.contains("`*`")),
-        "{status:?}"
+        matches!(
+            refused,
+            Err(rah_api::kernel::KernelError::InvalidConfig { .. })
+        ),
+        "{refused:?}"
     );
-    assert!(!ToolInvoker::new(kernel.handle()).is_guarded());
+    let invoker = ToolInvoker::new(kernel.handle());
+    assert!(invoker.is_guarded());
+    assert!(invoker.invoke(invocation("echo"), || {}).await.authorized);
+    assert!(!invoker.invoke(invocation("write"), || {}).await.authorized);
+}
+
+#[test]
+fn in_flight_admits_up_to_the_limit_and_releases_dropped_permits() {
+    let in_flight = InFlight::new(2);
+    let request = ToolRequestContext {
+        session: SessionId::new(),
+        call: invocation("echo").call,
+        definition: definition("echo", PermissionLevel::None),
+    };
+    let first = in_flight.admit(&request).unwrap();
+    let second = in_flight.admit(&request).unwrap();
+    let refused = in_flight.admit(&request).unwrap_err();
+    assert!(
+        refused.contains("2 tool calls are already running"),
+        "{refused}"
+    );
+    assert_eq!(in_flight.running(), 2);
+    drop(first);
+    assert_eq!(in_flight.running(), 1);
+    let third = in_flight.admit(&request).unwrap();
+    drop((second, third));
+    assert_eq!(in_flight.running(), 0);
+}
+
+#[tokio::test]
+async fn the_plugin_limits_tool_calls_in_flight() {
+    let kernel = Kernel::new();
+    let tools = Tools(
+        PluginManifest::new("tools", "1").provides(["tools"]),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    kernel
+        .mount(Arc::new(tools), MountOptions::default())
+        .await
+        .unwrap();
+    kernel
+        .mount(
+            Arc::new(PolicyAuthorityPlugin::new("policy")),
+            MountOptions::with_config(json!({ "tools": { "echo": "none" }, "max_in_flight": 1 })),
+        )
+        .await
+        .unwrap();
+    let invoker = ToolInvoker::new(kernel.handle());
+    // Calls one after another each get the single slot.
+    for _ in 0..2 {
+        assert!(invoker.invoke(invocation("echo"), || {}).await.authorized);
+    }
+    // While the slot is taken, a call is refused before it starts.
+    let admission = kernel
+        .handle()
+        .get(TOOL_ADMISSION)
+        .expect("the policy admits calls");
+    let request = ToolRequestContext {
+        session: SessionId::new(),
+        call: invocation("echo").call,
+        definition: definition("echo", PermissionLevel::None),
+    };
+    let slot = admission.admit(&request).unwrap();
+    let refused = invoker
+        .invoke(invocation("echo"), || panic!("must not start"))
+        .await;
+    assert!(!refused.authorized);
+    assert_eq!(refused.effect, rah_protocol::ToolEffect::None);
+    drop(slot);
+    assert!(invoker.invoke(invocation("echo"), || {}).await.authorized);
 }

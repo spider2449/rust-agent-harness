@@ -86,6 +86,16 @@ impl Plugin for SandboxOsPlugin {
         &self.manifest
     }
 
+    #[cfg(target_os = "linux")]
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        linux::check_config(config)
+    }
+
+    #[cfg(windows)]
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        windows::check_config(config)
+    }
+
     #[cfg(not(any(target_os = "linux", windows)))]
     async fn apply(&self, _scope: &mut Scope) -> Result<(), PluginError> {
         Err("sandbox-os supports only Linux and Windows; \

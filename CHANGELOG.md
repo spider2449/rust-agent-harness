@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- A plugin configuration is checked before it is applied. Plugins gain
+  `check_config`, which the kernel runs before a mount and before a
+  configuration change; a refused configuration fails the request with the
+  reason (`invalid configuration for plugin ...`, HTTP 400 in the Web UI)
+  and the running plugin keeps its old configuration. Before, a typo stopped
+  the plugin and its dependents first, and for `policy-authority` left tool
+  calls unguarded until the Web UI rolled the change back. Every built-in
+  plugin checks its configuration with the same code it applies, and the
+  unused `config_schema` manifest field is removed (ADR 0044). At boot, an
+  invalid configuration now stops `rah` instead of leaving that plugin
+  inactive.
+- `policy-authority` limits how many tool calls run at once, across all
+  sessions (`max_in_flight`, default 128, as in the legacy host). A call over
+  the limit is not started and returns an error. The limit uses the new
+  `tool-admission` service: `ToolInvoker` holds a permit while a tool runs,
+  so it is released however the call ends (ADR 0045).
+- `loop-react` and `loop-plan` send `ToolStarted` when the tool starts,
+  after the policy and any approval, instead of after the tool returned, so
+  frontends can show a long call as running.
 - `rah --init-config` (`scripts\start.ps1 -InitConfig`) writes a preset
   (`--preset`, else `default`) as `rah.toml` in the data directory, or to
   `--config <file>`, as a starting point to edit, with the opt-in

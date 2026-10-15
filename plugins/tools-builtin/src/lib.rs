@@ -61,12 +61,13 @@ impl Plugin for BuiltinToolsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let root = config.root.unwrap_or_else(|| PathBuf::from("."));
         let root = tokio::fs::canonicalize(&root)
             .await

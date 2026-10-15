@@ -109,12 +109,13 @@ impl Plugin for CliFrontendPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<ReplOptions>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let options: ReplOptions = if scope.config().is_null() {
-            ReplOptions::default()
-        } else {
-            scope.config_as()?
-        };
+        let options: ReplOptions = rah_api::config::parse(scope.config())?;
         let kernel = scope.kernel();
         let (prompts, approvals) = mpsc::channel::<ApprovalPrompt>(1);
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {

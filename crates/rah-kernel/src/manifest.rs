@@ -71,8 +71,6 @@ pub struct PluginManifest {
     pub requires: Vec<ServiceName>,
     /// Services the plugin may inject if present.
     pub optional: Vec<ServiceName>,
-    /// Optional JSON Schema describing the plugin configuration.
-    pub config_schema: Option<serde_json::Value>,
 }
 
 impl PluginManifest {
@@ -84,7 +82,6 @@ impl PluginManifest {
             provides: Vec::new(),
             requires: Vec::new(),
             optional: Vec::new(),
-            config_schema: None,
         }
     }
 

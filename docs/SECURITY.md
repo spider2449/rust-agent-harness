@@ -55,8 +55,10 @@ The policy decides each call from its own configuration only:
   tools. It is the user's configuration (the Web UI's Settings write it); it
   can allow a tool that declares `write` without asking, turn off one tool of
   a pattern, or ask before a read. Tool metadata still cannot grant anything.
-- An invalid configuration fails the plugin, and `rah` then refuses to boot
-  instead of running unguarded.
+- An invalid configuration is refused before it is applied (ADR 0044): at
+  boot `rah` refuses to start instead of running unguarded, and a changed
+  configuration (Web UI Settings or the Plugins panel) that is refused
+  leaves the running policy and its configuration in place.
 - `Ask` needs a `tool.approval` handler; without one it is a denial.
   `frontend-cli` shows the call and its arguments on the terminal and
   approves only an explicit `y` or `yes`. End of input or any other answer
@@ -64,7 +66,14 @@ The policy decides each call from its own configuration only:
 
 The policy registers at hook priority 0. A mounted plugin with a higher
 priority runs first and can pre-empt it; mounting such a plugin is a trust
-decision. The legacy in-flight limit is not carried over yet.
+decision.
+
+The policy also bounds how many tool calls run at once, across all sessions
+(`max_in_flight`, default 128, the limit of the legacy host), through the
+`tool-admission` service (ADR 0045). `ToolInvoker` asks for a slot after the
+policy allowed a call and holds it while the tool runs, so the slot is
+released however the call ends. A call over the limit is not started: it
+returns an error, its effect is `none`, and nothing waits or retries.
 
 ## `sandbox-process` and `tools-shell`
 

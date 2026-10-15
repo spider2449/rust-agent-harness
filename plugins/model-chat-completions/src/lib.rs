@@ -220,12 +220,14 @@ impl Plugin for ChatCompletionsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: Config = rah_api::config::parse(config)?;
+        config.resolve()?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let (settings, key) = config.resolve()?;
         let key = match key {
             Some((variable, required)) => read_key(&variable, required)?,

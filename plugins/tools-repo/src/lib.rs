@@ -71,12 +71,13 @@ impl Plugin for RepoToolsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<RepoConfig>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: RepoConfig = if scope.config().is_null() {
-            RepoConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: RepoConfig = rah_api::config::parse(scope.config())?;
         let sandbox = scope.inject(SANDBOX)?;
         provide_tools(scope, repo_tools(sandbox, config)?)?;
         Ok(())

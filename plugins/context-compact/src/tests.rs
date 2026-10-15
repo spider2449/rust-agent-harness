@@ -349,9 +349,9 @@ async fn the_removed_dir_option_is_refused() {
             MountOptions::with_config(small(json!({ "dir": ".rah/compact" }))),
         )
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        matches!(status, rah_api::PluginStatus::Failed { .. }),
+        matches!(status, rah_api::kernel::KernelError::InvalidConfig { .. }),
         "{status:?}"
     );
 }
@@ -365,9 +365,9 @@ async fn keep_must_be_below_the_trigger() {
             MountOptions::with_config(json!({ "trigger_chars": 100, "keep_chars": 100 })),
         )
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        matches!(status, rah_api::PluginStatus::Failed { .. }),
+        status.to_string().contains("`keep_chars` must be smaller"),
         "{status:?}"
     );
 }

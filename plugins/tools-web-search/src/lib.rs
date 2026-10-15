@@ -143,12 +143,13 @@ impl Plugin for WebSearchPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let fetch = WebFetch::from_config(&config)?;
         let search = Arc::new(WebSearch::from_config(config)?);
         let multi = MultiSearch(search.clone());

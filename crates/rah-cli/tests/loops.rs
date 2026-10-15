@@ -207,3 +207,103 @@ async fn loop_plan_ends_a_step_without_tools_once_its_rounds_are_used_up() {
         ]
     );
 }
+
+/// Provides `gate`, a tool that returns only once it is opened.
+struct GateTool {
+    manifest: rah_api::PluginManifest,
+    open: std::sync::Arc<tokio::sync::Notify>,
+}
+
+struct Gate(std::sync::Arc<tokio::sync::Notify>);
+
+#[rah_api::async_trait]
+impl rah_api::tools::Tool for Gate {
+    fn definition(&self) -> rah_protocol::ToolDefinition {
+        rah_protocol::ToolDefinition {
+            name: rah_protocol::ToolName::new("gate"),
+            description: "returns once the test opens it".into(),
+            input_schema: json!({"type": "object"}),
+            permission: rah_protocol::PermissionLevel::None,
+        }
+    }
+
+    async fn call(
+        &self,
+        _input: Value,
+        _cx: rah_api::tools::ToolContext,
+    ) -> Result<rah_protocol::ToolOutput, rah_api::tools::ToolError> {
+        self.0.notified().await;
+        Ok(rah_protocol::ToolOutput {
+            content: vec![rah_protocol::ToolContent::Text("opened".into())],
+            is_error: false,
+        })
+    }
+}
+
+#[rah_api::async_trait]
+impl rah_api::Plugin for GateTool {
+    fn manifest(&self) -> &rah_api::PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
+        let gate = std::sync::Arc::new(Gate(self.open.clone()));
+        rah_api::tools::provide_tools(scope, vec![gate])?;
+        Ok(())
+    }
+}
+
+/// `ToolStarted` arrives while the tool runs, not after it returned: the
+/// gate opens only once the event was seen.
+#[tokio::test]
+async fn tool_started_is_sent_while_the_tool_runs_in_both_loops() {
+    use futures::StreamExt;
+    use rah_api::agent_loop::{LOOP, TurnRequest};
+
+    for loop_kind in ["loop-react", "loop-plan"] {
+        let dir = TempDir::new(&format!("tool-started-{loop_kind}"));
+        let mut distribution = headless(&dir);
+        for spec in &mut distribution.plugin {
+            if spec.kind == "loop-react" {
+                spec.kind = loop_kind.into();
+            }
+        }
+        distribution.set_config("policy-authority", "decisions", json!({"gate": "allow"}));
+        let kernel = kernel(&distribution).await;
+        let open = std::sync::Arc::new(tokio::sync::Notify::new());
+        let gate = GateTool {
+            manifest: rah_api::PluginManifest::new("gate", "1").provides(["tools"]),
+            open: open.clone(),
+        };
+        kernel
+            .mount(std::sync::Arc::new(gate), rah_api::MountOptions::default())
+            .await
+            .unwrap();
+        let handle = kernel.handle();
+        let session = new_session(&handle).await;
+        let mut events = handle.get(LOOP).unwrap().run_turn(TurnRequest {
+            session,
+            input: "/call gate {}".into(),
+            cancel: rah_api::CancellationToken::new(),
+        });
+        let mut seen = Vec::new();
+        let run = async {
+            while let Some(event) = events.next().await {
+                match &event {
+                    AgentEvent::ToolStarted { .. } => open.notify_one(),
+                    AgentEvent::ToolFinished { output, .. } => {
+                        assert!(!output.is_error, "{output:?}");
+                    }
+                    _ => {}
+                }
+                seen.push(event);
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .unwrap_or_else(|_| panic!("{loop_kind}: no ToolStarted while the tool ran"));
+        let kinds = kinds(&seen);
+        assert!(kinds.contains(&"tool-started"), "{loop_kind}: {kinds:?}");
+        assert_eq!(kinds.last(), Some(&"completed"), "{loop_kind}: {kinds:?}");
+    }
+}

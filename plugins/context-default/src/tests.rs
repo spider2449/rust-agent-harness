@@ -407,9 +407,9 @@ async fn a_memory_file_and_a_memory_dir_are_exclusive() {
             MountOptions::with_config(json!({ "memory_file": "a.md", "memory_dir": "b" })),
         )
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        matches!(status, rah_api::PluginStatus::Failed { ref message } if message.contains("not both")),
+        matches!(status, rah_api::kernel::KernelError::InvalidConfig { ref reason, .. } if reason.contains("not both")),
         "{status:?}"
     );
 }

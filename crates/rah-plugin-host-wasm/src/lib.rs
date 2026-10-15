@@ -345,6 +345,11 @@ impl Plugin for WasmPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &Value) -> Result<(), PluginError> {
+        WasmConfig::deserialize(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let requires = &self.described.requires;
         let session = if requires.iter().any(|s| s == "session") {

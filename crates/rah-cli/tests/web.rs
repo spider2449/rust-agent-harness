@@ -520,10 +520,24 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
         200
     );
 
-    // A replacement that does not start keeps the plugin it would replace.
+    // A replacement with a refused configuration, or one that does not
+    // start, keeps the plugin it would replace.
     let (status, reply) = web
         .status(web.post("/api/plugins/model-mock-2/replace").json(
             &json!({ "kind": "model-llamacpp", "config": { "endpoint": "http://example.com" } }),
+        ))
+        .await;
+    assert_eq!(status, 400, "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid configuration"),
+        "{reply}"
+    );
+    let (status, reply) = web
+        .status(web.post("/api/plugins/model-mock-2/replace").json(
+            &json!({ "kind": "model-llamacpp", "config": { "api_key_env": "RAH_TEST_UNSET_KEY_51E0" } }),
         ))
         .await;
     assert_eq!(status, 409, "{reply}");
@@ -1195,8 +1209,8 @@ async fn settings_are_saved_rolled_back_when_invalid_and_restored_at_start() {
         .await;
     assert_eq!(status, 200, "{saved}");
 
-    // A policy configuration that does not start is rolled back and not
-    // remembered; tool calls stay guarded.
+    // A refused policy configuration is not applied and not remembered;
+    // tool calls stay guarded.
     let (status, refused) = web
         .status(put(
             "tools",
@@ -1208,7 +1222,7 @@ async fn settings_are_saved_rolled_back_when_invalid_and_restored_at_start() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("previous settings were kept"),
+            .contains("invalid configuration for plugin `policy-authority`"),
         "{refused}"
     );
     assert!(wait_active(&web.kernel, "policy-authority").await);

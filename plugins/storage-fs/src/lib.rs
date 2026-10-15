@@ -72,12 +72,13 @@ impl Plugin for StorageFsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<StorageFsConfig>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: StorageFsConfig = if scope.config().is_null() {
-            StorageFsConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: StorageFsConfig = rah_api::config::parse(scope.config())?;
         let dir = config.dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR));
         tokio::fs::create_dir_all(&dir)
             .await

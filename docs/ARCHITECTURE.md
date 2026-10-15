@@ -49,6 +49,9 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
 - Scopes: services, hooks and handlers registered in `apply` commit only if
   `apply` succeeds. On dispose, owned tasks are cancelled and drained, then
   dispose effects run in reverse order. Nothing outlives its owner.
+- Configuration: a plugin's `check_config` runs before a mount or a
+  configuration change. A refused configuration fails the operation with
+  `InvalidConfig` and leaves a running instance as it was (ADR 0044).
 
 ### A turn
 
@@ -58,6 +61,8 @@ frontend --TurnRequest--> loop
      -> model.stream()
      -> ToolCall -> ToolInvoker.invoke()
           -> tool.before_invoke hooks (policy: Allow / Deny / Ask)
+          -> tool-admission providers (policy: in-flight limit)
+          -> ToolStarted
           -> ToolProvider
           -> tool.after_invoke hooks
      -> ... -> Completed
@@ -86,7 +91,9 @@ Implemented:
   long-running program with pipes), tools with `ToolInvoker`, and the standard
   hooks
   `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
-  `model.before_request`. Loops publish each turn event on the event bus as
+  `model.before_request`. `tool-admission` (`ToolAdmission`, ADR 0045)
+  admits authorized calls before they start; `policy-authority` uses it to
+  bound how many calls run at once. Loops publish each turn event on the event bus as
   `TurnEvent`, and providers report token usage as `ModelEvent::Usage`
   (ADR 0040). `storage` (`KvStore`, ADR 0041): a namespaced key-value
   store for plugin state that must survive a restart, each plugin in the

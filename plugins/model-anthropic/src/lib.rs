@@ -145,12 +145,15 @@ impl Plugin for AnthropicPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: Config = rah_api::config::parse(config)?;
+        anthropic_endpoint(config.endpoint.as_deref())?;
+        config.settings()?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let variable = config
             .api_key_env
             .clone()

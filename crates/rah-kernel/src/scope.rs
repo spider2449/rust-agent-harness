@@ -23,6 +23,16 @@ use crate::{
 pub trait Plugin: Send + Sync + 'static {
     fn manifest(&self) -> &PluginManifest;
 
+    /// Checks a configuration before the kernel mounts the plugin with it or
+    /// replaces its configuration. A refused configuration fails the mount
+    /// or update with [`KernelError::InvalidConfig`](crate::KernelError) and
+    /// leaves a running instance untouched. It must not have side effects.
+    /// The default accepts every configuration; `apply` can still fail.
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let _ = config;
+        Ok(())
+    }
+
     /// Registers services, hooks, event handlers, tasks and dispose effects.
     /// Registrations become visible only if `apply` returns `Ok`; on error or
     /// panic they are discarded and the scope is disposed.

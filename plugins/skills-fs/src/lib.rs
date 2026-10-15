@@ -61,12 +61,13 @@ impl Plugin for SkillsPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let library = Arc::new(Library {
             dir: config.dir.unwrap_or_else(|| PathBuf::from(".rah/skills")),
             max_skills: config.max_skills.unwrap_or(64).max(1),

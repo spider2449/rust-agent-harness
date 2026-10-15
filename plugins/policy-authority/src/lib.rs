@@ -27,11 +27,15 @@
 //! and no assignments, which denies every tool. Without a mounted approver,
 //! the `ToolInvoker` treats Ask as a denial.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
-    hooks::{ToolBeforeInvoke, ToolDecision},
+    hooks::{ToolBeforeInvoke, ToolDecision, ToolRequestContext},
+    tools::{TOOL_ADMISSION, TOOL_ADMISSION_SERVICE, ToolAdmission, ToolPermit},
 };
 use rah_protocol::{PermissionLevel, ToolDefinition};
 use serde::Deserialize;
@@ -41,6 +45,10 @@ use serde::Deserialize;
 /// decision of the user.
 pub const POLICY_PRIORITY: i32 = 0;
 
+/// How many tool calls may run at once without `max_in_flight` (the limit
+/// of the legacy host).
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 128;
+
 pub struct PolicyAuthorityPlugin {
     manifest: PluginManifest,
 }
@@ -48,7 +56,8 @@ pub struct PolicyAuthorityPlugin {
 impl PolicyAuthorityPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .provides([TOOL_ADMISSION_SERVICE]),
         }
     }
 }
@@ -59,17 +68,20 @@ impl Plugin for PolicyAuthorityPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        Policy::new(rah_api::config::parse(config)?)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: PolicyConfig = if scope.config().is_null() {
-            PolicyConfig::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: PolicyConfig = rah_api::config::parse(scope.config())?;
+        let in_flight = InFlight::new(config.max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT));
         let policy = std::sync::Arc::new(Policy::new(config)?);
         scope.hook_bail::<ToolBeforeInvoke, _, _>(POLICY_PRIORITY, move |request| {
             let decision = policy.decide(&request.definition);
             async move { Some(decision) }
         });
+        scope.provide(TOOL_ADMISSION, std::sync::Arc::new(in_flight))?;
         Ok(())
     }
 }
@@ -91,6 +103,11 @@ pub struct PolicyConfig {
     /// replaces the level rules for that tool.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// The most tool calls that may run at once, across all sessions
+    /// (default [`DEFAULT_MAX_IN_FLIGHT`]). A call over the limit is not
+    /// started.
+    #[serde(default)]
+    pub max_in_flight: Option<usize>,
 }
 
 /// A decision the host fixes for a tool.
@@ -109,6 +126,7 @@ impl Default for PolicyConfig {
             ask: default_ask(),
             tools: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            max_in_flight: None,
         }
     }
 }
@@ -175,6 +193,9 @@ pub struct Policy {
 
 impl Policy {
     pub fn new(config: PolicyConfig) -> Result<Self, String> {
+        if config.max_in_flight == Some(0) {
+            return Err("`max_in_flight` must be at least 1".into());
+        }
         if let Some(level) = config.allow.iter().find(|level| config.ask.contains(level)) {
             return Err(format!(
                 "permission level `{}` is listed in both `allow` and `ask`",
@@ -278,8 +299,56 @@ impl PolicyAuthorityPlugin {
   },
   "decisions": {
     "web.*": "ask"
-  }
+  },
+  "max_in_flight": 128
 }"#;
+}
+
+/// Counts running tool calls and refuses one over the limit. The
+/// `ToolInvoker` holds the permit while the tool runs, so the count is
+/// released however the call ends.
+pub struct InFlight {
+    max: usize,
+    running: std::sync::Arc<AtomicUsize>,
+}
+
+impl InFlight {
+    pub fn new(max: usize) -> Self {
+        Self {
+            max,
+            running: std::sync::Arc::default(),
+        }
+    }
+
+    /// How many admitted calls are running.
+    pub fn running(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
+    }
+}
+
+struct Running(std::sync::Arc<AtomicUsize>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ToolAdmission for InFlight {
+    fn admit(&self, _request: &ToolRequestContext) -> Result<ToolPermit, String> {
+        self.running
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+                (running < self.max).then_some(running + 1)
+            })
+            .map_err(|_| {
+                format!(
+                    "{} tool calls are already running, the most the policy allows \
+                     (`max_in_flight`)",
+                    self.max
+                )
+            })?;
+        Ok(ToolPermit::new(Running(self.running.clone())))
+    }
 }
 
 #[cfg(test)]

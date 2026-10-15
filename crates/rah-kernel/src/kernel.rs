@@ -463,6 +463,7 @@ async fn mount(
     let manifest = plugin.manifest().clone();
     manifest.validate(&options)?;
     let id = manifest.id.clone();
+    check_config(plugin.as_ref(), &id, &options.config)?;
     {
         let mut state = inner.state();
         if state.plugins.contains_key(&id) {
@@ -513,8 +514,17 @@ async fn restart(
     if *shut_down {
         return Err(KernelError::ShutDown);
     }
-    if !inner.state().plugins.contains_key(id) {
+    let plugin = inner
+        .state()
+        .plugins
+        .get(id)
+        .map(|entry| entry.plugin.clone());
+    let Some(plugin) = plugin else {
         return Err(KernelError::UnknownPlugin(id.clone()));
+    };
+    // A refused configuration leaves the running instance as it is.
+    if let Some(config) = &config {
+        check_config(plugin.as_ref(), id, config)?;
     }
     stop_cascade(inner, id).await;
     let mut changes = Changes::new();
@@ -531,6 +541,23 @@ async fn restart(
     reconcile(inner).await;
     drop(shut_down);
     status_of(inner, id)
+}
+
+/// Runs a plugin's configuration check; a panic counts as a refusal.
+fn check_config(
+    plugin: &dyn Plugin,
+    id: &PluginId,
+    config: &serde_json::Value,
+) -> Result<(), KernelError> {
+    let reason = match std::panic::catch_unwind(AssertUnwindSafe(|| plugin.check_config(config))) {
+        Ok(Ok(())) => return Ok(()),
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "the configuration check panicked".to_owned(),
+    };
+    Err(KernelError::InvalidConfig {
+        id: id.clone(),
+        reason,
+    })
 }
 
 fn status_of(inner: &Inner, id: &PluginId) -> Result<PluginStatus, KernelError> {

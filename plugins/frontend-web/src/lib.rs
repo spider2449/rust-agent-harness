@@ -148,19 +148,24 @@ pub(crate) struct Shared {
 
 pub(crate) type AppState = Arc<Shared>;
 
+/// Where the server listens without a `bind`.
+const DEFAULT_BIND: &str = "127.0.0.1:8765";
+
 #[async_trait]
 impl Plugin for WebFrontendPlugin {
     fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        let config: Config = rah_api::config::parse(config)?;
+        access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
-        let requested = access::loopback(config.bind.as_deref().unwrap_or("127.0.0.1:8765"))?;
+        let config: Config = rah_api::config::parse(scope.config())?;
+        let requested = access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
         let listener = tokio::net::TcpListener::bind(requested)
             .await
             .map_err(|error| format!("cannot listen on {requested}: {error}"))?;

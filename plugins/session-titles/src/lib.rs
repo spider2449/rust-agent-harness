@@ -63,12 +63,13 @@ impl Plugin for SessionTitlesPlugin {
         &self.manifest
     }
 
+    fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
+        rah_api::config::parse::<Config>(config)?;
+        Ok(())
+    }
+
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let config: Config = if scope.config().is_null() {
-            Config::default()
-        } else {
-            scope.config_as()?
-        };
+        let config: Config = rah_api::config::parse(scope.config())?;
         let titler = Arc::new(Titler {
             kernel: scope.kernel(),
             timeout: Duration::from_secs(config.timeout_secs.unwrap_or(60).max(1)),

@@ -113,12 +113,13 @@ struct Config {
 /// An inheritable Low label that denies writes from below Low (`NW`).
 const LOW_LABEL_SDDL: &str = "S:(ML;OICI;NW;;;LW)";
 
-pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
-    let config: Config = if scope.config().is_null() {
-        Config::default()
-    } else {
-        scope.config_as()?
-    };
+/// Parses the configuration and refuses what Windows cannot enforce.
+pub(super) fn check_config(config: &serde_json::Value) -> Result<(), PluginError> {
+    parse_config(config).map(drop)
+}
+
+fn parse_config(config: &serde_json::Value) -> Result<Config, PluginError> {
+    let config: Config = rah_api::config::parse(config)?;
     if config.readable.is_some() {
         return Err("readable: sandbox-os cannot restrict reads on Windows; \
                     a Low integrity program can read whatever the user can"
@@ -129,6 +130,12 @@ pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
                     set `network = true` to run programs with network access"
             .into());
     }
+    max_timeout(config.max_timeout_ms)?;
+    Ok(config)
+}
+
+pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
+    let config = parse_config(scope.config())?;
     let root = canonical_root(config.root).await?;
     let mut base_env = inherited_env(config.inherit_env, config.inherit_env_extra)?;
     let max_timeout = max_timeout(config.max_timeout_ms)?;
