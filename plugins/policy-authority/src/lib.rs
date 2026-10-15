@@ -336,17 +336,25 @@ impl Drop for Running {
 
 impl ToolAdmission for InFlight {
     fn admit(&self, _request: &ToolRequestContext) -> Result<ToolPermit, String> {
-        self.running
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
-                (running < self.max).then_some(running + 1)
-            })
-            .map_err(|_| {
-                format!(
+        let mut running = self.running.load(Ordering::SeqCst);
+        loop {
+            if running >= self.max {
+                return Err(format!(
                     "{} tool calls are already running, the most the policy allows \
                      (`max_in_flight`)",
                     self.max
-                )
-            })?;
+                ));
+            }
+            match self.running.compare_exchange_weak(
+                running,
+                running + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => running = current,
+            }
+        }
         Ok(ToolPermit::new(Running(self.running.clone())))
     }
 }
