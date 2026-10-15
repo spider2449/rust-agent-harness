@@ -9,7 +9,9 @@ use std::{
 
 use rah_api::{
     KernelHandle, MountOptions, Plugin, PluginError, PluginId, PluginManifest, PluginStatus, Scope,
-    admin::{ADMIN, AdminError, MountRequest, PluginAdmin, PluginInstance, Workspace},
+    admin::{
+        ADMIN, AdminError, ConfigKeyHelp, MountRequest, PluginAdmin, PluginInstance, Workspace,
+    },
     async_trait,
 };
 use rah_plugin_host_process::ProcessPlugin;
@@ -17,7 +19,8 @@ use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
 use crate::{
-    PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example, resolve_data_paths,
+    PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example, config_help,
+    resolve_data_paths,
 };
 
 /// The id `rah` mounts the distribution plugin under.
@@ -230,6 +233,16 @@ impl PluginAdmin for Admin {
 
     fn config_example(&self, kind: &str) -> Option<Value> {
         serde_json::from_str(config_example(kind)?).ok()
+    }
+
+    fn config_help(&self, kind: &str) -> Vec<ConfigKeyHelp> {
+        config_help(kind)
+            .iter()
+            .map(|(key, help)| ConfigKeyHelp {
+                key: (*key).to_owned(),
+                help: (*help).to_owned(),
+            })
+            .collect()
     }
 
     fn instance(&self, id: &PluginId) -> Option<PluginInstance> {

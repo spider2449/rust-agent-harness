@@ -66,6 +66,7 @@ fn helper_report() {
     );
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     println!("home={:?}", std::env::var_os(home));
+    println!("program_data={:?}", std::env::var_os("ProgramData"));
     eprintln!("to-stderr");
     std::process::exit(3);
 }
@@ -121,6 +122,15 @@ async fn runs_a_program_with_a_cleared_environment_and_bounded_cwd() {
     let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     if let Some(value) = std::env::var_os(home) {
         assert!(text.contains(&format!("home={:?}", Some(value))), "{text}");
+    }
+    // rustc finds the MSVC linker through `%ProgramData%`.
+    if cfg!(windows)
+        && let Some(value) = std::env::var_os("ProgramData")
+    {
+        assert!(
+            text.contains(&format!("program_data={:?}", Some(value))),
+            "{text}"
+        );
     }
     let cwd = text
         .lines()
@@ -261,10 +271,45 @@ async fn unmounting_the_plugin_cancels_running_programs() {
 }
 
 #[tokio::test]
+async fn inherit_env_extra_adds_to_the_default_list() {
+    let dir = TempDir::new("extra-env");
+    let kernel = Kernel::new();
+    // Cargo sets `CARGO_MANIFEST_DIR` for this test binary; it is not in the
+    // default list, so only `inherit_env_extra` can pass it on.
+    let config = serde_json::json!({
+        "root": dir.0,
+        "inherit_env_extra": ["CARGO_MANIFEST_DIR"],
+    });
+    kernel
+        .mount(
+            Arc::new(SandboxProcessPlugin::new("sandbox")),
+            MountOptions::with_config(config),
+        )
+        .await
+        .unwrap();
+    let sandbox = kernel.handle().get(SANDBOX).unwrap();
+    let output = sandbox
+        .run(
+            helper("helper_report", Duration::from_secs(30)),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let text = stdout(&output);
+    assert!(text.contains("cargo_env_present=true"), "{text}");
+    // The defaults still apply.
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    if let Some(value) = std::env::var_os(home) {
+        assert!(text.contains(&format!("home={:?}", Some(value))), "{text}");
+    }
+}
+
+#[tokio::test]
 async fn invalid_configuration_fails_the_plugin() {
     let kernel = Kernel::new();
     for config in [
         serde_json::json!({ "inherit_env": ["A=B"] }),
+        serde_json::json!({ "inherit_env_extra": ["A=B"] }),
         serde_json::json!({ "max_timeout_ms": 0 }),
         serde_json::json!({ "root": "/rah/does/not/exist" }),
         serde_json::json!({ "unknown": true }),

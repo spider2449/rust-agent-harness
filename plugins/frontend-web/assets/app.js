@@ -1585,6 +1585,8 @@ function connect() {
 const editor = { mode: null, target: null };
 // Example configurations by kind, from `/api/catalog`.
 let configExamples = {};
+// Help for configuration keys by kind (`[{key, help}]`), from `/api/catalog`.
+let configHelp = {};
 
 function isEmptyConfig(config) {
   return config == null || (typeof config === "object" && !Array.isArray(config) && Object.keys(config).length === 0);
@@ -1611,6 +1613,18 @@ function showConfigExample() {
     : `Example (not applied; leave empty for the defaults):\n${JSON.stringify(example, null, 2)}`;
   const lines = Math.max(textarea.value.split("\n").length, textarea.placeholder.split("\n").length);
   textarea.rows = Math.min(18, Math.max(6, lines));
+  showConfigHelp();
+}
+
+// Lists what each configuration key of the kind does, when the
+// distribution describes them.
+function showConfigHelp() {
+  const keys = configHelp[editorKind()] || [];
+  $("editor-help").hidden = keys.length === 0;
+  $("editor-help-list").replaceChildren(...keys.flatMap(({ key, help }) => [
+    el("dt", "", key),
+    el("dd", "", help),
+  ]));
 }
 
 // Copies the example into the editor to start from.
@@ -1736,6 +1750,7 @@ async function loadCatalog() {
   try {
     const catalog = await api("/catalog");
     configExamples = catalog.examples || {};
+    configHelp = catalog.help || {};
     $("editor-kind").replaceChildren(...catalog.kinds.map((kind) => {
       const option = el("option", "", kind);
       option.value = kind;

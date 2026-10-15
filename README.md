@@ -106,6 +106,19 @@ config = { allow_programs = ["git", "cargo"] }   # optional allow list
 a timeout, bounded output and process-tree termination. With the mock model,
 `/call shell.exec {"program":"git","args":["status"]}` exercises it.
 
+Programs start with a cleared environment refilled from a short default list
+(the path, system, temporary and home directories, and on Windows
+`ProgramData`). When a program needs another variable, name it in
+`inherit_env_extra`, which adds to the defaults; `inherit_env` replaces the
+whole list. Both `sandbox-process` and `sandbox-os` take these keys, and the
+Web UI's configuration example lists the defaults.
+
+```toml
+[[plugin]]
+use = "sandbox-process"
+config = { root = ".", inherit_env_extra = ["CARGO_HOME", "RUSTUP_HOME"] }
+```
+
 On Linux (landlock ABI 3, Linux 6.2 or later), `sandbox-os` can take the
 place of `sandbox-process` and also confines what programs touch: writes
 only under the root, a private `TMPDIR` and `writable`, reads under

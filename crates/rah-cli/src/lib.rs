@@ -127,6 +127,18 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
     Some(example)
 }
 
+/// Help for the configuration keys of each kind that has it, as
+/// `(key, help)` pairs in display order, from the plugin crates
+/// (`<Plugin>::CONFIG_HELP`).
+pub fn config_help(kind: &str) -> &'static [(&'static str, &'static str)] {
+    match kind {
+        "sandbox-os" => SandboxOsPlugin::CONFIG_HELP,
+        "sandbox-process" => SandboxProcessPlugin::CONFIG_HELP,
+        "tools-shell" => ShellToolsPlugin::CONFIG_HELP,
+        _ => &[],
+    }
+}
+
 /// A built-in preset: a named composition of catalog plugins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preset {

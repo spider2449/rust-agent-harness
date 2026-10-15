@@ -36,9 +36,9 @@
 //!   side}` keeps the UI's preferences the same way, for every browser.
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
-//! - With an `admin` service: `GET /api/catalog` (`{kinds, examples}`, an
-//!   example configuration per kind), `POST /api/plugins {kind,
-//!   id, config, bind}`, `DELETE /api/plugins/{id}`,
+//! - With an `admin` service: `GET /api/catalog` (`{kinds, examples, help}`,
+//!   an example configuration and key help per kind), `POST /api/plugins
+//!   {kind, id, config, bind}`, `DELETE /api/plugins/{id}`,
 //!   `POST /api/plugins/{id}/restart`, `POST /api/plugins/{id}/stop` and
 //!   `/start` (stopped plugins are listed with the state `stopped`),
 //!   `PUT /api/plugins/{id}/config

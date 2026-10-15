@@ -21,9 +21,10 @@
 //! the process tree.
 //!
 //! Configuration: `{ "root": "<dir>", "inherit_env": ["PATH", ...],
-//! "max_timeout_ms": <n> }`. `root` defaults to the current directory;
-//! `inherit_env` defaults to a small platform list (see
-//! [`DEFAULT_INHERIT_ENV`]); `max_timeout_ms` defaults to 10 minutes.
+//! "inherit_env_extra": ["NAME", ...], "max_timeout_ms": <n> }`. `root`
+//! defaults to the current directory; `inherit_env` replaces the default
+//! platform list (see [`DEFAULT_INHERIT_ENV`]), while `inherit_env_extra` adds
+//! names to whichever list applies; `max_timeout_ms` defaults to 10 minutes.
 //!
 //! The crate also provides `sandbox-os` ([`SandboxOsPlugin`]), the same
 //! service with OS-level confinement on Linux and Windows.
@@ -66,7 +67,10 @@ enum Stdin {
 /// directory variables let programs find the user's own configuration (Git
 /// reads `safe.directory` and the identity from `~/.gitconfig` and fails
 /// with "$HOME not set" without them; rustup finds its toolchains through
-/// them). They name a directory; they carry no secret.
+/// them). They name a directory; they carry no secret. `ProgramData` lets
+/// rustc find the MSVC linker: the Visual Studio setup locator reads its
+/// instance registrations from `%ProgramData%`, and without it every build
+/// fails with "linker `link.exe` not found".
 #[cfg(windows)]
 pub const DEFAULT_INHERIT_ENV: &[&str] = &[
     "PATH",
@@ -79,6 +83,7 @@ pub const DEFAULT_INHERIT_ENV: &[&str] = &[
     "USERPROFILE",
     "HOMEDRIVE",
     "HOMEPATH",
+    "ProgramData",
 ];
 #[cfg(not(windows))]
 pub const DEFAULT_INHERIT_ENV: &[&str] = &["PATH", "LANG", "TMPDIR", "HOME"];
@@ -102,6 +107,8 @@ impl SandboxProcessPlugin {
 struct Config {
     root: Option<PathBuf>,
     inherit_env: Option<Vec<String>>,
+    #[serde(default)]
+    inherit_env_extra: Vec<String>,
     max_timeout_ms: Option<u64>,
 }
 
@@ -119,7 +126,7 @@ impl Plugin for SandboxProcessPlugin {
         };
         let env = ProcessEnv {
             root: canonical_root(config.root).await?,
-            base_env: inherited_env(config.inherit_env)?,
+            base_env: inherited_env(config.inherit_env, config.inherit_env_extra)?,
             max_timeout: max_timeout(config.max_timeout_ms)?,
             stop: scope.spawner().cancellation(),
             spawner: Some(scope.spawner()),
@@ -139,17 +146,26 @@ async fn canonical_root(root: Option<PathBuf>) -> Result<PathBuf, String> {
 }
 
 /// The base environment: the named variables of the RAH process that are
-/// set, [`DEFAULT_INHERIT_ENV`] when `names` is `None`.
-fn inherited_env(names: Option<Vec<String>>) -> Result<BTreeMap<OsString, OsString>, String> {
+/// set, from `names` ([`DEFAULT_INHERIT_ENV`] when `None`) followed by
+/// `extra`.
+fn inherited_env(
+    names: Option<Vec<String>>,
+    extra: Vec<String>,
+) -> Result<BTreeMap<OsString, OsString>, String> {
     let names = names.unwrap_or_else(|| {
         DEFAULT_INHERIT_ENV
             .iter()
             .map(|name| (*name).to_owned())
             .collect()
     });
+    for name in &names {
+        validate_env_name(name).map_err(|message| format!("inherit_env: {message}"))?;
+    }
+    for name in &extra {
+        validate_env_name(name).map_err(|message| format!("inherit_env_extra: {message}"))?;
+    }
     let mut base_env = BTreeMap::new();
-    for name in names {
-        validate_env_name(&name).map_err(|message| format!("inherit_env: {message}"))?;
+    for name in names.into_iter().chain(extra) {
         if let Some(value) = std::env::var_os(&name) {
             base_env.insert(OsString::from(name), value);
         }
@@ -378,11 +394,76 @@ fn validate_env_name(name: &str) -> Result<(), String> {
 impl SandboxProcessPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
+    /// `inherit_env` lists [`DEFAULT_INHERIT_ENV`], so the defaults are
+    /// visible; `inherit_env_extra` adds to them without restating them.
+    #[cfg(windows)]
     pub const CONFIG_EXAMPLE: &str = r#"{
   "root": ".",
+  "inherit_env": [
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "ProgramData"
+  ],
+  "inherit_env_extra": [],
   "max_timeout_ms": 600000
 }"#;
+    /// An example configuration, mostly the defaults, for reference (the Web
+    /// UI shows it in an empty configuration editor). It is never applied.
+    /// `inherit_env` lists [`DEFAULT_INHERIT_ENV`], so the defaults are
+    /// visible; `inherit_env_extra` adds to them without restating them.
+    #[cfg(not(windows))]
+    pub const CONFIG_EXAMPLE: &str = r#"{
+  "root": ".",
+  "inherit_env": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "HOME"
+  ],
+  "inherit_env_extra": [],
+  "max_timeout_ms": 600000
+}"#;
+
+    /// What each configuration key does, as `(key, help)` pairs, for the
+    /// Web UI's configuration editor.
+    pub const CONFIG_HELP: &[(&str, &str)] = &[
+        ROOT_HELP,
+        INHERIT_ENV_HELP,
+        INHERIT_ENV_EXTRA_HELP,
+        MAX_TIMEOUT_HELP,
+    ];
 }
+
+const ROOT_HELP: (&str, &str) = (
+    "root",
+    "Directory programs run in; a program's working directory must stay \
+     inside it. Defaults to the directory rah was started in.",
+);
+const INHERIT_ENV_HELP: (&str, &str) = (
+    "inherit_env",
+    "Programs start with an empty environment. These variables are copied \
+     from rah's own environment. Setting it replaces the whole default list \
+     shown in the example, so prefer inherit_env_extra.",
+);
+const INHERIT_ENV_EXTRA_HELP: (&str, &str) = (
+    "inherit_env_extra",
+    "Variable names added to the default list, for a program that needs one \
+     more, for example [\"CARGO_HOME\"]. If a build fails with \"link.exe \
+     not found\" on an older rah, add \"ProgramData\".",
+);
+const MAX_TIMEOUT_HELP: (&str, &str) = (
+    "max_timeout_ms",
+    "Longest time one program may run, in milliseconds (default 600000, 10 \
+     minutes). A tool's own timeout must fit within it.",
+);
 
 #[cfg(test)]
 mod tests;
@@ -392,4 +473,50 @@ mod tests;
 fn the_config_example_is_a_valid_configuration() {
     let parsed: Result<Config, _> = serde_json::from_str(SandboxProcessPlugin::CONFIG_EXAMPLE);
     assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+/// Asserts that a configuration example's `inherit_env` lists exactly
+/// [`DEFAULT_INHERIT_ENV`].
+#[cfg(test)]
+fn assert_example_lists_the_defaults(example: &str) {
+    let example: serde_json::Value = serde_json::from_str(example).unwrap();
+    let listed: Vec<&str> = example["inherit_env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap())
+        .collect();
+    assert_eq!(listed, DEFAULT_INHERIT_ENV);
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_examples_list_the_default_inherit_env() {
+    assert_example_lists_the_defaults(SandboxProcessPlugin::CONFIG_EXAMPLE);
+    assert_example_lists_the_defaults(SandboxOsPlugin::CONFIG_EXAMPLE);
+}
+
+/// Asserts that the help describes exactly the keys of the example.
+#[cfg(test)]
+fn assert_help_matches_example(help: &[(&str, &str)], example: &str) {
+    let example: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(example).unwrap();
+    let mut example_keys: Vec<&str> = example.keys().map(String::as_str).collect();
+    let mut help_keys: Vec<&str> = help.iter().map(|(key, _)| *key).collect();
+    example_keys.sort_unstable();
+    help_keys.sort_unstable();
+    assert_eq!(help_keys, example_keys);
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_help_describes_every_example_key() {
+    assert_help_matches_example(
+        SandboxProcessPlugin::CONFIG_HELP,
+        SandboxProcessPlugin::CONFIG_EXAMPLE,
+    );
+    assert_help_matches_example(
+        SandboxOsPlugin::CONFIG_HELP,
+        SandboxOsPlugin::CONFIG_EXAMPLE,
+    );
 }

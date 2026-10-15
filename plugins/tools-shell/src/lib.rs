@@ -253,6 +253,34 @@ impl ShellToolsPlugin {
   "max_timeout_ms": 300000,
   "max_output_bytes": 65536
 }"#;
+
+    /// What each configuration key does, as `(key, help)` pairs, for the
+    /// Web UI's configuration editor.
+    pub const CONFIG_HELP: &[(&str, &str)] = &[
+        (
+            "allow_programs",
+            "Exact program names shell.exec may run, for example [\"git\", \
+             \"cargo\"]; any program when unset. Programs run through the \
+             sandbox plugin (sandbox-process or sandbox-os), which must be \
+             mounted, and the policy must assign \"shell.exec\" = \"execute\". \
+             A program missing an environment variable needs it in the \
+             sandbox's inherit_env_extra.",
+        ),
+        (
+            "default_timeout_ms",
+            "Timeout when the model does not choose one, in milliseconds \
+             (default 30000).",
+        ),
+        (
+            "max_timeout_ms",
+            "Longest timeout the model may choose, in milliseconds (default \
+             300000). It must also fit the sandbox's max_timeout_ms.",
+        ),
+        (
+            "max_output_bytes",
+            "Bytes kept from each of stdout and stderr (default 65536).",
+        ),
+    ];
 }
 
 #[cfg(test)]
@@ -263,4 +291,19 @@ mod tests;
 fn the_config_example_is_a_valid_configuration() {
     let parsed: Result<ShellConfig, _> = serde_json::from_str(ShellToolsPlugin::CONFIG_EXAMPLE);
     assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+#[test]
+fn the_config_help_describes_every_example_key() {
+    let example: serde_json::Map<String, Value> =
+        serde_json::from_str(ShellToolsPlugin::CONFIG_EXAMPLE).unwrap();
+    let mut example_keys: Vec<&str> = example.keys().map(String::as_str).collect();
+    let mut help_keys: Vec<&str> = ShellToolsPlugin::CONFIG_HELP
+        .iter()
+        .map(|(key, _)| *key)
+        .collect();
+    example_keys.sort_unstable();
+    help_keys.sort_unstable();
+    assert_eq!(help_keys, example_keys);
 }

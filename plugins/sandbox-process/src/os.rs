@@ -37,7 +37,7 @@
 //! plugin fails to start there too.
 //!
 //! Configuration: the `sandbox-process` keys (`root`, `inherit_env`,
-//! `max_timeout_ms`) plus `readable` and `writable` (paths; relative ones are
+//! `inherit_env_extra`, `max_timeout_ms`) plus `readable` and `writable` (paths; relative ones are
 //! relative to `root`; each must exist) and `network` (default `false`).
 
 #[cfg(any(target_os = "linux", windows))]
@@ -124,6 +124,20 @@ impl SandboxOsPlugin {
     #[cfg(windows)]
     pub const CONFIG_EXAMPLE: &str = r#"{
   "root": ".",
+  "inherit_env": [
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "ProgramData"
+  ],
+  "inherit_env_extra": [],
   "writable": [],
   "network": true,
   "max_timeout_ms": 600000
@@ -133,6 +147,13 @@ impl SandboxOsPlugin {
     #[cfg(not(windows))]
     pub const CONFIG_EXAMPLE: &str = r#"{
   "root": ".",
+  "inherit_env": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "HOME"
+  ],
+  "inherit_env_extra": [],
   "readable": [
     "/"
   ],
@@ -140,7 +161,63 @@ impl SandboxOsPlugin {
   "network": false,
   "max_timeout_ms": 600000
 }"#;
+
+    /// What each configuration key does, as `(key, help)` pairs, for the
+    /// Web UI's configuration editor. Windows has no `readable`: reads
+    /// cannot be restricted there, and setting it is refused.
+    #[cfg(windows)]
+    pub const CONFIG_HELP: &[(&str, &str)] = &[
+        crate::ROOT_HELP,
+        crate::INHERIT_ENV_HELP,
+        crate::INHERIT_ENV_EXTRA_HELP,
+        WRITABLE_HELP,
+        NETWORK_HELP,
+        crate::MAX_TIMEOUT_HELP,
+    ];
+    /// What each configuration key does, as `(key, help)` pairs, for the
+    /// Web UI's configuration editor.
+    #[cfg(not(windows))]
+    pub const CONFIG_HELP: &[(&str, &str)] = &[
+        crate::ROOT_HELP,
+        crate::INHERIT_ENV_HELP,
+        crate::INHERIT_ENV_EXTRA_HELP,
+        READABLE_HELP,
+        WRITABLE_HELP,
+        NETWORK_HELP,
+        crate::MAX_TIMEOUT_HELP,
+    ];
 }
+
+#[cfg(not(windows))]
+const READABLE_HELP: (&str, &str) = (
+    "readable",
+    "Paths programs may read and execute (default [\"/\"]). Relative paths \
+     are relative to root; each must exist.",
+);
+#[cfg(windows)]
+const WRITABLE_HELP: (&str, &str) = (
+    "writable",
+    "Extra directories programs may write, besides root and a private TEMP. \
+     They are labeled Low integrity, and the label stays on them.",
+);
+#[cfg(not(windows))]
+const WRITABLE_HELP: (&str, &str) = (
+    "writable",
+    "Extra paths programs may write, besides root and a private TMPDIR, for \
+     example a Cargo registry. Relative paths are relative to root.",
+);
+#[cfg(windows)]
+const NETWORK_HELP: (&str, &str) = (
+    "network",
+    "Must be true: the network cannot be denied on Windows, and the plugin \
+     refuses to start without this acknowledgement.",
+);
+#[cfg(not(windows))]
+const NETWORK_HELP: (&str, &str) = (
+    "network",
+    "Whether programs may open network sockets (default false, which also \
+     blocks loopback).",
+);
 
 /// Creates a new directory under the system temporary directory, named after
 /// this process and the time, with `create`. Instances mounted at the same

@@ -79,7 +79,8 @@ pub(crate) async fn list(State(shared): State<AppState>) -> ApiResult {
 }
 
 /// `GET /api/catalog`: the mountable kinds and, where the distribution has
-/// one, an example configuration for each.
+/// them, an example configuration and help for the configuration keys of
+/// each (`help`: `{kind: [{key, help}]}`).
 pub(crate) async fn catalog(State(shared): State<AppState>) -> ApiResult {
     let admin = admin(&shared)?;
     let kinds = admin.kinds();
@@ -87,7 +88,23 @@ pub(crate) async fn catalog(State(shared): State<AppState>) -> ApiResult {
         .iter()
         .filter_map(|kind| Some((kind.clone(), admin.config_example(kind)?)))
         .collect();
-    Ok(Json(json!({ "kinds": kinds, "examples": examples })))
+    let help: serde_json::Map<String, Value> = kinds
+        .iter()
+        .filter_map(|kind| {
+            let keys = admin.config_help(kind);
+            if keys.is_empty() {
+                return None;
+            }
+            let keys: Vec<Value> = keys
+                .into_iter()
+                .map(|entry| json!({ "key": entry.key, "help": entry.help }))
+                .collect();
+            Some((kind.clone(), json!(keys)))
+        })
+        .collect();
+    Ok(Json(
+        json!({ "kinds": kinds, "examples": examples, "help": help }),
+    ))
 }
 
 #[derive(Deserialize)]

@@ -27,6 +27,14 @@ pub struct MountRequest {
     pub bind: BTreeMap<String, String>,
 }
 
+/// What one configuration key of a plugin kind does, for a frontend to show
+/// next to its configuration editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigKeyHelp {
+    pub key: String,
+    pub help: String,
+}
+
 /// What the distribution knows about a mounted plugin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginInstance {
@@ -72,6 +80,13 @@ pub trait PluginAdmin: Send + Sync {
     fn config_example(&self, kind: &str) -> Option<Value> {
         let _ = kind;
         None
+    }
+
+    /// Help for the configuration keys of `kind`, in display order; empty
+    /// when the distribution has none.
+    fn config_help(&self, kind: &str) -> Vec<ConfigKeyHelp> {
+        let _ = kind;
+        Vec::new()
     }
 
     /// Kind and configuration of a mounted plugin, if this distribution

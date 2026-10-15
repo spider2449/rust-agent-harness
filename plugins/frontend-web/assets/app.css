@@ -374,6 +374,11 @@ button.danger { color: var(--bad); border-color: var(--bad); }
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
 .editor .buttons { display: flex; gap: 6px; justify-content: flex-end; }
+.editor-help { font-size: 12px; color: var(--muted); }
+.editor-help summary { cursor: pointer; }
+.editor-help dl { margin: 4px 0 0; }
+.editor-help dt { font-family: ui-monospace, Consolas, monospace;color: var(--text); margin-top: 6px; }
+.editor-help dd { margin: 2px 0 0 12px; }
 .activity li.link { cursor: pointer; }
 .activity li.link:hover .text { text-decoration: underline; }
 

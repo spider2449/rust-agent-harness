@@ -101,6 +101,8 @@ use crate::{
 struct Config {
     root: Option<PathBuf>,
     inherit_env: Option<Vec<String>>,
+    #[serde(default)]
+    inherit_env_extra: Vec<String>,
     max_timeout_ms: Option<u64>,
     readable: Option<Vec<PathBuf>>,
     writable: Option<Vec<PathBuf>>,
@@ -128,7 +130,7 @@ pub(super) async fn apply(scope: &mut Scope) -> Result<(), PluginError> {
             .into());
     }
     let root = canonical_root(config.root).await?;
-    let mut base_env = inherited_env(config.inherit_env)?;
+    let mut base_env = inherited_env(config.inherit_env, config.inherit_env_extra)?;
     let max_timeout = max_timeout(config.max_timeout_ms)?;
     let mut labeled = vec![root.clone()];
     labeled.extend(resolve(&root, config.writable.unwrap_or_default(), "writable").await?);

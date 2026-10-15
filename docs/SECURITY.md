@@ -78,7 +78,8 @@ there is no filesystem or network isolation. It guarantees:
 - a cleared environment refilled only from `inherit_env` (a short platform
   list by default: the path, system and temporary directories, and the home
   directory so programs such as Git find the user's own configuration;
-  credentials and other variables are not passed) and the caller's spec;
+  credentials and other variables are not passed), any names in
+  `inherit_env_extra`, and the caller's spec;
 - null stdin, per-stream output limits and a timeout capped by the plugin;
 - termination of the process tree (a kill-on-close Job Object on Windows, a
   process group on Unix) on timeout, output overflow, cancellation, unmount

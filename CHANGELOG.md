@@ -11,6 +11,21 @@
   programs `allow_programs` permits, and each input field is described,
   so a model can pick it for "git pull for me" without being told the tool
   name.
+- `sandbox-process` and `sandbox-os` pass `ProgramData` to programs on
+  Windows by default. Without it rustc cannot locate Visual Studio, so
+  `cargo build` under `shell.exec` failed with "linker `link.exe` not
+  found" although the Build Tools were installed.
+- `sandbox-process` and `sandbox-os` take `inherit_env_extra`, variable
+  names added to the default environment list, so passing one more
+  variable no longer means restating the whole `inherit_env`. Their
+  configuration examples (shown in the Web UI) now list the default
+  `inherit_env`.
+- The Web UI's plugin editor shows help for each configuration key of
+  `sandbox-process`, `sandbox-os` and `tools-shell`: what it does, its
+  default, and the related settings (the sandbox and policy entry
+  `shell.exec` needs, `inherit_env_extra` for a missing variable). The
+  `admin` service gains an optional `config_help`, and `GET /api/catalog`
+  returns it as `help`.
 
 ## v0.43.0 (2026-10-15)
 
