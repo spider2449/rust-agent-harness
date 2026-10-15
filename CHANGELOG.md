@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## v0.43.0 (2026-10-15)
+
+> One data home for everything RAH keeps between runs, a new
+> `model-chat-completions` plugin for OpenAI-compatible servers (DeepSeek,
+> Ollama, vLLM, llama-server) with a `deepseek` preset, and Windows fixes
+> for `sandbox-os` (standard and elevated users) and `storage-fs`.
+
+### One data home
+
+- All data RAH keeps between runs now lives in one data directory,
+  `~/.rah` by default (`--data-dir` or `RAH_HOME` move it), instead of
+  `.rah` in whatever directory `rah` started in. Data under an old
+  `./.rah` is not moved automatically.
+- `rah` resolves the data paths of `storage-fs`, `session-jsonl`,
+  `skills-fs`, `telemetry-log` and `context-default` against the data home
+  at mount, also for plugins mounted or configured through the `admin`
+  service. Relative paths are relative to the data home; memory stays
+  opt-in.
+- Without `--preset` and `--config`, `rah.toml` in the data home runs when
+  it exists. `scripts/start.ps1` follows and gains `-DataDir`.
+- The Web UI remembers Plugins panel changes (mount, configure, stop,
+  start, remove, replace) in `storage` and applies them again at start,
+  after the Settings forms; stopping or removing the policy is never
+  replayed. Recent workspaces, open folders and the side panel layout are
+  server preferences instead of browser localStorage.
+- Session export asks where to save where the browser has a save dialog,
+  and falls back to a download. A folder in the session list can delete
+  all its sessions at once (`POST /api/sessions/delete`).
+
 ### `model-chat-completions`
 
 - New crate `plugins/model-chat-completions` with the plugin
