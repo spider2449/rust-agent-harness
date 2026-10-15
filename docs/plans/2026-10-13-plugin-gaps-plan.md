@@ -56,6 +56,7 @@
   - 讀取和網路都不限制：`readable` 直接拒絕，`network` 必須設 `true`（預設 `false` 時拒絕啟動）。batch 檔拒絕，要明確用 `cmd.exe /c`。
   - 測試在本機 Windows 跑（CI 只有 Linux）；起初只在 elevated token 下測過。
   - 2026-10-14 以一般使用者帳號（Medium、非系統管理員）實測：設 label 需要 `WRITE_OWNER`，只有 Modify 權限的目錄（非系統磁碟的預設 ACL）會 Access denied。改為被拒時先給目前使用者加一個可繼承的 `WRITE_OWNER` ACE 再設 label，ACE 和 label 一樣保留（使用者確認；ADR 0043 修訂）。
+  - 2026-10-15 在 Windows 10（19045）以 elevated 帳號執行時，所有程式都以 `0xC0000142` 結束。原因：token 裡 Administrators 是 deny-only 時，Windows 無法替程式建立 console（`CREATE_NO_WINDOW`）；`DETACHED_PROCESS` 也不行，因為子程式會各自建立 console。改成由 RAH 建立 pseudo console（ConPTY），conhost 以 RAH 的 token 執行，子孫共用；寫到 console 的內容導向 `NUL`（ADR 0043 修訂）。
 
 ## G5：`storage-fs`
 

@@ -32,6 +32,14 @@
   needs `WRITE_OWNER`, so it failed with "Access is denied"; the user is now
   granted `WRITE_OWNER` there first, and the grant stays like the label
   (ADR 0043, amended).
+- `sandbox-os` on Windows now runs programs for an elevated user. With
+  Administrators deny-only in the token, Windows could not create the
+  program's hidden console, and every program exited with
+  `STATUS_DLL_INIT_FAILED` (`0xC0000142`) before it ran. Each program now
+  gets a pseudo console that RAH creates and its descendants share; what is
+  written to the console itself is discarded (ADR 0043, amended). Closes
+  the known issue about the Low-integrity tests failing on a Windows 10
+  machine.
 - `sandbox-os` on Windows no longer fails to start a program with "All pipe
   instances are busy" when two instances in one process name a pipe at the
   same instant; pipe names now include the instance.

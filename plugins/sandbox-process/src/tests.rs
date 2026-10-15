@@ -808,6 +808,25 @@ mod os {
             assert!(spawned.process.stderr().contains("echo-ready"));
         }
 
+        /// The program and the console programs it starts share the pseudo
+        /// console RAH creates. A console created with the program's token
+        /// fails to start for an elevated user (Administrators deny-only),
+        /// which every test here then shows as `STATUS_DLL_INIT_FAILED`.
+        #[tokio::test]
+        async fn descendants_share_the_console() {
+            let dir = TempDir::new("os-console");
+            let (_kernel, sandbox) = mounted(base(&dir)).await;
+            // `CON` is the console itself; what reaches it is discarded.
+            let line = r"cmd.exe /c echo nested& echo to the console> CON& exit 7";
+            let args = ["/c", line].map(str::to_owned).to_vec();
+            let spec = ProgramSpec::new("cmd".to_owned(), args, Duration::from_secs(30));
+            let output = sandbox.run(spec, CancellationToken::new()).await.unwrap();
+            assert_eq!(output.exit_code, Some(7), "{output:?}");
+            let text = stdout(&output);
+            assert!(text.contains("nested"), "{text}");
+            assert!(!text.contains("to the console"), "{text}");
+        }
+
         #[tokio::test]
         async fn arguments_reach_the_program_unchanged() {
             let dir = TempDir::new("os-args");

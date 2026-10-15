@@ -12,6 +12,12 @@
 //! suspended, so the Job Object owns the tree before the program runs, with
 //! named pipes for the standard streams and an explicit inherited-handle
 //! list.
+//!
+//! Each program gets a pseudo console that RAH creates, which the program's
+//! descendants share. Windows cannot create a console for a process whose
+//! token has Administrators as a deny-only group (the child fails with
+//! `STATUS_DLL_INIT_FAILED`), so a console created for the program itself
+//! would break every elevated run.
 
 use std::{
     collections::BTreeMap,
@@ -66,18 +72,20 @@ use windows_sys::Win32::{
         FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, WRITE_OWNER,
     },
     System::{
+        Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON},
+        Pipes::CreatePipe,
         SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW},
         SystemServices::{
             SE_GROUP_INTEGRITY, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
         },
         Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
             DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
             GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
             LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            PROCESS_INFORMATION, RegisterWaitForSingleObject, ResumeThread, STARTF_USESTDHANDLES,
-            STARTUPINFOEXW, TerminateProcess, UnregisterWaitEx, UpdateProcThreadAttribute,
-            WT_EXECUTEONLYONCE,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, RegisterWaitForSingleObject,
+            ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UnregisterWaitEx,
+            UpdateProcThreadAttribute, WT_EXECUTEONLYONCE,
         },
     },
 };
@@ -490,6 +498,7 @@ impl Confinement {
             &environment,
             &wide(cwd.as_os_str()),
             handles,
+            PseudoConsole::new()?,
         )?;
         // The child's ends close here, so the pipes end when the program and
         // its descendants are gone.
@@ -530,7 +539,7 @@ impl Confinement {
         } else {
             GENERIC_READ | FILE_WRITE_ATTRIBUTES
         };
-        let client = open_inheritable(OsStr::new(&name), access, 0)?;
+        let client = open(OsStr::new(&name), access, 0, true)?;
         server.connect().await?;
         Ok((server, client))
     }
@@ -542,8 +551,9 @@ impl Confinement {
         environment: &[u16],
         cwd: &[u16],
         handles: [RawHandle; 3],
+        console: PseudoConsole,
     ) -> io::Result<NativeChild> {
-        let attributes = AttributeList::new()?;
+        let attributes = AttributeList::new(2)?;
         // SAFETY: `handles` outlives `attributes`' use in `CreateProcessAsUserW`.
         let updated = unsafe {
             UpdateProcThreadAttribute(
@@ -552,6 +562,22 @@ impl Confinement {
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 handles.as_ptr().cast(),
                 size_of_val(&handles),
+                null_mut(),
+                null(),
+            )
+        };
+        if updated == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the value of this attribute is the console handle itself,
+        // which `console` keeps open past `CreateProcessAsUserW`.
+        let updated = unsafe {
+            UpdateProcThreadAttribute(
+                attributes.as_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                console.handle as *const c_void,
+                size_of::<HPCON>(),
                 null_mut(),
                 null(),
             )
@@ -570,7 +596,8 @@ impl Confinement {
         // SAFETY: an all-zero `PROCESS_INFORMATION` is valid.
         let mut information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: every string is NUL-terminated (the environment doubly),
-        // the token and handles are valid, and all outlive the call.
+        // the token and handles are valid, and all outlive the call. No
+        // console flag: the program attaches to `console`.
         let created = unsafe {
             CreateProcessAsUserW(
                 self.token.as_raw_handle(),
@@ -579,10 +606,7 @@ impl Confinement {
                 null(),
                 null(),
                 1,
-                CREATE_SUSPENDED
-                    | CREATE_NO_WINDOW
-                    | CREATE_UNICODE_ENVIRONMENT
-                    | EXTENDED_STARTUPINFO_PRESENT,
+                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 environment.as_ptr().cast(),
                 cwd.as_ptr(),
                 &raw const startup.StartupInfo,
@@ -604,7 +628,79 @@ impl Confinement {
             thread: Some(thread),
             exit: None,
             watch: None,
+            _console: console,
         })
+    }
+}
+
+/// A pseudo console for one program and its descendants. Its conhost runs
+/// with RAH's token, so it starts where a console created with the
+/// program's token would not. Nothing is shown or read: the standard streams
+/// are the program's pipes, what is written to the console itself goes to
+/// `NUL`, and the input is a pipe that is never written. Dropping it closes
+/// the console.
+struct PseudoConsole {
+    handle: HPCON,
+    /// The write end of the console's input, held so the input stays open
+    /// while the console lives.
+    _input: OwnedHandle,
+}
+
+// SAFETY: a pseudo console handle may be used and closed from any thread.
+unsafe impl Send for PseudoConsole {}
+
+impl PseudoConsole {
+    fn new() -> io::Result<Self> {
+        let mut read: HANDLE = null_mut();
+        let mut write: HANDLE = null_mut();
+        // SAFETY: null attributes make both ends non-inheritable.
+        if unsafe { CreatePipe(&mut read, &mut write, null(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: new handles that nothing else owns.
+        let (read, write) = unsafe {
+            (
+                OwnedHandle::from_raw_handle(read),
+                OwnedHandle::from_raw_handle(write),
+            )
+        };
+        // Writes to `NUL` never block or fail, so the console needs no
+        // reader and cannot stall the program.
+        let output = open(
+            OsStr::new("NUL"),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            false,
+        )?;
+        let mut handle: HPCON = 0;
+        // SAFETY: both handles are valid; conhost duplicates them, so they
+        // may be closed after the call.
+        let result = unsafe {
+            CreatePseudoConsole(
+                COORD { X: 80, Y: 25 },
+                read.as_raw_handle(),
+                output.as_raw_handle(),
+                0,
+                &mut handle,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::other(format!(
+                "CreatePseudoConsole failed with HRESULT {result:#010x}"
+            )));
+        }
+        Ok(Self {
+            handle,
+            _input: write,
+        })
+    }
+}
+
+impl Drop for PseudoConsole {
+    fn drop(&mut self) {
+        // SAFETY: the console was created in `new` and is closed only here.
+        // Its output never blocks, so closing returns promptly.
+        unsafe { ClosePseudoConsole(self.handle) };
     }
 }
 
@@ -777,18 +873,19 @@ fn append_arg(line: &mut Vec<u16>, arg: &str) {
 }
 
 fn open_null() -> io::Result<OwnedHandle> {
-    open_inheritable(
+    open(
         OsStr::new("NUL"),
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
+        true,
     )
 }
 
-fn open_inheritable(name: &OsStr, access: u32, share: u32) -> io::Result<OwnedHandle> {
+fn open(name: &OsStr, access: u32, share: u32, inheritable: bool) -> io::Result<OwnedHandle> {
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: null_mut(),
-        bInheritHandle: 1,
+        bInheritHandle: i32::from(inheritable),
     };
     let name = wide(name);
     // SAFETY: `name` is NUL-terminated and `attributes` outlives the call.
@@ -819,6 +916,8 @@ pub(crate) struct NativeChild {
     /// The suspended main thread, until resumed.
     thread: Option<OwnedHandle>,
     exit: Option<i32>,
+    /// Closed after the process handle, with the console's last users.
+    _console: PseudoConsole,
 }
 
 impl NativeChild {
@@ -969,21 +1068,22 @@ impl AsyncRead for PipeReader {
     }
 }
 
-/// A process-thread attribute list with room for one attribute.
+/// A process-thread attribute list with room for `count` attributes.
 struct AttributeList {
     /// `u64` elements keep the list aligned.
     buffer: Vec<u64>,
 }
 
 impl AttributeList {
-    fn new() -> io::Result<Self> {
+    fn new(count: u32) -> io::Result<Self> {
         let mut size = 0;
         // SAFETY: a size query with a null list.
-        unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size) };
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size) };
         let mut buffer = vec![0_u64; size.div_ceil(8)];
         // SAFETY: the buffer holds `size` bytes.
-        if unsafe { InitializeProcThreadAttributeList(buffer.as_mut_ptr().cast(), 1, 0, &mut size) }
-            == 0
+        if unsafe {
+            InitializeProcThreadAttributeList(buffer.as_mut_ptr().cast(), count, 0, &mut size)
+        } == 0
         {
             return Err(io::Error::last_os_error());
         }

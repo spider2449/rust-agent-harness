@@ -74,7 +74,7 @@ process with another token, and its process-attribute support
    the default (`false`) fails the plugin with a message saying so.
 
 4. **Programs are started by the plugin.** `CreateProcessAsUserW` starts
-   the program suspended and without a console window. Only its three
+   the program suspended, attached to a pseudo console. Only its three
    standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The
    handles are named pipes (one instance, created first, remote clients
    rejected) served through tokio, and `NUL` as stdin for `run`. The program
@@ -84,6 +84,22 @@ process with another token, and its process-attribute support
    Supervision (timeout, output limits, cancellation, unmount, orphaned
    descendants) is the code `sandbox-process` uses, now over a small process
    abstraction that both kinds of child implement.
+
+   *(Amended 2026-10-15.)* The console is a pseudo console that the plugin
+   creates for each program (`CreatePseudoConsole`,
+   `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`), shared by the program's
+   descendants and closed when the program is released. The program was
+   first started with `CREATE_NO_WINDOW`, which makes Windows create a
+   console with the program's token. That fails when the token has
+   Administrators as a deny-only group, which is every elevated run: the
+   program exits with `STATUS_DLL_INIT_FAILED` before it runs.
+   `DETACHED_PROCESS` (no console) does not help, because each console
+   program it starts then creates its own console and fails the same way.
+   With a pseudo console, conhost runs with RAH's token. Nothing is shown or
+   read from it: the standard streams are still the named pipes, what a
+   program writes to the console itself (`CON`) goes to `NUL`, and its input
+   is a pipe that is never written. A program can reach that conhost only
+   through the console API of its own console.
 
    The program is found as std finds it: `.exe` is appended when there is no
    extension, a path is relative to the working directory, and a bare name is
@@ -142,8 +158,12 @@ It does **not**:
   timeout, cancellation, orphaned descendants and unmount still end the
   process tree, piped `spawn` works, arguments with spaces, quotes and
   backslashes arrive unchanged, programs are found on `PATH`, and batch
-  files and invalid configurations are refused.
+  files and invalid configurations are refused, and console programs
+  started by the program share its console.
 - CI runs on Linux only, so the Windows code is checked by the local test
   runs. They ran first with an elevated token, then as a standard user
   (Medium, not an administrator), which found the `WRITE_OWNER` case above;
   a test reproduces it with a root whose DACL grants the user only Modify.
+  The elevated runs passed on Windows 11 but failed on a Windows 10 machine
+  (19045) with `STATUS_DLL_INIT_FAILED`, which found the console case in
+  decision 4; why the Windows 11 machine was not affected is not known.
