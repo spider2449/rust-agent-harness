@@ -1,6 +1,5 @@
 # Changelog
-
-## Unreleased
+## v0.44.0 (2026-10-16)
 
 - `rah-desktop`: the Web UI in a native window (tao and wry; WebView2 on
   Windows). It boots the same distribution as `rah --web` in-process, with
