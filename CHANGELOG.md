@@ -26,6 +26,12 @@
   dividers can be dragged (and moved with the arrow keys); sizes are kept in
   the preferences (`layout`). The "Switched the workspace" warning now
   clears itself after a few seconds; it was never written to the session.
+- `scripts\start.ps1 -Desktop` runs `rah-desktop` (the Web UI in a native
+  window) with the same `-Preset`, `-Config`, `-DataDir`, `-Root` and `-Release`
+  as the browser version, and `-Mode` picks the mode at start for either.
+  `-Model`, `-SessionDir` and `-Bind` are refused with `-Desktop`.
+- `rah-desktop` releases its WebView and window before exiting, so WebView2
+  no longer prints "Failed to unregister class Chrome_WidgetWin_0".
 - `rah_cli::select_distribution`, `read_distribution`, `USER_CONFIG`,
   `Distribution::set_root` and `Distribution::use_web_frontend`, so `rah` and
   `rah-desktop` choose and adjust the distribution the same way.

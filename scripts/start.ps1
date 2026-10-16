@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
-Starts RAH: the Web UI (default) or the terminal REPL.
+Starts RAH: the Web UI (default), the Web UI in a desktop window, or the
+terminal REPL.
 
 .DESCRIPTION
 Builds and runs the `rah` binary from this repository with cargo. With the
 Web UI, the script opens the printed URL (it carries the per-start access
-token) in the default browser. With the `default` preset it first checks that
-llama-server answers, and only warns if it does not.
+token) in the default browser. With -Desktop it runs `rah-desktop` instead,
+which shows the same Web UI in a native window. With the `default` preset it
+first checks that llama-server answers, and only warns if it does not.
 
 .EXAMPLE
 .\scripts\start.ps1
@@ -16,6 +18,10 @@ exists, otherwise with llama.cpp (the `default` preset).
 .EXAMPLE
 .\scripts\start.ps1 -Preset dev
 Web UI with the mock model; needs no model server.
+
+.EXAMPLE
+.\scripts\start.ps1 -Desktop -Mode coding
+The Web UI in a native window, in the coding mode.
 
 .EXAMPLE
 .\scripts\start.ps1 -Cli -Root D:\work\my-repo
@@ -52,6 +58,11 @@ param(
     [string]$Bind = "127.0.0.1:8765",
     # The terminal REPL instead of the Web UI.
     [switch]$Cli,
+    # The Web UI in a native window (rah-desktop) instead of the browser.
+    [switch]$Desktop,
+    # Mode to enter at start, such as daily or coding, instead of the last
+    # one used.
+    [string]$Mode,
     # Do not open the browser.
     [switch]$NoBrowser,
     # Build with optimizations (slower first build, faster runs).
@@ -66,7 +77,18 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 
-$cargoArgs = @("run", "--quiet", "-p", "rah-cli")
+if ($Desktop -and $Cli) { throw "-Desktop and -Cli cannot be combined." }
+if ($Cli -and $Mode) { throw "-Mode needs the Web UI; it cannot be combined with -Cli." }
+if ($Desktop) {
+    # rah-desktop takes what the distribution and the window need, and picks
+    # its own port.
+    foreach ($name in "Model", "SessionDir", "Bind") {
+        if ($PSBoundParameters.ContainsKey($name)) { throw "-$name is not supported with -Desktop." }
+    }
+}
+$package = if ($Desktop) { "rah-desktop" } else { "rah-cli" }
+
+$cargoArgs = @("run", "--quiet", "-p", $package)
 if ($Release) { $cargoArgs += "--release" }
 $cargoArgs += "--"
 # Relative to where the script was called from, not the repository it runs in.
@@ -80,7 +102,8 @@ if ($DataDir) { $cargoArgs += @("--data-dir", $DataDir) }
 if ($Model) { $cargoArgs += @("--model", $Model) }
 if ($Root) { $cargoArgs += @("--root", $Root) }
 if ($SessionDir) { $cargoArgs += @("--session-dir", $SessionDir) }
-if (-not $Cli) { $cargoArgs += @("--web", "--bind", $Bind) }
+if ($Mode) { $cargoArgs += @("--mode", $Mode) }
+if (-not $Cli -and -not $Desktop) { $cargoArgs += @("--web", "--bind", $Bind) }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo was not found on PATH; install Rust from https://rustup.rs"
@@ -117,8 +140,9 @@ if ($runPreset -eq "openai" -and -not $env:OPENAI_API_KEY) {
 
 Push-Location $repo
 try {
-    if ($Cli) {
-        # The REPL needs the console's stdin and stdout as they are.
+    if ($Cli -or $Desktop) {
+        # The REPL needs the console's stdin and stdout as they are; the
+        # desktop window needs no URL opened.
         & cargo @cargoArgs
         exit $LASTEXITCODE
     }

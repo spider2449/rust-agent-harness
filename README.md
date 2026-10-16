@@ -28,6 +28,7 @@ it, and `rah-desktop` shows that same Web UI in a native window
 .\scripts\start.ps1              # Web UI with llama.cpp; opens the browser
 .\scripts\start.ps1 -Preset dev  # Web UI with the mock model, no model server
 .\scripts\start.ps1 -Cli         # terminal REPL instead
+.\scripts\start.ps1 -Desktop     # the same Web UI in a native window
 ```
 
 Scripts (Windows PowerShell 5.1 or later; if scripts are blocked, run them
@@ -35,7 +36,7 @@ as `powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1`):
 
 | Script | Does |
 |---|---|
-| `scripts\start.ps1` | Builds and runs `rah`. Web UI by default, opening the printed URL with its token; `-Cli` for the REPL. Options: `-Preset`, `-Config`, `-Model`, `-Root`, `-SessionDir`, `-Bind`, `-Release`, `-NoBrowser`. Warns when llama-server does not answer. |
+| `scripts\start.ps1` | Builds and runs `rah`. Web UI by default, opening the printed URL with its token; `-Cli` for the REPL, `-Desktop` for the native window (`rah-desktop`; not with `-Model`, `-SessionDir` or `-Bind`). Options: `-Preset`, `-Config`, `-Model`, `-Root`, `-SessionDir`, `-Bind`, `-Mode`, `-Release`, `-NoBrowser`. Warns when llama-server does not answer. |
 | `scripts\install.ps1` | `cargo install` of `rah`, so `rah --web` works anywhere. Run it again after updating; `-Uninstall` removes it. |
 | `scripts\check.ps1` | The validation suite (fmt, check, test, clippy, `git diff --check`), with the browser tests when Edge or Chrome is found. `-Quick`, `-Fix`, `-NoBrowser`, `-Browser <path>`. |
 | `scripts\sessions.ps1` | Lists deleted sessions, `-Restore <id prefix>` moves one back, `-Purge [-OlderThanDays n]` removes them for good. |
