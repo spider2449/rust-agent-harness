@@ -1150,29 +1150,6 @@ function toggleSide(view) {
   else showSide(view);
 }
 
-function setupResizer() {
-  const width = sidePrefs().width;
-  if (width) document.documentElement.style.setProperty("--side-width", `${width}px`);
-  const handle = $("side-resizer");
-  handle.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    handle.setPointerCapture(event.pointerId);
-    handle.classList.add("dragging");
-    const move = (moved) => {
-      const next = Math.round(Math.min(Math.max(window.innerWidth - moved.clientX, 320), window.innerWidth * 0.75));
-      document.documentElement.style.setProperty("--side-width", `${next}px`);
-    };
-    const done = () => {
-      handle.classList.remove("dragging");
-      handle.removeEventListener("pointermove", move);
-      saveSidePrefs({ width: Math.round($("side").getBoundingClientRect().width) });
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", done, { once: true });
-    handle.addEventListener("pointercancel", done, { once: true });
-  });
-}
-
 function treeError(error) {
   $("tree").replaceChildren(el("li", "note", error.message));
 }
@@ -1573,61 +1550,30 @@ function gitSignature(state) {
   }
 }
 
-function setupSplitter() {
-  const pane = $("tree-pane");
-  const apply = (ratio) => pane.style.setProperty("--tree-ratio", String(ratio));
-  const saved = Number(sidePrefs().tree_ratio);
-  if (saved > 0 && saved < 1) apply(saved);
-  const handle = $("pane-splitter");
-  handle.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    handle.setPointerCapture(event.pointerId);
-    handle.classList.add("dragging");
-    let ratio = null;
-    const move = (moved) => {
-      const box = pane.getBoundingClientRect();
-      ratio = Math.min(Math.max((moved.clientY - box.top) / box.height, 0.1), 0.9);
-      apply(ratio.toFixed(3));
-    };
-    const done = () => {
-      handle.classList.remove("dragging");
-      handle.removeEventListener("pointermove", move);
-      if (ratio !== null) saveSidePrefs({ tree_ratio: Number(ratio.toFixed(3)) });
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", done, { once: true });
-    handle.addEventListener("pointercancel", done, { once: true });
-  });
-  // Keyboard: arrows move the split by 5%.
-  handle.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    event.preventDefault();
-    const current = Number(getComputedStyle(pane).getPropertyValue("--tree-ratio")) || 0.6;
-    const next = Math.min(Math.max(current + (event.key === "ArrowUp" ? -0.05 : 0.05), 0.1), 0.9);
-    apply(next.toFixed(3));
-    saveSidePrefs({ tree_ratio: Number(next.toFixed(3)) });
-  });
-}
-
 // A draggable divider, for every divider that needs no code of its own.
 // `size(event)` turns the pointer into a size (pixels, or a share between 0
 // and 1), `bounds()` limits it while dragging, `apply(size)` shows it and
 // `current()` reads the size shown. The size is kept in the server
-// preferences as `layout[name]`; the arrow keys `keys` (less, more) move it
-// by `step`.
-function setupSplit({ handle, name, keys, step, size, bounds, apply, current }) {
+// preferences as `layout[name]` (or where `stored` says: `get()` and
+// `set(size)`), and a saved size is shown again when `valid(size)`. The arrow
+// keys `keys` (less, more) move it by `step`.
+function setupSplit({ handle, name, keys, step, size, bounds, apply, current, valid = (value) => value > 0, stored }) {
   const layout = () => state.prefs.layout || {};
   const clamp = (value) => {
     const [low, high] = bounds();
     return Math.round(Math.min(Math.max(value, low), Math.max(low, high)) * 1000) / 1000;
   };
   const keep = (value) => {
+    if (stored) {
+      stored.set(value);
+      return;
+    }
     state.prefs.layout = { ...layout(), [name]: value };
     savePrefs();
   };
   // The CSS limits (min and max sizes) hold a saved size that no longer fits.
-  const saved = Number(layout()[name]);
-  if (saved > 0) apply(saved);
+  const saved = Number(stored ? stored.get() : layout()[name]);
+  if (valid(saved)) apply(saved);
   handle.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
@@ -1656,8 +1602,37 @@ function setupSplit({ handle, name, keys, step, size, bounds, apply, current }) 
   });
 }
 
-// The dividers of the session list, the file tree and the file view.
+// Every divider: the right-hand panel, the file tree and source control, the
+// session list, the file tree and the file view.
 function setupLayout() {
+  // The side panel's width and the tree/Git split keep their place in `side`.
+  setupSplit({
+    handle: $("side-resizer"),
+    name: "side_width",
+    keys: ["ArrowRight", "ArrowLeft"],
+    step: 20,
+    size: (event) => window.innerWidth - event.clientX,
+    bounds: () => [320, window.innerWidth * 0.75],
+    apply: (value) => document.documentElement.style.setProperty("--side-width", `${value}px`),
+    current: () => $("side").getBoundingClientRect().width,
+    stored: { get: () => sidePrefs().width, set: (value) => saveSidePrefs({ width: Math.round(value) }) },
+  });
+  const treePane = $("tree-pane");
+  setupSplit({
+    handle: $("pane-splitter"),
+    name: "tree_ratio",
+    keys: ["ArrowUp", "ArrowDown"],
+    step: 0.05,
+    size: (event) => {
+      const box = treePane.getBoundingClientRect();
+      return (event.clientY - box.top) / box.height;
+    },
+    bounds: () => [0.1, 0.9],
+    apply: (value) => treePane.style.setProperty("--tree-ratio", Number(value).toFixed(3)),
+    current: () => Number(getComputedStyle(treePane).getPropertyValue("--tree-ratio")) || 0.6,
+    valid: (value) => value > 0 && value < 1,
+    stored: { get: () => sidePrefs().tree_ratio, set: (value) => saveSidePrefs({ tree_ratio: value }) },
+  });
   const sessions = $("sessions-splitter");
   setupSplit({
     handle: sessions,
@@ -2280,8 +2255,6 @@ async function start() {
   $("wrap-activity").addEventListener("click", () => toggleWrap("wrap_activity"));
   applyWrap();
   $("activity-clear").addEventListener("click", () => $("activity").replaceChildren());
-  setupResizer();
-  setupSplitter();
   setupLayout();
   $("git-refresh").addEventListener("click", () => loadGit());
   renderFile();
