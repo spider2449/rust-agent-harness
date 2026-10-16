@@ -33,7 +33,10 @@
 //!   `loop`) the same way, rolled back when the plugin does not start, and
 //!   applies them again at the next start (see [`settings`]).
 //!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
-//!   side}` keeps the UI's preferences the same way, for every browser.
+//!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's preferences the same way, for every browser.
+//! - `GET /api/modes`, `PUT /api/mode {mode}`: the modes (daily work,
+//!   coding, ...) and the active one, shared by every frontend of this plugin
+//!   (see [`modes`]).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog` (`{kinds, examples, help}`,
@@ -75,6 +78,7 @@ mod files;
 mod git;
 mod jobs;
 mod manage;
+mod modes;
 mod panel;
 mod settings;
 mod status;
@@ -95,7 +99,7 @@ use axum::{
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
     Scope, async_trait,
-    hooks::ToolApproval,
+    hooks::{ModelBeforeRequest, ToolApproval},
     host::FrontendListening,
     session::{SESSION, SessionError, SessionLog},
     tools::ToolInvoker,
@@ -131,6 +135,27 @@ impl WebFrontendPlugin {
 struct Config {
     bind: Option<String>,
     approval_timeout_secs: Option<u64>,
+    /// The mode entered at start, instead of the stored one.
+    mode: Option<String>,
+    /// Replaces the built-in modes.
+    modes: Option<Vec<modes::Mode>>,
+}
+
+impl Config {
+    fn modes(&self) -> Vec<modes::Mode> {
+        self.modes.clone().unwrap_or_else(modes::builtin)
+    }
+
+    fn check(&self) -> Result<(), PluginError> {
+        let modes = self.modes();
+        modes::check(&modes)?;
+        match &self.mode {
+            Some(mode) if !modes.iter().any(|known| &known.id == mode) => {
+                Err(format!("unknown mode `{mode}`").into())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 pub(crate) struct Shared {
@@ -144,6 +169,9 @@ pub(crate) struct Shared {
     pub stop: CancellationToken,
     /// Serializes updates of the recorded Plugins panel changes.
     pub panel: tokio::sync::Mutex<()>,
+    pub modes: modes::Modes,
+    /// The `mode` configuration key.
+    pub start_mode: Option<String>,
 }
 
 pub(crate) type AppState = Arc<Shared>;
@@ -160,11 +188,12 @@ impl Plugin for WebFrontendPlugin {
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
         let config: Config = rah_api::config::parse(config)?;
         access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
-        Ok(())
+        config.check()
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let config: Config = rah_api::config::parse(scope.config())?;
+        config.check()?;
         let requested = access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
         let listener = tokio::net::TcpListener::bind(requested)
             .await
@@ -181,11 +210,18 @@ impl Plugin for WebFrontendPlugin {
             approvals: Approvals::new(timeout),
             stop: scope.spawner().cancellation(),
             panel: tokio::sync::Mutex::new(()),
+            modes: modes::Modes::new(config.modes()),
+            start_mode: config.mode.clone(),
         });
         let asker = shared.clone();
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
             let asker = asker.clone();
             async move { asker.approvals.ask(request).await }
+        });
+        let shaper = shared.clone();
+        scope.hook_waterfall::<ModelBeforeRequest, _, _>(0, move |request| {
+            let shaped = shaper.modes.shape(request);
+            async move { shaped }
         });
         let app = router(shared.clone());
         let stop = shared.stop.clone();
@@ -223,6 +259,8 @@ fn router(shared: AppState) -> Router {
             "/preferences",
             get(settings::preferences).put(settings::set_preferences),
         )
+        .route("/modes", get(modes::list))
+        .route("/mode", put(modes::set))
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))
@@ -563,7 +601,8 @@ impl WebFrontendPlugin {
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
   "bind": "127.0.0.1:8765",
-  "approval_timeout_secs": 300
+  "approval_timeout_secs": 300,
+  "mode": "coding"
 }"#;
 }
 

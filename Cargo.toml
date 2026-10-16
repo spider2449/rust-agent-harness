@@ -2,6 +2,7 @@
 members = [
     "crates/rah-api",
     "crates/rah-cli",
+    "crates/rah-desktop",
     "crates/rah-kernel",
     "crates/rah-plugin-host-process",
     "crates/rah-plugin-host-wasm",

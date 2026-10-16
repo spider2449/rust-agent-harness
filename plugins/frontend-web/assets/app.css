@@ -24,8 +24,11 @@
   color-scheme: light;
 }
 
+/* Themes: `:root` is the light theme and `data-theme` picks another (see
+   `applyTheme`). Without `data-theme` the system decides, which is why the
+   dark values appear twice: once for the system, once for the named theme. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #161615;
     --panel: #1f1f1d;
     --text: #e8e7e3;
@@ -51,6 +54,106 @@
   }
 }
 
+:root[data-theme="dark"] {
+  --bg: #161615;
+  --panel: #1f1f1d;
+  --text: #e8e7e3;
+  --muted: #9b9a94;
+  --line: #34332f;
+  --accent: #7d9bff;
+  --accent-text: #10131c;
+  --user: #1e2638;
+  --tool: #262522;
+  --warn: #f0b45c;
+  --warn-bg: #3a2a10;
+  --bad: #ff8a80;
+  --good: #7ed69a;
+  --tok-comment: #7f848e;
+  --tok-string: #98c379;
+  --tok-keyword: #c678dd;
+  --tok-type: #e5c07b;
+  --tok-function: #61afef;
+  --tok-number: #d19a66;
+  --tok-attr: #56b6c2;
+  --tok-property: #e06c75;
+  color-scheme: dark;
+}
+
+:root[data-theme="sepia"] {
+  --bg: #f1e8d3;
+  --panel: #faf3e2;
+  --text: #3b3226;
+  --muted: #76674f;
+  --line: #dccfb0;
+  --accent: #8a4b12;
+  --accent-text: #ffffff;
+  --user: #ede0c0;
+  --tool: #eee3c8;
+  --warn: #7f4a00;
+  --warn-bg: #f9e5bd;
+  --bad: #a62a1f;
+  --good: #2e6b2e;
+  --tok-comment: #85785f;
+  --tok-string: #4d7a1f;
+  --tok-keyword: #9c3d7a;
+  --tok-type: #9a5600;
+  --tok-function: #2d5f8a;
+  --tok-number: #8a5d00;
+  --tok-attr: #1d7a82;
+  --tok-property: #b03a2e;
+  color-scheme: light;
+}
+
+:root[data-theme="midnight"] {
+  --bg: #0d1220;
+  --panel: #141b2d;
+  --text: #dfe6f5;
+  --muted: #8d99b5;
+  --line: #26304a;
+  --accent: #6ea8ff;
+  --accent-text: #08101f;
+  --user: #1a2a4a;
+  --tool: #19223a;
+  --warn: #f2c36b;
+  --warn-bg: #3a2f12;
+  --bad: #ff8f8f;
+  --good: #7fdca0;
+  --tok-comment: #7885a3;
+  --tok-string: #9ad48b;
+  --tok-keyword: #c3a0ff;
+  --tok-type: #f0c674;
+  --tok-function: #7cb7ff;
+  --tok-number: #f2a672;
+  --tok-attr: #5fd0d8;
+  --tok-property: #ff8fa3;
+  color-scheme: dark;
+}
+
+:root[data-theme="contrast"] {
+  --bg: #000000;
+  --panel: #0a0a0a;
+  --text: #ffffff;
+  --muted: #cfcfcf;
+  --line: #8a8a8a;
+  --accent: #ffd60a;
+  --accent-text: #000000;
+  --user: #14142e;
+  --tool: #161616;
+  --warn: #ffd60a;
+  --warn-bg: #332b00;
+  --bad: #ff6b6b;
+  --good: #5cff8a;
+  --tok-comment: #b8b8b8;
+  --tok-string: #7dff9b;
+  --tok-keyword: #ff9cf2;
+  --tok-type: #ffd60a;
+  --tok-function: #7fc8ff;
+  --tok-number: #ffb86b;
+  --tok-attr: #5ff0ff;
+  --tok-property: #ff8a8a;
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
 [hidden] { display: none !important; }
@@ -69,9 +172,15 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 .badge.muted { color: var(--muted); }
 .badge.good { color: var(--good); border-color: var(--good); }
 .badge.bad { color: var(--bad); border-color: var(--bad); }
+.mode { width: auto; }
+/* A mode without the workspace hides its controls (see `applyMode`). */
+body.no-workspace #toggle-side,
+body.no-workspace #side-tabs [data-view="files"],
+body.no-workspace #status-root,
+body.no-workspace #status-git { display: none; }
 
 .layout { flex: 1; display: flex; min-height: 0; }
-.sidebar { width: 240px; padding: 12px; border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.sidebar { flex: none; width: var(--sessions-width, 240px); padding: 12px; border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .sidebar input[type="search"], .sidebar select {
   font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text);
@@ -271,11 +380,14 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .files-view { flex: 1; display: flex; min-height: 0; }
 .tree-pane {
   --tree-ratio: 0.6;
-  width: 34%; min-width: 170px; max-width: 340px; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-height: 0;
+  flex: none; width: var(--tree-width, 34%); min-width: 120px; max-width: 70%; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-height: 0;
 }
 /* The files above, source control below; the splitter sets the ratio. */
 .tree-section { flex: var(--tree-ratio) 1 0; display: flex; flex-direction: column; min-height: 60px; }
 .git-section { flex: calc(1 - var(--tree-ratio)) 1 0; display: flex; flex-direction: column; min-height: 60px; }
+/* A vertical divider between two panes; `setupSplit` drags it. */
+.vsplit { flex: none; width: 5px; margin: 0 -2px; z-index: 1; cursor: col-resize; background: transparent; }
+.vsplit:hover, .vsplit.dragging, .vsplit:focus-visible { background: var(--accent); opacity: 0.45; outline: none; }
 .splitter { flex: none; height: 5px; cursor: row-resize; border-top: 1px solid var(--line); background: transparent; }
 .splitter:hover, .splitter.dragging, .splitter:focus-visible { background: var(--accent); opacity: 0.45; outline: none; }
 .git-branch { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
@@ -320,16 +432,22 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .file-tab-list .file-tab button { border: none; background: none; color: var(--muted); padding: 0 4px; font-size: 11px; }
 .file-tab-list .file-tab button:hover { color: var(--bad); }
 .file-tabs > button { font-size: 12px; padding: 1px 8px; margin-bottom: 4px; border: none; }
-.file-view { flex: 3 1 0; min-height: 80px; overflow: auto; background: var(--bg); }
+.viewer-pane { --view-ratio: 0.75; }
+.file-view { flex: var(--view-ratio) 1 0; min-height: 80px; overflow: auto; background: var(--bg); }
 .file-view .placeholder, .file-view .file-note { padding: 12px; color: var(--muted); font-size: 13px; }
 .file-view .file-note { padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--warn-bg); color: var(--warn); font-size: 12px; }
 .code { display: flex; min-width: max-content; }
 .code pre { margin: 0; padding: 8px 0; white-space: pre; word-break: normal; font: 12px/1.5 ui-monospace, Consolas, monospace; }
 .code .gutter { padding: 8px 10px 8px 12px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg); }
 .code .lines { padding-left: 12px; padding-right: 16px; }
+/* Wrapped: one row per line, so the number stays beside its first row. */
+.code.wrap { display: block; min-width: 0; padding: 8px 0; }
+.code.wrap .row { display: flex; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+.code.wrap .num { flex: none; box-sizing: content-box; width: var(--num-width, 3ch); padding: 0 10px 0 12px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); }
+.code.wrap .text { flex: 1; min-width: 0; padding: 0 16px 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-head { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .activity {
-  flex: 1 1 0; min-height: 60px; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0;
+  flex: calc(1 - var(--view-ratio)) 1 0; min-height: 60px; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0;
   font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--bg);
 }
 .activity li { display: flex; gap: 8px; padding: 0 10px; white-space: nowrap; }
@@ -360,7 +478,7 @@ button.danger { color: var(--bad); border-color: var(--bad); }
   .sidebar { display: none; }
   .side { position: fixed; inset: 48px 0 0 0; width: auto; max-width: none; min-width: 0; z-index: 5; }
   .tree-pane { width: 40%; min-width: 0; }
-  .resizer { display: none; }
+  .resizer, #sessions-splitter, #tree-splitter { display: none; }
 }
 
 .plugins .kind { display: block; color: var(--muted); font-size: 12px; }
@@ -379,6 +497,10 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .editor-help dl { margin: 4px 0 0; }
 .editor-help dt { font-family: ui-monospace, Consolas, monospace;color: var(--text); margin-top: 6px; }
 .editor-help dd { margin: 2px 0 0 12px; }
+.activity.wrap li { white-space: normal; align-items: flex-start; }
+.activity.wrap li .text { overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+button.toggle { padding: 1px 8px; font-size: 12px; }
+button.toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
 .activity li.link { cursor: pointer; }
 .activity li.link:hover .text { text-decoration: underline; }
 

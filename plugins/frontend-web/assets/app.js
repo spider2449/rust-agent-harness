@@ -13,6 +13,8 @@ const state = {
   // Preferences kept by the server (`/api/preferences`): display, the
   // folders opened in the session list, recent workspaces, the side panel.
   prefs: { raw_markdown: false },
+  // `GET /api/modes`: `{modes, active}`; one mode is active for every window.
+  modes: { modes: [], active: null },
   liveText: "",
   retry: 500,
   // Last seen model and loop providers, to announce a switch.
@@ -46,6 +48,17 @@ function el(tag, className, text) {
 function showNotice(text) {
   $("notice").textContent = text;
   $("notice").hidden = !text;
+}
+
+// A warning that clears itself: nothing in it needs an answer, and it is
+// never written to a session.
+let noticeTimer = null;
+function showTransientNotice(text, milliseconds = 8000) {
+  showNotice(text);
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    if ($("notice").textContent === text) showNotice("");
+  }, milliseconds);
 }
 
 // Informational notices (such as a reconnected model) end with the next turn.
@@ -297,7 +310,7 @@ async function ensureWorkspace(info) {
     const result = await api("/workspace", { method: "PUT", body: JSON.stringify({ root: info.workspace }) });
     rememberWorkspace(result.root);
     await loadStatus().catch(() => {});
-    showNotice(`Switched the workspace to ${result.root}, where this session's work happened.`);
+    showTransientNotice(`Switched the workspace to ${result.root}, where this session's work happened.`);
     return true;
   } catch (error) {
     showNotice(`This session belongs to ${info.workspace}, which cannot be used now: ${error.message}`);
@@ -1043,6 +1056,7 @@ function sideView() {
 }
 
 function showSide(view) {
+  if (view === "files" && !workspaceShown()) return;
   $("side").hidden = false;
   $("files-view").hidden = view !== "files";
   $("plugins-panel").hidden = view !== "plugins";
@@ -1060,6 +1074,74 @@ function showSide(view) {
 function hideSide() {
   $("side").hidden = true;
   saveSidePrefs({ open: false });
+}
+
+// ---- Modes ----------------------------------------------------------------
+
+function activeMode() {
+  return state.modes.modes.find((mode) => mode.id === state.modes.active) || null;
+}
+
+// Whether the active mode shows the workspace (files, Git, the folder).
+function workspaceShown() {
+  return activeMode()?.workspace !== false;
+}
+
+function renderModes() {
+  const select = $("mode");
+  select.hidden = state.modes.modes.length === 0;
+  const none = el("option", "", "No mode");
+  none.value = "";
+  const options = state.modes.modes.map((mode) => {
+    const option = el("option", "", mode.label);
+    option.value = mode.id;
+    option.title = mode.description || "";
+    return option;
+  });
+  select.replaceChildren(none, ...options);
+  select.value = state.modes.active || "";
+  select.title = activeMode()?.description || "Mode: the tools, instructions and panels to work with";
+}
+
+// Applies the active mode to this window. The side panel's own preference
+// is kept: a mode without the workspace only hides the files view.
+function applyMode() {
+  renderModes();
+  const shown = workspaceShown();
+  document.body.classList.toggle("no-workspace", !shown);
+  if (!shown && !$("side").hidden && sideView() === "files") $("side").hidden = true;
+  if (shown && $("side").hidden && sidePrefs().open) {
+    showSide(sidePrefs().view === "plugins" ? "plugins" : "files");
+  }
+}
+
+async function loadModes() {
+  try {
+    state.modes = await api("/modes");
+  } catch {
+    // Older servers have no modes.
+    state.modes = { modes: [], active: null };
+  }
+  applyMode();
+}
+
+async function switchMode(id) {
+  $("mode").disabled = true;
+  try {
+    const reply = await api("/mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode: id || null }),
+    });
+    state.modes = { modes: reply.modes, active: reply.active };
+    applyMode();
+    if (reply.problems?.length) showNotice(`Some plugins were not switched: ${reply.problems.join("; ")}`);
+    refreshStatus();
+  } catch (error) {
+    report(error);
+    renderModes();
+  } finally {
+    $("mode").disabled = false;
+  }
 }
 
 // The header buttons open their view, or close the panel when it shows it.
@@ -1263,13 +1345,87 @@ function closeAllFiles() {
 
 // File contents are untrusted text: shown as text nodes and token spans
 // (Highlight), never as HTML.
+// `node` cut at its line breaks: one copy of `node` per line, each holding
+// only the part of the content on that line, so highlighting that spans lines
+// (a block comment) survives the cut.
+function splitByLine(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.data.split("\n").map((part) => document.createTextNode(part));
+  }
+  const lines = [[]];
+  for (const child of node.childNodes) {
+    splitByLine(child).forEach((part, index) => {
+      if (index > 0) lines.push([]);
+      lines[lines.length - 1].push(part);
+    });
+  }
+  return lines.map((children) => {
+    const copy = node.cloneNode(false);
+    copy.append(...children);
+    return copy;
+  });
+}
+
 function codeView(text, path) {
   const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+  const highlighted = Highlight.render(lines.join("\n"), path);
+  if (state.prefs.wrap_files) {
+    // One row per line: a line number stays beside the first row of its line.
+    const code = el("div", "code wrap");
+    code.style.setProperty("--num-width", `${String(lines.length).length}ch`);
+    code.append(
+      ...splitByLine(highlighted).map((part, index) => {
+        const row = el("div", "row");
+        const text = el("span", "text");
+        text.append(part);
+        row.append(el("span", "num", String(index + 1)), text);
+        return row;
+      }),
+    );
+    return code;
+  }
   const code = el("div", "code");
   const body = el("pre", "lines");
-  body.append(Highlight.render(lines.join("\n"), path));
+  body.append(highlighted);
   code.append(el("pre", "gutter", lines.map((_, index) => index + 1).join("\n")), body);
   return code;
+}
+
+// The wrap switches (files and activity) and the theme come from the
+// preferences, so the browser and the desktop agree.
+function applyWrap() {
+  const files = Boolean(state.prefs.wrap_files);
+  const activity = Boolean(state.prefs.wrap_activity);
+  $("wrap-files").setAttribute("aria-pressed", String(files));
+  $("wrap-activity").setAttribute("aria-pressed", String(activity));
+  $("activity").classList.toggle("wrap", activity);
+}
+
+const THEMES = [
+  ["system", "Follow the system"],
+  ["light", "Light"],
+  ["dark", "Dark"],
+  ["sepia", "Sepia"],
+  ["midnight", "Midnight"],
+  ["contrast", "High contrast"],
+];
+
+function currentTheme() {
+  return THEMES.some(([id]) => id === state.prefs.theme) ? state.prefs.theme : "system";
+}
+
+// `data-theme` picks a theme; without it the system decides (see app.css).
+function applyTheme() {
+  const theme = currentTheme();
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+}
+
+function toggleWrap(key) {
+  state.prefs[key] = !state.prefs[key];
+  savePrefs();
+  applyWrap();
+  if (key === "wrap_files") renderFile();
 }
 
 function fileTab(file) {
@@ -1453,6 +1609,100 @@ function setupSplitter() {
   });
 }
 
+// A draggable divider, for every divider that needs no code of its own.
+// `size(event)` turns the pointer into a size (pixels, or a share between 0
+// and 1), `bounds()` limits it while dragging, `apply(size)` shows it and
+// `current()` reads the size shown. The size is kept in the server
+// preferences as `layout[name]`; the arrow keys `keys` (less, more) move it
+// by `step`.
+function setupSplit({ handle, name, keys, step, size, bounds, apply, current }) {
+  const layout = () => state.prefs.layout || {};
+  const clamp = (value) => {
+    const [low, high] = bounds();
+    return Math.round(Math.min(Math.max(value, low), Math.max(low, high)) * 1000) / 1000;
+  };
+  const keep = (value) => {
+    state.prefs.layout = { ...layout(), [name]: value };
+    savePrefs();
+  };
+  // The CSS limits (min and max sizes) hold a saved size that no longer fits.
+  const saved = Number(layout()[name]);
+  if (saved > 0) apply(saved);
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("dragging");
+    let value = null;
+    const move = (moved) => {
+      value = clamp(size(moved));
+      apply(value);
+    };
+    const done = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      if (value !== null) keep(value);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", done, { once: true });
+    handle.addEventListener("pointercancel", done, { once: true });
+  });
+  handle.addEventListener("keydown", (event) => {
+    const direction = keys.indexOf(event.key);
+    if (direction < 0) return;
+    event.preventDefault();
+    const next = clamp(current() + (direction === 0 ? -step : step));
+    apply(next);
+    keep(next);
+  });
+}
+
+// The dividers of the session list, the file tree and the file view.
+function setupLayout() {
+  const sessions = $("sessions-splitter");
+  setupSplit({
+    handle: sessions,
+    name: "sessions_width",
+    keys: ["ArrowLeft", "ArrowRight"],
+    step: 20,
+    size: (event) => event.clientX - sessions.previousElementSibling.getBoundingClientRect().left,
+    bounds: () => [160, Math.min(520, window.innerWidth * 0.4)],
+    apply: (value) => document.documentElement.style.setProperty("--sessions-width", `${value}px`),
+    current: () => sessions.previousElementSibling.getBoundingClientRect().width,
+  });
+  const tree = $("tree-pane");
+  setupSplit({
+    handle: $("tree-splitter"),
+    name: "tree_width",
+    keys: ["ArrowLeft", "ArrowRight"],
+    step: 20,
+    size: (event) => event.clientX - tree.getBoundingClientRect().left,
+    bounds: () => [120, $("files-view").getBoundingClientRect().width - 160],
+    apply: (value) => tree.style.setProperty("--tree-width", `${value}px`),
+    current: () => tree.getBoundingClientRect().width,
+  });
+  // The file view above and the activity log below share what is left.
+  const shown = () => {
+    const view = $("file-view").getBoundingClientRect();
+    return { top: view.top, total: view.height + $("activity").getBoundingClientRect().height };
+  };
+  setupSplit({
+    handle: $("view-splitter"),
+    name: "view_ratio",
+    keys: ["ArrowUp", "ArrowDown"],
+    step: 0.05,
+    size: (event) => {
+      const { top, total } = shown();
+      return total > 0 ? (event.clientY - top) / total : 0.75;
+    },
+    bounds: () => [0.15, 0.9],
+    apply: (value) => $("viewer-pane").style.setProperty("--view-ratio", String(value)),
+    current: () => {
+      const { total } = shown();
+      return total > 0 ? $("file-view").getBoundingClientRect().height / total : 0.75;
+    },
+  });
+}
+
 // ---- Activity ---------------------------------------------------------------
 
 const ACTIVITY_LIMIT = 500;
@@ -1553,6 +1803,9 @@ function connect() {
     $("connection").className = "badge good";
     // Keep other notices, such as a failed startup request.
     if ($("notice").textContent === NOT_CONNECTED) showNotice("");
+    // A switch made while this window was not connected (such as the mode
+    // entered at start) sent no notice here.
+    loadModes();
   });
   socket.addEventListener("message", (message) => {
     const data = JSON.parse(message.data);
@@ -1563,6 +1816,13 @@ function connect() {
     } else if (data.type === "approval_resolved") {
       $(`approval-${data.id}`)?.remove();
       if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
+    } else if (data.type === "mode") {
+      // Another window (or this one) switched the mode.
+      if (data.active !== state.modes.active) {
+        state.modes.active = data.active;
+        applyMode();
+        refreshStatus();
+      }
     }
     else if (data.type === "error") {
       showNotice(data.message);
@@ -1981,6 +2241,7 @@ async function start() {
   } catch {
     // Older servers have no preferences; the defaults apply.
   }
+  applyTheme();
   $("session-search").addEventListener("input", renderSessions);
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));
@@ -2015,9 +2276,13 @@ async function start() {
   $("side-close").addEventListener("click", hideSide);
   $("tree-refresh").addEventListener("click", () => reloadFiles().catch(report));
   $("close-all").addEventListener("click", closeAllFiles);
+  $("wrap-files").addEventListener("click", () => toggleWrap("wrap_files"));
+  $("wrap-activity").addEventListener("click", () => toggleWrap("wrap_activity"));
+  applyWrap();
   $("activity-clear").addEventListener("click", () => $("activity").replaceChildren());
   setupResizer();
   setupSplitter();
+  setupLayout();
   $("git-refresh").addEventListener("click", () => loadGit());
   renderFile();
   renderGit();
@@ -2035,6 +2300,8 @@ async function start() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshStatus();
   });
+  $("mode").addEventListener("change", () => switchMode($("mode").value));
+  await loadModes();
   const side = sidePrefs();
   if (side.open ?? window.innerWidth >= 1100) showSide(side.view === "plugins" ? "plugins" : "files");
   try {

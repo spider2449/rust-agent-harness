@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::{ApiResult, AppState, Shared, manage::admin};
 
-const KIND: &str = "tools-web-search";
+pub(crate) const KIND: &str = "tools-web-search";
 const POLICY: &str = "policy-authority";
 const PATTERN: &str = "web.*";
 const KEY: &str = "web-search";
@@ -89,7 +89,7 @@ fn state(shared: &Shared) -> Value {
     json!({ "available": available, "enabled": enabled })
 }
 
-async fn enable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<(), AdminError> {
+pub(crate) async fn enable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<(), AdminError> {
     for (id, status) in instances(shared, admin, POLICY) {
         let Some(instance) = admin.instance(&id).filter(|_| status.is_some()) else {
             continue;
@@ -139,7 +139,7 @@ async fn enable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<(), AdminErr
     Ok(())
 }
 
-async fn disable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<(), AdminError> {
+pub(crate) async fn disable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<(), AdminError> {
     for (id, status) in instances(shared, admin, KIND) {
         if status.is_some() {
             admin.unmount(&id).await?;

@@ -99,6 +99,11 @@ impl Approvals {
         ))
     }
 
+    /// Pushes `notice` to every connected browser.
+    pub fn notify(&self, notice: Notice) {
+        let _ = self.notices.send(notice);
+    }
+
     /// Answers a waiting request; `false` if it is unknown or already over.
     pub fn answer(&self, id: &str, approve: bool) -> bool {
         match self.lock().remove(id) {

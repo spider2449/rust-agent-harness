@@ -13,6 +13,7 @@
     <span id="guard" class="badge" hidden></span>
     <span id="connection" class="badge muted">connecting</span>
     <span class="spacer"></span>
+    <select id="mode" class="mode" aria-label="Mode" title="Mode: the tools, instructions and panels to work with" hidden></select>
     <button id="open-settings" type="button">Settings</button>
     <button id="toggle-side" type="button" class="ghost" title="Show or hide the workspace panel">Workspace</button>
     <button id="toggle-plugins" type="button" class="ghost" title="Advanced: every plugin and its JSON configuration">Plugins</button>
@@ -26,6 +27,7 @@
       <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
       <ul id="sessions" class="sessions"></ul>
     </nav>
+    <div id="sessions-splitter" class="vsplit" role="separator" aria-orientation="vertical" aria-label="Resize the session list" tabindex="0" title="Drag to resize"></div>
 
     <section class="conversation" aria-label="Conversation">
       <div id="session-head" class="session-head" hidden>
@@ -87,14 +89,18 @@
             </div>
           </div>
         </div>
-        <div class="viewer-pane">
+        <div id="tree-splitter" class="vsplit" role="separator" aria-orientation="vertical" aria-label="Resize the file tree" tabindex="0" title="Drag to resize"></div>
+        <div id="viewer-pane" class="viewer-pane">
           <div class="file-tabs">
             <div id="file-tabs" class="file-tab-list" role="tablist" aria-label="Open files"></div>
+            <button id="wrap-files" type="button" class="ghost toggle" aria-pressed="false" title="Wrap long lines in the file">Wrap</button>
             <button id="close-all" type="button" class="ghost" hidden>Close all</button>
           </div>
           <div id="file-view" class="file-view"></div>
+          <div id="view-splitter" class="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize the file view and the activity log" tabindex="0" title="Drag to resize"></div>
           <div class="pane-head activity-head">
             <span class="pane-title">Activity</span>
+            <button id="wrap-activity" type="button" class="ghost toggle" aria-pressed="false" title="Wrap long lines in the activity log">Wrap</button>
             <button id="activity-clear" type="button" class="ghost icon" title="Clear the activity log" aria-label="Clear the activity log">✕</button>
           </div>
           <ol id="activity" class="activity" aria-live="polite"></ol>

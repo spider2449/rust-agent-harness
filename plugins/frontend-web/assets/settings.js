@@ -463,6 +463,36 @@ function displayForm() {
   row.append(box, el("span", "label", "Show replies as raw Markdown"));
   row.append(el("small", "", "Off: the model's replies are formatted (headings, lists, tables, code). On: they are shown as the Markdown text the model wrote."));
   form.append(row);
+
+  const themes = el("label", "field");
+  themes.append(el("span", "label", "Theme"));
+  const select = el("select");
+  select.id = "theme";
+  for (const [id, label] of THEMES) {
+    const option = el("option", "", label);
+    option.value = id;
+    select.append(option);
+  }
+  select.value = currentTheme();
+  select.addEventListener("change", async () => {
+    const before = currentTheme();
+    // Shown at once; kept on the server for every window on this rah.
+    state.prefs.theme = select.value === "system" ? undefined : select.value;
+    applyTheme();
+    settingsMessage("");
+    try {
+      const result = await api("/preferences", { method: "PUT", body: JSON.stringify(state.prefs) });
+      delete result.remembered;
+      state.prefs = { ...state.prefs, ...result };
+    } catch (error) {
+      state.prefs.theme = before === "system" ? undefined : before;
+      applyTheme();
+      select.value = before;
+      settingsMessage(error.message, true);
+    }
+  });
+  themes.append(select, el("small", "", "Follow the system, or pick a theme. It applies to every window of this rah, in the browser and on the desktop."));
+  form.append(themes);
   return form;
 }
 

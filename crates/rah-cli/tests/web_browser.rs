@@ -1207,6 +1207,63 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
             .await,
         "# Guide"
     );
+    // Wrapping shows one row per line, the number beside it, and keeps the
+    // text and the highlighting; it is remembered with the preferences.
+    page.eval("byId('wrap-files').click(); true").await;
+    page.wait(
+        "the wrapped file",
+        "byId('file-view').querySelector('.code.wrap') && \
+         [...byId('file-view').querySelectorAll('.row .num')].map((n) => n.textContent).join() === '1,2' && \
+         [...byId('file-view').querySelectorAll('.row .text')].map((t) => t.textContent).join('|') === '# Guide|line two' && \
+         byId('file-view').querySelector('.row .tok-heading')?.textContent === '# Guide' && \
+         byId('wrap-files').getAttribute('aria-pressed') === 'true'",
+    )
+    .await;
+    page.wait(
+        "the saved wrap",
+        "api('/preferences').then((p) => p.wrap_files === true)",
+    )
+    .await;
+    page.eval("byId('wrap-files').click(); true").await;
+    page.wait(
+        "the unwrapped file",
+        "!byId('file-view').querySelector('.code.wrap') && byId('file-view').querySelector('.gutter')",
+    )
+    .await;
+    page.eval("byId('wrap-activity').click(); true").await;
+    page.wait(
+        "the wrapped activity log",
+        "byId('activity').classList.contains('wrap') && \
+         api('/preferences').then((p) => p.wrap_activity === true)",
+    )
+    .await;
+    // A theme applies at once and is kept for every window.
+    page.eval(
+        "state.prefs.theme = 'midnight'; applyTheme(); \
+         api('/preferences', { method: 'PUT', body: JSON.stringify(state.prefs) }); true",
+    )
+    .await;
+    assert_eq!(
+        page.eval("document.documentElement.dataset.theme").await,
+        "midnight"
+    );
+    page.wait(
+        "the theme colours",
+        "getComputedStyle(document.body).backgroundColor === 'rgb(13, 18, 32)'",
+    )
+    .await;
+    page.wait(
+        "the saved theme",
+        "api('/preferences').then((p) => p.theme === 'midnight')",
+    )
+    .await;
+    page.eval("state.prefs.theme = undefined; applyTheme(); true")
+        .await;
+    assert_eq!(
+        page.eval("document.documentElement.dataset.theme === undefined")
+            .await,
+        true
+    );
     page.eval("treeButton('notes.txt').click(); true").await;
     page.wait(
         "a second tab",

@@ -28,7 +28,9 @@ use rah_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ApiError, ApiResult, AppState, Shared, manage::admin, panel, status_json, web_search};
+use crate::{
+    ApiError, ApiResult, AppState, Shared, manage::admin, modes, panel, status_json, web_search,
+};
 
 /// Slots and the plugin kinds each may hold, in the order they are restored.
 const SLOTS: [(&str, &[&str]); 4] = [
@@ -155,6 +157,7 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
     }
     panel::restore(&shared, admin.as_ref()).await;
     web_search::restore(&shared, admin.as_ref()).await;
+    modes::restore(&shared, admin.as_ref(), shared.start_mode.clone()).await;
 }
 
 fn key(slot: &str) -> String {
@@ -241,6 +244,19 @@ pub(crate) struct Preferences {
     /// Layout of the side panel.
     #[serde(default, skip_serializing_if = "SidePanel::is_empty")]
     side: SidePanel,
+    /// Wrap long lines in the file viewer and in the activity log.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    wrap_files: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    wrap_activity: bool,
+    /// The colour theme by name; the UI knows the names and falls back to
+    /// following the system for one it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
+    /// Sizes of the other draggable dividers by name (pixels, or a share
+    /// between 0 and 1), so a new divider needs no change here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    layout: BTreeMap<String, f64>,
 }
 
 #[derive(Default, Deserialize, Serialize, PartialEq)]
@@ -271,6 +287,11 @@ const MAX_FOLDERS: usize = 1000;
 const MAX_PATH_CHARS: usize = 4096;
 /// The most recent workspaces kept.
 const MAX_RECENT: usize = 8;
+/// The most layout entries kept, the longest name and the largest size.
+const MAX_LAYOUT: usize = 32;
+const MAX_LAYOUT_NAME: usize = 64;
+const MAX_LAYOUT_SIZE: f64 = 100_000.0;
+const MAX_THEME_NAME: usize = 32;
 
 impl Preferences {
     /// Refuses what no UI sends, so a client cannot grow the stored entry
@@ -290,6 +311,22 @@ impl Preferences {
         let finite = |value: Option<f64>| value.is_none_or(f64::is_finite);
         if !finite(self.side.width) || !finite(self.side.tree_ratio) {
             return bad("`side` sizes must be numbers");
+        }
+        if let Some(theme) = &self.theme
+            && (theme.is_empty()
+                || theme.len() > MAX_THEME_NAME
+                || !theme.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
+        {
+            return bad("`theme` must be a short lowercase name");
+        }
+        if self.layout.len() > MAX_LAYOUT
+            || self.layout.keys().any(|name| name.len() > MAX_LAYOUT_NAME)
+            || !self
+                .layout
+                .values()
+                .all(|size| (0.0..=MAX_LAYOUT_SIZE).contains(size))
+        {
+            return bad("`layout` has too many entries, a long name or a size out of range");
         }
         self.recent_workspaces.truncate(MAX_RECENT);
         Ok(self)

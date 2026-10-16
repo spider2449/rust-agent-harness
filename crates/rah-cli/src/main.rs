@@ -9,7 +9,7 @@ use rah_api::{
     host::{ExitRequested, FrontendListening, Interrupt},
     tools::ToolInvoker,
 };
-use rah_cli::{Distribution, boot, default_data_home};
+use rah_cli::{Distribution, USER_CONFIG, boot, default_data_home, select_distribution};
 use serde_json::Value;
 
 /// RAH: a plugin-kernel agent harness.
@@ -36,6 +36,10 @@ struct Args {
     /// Web UI address, loopback only (frontend-web); port 0 picks one.
     #[arg(long)]
     bind: Option<String>,
+    /// Mode to enter at start (frontend-web), such as `daily` or `coding`,
+    /// instead of the last one used.
+    #[arg(long)]
+    mode: Option<String>,
     /// Run one prompt and exit (frontend-cli).
     #[arg(long)]
     prompt: Option<String>,
@@ -58,7 +62,7 @@ struct Args {
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "prompt", "session", "session_dir", "root"])]
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root"])]
     init_config: bool,
 }
 
@@ -77,15 +81,6 @@ fn data_home(args: &Args) -> Result<PathBuf, String> {
         .or_else(default_data_home)
         .unwrap_or_else(|| PathBuf::from(".rah"));
     absolute(&home)
-}
-
-/// The user's own distribution file in the data directory.
-const USER_CONFIG: &str = "rah.toml";
-
-fn read_config(path: &Path) -> Result<Distribution, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
-    Distribution::parse(&text).map_err(|error| format!("`{}`: {error}", path.display()))
 }
 
 /// Appended to a file written by `--init-config`: the opt-in plugins no
@@ -137,17 +132,11 @@ fn init_config(args: &Args) -> Result<PathBuf, String> {
 
 fn distribution(args: &Args) -> Result<Distribution, String> {
     let home = data_home(args)?;
-    let user_config = home.join(USER_CONFIG);
-    let mut distribution = match (&args.config, &args.preset) {
-        (Some(path), _) => read_config(path)?,
-        (None, Some(preset)) => Distribution::preset(preset).map_err(|error| error.to_string())?,
-        (None, None) if user_config.is_file() => {
-            eprintln!("rah: using `{}`", user_config.display());
-            read_config(&user_config)?
-        }
-        (None, None) => Distribution::preset("default").map_err(|error| error.to_string())?,
-    };
-    distribution.data_home = Some(home);
+    let (mut distribution, user_config) =
+        select_distribution(args.config.as_deref(), args.preset.as_deref(), &home)?;
+    if let Some(path) = user_config {
+        eprintln!("rah: using `{}`", path.display());
+    }
     let session_dir = args.session_dir.as_deref().map(absolute).transpose()?;
     if args.web {
         if args.prompt.is_some() || args.session.is_some() {
@@ -159,6 +148,7 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     }
     let overrides = [
         ("frontend-web", "bind", args.bind.clone().map(Value::String)),
+        ("frontend-web", "mode", args.mode.clone().map(Value::String)),
         (
             "frontend-cli",
             "prompt",
@@ -184,15 +174,10 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             ));
         }
     }
-    if let Some(root) = &args.root {
-        let root = Value::String(root.display().to_string());
-        let mut matched = false;
-        for kind in rah_cli::WORKSPACE_PLUGINS {
-            matched |= distribution.set_config(kind, "root", root.clone());
-        }
-        if !matched {
-            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
-        }
+    if let Some(root) = &args.root
+        && !distribution.set_root(root)
+    {
+        return Err("--root needs a `tools-builtin` or sandbox plugin".into());
     }
     if let Some(model) = &args.model {
         let mut matched = false;

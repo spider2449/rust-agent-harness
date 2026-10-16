@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `rah-desktop`: the Web UI in a native window (tao and wry; WebView2 on
+  Windows). It boots the same distribution as `rah --web` in-process, with
+  `frontend-web` on a free loopback port, and has no API or UI code of its
+  own, so the browser and the desktop behave the same (ADR 0046). Closing
+  the window stops RAH; a start failure is shown in the window.
+- Modes, shared by the browser and the desktop: a picker in the header and
+  `GET /api/modes`, `PUT /api/mode {mode}`. **Daily work** stops
+  `tools-repo-write`, turns web search on and hides the workspace panel;
+  **Coding** runs `tools-repo-write` and shows the workspace. A mode's
+  `instructions` are added to every model request. One mode is active per
+  `rah`; a switch is pushed to every window, remembered in `storage` and
+  entered again at the next start. `frontend-web` takes `mode` and `modes`
+  (replacing the built-in ones; policy and frontend kinds are refused), and
+  `rah --mode` / `rah-desktop --mode` pick the mode at start.
+- Web UI: **Wrap** switches in the file viewer and the activity log (a
+  wrapped file keeps its line numbers beside the first row of each line and
+  its highlighting), and **themes** under Settings → Display: follow the
+  system, Light, Dark, Sepia, Midnight and High contrast. Both are kept in
+  the preferences (`wrap_files`, `wrap_activity`, `theme`), so the browser
+  and the desktop agree.
+- Web UI: the session list, the file tree and the file view/activity log
+  dividers can be dragged (and moved with the arrow keys); sizes are kept in
+  the preferences (`layout`). The "Switched the workspace" warning now
+  clears itself after a few seconds; it was never written to the session.
+- `rah_cli::select_distribution`, `read_distribution`, `USER_CONFIG`,
+  `Distribution::set_root` and `Distribution::use_web_frontend`, so `rah` and
+  `rah-desktop` choose and adjust the distribution the same way.
 - A plugin configuration is checked before it is applied. Plugins gain
   `check_config`, which the kernel runs before a mount and before a
   configuration change; a refused configuration fails the request with the

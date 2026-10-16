@@ -1148,6 +1148,141 @@ config = { bind = "127.0.0.1:0" }
     );
 }
 
+#[tokio::test]
+async fn modes_switch_plugins_for_every_window_and_are_remembered() {
+    use reqwest::Method;
+    let web = start("modes", |_| {}).await;
+    let state = web.json(web.get("/api/modes")).await;
+    assert_eq!(state["active"], Value::Null, "{state}");
+    let ids: Vec<&str> = state["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mode| mode["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["daily", "coding"]);
+    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
+    let write = PluginId::new("tools-repo-write");
+    let root = instance(&web.kernel, "tools-repo-write").unwrap().1["root"].clone();
+
+    // Every connected window hears about a switch.
+    let mut other = web.socket().await;
+    let (status, daily) = web
+        .status(
+            web.request(Method::PUT, "/api/mode")
+                .json(&json!({ "mode": "daily" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{daily}");
+    assert_eq!(daily["active"], "daily", "{daily}");
+    assert_eq!(daily["problems"], json!([]), "{daily}");
+    assert_eq!(daily["remembered"], true, "{daily}");
+    let notice = next_json(&mut other).await;
+    assert_eq!(notice["type"], "mode", "{notice}");
+    assert_eq!(notice["active"], "daily", "{notice}");
+    assert_eq!(admin.stopped(), std::slice::from_ref(&write));
+    assert!(wait_active(&web.kernel, "tools-web-search").await);
+
+    // Coding starts the stopped plugin again with its configuration.
+    let (status, coding) = web
+        .status(
+            web.request(Method::PUT, "/api/mode")
+                .json(&json!({ "mode": "coding" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{coding}");
+    assert!(admin.stopped().is_empty());
+    assert!(wait_active(&web.kernel, "tools-repo-write").await);
+    assert_eq!(
+        instance(&web.kernel, "tools-repo-write").unwrap().1["root"],
+        root
+    );
+
+    let (status, unknown) = web
+        .status(
+            web.request(Method::PUT, "/api/mode")
+                .json(&json!({ "mode": "nope" })),
+        )
+        .await;
+    assert_eq!(status, 400, "{unknown}");
+
+    // The last mode is entered again at the next start.
+    web.status(
+        web.request(Method::PUT, "/api/mode")
+            .json(&json!({ "mode": "daily" })),
+    )
+    .await;
+    let mut distribution = headless(&web.dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0" }
+"#,
+    ));
+    let restarted = Kernel::new();
+    boot(&restarted, &distribution).await.unwrap();
+    assert!(wait_active(&restarted, "tools-web-search").await);
+    let restarted_admin = restarted.handle().get(rah_api::admin::ADMIN).unwrap();
+    assert_eq!(restarted_admin.stopped(), [write]);
+
+    // A configured mode must be one of the modes.
+    let mut refused = headless(&web.dir);
+    refused.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "frontend-web"
+config = { bind = "127.0.0.1:0", mode = "nope" }
+"#,
+    ));
+    assert!(boot(&Kernel::new(), &refused).await.is_err());
+}
+
+#[tokio::test]
+async fn configured_modes_replace_the_builtin_ones_and_pick_the_start_mode() {
+    // The example from the README.
+    let web = start("modes-configured", |distribution| {
+        distribution
+            .plugin
+            .retain(|spec| spec.kind != "frontend-web");
+        distribution.plugin.push(toml_spec(
+            r#"
+[[plugin]]
+use = "frontend-web"
+
+[plugin.config]
+bind = "127.0.0.1:0"
+mode = "writing"
+
+[[plugin.config.modes]]
+id = "coding"
+label = "Coding"
+instructions = "Keep changes small and say which files you changed."
+plugins = { "tools-repo-write" = true }
+
+[[plugin.config.modes]]
+id = "writing"
+label = "Writing"
+workspace = false
+plugins = { "tools-repo-write" = false }
+"#,
+        ));
+    })
+    .await;
+    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
+    for _ in 0..200 {
+        if !admin.stopped().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(admin.stopped(), [PluginId::new("tools-repo-write")]);
+    let state = web.json(web.get("/api/modes")).await;
+    assert_eq!(state["active"], "writing", "{state}");
+    assert_eq!(state["modes"][1]["workspace"], false, "{state}");
+    assert_eq!(state["modes"].as_array().unwrap().len(), 2, "{state}");
+}
+
 /// The kind and configuration of `kernel`'s plugin `id`, through `admin`.
 fn instance(kernel: &Kernel, id: &str) -> Option<(String, Value)> {
     let admin = kernel.handle().get(rah_api::admin::ADMIN)?;
@@ -1284,6 +1419,9 @@ async fn preferences_are_kept_bounded_and_survive_a_restart() {
             "folders": { "c:/work/0": false, "": true },
             "recent_workspaces": recent,
             "side": { "open": true, "view": "plugins", "width": 480, "tree_ratio": 0.4 },
+            "layout": { "sessions_width": 300, "view_ratio": 0.6 },
+            "wrap_files": true,
+            "theme": "midnight",
         })))
         .await;
     assert_eq!(status, 200, "{saved}");
@@ -1295,6 +1433,12 @@ async fn preferences_are_kept_bounded_and_survive_a_restart() {
     for body in [
         json!({ "colour": "red" }),
         json!({ "side": { "view": "elsewhere" } }),
+        json!({ "theme": "Dark; drop" }),
+        json!({ "theme": "" }),
+        json!({ "wrap_files": "yes" }),
+        json!({ "layout": { "sessions_width": -1 } }),
+        json!({ "layout": { "sessions_width": 1e9 } }),
+        json!({ "layout": (0..33).map(|n| (n.to_string(), json!(1))).collect::<serde_json::Map<_, _>>() }),
         json!({ "folders": (0..1001).map(|n| (n.to_string(), json!(true))).collect::<serde_json::Map<_, _>>() }),
     ] {
         let (status, refused) = web.status(put(body)).await;
@@ -1340,6 +1484,13 @@ config = { bind = "127.0.0.1:0" }
     assert_eq!(stored["folders"], json!({ "c:/work/0": false, "": true }));
     assert_eq!(stored["recent_workspaces"][0], "C:/work/0");
     assert_eq!(stored["side"]["view"], "plugins");
+    assert_eq!(
+        stored["layout"],
+        json!({ "sessions_width": 300.0, "view_ratio": 0.6 })
+    );
+    assert_eq!(stored["wrap_files"], true, "{stored}");
+    assert!(stored.get("wrap_activity").is_none(), "{stored}");
+    assert_eq!(stored["theme"], "midnight", "{stored}");
     restarted.shutdown().await.unwrap();
 }
 

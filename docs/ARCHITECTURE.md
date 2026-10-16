@@ -137,7 +137,11 @@ Implemented:
   `web.fetch` limited to public addresses); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API
   with an embedded Web UI (`rah --web`), which answers `tool.approval` in the
-  browser.
+  browser and owns the modes (daily work, coding, configured ones) that
+  switch plugins through `admin` and add instructions on
+  `model.before_request`. `rah-desktop` is not a plugin: it boots the same
+  distribution and shows that Web UI in a native window, so every behavior
+  is defined once (ADR 0046).
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

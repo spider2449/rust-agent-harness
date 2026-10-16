@@ -1,0 +1,18 @@
+[package]
+name = "rah-desktop"
+version.workspace = true
+edition.workspace = true
+description = "RAH in a native window: the `rah` distribution with the Web UI of frontend-web in a WebView"
+
+[[bin]]
+name = "rah-desktop"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rah-api = { path = "../rah-api" }
+rah-cli = { path = "../rah-cli" }
+serde_json.workspace = true
+tao = "0.37"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+wry = "0.57"

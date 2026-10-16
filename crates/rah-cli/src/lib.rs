@@ -6,7 +6,11 @@
 mod admin;
 mod data;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use admin::{BuildError, construct};
 pub use admin::{DISTRIBUTION_PLUGIN, DistributionPlugin, Registry};
@@ -341,6 +345,62 @@ impl Distribution {
         }
         matched
     }
+
+    /// Points every workspace plugin ([`WORKSPACE_PLUGINS`]) at `root`.
+    /// Returns whether any plugin matched.
+    pub fn set_root(&mut self, root: &Path) -> bool {
+        let root = Value::String(root.display().to_string());
+        let mut matched = false;
+        for kind in WORKSPACE_PLUGINS {
+            matched |= self.set_config(kind, "root", root.clone());
+        }
+        matched
+    }
+
+    /// Runs `frontend-web` instead of `frontend-cli`. Returns whether a
+    /// `frontend-web` is now in the distribution.
+    pub fn use_web_frontend(&mut self) -> bool {
+        self.replace("frontend-cli", "frontend-web")
+            || self.plugin.iter().any(|spec| spec.kind == "frontend-web")
+    }
+}
+
+/// The user's own distribution file in the data directory.
+pub const USER_CONFIG: &str = "rah.toml";
+
+/// Reads a distribution file.
+pub fn read_distribution(path: &Path) -> Result<Distribution, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
+    Distribution::parse(&text).map_err(|error| format!("`{}`: {error}", path.display()))
+}
+
+/// The distribution to run, with `data_home` set to `home`: the file
+/// `config` when given, else the built-in `preset`, else [`USER_CONFIG`] in
+/// `home` when it exists, else the `default` preset. Also returns the user's
+/// file when that was the one read.
+pub fn select_distribution(
+    config: Option<&Path>,
+    preset: Option<&str>,
+    home: &Path,
+) -> Result<(Distribution, Option<PathBuf>), String> {
+    let user_config = home.join(USER_CONFIG);
+    let (mut distribution, used) = match (config, preset) {
+        (Some(path), _) => (read_distribution(path)?, None),
+        (None, Some(preset)) => (
+            Distribution::preset(preset).map_err(|error| error.to_string())?,
+            None,
+        ),
+        (None, None) if user_config.is_file() => {
+            (read_distribution(&user_config)?, Some(user_config))
+        }
+        (None, None) => (
+            Distribution::preset("default").map_err(|error| error.to_string())?,
+            None,
+        ),
+    };
+    distribution.data_home = Some(home.to_path_buf());
+    Ok((distribution, used))
 }
 
 /// The distribution file of a built-in preset, as `rah.toml` text.

@@ -19,7 +19,8 @@ plugin, and tools come from built-in, repository, shell, MCP and
 out-of-process plugins. The architecture decision is
 [ADR 0036](docs/adr/0036-plugin-kernel-everything-is-a-plugin.md). The legacy
 Desktop and its crates were removed in P5; the Web UI (`rah --web`) replaces
-it. See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
+it, and `rah-desktop` shows that same Web UI in a native window
+([ADR 0046](docs/adr/0046-desktop-shell-and-shared-modes.md)). See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).
 
 ## Quick start
 
@@ -279,6 +280,51 @@ cargo run -p rah-cli -- --preset dev --web            # http://127.0.0.1:8765
 cargo run -p rah-cli -- --preset dev --web --bind 127.0.0.1:0
 ```
 
+`rah-desktop` runs the same Web UI in a native window instead of a browser
+(WebView2 on Windows). It takes `--preset`, `--config`, `--data-dir`,
+`--root` and `--mode` like `rah`, picks a free port itself and stops when the
+window closes. Without `--preset` and `--config` it runs your `rah.toml` in
+the data directory, as `rah` does; a preset ignores that file, so tools your
+`rah.toml` allows (such as `shell.exec`) are denied under it:
+
+```powershell
+cargo run -p rah-desktop -- --mode coding
+cargo run -p rah-desktop -- --preset dev --mode coding   # mock model, ignores rah.toml
+```
+
+**Modes** (the picker in the header, `--mode` at start) switch how RAH works,
+for every browser tab and desktop window at once: **Daily work** stops the
+repository write tools, turns web search on (the policy asks before each
+call), hides the workspace panel and asks the model for direct, sourced
+answers; **Coding** runs the repository write tools and shows the workspace.
+The last mode is entered again at the next start. Define your own with the
+`modes` key of `frontend-web` (it replaces the built-in ones):
+
+```toml
+[[plugin]]
+use = "frontend-web"
+
+[plugin.config]
+mode = "coding"
+
+[[plugin.config.modes]]
+id = "coding"
+label = "Coding"
+instructions = "Keep changes small and say which files you changed."
+plugins = { "tools-repo-write" = true }
+
+[[plugin.config.modes]]
+id = "writing"
+label = "Writing"
+workspace = false
+plugins = { "tools-repo-write" = false }
+```
+
+`plugins` runs (`true`) or stops (`false`) plugin kinds; policy and frontend
+plugins cannot be listed. `instructions` is added to every model request
+after the system prompt. `workspace = false` hides the files, Git state and
+folder in the UI.
+
 `rah` prints the address with a per-start access token; open exactly that
 URL. The UI lists sessions grouped by the folder they worked in (the current
 workspace first and open, the others folded, ten per folder until "Show
@@ -305,7 +351,11 @@ highlighting for common languages), shows the branch and the Git changes
 (by folder) under the tree, with a splitter between the two, opens a
 change's diff read-only, and keeps an
 activity log of the open session's turns and tool calls; it can be resized
-or hidden. Its **Plugins** tab remains for raw plugin configuration: it
+or hidden. Every divider (the session list, the file tree, the file view and
+activity log) can be dragged, and **Wrap** in the file tabs and the activity
+header wraps long lines; **Settings → Display** also picks a theme (follow the
+system, Light, Dark, Sepia, Midnight, High contrast). All of these are kept in
+the preferences, so the browser and `rah-desktop` show the same. Its **Plugins** tab remains for raw plugin configuration: it
 adds, configures, stops, starts, restarts, replaces and removes plugins while `rah` runs:
 replacing `model-mock` with `model-llamacpp`, or one loop with another, takes
 effect on the next turn without a restart. These changes are remembered and
