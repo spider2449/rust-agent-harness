@@ -24,7 +24,9 @@
 //!   file, for the read-only file browser. Paths are relative to the
 //!   workspace root and cannot leave it. `GET /api/git/changes` and
 //!   `/api/git/diff?path=` are read-only Git views of the workspace (one
-//!   `git` run each, through the `sandbox` service).
+//!   `git` run each, through the `sandbox` service). `GET /api/git/branches`
+//!   lists the branches and `POST /api/git/checkout {branch}` switches to one
+//!   of them (`git switch`; Git refuses when local changes are in the way).
 //! - With an `admin` service: `GET|PUT /api/web-search {enabled}` turns
 //!   web search on (the policy asks before `web.*`, then `tools-web-search`
 //!   is mounted) or off, and remembers the choice in `storage` for the next
@@ -251,6 +253,8 @@ fn router(shared: AppState) -> Router {
         .route("/files/content", get(files::content))
         .route("/git/changes", get(git::changes))
         .route("/git/diff", get(git::diff))
+        .route("/git/branches", get(git::branches))
+        .route("/git/checkout", post(git::checkout))
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/web-search", get(web_search::get).put(web_search::set))

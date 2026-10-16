@@ -955,7 +955,7 @@ async fn workspace_files_are_listed_and_read_inside_the_workspace_only() {
 }
 
 #[tokio::test]
-async fn git_changes_and_diffs_are_shown_read_only() {
+async fn git_changes_and_diffs_are_shown_and_branches_switched() {
     let web = start("web-git", |_| {}).await;
     let workspace = web.dir.workspace();
     let git = |args: &[&str]| {
@@ -1020,6 +1020,36 @@ async fn git_changes_and_diffs_are_shown_read_only() {
         let (status, body) = web.status(web.get(refused)).await;
         assert_eq!(status, 400, "{refused}: {body}");
     }
+
+    // Branches are listed, and only a listed one can be switched to.
+    git(&["branch", "side"]);
+    let branches = web.json(web.get("/api/git/branches")).await;
+    assert_eq!(branches["current"], "trunk", "{branches}");
+    let names: Vec<_> = branches["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| branch["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["side", "trunk"], "{branches}");
+    for refused in ["--detach", "HEAD~1", "missing"] {
+        let (status, body) = web
+            .status(
+                web.post("/api/git/checkout")
+                    .json(&serde_json::json!({ "branch": refused })),
+            )
+            .await;
+        assert_eq!(status, 400, "{refused}: {body}");
+    }
+    let switched = web
+        .json(
+            web.post("/api/git/checkout")
+                .json(&serde_json::json!({ "branch": "side" })),
+        )
+        .await;
+    assert_eq!(switched["branch"], "side", "{switched}");
+    let changes = web.json(web.get("/api/git/changes")).await;
+    assert_eq!(changes["branch"], "side", "{changes}");
 }
 
 /// Waits until `kind`'s default instance is active in `kernel`.

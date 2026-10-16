@@ -78,7 +78,7 @@
           <div class="git-section" aria-label="Source control">
             <div class="pane-head">
               <span class="pane-title">Source control</span>
-              <span id="git-branch" class="git-branch"></span>
+              <button id="git-branch" type="button" class="git-branch" aria-haspopup="listbox" title="Switch branch"></button>
               <button id="git-refresh" type="button" class="ghost icon" title="Reload the Git state" aria-label="Reload the Git state">⟳</button>
             </div>
             <div class="git-body">
@@ -142,7 +142,7 @@
   </main>
   <footer id="status" class="status" aria-label="Status">
     <button id="status-root" type="button" class="item path link" title="Change the workspace folder"></button>
-    <span id="status-git" class="item"></span>
+    <button id="status-git" type="button" class="item link" aria-haspopup="listbox"></button>
     <span class="spacer"></span>
     <span id="status-model" class="item"></span>
     <span id="status-loop" class="item"></span>
@@ -150,6 +150,7 @@
     <span id="status-policy" class="item"></span>
     <span id="status-usage" class="item" hidden></span>
   </footer>
+  <div id="branch-menu" class="menu" role="listbox" aria-label="Switch branch" hidden></div>
   <dialog id="workspace-dialog" class="dialog" aria-labelledby="workspace-title">
     <h2 id="workspace-title">Workspace folder</h2>
     <p class="hint">File, Git and shell tools work inside this folder. Sessions are kept where they are.</p>

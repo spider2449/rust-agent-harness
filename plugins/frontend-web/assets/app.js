@@ -1539,6 +1539,66 @@ function renderGit() {
   changes.replaceChildren(...rows);
 }
 
+// The branch menu, opened from the status line or the source control header.
+// Switching runs `git switch` in the workspace, then everything that shows
+// the work tree is read again: status line, file tree, open tabs, changes.
+function closeBranchMenu() {
+  $("branch-menu").hidden = true;
+}
+
+async function openBranchMenu(anchor) {
+  const menu = $("branch-menu");
+  if (!menu.hidden && menu.anchor === anchor) {
+    closeBranchMenu();
+    return;
+  }
+  menu.anchor = anchor;
+  menu.replaceChildren(el("div", "note", "Loading…"));
+  menu.hidden = false;
+  const box = anchor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8));
+  menu.style.left = `${left}px`;
+  // Below the control when it sits in the top half, above it otherwise.
+  const above = box.top > window.innerHeight / 2;
+  menu.style.top = above ? "" : `${box.bottom + 4}px`;
+  menu.style.bottom = above ? `${window.innerHeight - box.top + 4}px` : "";
+  let listing;
+  try {
+    listing = await api("/git/branches");
+  } catch (error) {
+    menu.replaceChildren(el("div", "note", error.message));
+    return;
+  }
+  const rows = listing.branches.map((branch) => {
+    const button = el("button");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    const current = branch.name === listing.current;
+    button.classList.toggle("current", current);
+    button.setAttribute("aria-selected", String(current));
+    button.title = branch.remote ? `Create a local branch tracking ${branch.name}` : `Switch to ${branch.name}`;
+    button.append(el("span", "menu-name", branch.name), el("span", "menu-tag", current ? "✓" : branch.remote ? "remote" : ""));
+    button.addEventListener("click", () => switchBranch(branch.name, current).catch(report));
+    return button;
+  });
+  if (!rows.length) rows.push(el("div", "note", "No branches"));
+  menu.replaceChildren(...rows);
+  (menu.querySelector(".current") || rows[0])?.focus?.();
+}
+
+async function switchBranch(name, current) {
+  closeBranchMenu();
+  if (current) return;
+  if (state.running) {
+    showNotice("A turn is running: switching branch now would change files under it. Cancel it or wait.");
+    return;
+  }
+  await api("/git/checkout", { method: "POST", body: JSON.stringify({ branch: name }) });
+  showInfo(`Switched to branch ${name}.`);
+  refreshStatus();
+  await reloadFiles();
+}
+
 // The status line's Git summary changed (every 30 seconds it is read): the
 // list is probably stale.
 function gitSignature(state) {
@@ -2013,7 +2073,7 @@ function statusItem(id, text, title, className) {
   const node = $(id);
   node.textContent = text;
   node.title = title || text;
-  node.className = `item${className ? ` ${className}` : ""}${id === "status-root" ? " path link" : ""}`;
+  node.className = `item${className ? ` ${className}` : ""}${id === "status-root" ? " path link" : id === "status-git" ? " link" : ""}`;
   node.hidden = !text;
 }
 
@@ -2219,6 +2279,18 @@ async function start() {
   applyTheme();
   $("session-search").addEventListener("input", renderSessions);
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
+  for (const id of ["status-git", "git-branch"]) {
+    $(id).addEventListener("click", (event) => {
+      event.stopPropagation();
+      openBranchMenu($(id)).catch(report);
+    });
+  }
+  document.addEventListener("click", (event) => {
+    if (!$("branch-menu").contains(event.target)) closeBranchMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("branch-menu").hidden) closeBranchMenu();
+  });
   $("ws-go").addEventListener("click", () => browse($("ws-path").value.trim()));
   $("ws-path").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {

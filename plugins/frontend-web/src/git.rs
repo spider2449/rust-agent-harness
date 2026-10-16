@@ -1,5 +1,5 @@
-//! Read-only Git views of the workspace for the file panel: the changed
-//! files and one file's diff.
+//! Git views of the workspace for the file panel: the changed files and one
+//! file's diff (read-only), and the branches with switching to one.
 //!
 //! Every view is one `git` run through the `sandbox` service in the workspace
 //! root: a fixed argument vector, never a shell, with `--no-optional-locks`
@@ -103,6 +103,109 @@ pub(crate) async fn changes(State(shared): State<AppState>) -> ApiResult {
     })))
 }
 
+/// `{current, branches: [{name, remote}]}`: the local branches, then the
+/// remote ones that have no local branch of the same name.
+pub(crate) async fn branches(State(shared): State<AppState>) -> ApiResult {
+    let (current, branches) = list_branches(&shared).await?;
+    Ok(Json(json!({
+        "current": current,
+        "branches": branches.iter().map(|branch| json!({
+            "name": branch.name,
+            "remote": branch.remote,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Checkout {
+    branch: String,
+}
+
+/// `POST /api/git/checkout {branch}`: switches to a branch that
+/// `GET /api/git/branches` lists (never an arbitrary revision or option). A
+/// remote-only branch gets a local tracking branch. Git refuses when local
+/// changes would be overwritten, and that reason is returned as the error.
+pub(crate) async fn checkout(
+    State(shared): State<AppState>,
+    Json(request): Json<Checkout>,
+) -> ApiResult {
+    let (_, branches) = list_branches(&shared).await?;
+    let Some(branch) = branches.iter().find(|branch| branch.name == request.branch) else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("`{}` is not a branch of this repository", request.branch),
+        ));
+    };
+    let args: &[&str] = if branch.remote {
+        &["switch", "--track", &branch.name]
+    } else {
+        &["switch", &branch.name]
+    };
+    git(&shared, args, 16 * 1024).await?;
+    Ok(Json(json!({ "branch": branch.name })))
+}
+
+struct Branch {
+    name: String,
+    remote: bool,
+}
+
+/// The current branch (none when detached) and every branch to switch to.
+async fn list_branches(shared: &AppState) -> Result<(Option<String>, Vec<Branch>), ApiError> {
+    let output = git(
+        shared,
+        &[
+            "for-each-ref",
+            "--format=%(HEAD)%09%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        1024 * 1024,
+    )
+    .await?;
+    Ok(parse_branches(&output.stdout))
+}
+
+/// `for-each-ref` lines of `HEAD-mark TAB refname` as the current branch and
+/// the branches: local ones first, then remote ones without a local twin.
+fn parse_branches(text: &str) -> (Option<String>, Vec<Branch>) {
+    let (mut current, mut local, mut remote) = (None, Vec::new(), Vec::new());
+    for line in text.lines() {
+        let Some((mark, refname)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(name) = refname.strip_prefix("refs/heads/") {
+            if mark == "*" {
+                current = Some(name.to_owned());
+            }
+            local.push(name.to_owned());
+        } else if let Some(name) = refname.strip_prefix("refs/remotes/") {
+            // `origin/HEAD` is a pointer, not a branch.
+            if !name.ends_with("/HEAD") && name.contains('/') {
+                remote.push(name.to_owned());
+            }
+        }
+    }
+    local.sort();
+    remote.sort();
+    let remote = remote.into_iter().filter(|name| {
+        let short = name
+            .split_once('/')
+            .map_or(name.as_str(), |(_, short)| short);
+        !local.iter().any(|existing| existing == short)
+    });
+    let branches = local
+        .iter()
+        .map(|name| Branch {
+            name: name.clone(),
+            remote: false,
+        })
+        .chain(remote.map(|name| Branch { name, remote: true }))
+        .collect();
+    (current, branches)
+}
+
 #[derive(Deserialize)]
 pub(crate) struct DiffQuery {
     path: String,
@@ -190,6 +293,27 @@ fn parse_status(text: &str) -> (Option<String>, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branches_list_local_then_remote_only() {
+        let text = " \trefs/heads/dev\n*\trefs/heads/master\n\
+                    \trefs/remotes/origin/HEAD\n \trefs/remotes/origin/master\n\
+                    \trefs/remotes/origin/feature/x\n";
+        let (current, branches) = parse_branches(text);
+        assert_eq!(current.as_deref(), Some("master"));
+        let brief: Vec<_> = branches
+            .iter()
+            .map(|b| (b.name.as_str(), b.remote))
+            .collect();
+        assert_eq!(
+            brief,
+            [
+                ("dev", false),
+                ("master", false),
+                ("origin/feature/x", true)
+            ]
+        );
+    }
 
     #[test]
     fn status_lists_each_change_with_one_letter() {
