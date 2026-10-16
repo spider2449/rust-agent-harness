@@ -335,11 +335,14 @@ impl Tool for Remember {
             description: match self.0.location {
                 Location::File(_) => {
                     "Saves a short note that will be shown at the start of later requests, \
-                     also in new sessions."
+                     also in new sessions. Keep it to one or two sentences (at most 1000 \
+                     characters); longer notes are rejected, so save one fact per note."
                 }
                 Location::PerWorkspace { .. } => {
                     "Saves a short note about this project that will be shown at the start of \
-                     later requests in this workspace, also in new sessions."
+                     later requests in this workspace, also in new sessions. Keep it to one or \
+                     two sentences (at most 1000 characters); longer notes are rejected, so \
+                     save one fact per note."
                 }
             }
             .into(),
