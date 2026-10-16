@@ -188,9 +188,10 @@ fn run(args: Args) -> Result<(), String> {
     let view =
         webview(&window, builder).map_err(|error| format!("cannot create the WebView: {error}"))?;
 
+    // The WebView lives as long as the event loop, and goes before the window
+    // it is in.
+    let mut shown = Some((view, window));
     event_loop.run(move |event, _, control_flow| {
-        // The WebView lives as long as the event loop.
-        let _view = &view;
         *control_flow = ControlFlow::Wait;
         let code = match event {
             Event::WindowEvent {
@@ -200,8 +201,14 @@ fn run(args: Args) -> Result<(), String> {
             Event::UserEvent(UserEvent::Exit(code)) => code,
             _ => return,
         };
-        // The window goes first, so closing feels immediate.
-        window.set_visible(false);
+        // The window goes first, so closing feels immediate. Both are
+        // released before the process exits: WebView2 reports "Failed to
+        // unregister class Chrome_WidgetWin_0" when a window outlives it.
+        if let Some((view, window)) = shown.take() {
+            window.set_visible(false);
+            drop(view);
+            drop(window);
+        }
         let _ = runtime.block_on(kernel.shutdown());
         std::process::exit(code);
     })
