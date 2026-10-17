@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub(crate) struct Root {
     pub path: PathBuf,
     pub max_file_bytes: usize,
+    pub locks: crate::locks::Locks,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +117,7 @@ impl Root {
             )));
         }
         let target = self.path.join(path);
+        let _writing = self.locks.files(std::slice::from_ref(&target)).await;
         if tokio::fs::symlink_metadata(&target).await.is_ok() {
             return Err(invalid(format!("`{path}` already exists")));
         }
@@ -156,13 +158,30 @@ impl Root {
 
     /// Checks every edit, then writes every changed file. Returns the paths.
     pub async fn edit(&self, edits: Vec<Edit>) -> Result<Vec<String>, ToolError> {
+        // Resolve every file first, then hold their locks while they are read,
+        // edited and written, so a concurrent edit is not overwritten.
+        let mut resolved_paths: Vec<(String, PathBuf)> = Vec::new();
+        for edit in &edits {
+            if !resolved_paths.iter().any(|(path, _)| *path == edit.path) {
+                resolved_paths.push((edit.path.clone(), self.existing_file(&edit.path).await?));
+            }
+        }
+        let locked: Vec<PathBuf> = resolved_paths
+            .iter()
+            .map(|(_, resolved)| resolved.clone())
+            .collect();
+        let _writing = self.locks.files(&locked).await;
         // path -> (resolved, new content), in first-seen order.
         let mut files: Vec<(String, PathBuf, String)> = Vec::new();
         for edit in edits {
             let index = match files.iter().position(|(path, ..)| *path == edit.path) {
                 Some(index) => index,
                 None => {
-                    let resolved = self.existing_file(&edit.path).await?;
+                    let resolved = resolved_paths
+                        .iter()
+                        .find(|(path, _)| *path == edit.path)
+                        .map(|(_, resolved)| resolved.clone())
+                        .ok_or_else(|| invalid("an edit names a file that was not resolved"))?;
                     let bytes = tokio::fs::read(&resolved)
                         .await
                         .map_err(|error| invalid(format!("`{}`: {error}", edit.path)))?;

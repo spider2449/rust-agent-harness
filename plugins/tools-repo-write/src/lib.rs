@@ -15,11 +15,20 @@
 //! after the first write is reported as an execution error, which the
 //! `ToolInvoker` records as `uncertain`.
 //!
+//! Writes of one plugin instance are serialized: each file has a lock (taken in
+//! sorted order for a multi-file edit, so two edits cannot wait for each
+//! other), and `repo.patch` waits for all of them, so edits that run at once
+//! (several sessions, background jobs, subagents) do not overwrite each
+//! other. The locks do not stop an editor, a build or another process from
+//! writing the same file. A UTF-8 byte order mark at the start of a file is
+//! kept as it is when the file is edited.
+//!
 //! Configuration: `{ "root": ".", "cwd": "<sandbox-relative repository
 //! directory>", "git": "git", "max_file_bytes": 1048576, "timeout_ms": 30000 }`.
 //! `repo.patch` refuses to run unless Git's top level for `cwd` is `root`.
 
 mod fsops;
+mod locks;
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
@@ -93,6 +102,7 @@ pub async fn write_tools(
     let root = Arc::new(Root {
         path: root,
         max_file_bytes: config.max_file_bytes.unwrap_or(1024 * 1024).max(1),
+        locks: Default::default(),
     });
     let git = Arc::new(Git {
         sandbox,
@@ -298,6 +308,8 @@ impl Tool for Patch {
             )));
         }
         let git = &self.0;
+        // `git apply` may touch any file, so no other write runs meanwhile.
+        let _exclusive = git.root.locks.all().await;
         let (code, top, stderr) = git
             .run(vec!["rev-parse".into(), "--show-toplevel".into()], &cx)
             .await?;

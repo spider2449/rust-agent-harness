@@ -242,3 +242,118 @@ fn definitions_declare_write() {
         assert_eq!(tool.definition().permission, PermissionLevel::Write);
     }
 }
+
+#[tokio::test]
+async fn concurrent_edits_of_one_file_are_all_applied() {
+    let repo = Repo::new("concurrent");
+    let lines: Vec<String> = (0..24).map(|n| format!("line {n}")).collect();
+    std::fs::write(repo.0.join("many.txt"), lines.join("\n") + "\n").unwrap();
+    let tools = repo.tools(json!({})).await;
+    let edit = tools["repo.edit-files"].clone();
+    let mut tasks = Vec::new();
+    for n in 0..24 {
+        let edit = edit.clone();
+        tasks.push(tokio::spawn(async move {
+            edit.call(
+                json!({ "edits": [
+                    { "path": "many.txt", "old": format!("line {n}\n"), "new": format!("edited {n}\n") }
+                ] }),
+                cx(),
+            )
+            .await
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    let expected: Vec<String> = (0..24).map(|n| format!("edited {n}")).collect();
+    assert_eq!(repo.read("many.txt"), expected.join("\n") + "\n");
+}
+
+#[tokio::test]
+async fn edits_that_name_the_same_files_in_opposite_orders_do_not_wait_for_each_other() {
+    let repo = Repo::new("order");
+    std::fs::write(repo.0.join("a.txt"), "a0\n<end>\n").unwrap();
+    std::fs::write(repo.0.join("b.txt"), "b0\n<end>\n").unwrap();
+    let tools = repo.tools(json!({})).await;
+    let edit = tools["repo.edit-files"].clone();
+    let both = |first: &'static str, second: &'static str, tag: &'static str| {
+        let edit = edit.clone();
+        tokio::spawn(async move {
+            for round in 0..20 {
+                let line = format!("{tag}{round}");
+                let insert = format!("{line}\n<end>\n");
+                edit.call(
+                    json!({ "edits": [
+                        { "path": first, "old": "<end>\n", "new": insert },
+                        { "path": second, "old": "<end>\n", "new": insert },
+                    ] }),
+                    cx(),
+                )
+                .await
+                .unwrap();
+            }
+        })
+    };
+    let (one, two) = (both("a.txt", "b.txt", "x"), both("b.txt", "a.txt", "y"));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        one.await.unwrap();
+        two.await.unwrap();
+    })
+    .await
+    .expect("the edits deadlocked");
+    // Every edit landed: 40 inserted lines in each file, plus its own two.
+    assert_eq!(repo.read("a.txt").lines().count(), 2 + 40);
+    assert_eq!(repo.read("b.txt").lines().count(), 2 + 40);
+}
+
+#[tokio::test]
+async fn a_byte_order_mark_is_kept_exactly_once() {
+    let repo = Repo::new("bom");
+    std::fs::write(repo.0.join("bom.txt"), "\u{feff}first\nsecond\n").unwrap();
+    let tools = repo.tools(json!({})).await;
+    tools["repo.edit-files"]
+        .call(
+            json!({ "edits": [
+                { "path": "bom.txt", "old": "first", "new": "changed" },
+                { "path": "bom.txt", "old": "second", "new": "other" },
+            ] }),
+            cx(),
+        )
+        .await
+        .unwrap();
+    let bytes = std::fs::read(repo.0.join("bom.txt")).unwrap();
+    assert_eq!(bytes, "\u{feff}changed\nother\n".as_bytes());
+    assert_eq!(
+        bytes
+            .windows(3)
+            .filter(|w| *w == [0xEF, 0xBB, 0xBF])
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_patch_waits_for_running_edits() {
+    let repo = Repo::new("patch-wait");
+    let tools = repo.tools(json!({})).await;
+    let edit = tools["repo.edit-files"].clone();
+    let patch = tools["repo.patch"].clone();
+    let diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-fn alpha() {}\n+fn alpha() { 0 }\n fn beta() {}\n";
+    let (edited, patched) = tokio::join!(
+        edit.call(
+            json!({ "edits": [{ "path": "src/lib.rs", "old": "fn beta() {}", "new": "fn beta() { 1 }" }] }),
+            cx(),
+        ),
+        patch.call(json!({ "patch": diff }), cx()),
+    );
+    // Either order is valid; neither may corrupt the file or fail half way.
+    let text = repo.read("src/lib.rs");
+    if patched.is_ok() {
+        assert!(text.contains("fn alpha() { 0 }"), "{text}");
+    }
+    if edited.is_ok() {
+        assert!(text.contains("fn beta() { 1 }"), "{text}");
+    }
+    assert!(edited.is_ok() || patched.is_ok());
+}
