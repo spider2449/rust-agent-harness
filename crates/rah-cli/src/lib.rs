@@ -26,6 +26,7 @@ pub use data::{DATA_HOME_ENV, default_data_home, resolve_data_paths};
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_context_compact::CompactPlugin;
 use rah_plugin_context_default::ContextPlugin;
+use rah_plugin_format_on_write::FormatOnWritePlugin;
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_loop_plan::PlanLoopPlugin;
@@ -59,9 +60,12 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 30] = [
+    let entries: [(&'static str, Constructor); 31] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
+        ("format-on-write", |id| {
+            Arc::new(FormatOnWritePlugin::new(id))
+        }),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
         ("loop-plan", |id| Arc::new(PlanLoopPlugin::new(id))),
@@ -116,6 +120,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
     let example = match kind {
         "context-compact" => CompactPlugin::CONFIG_EXAMPLE,
         "context-default" => ContextPlugin::CONFIG_EXAMPLE,
+        "format-on-write" => FormatOnWritePlugin::CONFIG_EXAMPLE,
         "frontend-cli" => CliFrontendPlugin::CONFIG_EXAMPLE,
         "frontend-web" => WebFrontendPlugin::CONFIG_EXAMPLE,
         "loop-plan" => PlanLoopPlugin::CONFIG_EXAMPLE,
@@ -457,12 +462,13 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
 /// configuration: what `rah --root` sets at start and what the `admin`
 /// service's `set_workspace` changes at runtime. The sandboxes come first, so
 /// the tools that depend on them restart with the new root.
-pub const WORKSPACE_PLUGINS: [&str; 5] = [
+pub const WORKSPACE_PLUGINS: [&str; 6] = [
     "sandbox-process",
     "sandbox-os",
     "tools-builtin",
     "tools-repo-write",
     "lsp-diagnostics",
+    "format-on-write",
 ];
 
 /// The `use` name of out-of-process plugins (protocol v3); their `config`

@@ -55,7 +55,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah --list-features` shows them.
-pub const FEATURES: [Feature; 6] = [
+pub const FEATURES: [Feature; 7] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -81,6 +81,19 @@ pub const FEATURES: [Feature; 6] = [
         argument_key: None,
         tools: &[("web.*", "read")],
         decisions: &[("web.*", "ask")],
+    },
+    Feature {
+        name: "format",
+        summary: "run the project's formatter on files the write tools changed",
+        argument: None,
+        needs_any: &["sandbox-process", "sandbox-os"],
+        mount: Mount::Plugin {
+            kind: "format-on-write",
+            place: Place::AfterSandbox,
+        },
+        argument_key: None,
+        tools: &[],
+        decisions: &[],
     },
     Feature {
         name: "lsp",
@@ -441,6 +454,17 @@ use = "sandbox-process"
         assert_eq!(kinds[sandbox + 1], "lsp-diagnostics");
         let mut bare = Distribution::parse("[[plugin]]\nuse = \"loop-react\"\n").unwrap();
         assert!(bare.enable("lsp").unwrap_err().contains("sandbox-process"));
+    }
+
+    #[test]
+    fn format_mounts_after_the_sandbox_before_the_loop() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        distribution.enable("format").unwrap();
+        distribution.enable("lsp").unwrap();
+        let kinds = kinds(&distribution);
+        let sandbox = kinds.iter().position(|k| *k == "sandbox-process").unwrap();
+        assert!(kinds[sandbox + 1..sandbox + 3].contains(&"format-on-write"));
+        assert!(kinds[sandbox + 1..sandbox + 3].contains(&"lsp-diagnostics"));
     }
 
     #[test]

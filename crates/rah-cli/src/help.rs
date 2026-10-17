@@ -76,6 +76,22 @@ pub fn fallback(kind: &str) -> Help {
             ),
             ("modes", "Your own modes; replaces the built-in ones."),
         ],
+        "format-on-write" => &[
+            (
+                "root",
+                "Workspace directory: only files inside it are formatted.",
+            ),
+            (
+                "defaults",
+                "Also try rustfmt, gofmt, ruff, black and clang-format where the project uses them (true).",
+            ),
+            (
+                "formatters",
+                "Formatters by name: command (with `$FILE`), extensions, requires, env, disabled. A default's name overrides it; {\"disabled\": true} removes it.",
+            ),
+            ("timeout_ms", "Time limit of one formatter run (10000)."),
+            ("max_files", "Most files formatted per tool call (5)."),
+        ],
         "loop-plan" => &[
             ("max_steps", "Most plan steps run (8)."),
             (
