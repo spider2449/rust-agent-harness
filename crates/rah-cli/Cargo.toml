@@ -19,6 +19,7 @@ rah-plugin-frontend-cli = { path = "../../plugins/frontend-cli" }
 rah-plugin-frontend-web = { path = "../../plugins/frontend-web" }
 rah-plugin-loop-plan = { path = "../../plugins/loop-plan" }
 rah-plugin-loop-react = { path = "../../plugins/loop-react" }
+rah-plugin-lsp-diagnostics = { path = "../../plugins/lsp-diagnostics" }
 rah-plugin-model-anthropic = { path = "../../plugins/model-anthropic" }
 rah-plugin-model-chat-completions = { path = "../../plugins/model-chat-completions" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }

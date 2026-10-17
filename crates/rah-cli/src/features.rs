@@ -55,7 +55,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah --list-features` shows them.
-pub const FEATURES: [Feature; 5] = [
+pub const FEATURES: [Feature; 6] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -81,6 +81,19 @@ pub const FEATURES: [Feature; 5] = [
         argument_key: None,
         tools: &[("web.*", "read")],
         decisions: &[("web.*", "ask")],
+    },
+    Feature {
+        name: "lsp",
+        summary: "append language server diagnostics to the output of file-writing tools",
+        argument: None,
+        needs_any: &["sandbox-process", "sandbox-os"],
+        mount: Mount::Plugin {
+            kind: "lsp-diagnostics",
+            place: Place::AfterSandbox,
+        },
+        argument_key: None,
+        tools: &[],
+        decisions: &[],
     },
     Feature {
         name: "compact",
@@ -417,6 +430,17 @@ use = "sandbox-process"
         let loop_at = kinds.iter().position(|k| *k == "loop-react").unwrap();
         assert!(kinds[..loop_at].contains(&"telemetry-log"));
         assert!(kinds[..loop_at].contains(&"context-compact"));
+    }
+
+    #[test]
+    fn lsp_mounts_after_the_sandbox_and_needs_one() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        distribution.enable("lsp").unwrap();
+        let kinds = kinds(&distribution);
+        let sandbox = kinds.iter().position(|k| *k == "sandbox-process").unwrap();
+        assert_eq!(kinds[sandbox + 1], "lsp-diagnostics");
+        let mut bare = Distribution::parse("[[plugin]]\nuse = \"loop-react\"\n").unwrap();
+        assert!(bare.enable("lsp").unwrap_err().contains("sandbox-process"));
     }
 
     #[test]

@@ -84,6 +84,41 @@ pub fn fallback(kind: &str) -> Help {
             ),
         ],
         "loop-react" => &[("max_rounds", "Most model requests per turn (32).")],
+        "lsp-diagnostics" => &[
+            (
+                "root",
+                "Workspace directory: servers start with it as their root and only files inside it are checked.",
+            ),
+            (
+                "defaults",
+                "Also try rust-analyzer, typescript-language-server, pyright-langserver, gopls and clangd when installed (true).",
+            ),
+            (
+                "servers",
+                "Language servers by name: command, extensions, env, initialization, disabled. A default's name overrides it; {\"disabled\": true} removes it.",
+            ),
+            (
+                "severity",
+                "Least severe diagnostic shown: error, warning, information or hint (error).",
+            ),
+            (
+                "wait_ms",
+                "How long to wait for a server to report on a file (4000).",
+            ),
+            (
+                "start_timeout_ms",
+                "Time limit for a server to start (20000).",
+            ),
+            ("max_files", "Most files checked per tool call (5)."),
+            (
+                "max_diagnostics",
+                "Most diagnostics shown per tool call (20).",
+            ),
+            (
+                "max_message_chars",
+                "Longest diagnostic message shown (300).",
+            ),
+        ],
         "model-anthropic" => &[
             ("model", "Anthropic model id."),
             (

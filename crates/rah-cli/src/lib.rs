@@ -30,6 +30,7 @@ use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
 use rah_plugin_loop_plan::PlanLoopPlugin;
 use rah_plugin_loop_react::ReactLoopPlugin;
+use rah_plugin_lsp_diagnostics::LspDiagnosticsPlugin;
 use rah_plugin_model_anthropic::AnthropicPlugin;
 use rah_plugin_model_chat_completions::ChatCompletionsPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
@@ -57,13 +58,16 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 28] = [
+    let entries: [(&'static str, Constructor); 29] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
         ("frontend-web", |id| Arc::new(WebFrontendPlugin::new(id))),
         ("loop-plan", |id| Arc::new(PlanLoopPlugin::new(id))),
         ("loop-react", |id| Arc::new(ReactLoopPlugin::new(id))),
+        ("lsp-diagnostics", |id| {
+            Arc::new(LspDiagnosticsPlugin::new(id))
+        }),
         ("model-anthropic", |id| Arc::new(AnthropicPlugin::new(id))),
         ("model-chat-completions", |id| {
             Arc::new(ChatCompletionsPlugin::new(id))
@@ -112,6 +116,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "frontend-web" => WebFrontendPlugin::CONFIG_EXAMPLE,
         "loop-plan" => PlanLoopPlugin::CONFIG_EXAMPLE,
         "loop-react" => ReactLoopPlugin::CONFIG_EXAMPLE,
+        "lsp-diagnostics" => LspDiagnosticsPlugin::CONFIG_EXAMPLE,
         "model-anthropic" => AnthropicPlugin::CONFIG_EXAMPLE,
         "model-chat-completions" => ChatCompletionsPlugin::CONFIG_EXAMPLE,
         "model-llamacpp" => LlamaCppPlugin::CONFIG_EXAMPLE,
@@ -444,11 +449,12 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
 /// configuration: what `rah --root` sets at start and what the `admin`
 /// service's `set_workspace` changes at runtime. The sandboxes come first, so
 /// the tools that depend on them restart with the new root.
-pub const WORKSPACE_PLUGINS: [&str; 4] = [
+pub const WORKSPACE_PLUGINS: [&str; 5] = [
     "sandbox-process",
     "sandbox-os",
     "tools-builtin",
     "tools-repo-write",
+    "lsp-diagnostics",
 ];
 
 /// The `use` name of out-of-process plugins (protocol v3); their `config`
