@@ -20,6 +20,25 @@ pub trait ModelProvider: Send + Sync {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError>;
+
+    /// A quick, side-effect free check that the model can be reached now,
+    /// for status displays. It must return promptly, send no conversation
+    /// and never spend tokens. Providers that cannot tell keep the default.
+    async fn health(&self, _cancel: CancellationToken) -> ModelHealth {
+        ModelHealth::Unknown
+    }
+}
+
+/// The result of [`ModelProvider::health`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelHealth {
+    /// The provider has no cheap way to check.
+    Unknown,
+    /// The server answered.
+    Reachable,
+    /// The server cannot serve requests now; the text says why and carries
+    /// no credentials.
+    Unavailable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

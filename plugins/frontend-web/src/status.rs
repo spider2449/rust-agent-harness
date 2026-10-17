@@ -5,14 +5,14 @@
 //! `--no-optional-locks` so it does not write the index). Model and loop are
 //! the providers the next turn will use.
 
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::{Json, extract::State};
 use rah_api::{
     CancellationToken, KernelHandle, PluginId,
     admin::ADMIN,
     agent_loop::LOOP,
-    model::MODEL,
+    model::{MODEL, ModelHealth, ModelProvider},
     sandbox::{OutputLimits, ProgramSpec, SANDBOX},
     tools::ToolInvoker,
 };
@@ -24,14 +24,35 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn status(State(shared): State<AppState>) -> ApiResult {
     let kernel = &shared.kernel;
+    let models = kernel.get_all(MODEL);
+    let (workspace, health) = tokio::join!(
+        workspace(kernel, &shared.stop),
+        model_health(models.first().map(|(_, model)| model.clone()), &shared.stop),
+    );
+    let mut model = provider(kernel, models.first().map(|(id, _)| id.clone()));
+    if let Some(model) = model.as_object_mut() {
+        model.insert("health".into(), health);
+    }
     Ok(Json(json!({
-        "workspace": workspace(kernel, &shared.stop).await,
-        "model": provider(kernel, kernel.get_all(MODEL).first().map(|(id, _)| id.clone())),
+        "workspace": workspace,
+        "model": model,
         "loop": provider(kernel, kernel.get_all(LOOP).first().map(|(id, _)| id.clone())),
         "guarded": ToolInvoker::new(kernel.clone()).is_guarded(),
         "tools": ToolInvoker::new(kernel.clone()).definitions().len(),
         "version": env!("CARGO_PKG_VERSION"),
     })))
+}
+
+/// `{state: "unknown" | "reachable" | "unavailable", reason}` of the model.
+async fn model_health(model: Option<Arc<dyn ModelProvider>>, stop: &CancellationToken) -> Value {
+    let Some(model) = model else {
+        return Value::Null;
+    };
+    match model.health(stop.child_token()).await {
+        ModelHealth::Unknown => json!({ "state": "unknown" }),
+        ModelHealth::Reachable => json!({ "state": "reachable" }),
+        ModelHealth::Unavailable(reason) => json!({ "state": "unavailable", "reason": reason }),
+    }
 }
 
 /// `{plugin, kind, model}` of a service provider, or `null`.

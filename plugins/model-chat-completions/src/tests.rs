@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use rah_api::{
     CancellationToken, Kernel, MountOptions, PluginStatus,
-    model::{ModelError, ModelProvider},
+    model::{ModelError, ModelHealth, ModelProvider},
 };
 use rah_protocol::{
     ContextItem, ModelEvent, ModelRequest, ModelUsage, PermissionLevel, ToolDefinition, ToolName,
@@ -573,4 +573,39 @@ fn a_key_pasted_as_the_variable_name_is_refused_without_echoing_it() {
     assert!(!error.contains(pasted), "{error}");
     let error = read_key(&"a".repeat(80), true).unwrap_err();
     assert!(error.contains("NAME of an environment variable"), "{error}");
+}
+
+#[tokio::test]
+async fn health_reports_reachable_unauthorized_and_down_servers() {
+    let server = Server::new(vec![
+        Reply::Json(200, json!({"data": []})),
+        Reply::Json(404, json!({})),
+        Reply::Json(401, json!({"error": KEY})),
+    ])
+    .await;
+    let up = model(settings(&server, Some("m")));
+    let health = || up.health(CancellationToken::new());
+    assert_eq!(health().await, ModelHealth::Reachable);
+    // A gateway without `/models` is still up.
+    assert_eq!(health().await, ModelHealth::Reachable);
+    let ModelHealth::Unavailable(reason) = health().await else {
+        panic!("a refused key must be unavailable");
+    };
+    assert!(!reason.contains(KEY), "{reason}");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let (base_url, loopback) = base_url(&format!("http://{address}/v1")).unwrap();
+    let down = model(Settings {
+        base_url,
+        model: None,
+        max_tokens: None,
+        temperature: None,
+        loopback,
+    });
+    assert!(matches!(
+        down.health(CancellationToken::new()).await,
+        ModelHealth::Unavailable(_)
+    ));
 }

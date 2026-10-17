@@ -1926,8 +1926,9 @@ function connect() {
   state.socket = socket;
   socket.addEventListener("open", () => {
     state.retry = 500;
+    // Shown only while the link to the local RAH process is down.
     $("connection").textContent = "connected";
-    $("connection").className = "badge good";
+    $("connection").hidden = true;
     // Keep other notices, such as a failed startup request.
     if ($("notice").textContent === NOT_CONNECTED) showNotice("");
     // A switch made while this window was not connected (such as the mode
@@ -1961,7 +1962,7 @@ function connect() {
   });
   socket.addEventListener("close", () => {
     $("connection").textContent = "disconnected";
-    $("connection").className = "badge bad";
+    $("connection").hidden = false;
     setRunning(false);
     setTimeout(connect, state.retry);
     state.retry = Math.min(state.retry * 2, 10000);
@@ -2253,7 +2254,15 @@ async function loadStatus() {
   const dirty = workspace.git && !workspace.git.error && workspace.git.changed + workspace.git.untracked > 0;
   statusItem("status-git", gitLabel, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
   const [model, modelTitle] = providerText("model", status.model);
-  statusItem("status-model", model, modelTitle, status.model ? "" : "bad");
+  // The server behind the model may be down while RAH itself is fine.
+  const down = status.model?.health?.state === "unavailable";
+  const reason = status.model?.health?.reason || "unreachable";
+  statusItem(
+    "status-model",
+    down ? `${model} ✕ ${reason}` : model,
+    down ? `${modelTitle}\nNot reachable now: ${reason}` : modelTitle,
+    status.model && !down ? "" : "bad",
+  );
   const [loop, loopTitle] = providerText("loop", status.loop);
   statusItem("status-loop", loop, loopTitle, status.loop ? "" : "bad");
   announceProvider("model", status.model);

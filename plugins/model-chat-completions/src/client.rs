@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use rah_api::{
     CancellationToken, async_trait,
-    model::{ModelError, ModelProvider, ModelStream},
+    model::{ModelError, ModelHealth, ModelProvider, ModelStream},
 };
 use rah_protocol::{ModelEvent, ModelRequest, ToolName};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -18,6 +18,7 @@ use crate::{
 
 const MAX_CHUNKS: usize = 65_536;
 const DISCOVERY_LIMIT: usize = 256 * 1024;
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Request settings that do not depend on the conversation.
 pub(crate) struct Settings {
@@ -162,6 +163,26 @@ impl ChatCompletionsModel {
 
 #[async_trait]
 impl ModelProvider for ChatCompletionsModel {
+    /// `GET <base_url>/models`. Any answer means the server is up, except a
+    /// refused key, which every request would meet too. Gateways without
+    /// `/models` answer 404 and still count as reachable.
+    async fn health(&self, cancel: CancellationToken) -> ModelHealth {
+        let url = format!("{}/models", self.settings.base_url);
+        let send = self.authorized(self.client.get(url)).send();
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return ModelHealth::Unavailable("check cancelled".into()),
+            response = tokio::time::timeout(HEALTH_TIMEOUT, send) => response,
+        };
+        match response {
+            Ok(Ok(response)) if matches!(response.status().as_u16(), 401 | 403) => {
+                ModelHealth::Unavailable(E::Authentication.to_string())
+            }
+            Ok(Ok(_)) => ModelHealth::Reachable,
+            Ok(Err(_)) | Err(_) => ModelHealth::Unavailable(E::Unreachable.to_string()),
+        }
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,
