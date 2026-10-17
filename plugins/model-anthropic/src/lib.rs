@@ -76,7 +76,24 @@ pub fn anthropic_endpoint(configured: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// `api_key_env` names an environment variable. A value that cannot be one
+/// is most likely the key itself, so it is never echoed back.
+fn check_variable_name(variable: &str) -> Result<(), String> {
+    let valid = !variable.is_empty()
+        && variable.len() <= 64
+        && !variable.starts_with(|c: char| c.is_ascii_digit())
+        && variable
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err("`api_key_env` must be the NAME of an environment variable (such as DEEPSEEK_API_KEY), not the key itself; revoke the key if it was pasted here".into())
+    }
+}
+
 fn read_key(variable: &str) -> Result<String, String> {
+    check_variable_name(variable)?;
     let key = std::env::var(variable).unwrap_or_default();
     if key.trim().is_empty() {
         return Err(format!(

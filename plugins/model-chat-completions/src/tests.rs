@@ -564,3 +564,13 @@ async fn plugin_mounts_for_local_servers_and_fails_closed_without_a_required_key
         );
     }
 }
+
+#[test]
+fn a_key_pasted_as_the_variable_name_is_refused_without_echoing_it() {
+    let pasted = "sk-abc123-this-is-a-secret-key";
+    let error = read_key(pasted, true).unwrap_err();
+    assert!(error.contains("NAME of an environment variable"), "{error}");
+    assert!(!error.contains(pasted), "{error}");
+    let error = read_key(&"a".repeat(80), true).unwrap_err();
+    assert!(error.contains("NAME of an environment variable"), "{error}");
+}

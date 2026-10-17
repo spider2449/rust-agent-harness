@@ -485,3 +485,13 @@ async fn plugin_fails_closed_on_missing_credentials_and_bad_configuration() {
     assert_eq!(defaults.max_tokens, DEFAULT_MAX_TOKENS);
     assert!(defaults.refusal_fallback && defaults.effort.is_none());
 }
+
+#[test]
+fn a_key_pasted_as_the_variable_name_is_refused_without_echoing_it() {
+    let pasted = "sk-abc123-this-is-a-secret-key";
+    let error = read_key(pasted).unwrap_err();
+    assert!(error.contains("NAME of an environment variable"), "{error}");
+    assert!(!error.contains(pasted), "{error}");
+    let error = read_key(&"a".repeat(80)).unwrap_err();
+    assert!(error.contains("NAME of an environment variable"), "{error}");
+}
