@@ -332,7 +332,9 @@ fn set_key(config: &mut Value, key: &str, value: Value) {
 
 /// The text of `rah --list-features`.
 pub fn list() -> String {
-    let mut text = String::from("Features (rah --with <name>, or features = [...] in rah.toml):\n");
+    let mut text = String::from(
+        "Features (--with <name> on rah or rah-desktop, or features = [...] in rah.toml):\n",
+    );
     for feature in &FEATURES {
         text.push_str(&format!("  {:<11} {}\n", feature.name, feature.summary));
         if let Some(argument) = feature.argument {

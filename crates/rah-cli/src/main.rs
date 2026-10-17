@@ -14,7 +14,16 @@ use serde_json::Value;
 
 /// RAH: a plugin-kernel agent harness.
 #[derive(Debug, Parser)]
-#[command(name = "rah", version)]
+#[command(
+    name = "rah",
+    version,
+    after_help = "Other ways to run RAH:\n  \
+        rah --web            Web UI in the browser\n  \
+        rah-desktop          Web UI in a native window (a separate program, same options\n                       \
+        --preset --config --data-dir --root --mode --with;\n                       \
+        install it with `cargo install --path crates/rah-desktop`)\n  \
+        scripts\\start.ps1 -Desktop   build and start it from the source tree"
+)]
 struct Args {
     /// Built-in preset to run (ignored with --config): default (llama.cpp),
     /// dev (mock model), minimal (mock model, no policy), openai, anthropic,
