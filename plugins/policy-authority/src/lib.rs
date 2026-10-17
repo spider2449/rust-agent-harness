@@ -17,10 +17,17 @@
 //!   before a read, or allow a write without asking. It is host
 //!   configuration; tool metadata still cannot grant anything.
 //!
+//! - `commands` lets the host run chosen `shell.exec` commands without
+//!   asking (ADR 0050). A rule is a program and its arguments, matched
+//!   against the call's `program` and `args` as exact strings; a last element
+//!   `"*"` also accepts any further arguments. It only turns an Ask into an
+//!   Allow: it never overrides a `decisions` entry or a denial, and a call
+//!   that matches no rule is judged as before.
+//!
 //! Configuration (all fields optional):
 //!
 //! ```toml
-//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" }, decisions = { "repo.patch" = "deny" } }
+//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" }, decisions = { "repo.patch" = "deny" }, commands = [["git", "status"], ["cargo", "check", "*"]] }
 //! ```
 //!
 //! The defaults are `allow = ["none", "read"]`, `ask = ["write", "execute"]`
@@ -78,7 +85,7 @@ impl Plugin for PolicyAuthorityPlugin {
         let in_flight = InFlight::new(config.max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT));
         let policy = std::sync::Arc::new(Policy::new(config)?);
         scope.hook_bail::<ToolBeforeInvoke, _, _>(POLICY_PRIORITY, move |request| {
-            let decision = policy.decide(&request.definition);
+            let decision = policy.decide_call(&request);
             async move { Some(decision) }
         });
         scope.provide(TOOL_ADMISSION, std::sync::Arc::new(in_flight))?;
@@ -103,6 +110,11 @@ pub struct PolicyConfig {
     /// replaces the level rules for that tool.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// `shell.exec` commands that run without asking (ADR 0050): a program,
+    /// its arguments, and optionally a last element `"*"` for any further
+    /// arguments.
+    #[serde(default)]
+    pub commands: Vec<Vec<String>>,
     /// The most tool calls that may run at once, across all sessions
     /// (default [`DEFAULT_MAX_IN_FLIGHT`]). A call over the limit is not
     /// started.
@@ -126,6 +138,7 @@ impl Default for PolicyConfig {
             ask: default_ask(),
             tools: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            commands: Vec::new(),
             max_in_flight: None,
         }
     }
@@ -182,6 +195,50 @@ impl<T: Copy> Patterns<T> {
     }
 }
 
+/// The tool whose commands `commands` rules apply to.
+const COMMAND_TOOL: &str = "shell.exec";
+
+/// One `commands` rule: a program and its arguments, optionally followed by
+/// any further arguments.
+#[derive(Clone, Debug)]
+struct CommandRule {
+    program: String,
+    args: Vec<String>,
+    /// Whether arguments beyond `args` are accepted.
+    any_more: bool,
+}
+
+impl CommandRule {
+    fn new(mut words: Vec<String>) -> Result<Self, String> {
+        let any_more = words.len() > 1 && words.last().is_some_and(|word| word == "*");
+        if any_more {
+            words.pop();
+        }
+        if words.is_empty() || words[0].trim().is_empty() {
+            return Err("a `commands` rule needs a program".into());
+        }
+        if words.iter().any(|word| word == "*") {
+            return Err("in a `commands` rule `*` may only be the last element".into());
+        }
+        let program = words.remove(0);
+        Ok(Self {
+            program,
+            args: words,
+            any_more,
+        })
+    }
+
+    fn matches(&self, program: &str, args: &[&str]) -> bool {
+        program == self.program
+            && if self.any_more {
+                args.len() >= self.args.len()
+            } else {
+                args.len() == self.args.len()
+            }
+            && self.args.iter().zip(args).all(|(rule, arg)| rule == arg)
+    }
+}
+
 /// A validated policy.
 #[derive(Clone, Debug)]
 pub struct Policy {
@@ -189,6 +246,7 @@ pub struct Policy {
     ask: Vec<PermissionLevel>,
     assignments: Patterns<PermissionLevel>,
     decisions: Patterns<Decision>,
+    commands: Vec<CommandRule>,
 }
 
 impl Policy {
@@ -207,12 +265,52 @@ impl Policy {
             ask: config.ask,
             assignments: Patterns::new(config.tools, "assignment")?,
             decisions: Patterns::new(config.decisions, "decision")?,
+            commands: config
+                .commands
+                .into_iter()
+                .map(CommandRule::new)
+                .collect::<Result<_, _>>()?,
         })
     }
 
     /// The host assignment for a tool name, if any.
     pub fn assignment(&self, name: &str) -> Option<PermissionLevel> {
         self.assignments.get(name)
+    }
+
+    /// Decides one call: [`Policy::decide`] for its tool, except that a
+    /// `commands` rule turns an Ask for `shell.exec` into an Allow. The call
+    /// input is untrusted: anything but a program string and an array of
+    /// argument strings matches no rule.
+    pub fn decide_call(&self, request: &ToolRequestContext) -> ToolDecision {
+        let decision = self.decide(&request.definition);
+        if !matches!(decision, ToolDecision::Ask { .. })
+            || request.definition.name.as_str() != COMMAND_TOOL
+            || self.decisions.get(COMMAND_TOOL).is_some()
+        {
+            return decision;
+        }
+        let input = &request.call.input.0;
+        let Some(program) = input.get("program").and_then(serde_json::Value::as_str) else {
+            return decision;
+        };
+        let Some(args) = input.get("args").map_or(Some(Vec::new()), |args| {
+            args.as_array()?
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+        }) else {
+            return decision;
+        };
+        if self
+            .commands
+            .iter()
+            .any(|rule| rule.matches(program, &args))
+        {
+            ToolDecision::Allow
+        } else {
+            decision
+        }
     }
 
     /// Decides one call. `definition` comes from the tool provider; only its
@@ -300,6 +398,9 @@ impl PolicyAuthorityPlugin {
   "decisions": {
     "web.*": "ask"
   },
+  "commands": [
+    ["git", "status"]
+  ],
   "max_in_flight": 128
 }"#;
 }

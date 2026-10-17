@@ -376,3 +376,201 @@ async fn the_plugin_limits_tool_calls_in_flight() {
     drop(slot);
     assert!(invoker.invoke(invocation("echo"), || {}).await.authorized);
 }
+
+fn shell_call(config: Value, input: Value) -> ToolDecision {
+    let policy = parse(config);
+    policy.decide_call(&ToolRequestContext {
+        session: SessionId::new(),
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("shell.exec"),
+            input: ToolInput(input),
+        },
+        definition: definition("shell.exec", PermissionLevel::Execute),
+    })
+}
+
+fn shell_config(commands: Value) -> Value {
+    json!({ "tools": { "shell.exec": "execute" }, "commands": commands })
+}
+
+fn asks(decision: &ToolDecision) -> bool {
+    matches!(decision, ToolDecision::Ask { .. })
+}
+
+#[test]
+fn a_command_rule_allows_exactly_that_command() {
+    let config = shell_config(json!([["git", "status"], ["git", "diff", "*"], ["ls"]]));
+    let run = |input| shell_call(config.clone(), input);
+    assert_eq!(
+        run(json!({ "program": "git", "args": ["status"] })),
+        ToolDecision::Allow
+    );
+    // Other options and arguments, or another program, are asked about.
+    assert!(asks(&run(
+        json!({ "program": "git", "args": ["status", "-s"] })
+    )));
+    assert!(asks(&run(json!({ "program": "git", "args": [] }))));
+    assert!(asks(&run(json!({ "program": "git", "args": ["push"] }))));
+    assert!(asks(&run(
+        json!({ "program": "./git", "args": ["status"] })
+    )));
+    assert!(asks(&run(json!({ "program": "Git", "args": ["status"] }))));
+    // A trailing `*` accepts any further arguments, none included.
+    assert_eq!(
+        run(json!({ "program": "git", "args": ["diff"] })),
+        ToolDecision::Allow
+    );
+    assert_eq!(
+        run(json!({ "program": "git", "args": ["diff", "--stat", "HEAD"] })),
+        ToolDecision::Allow
+    );
+    assert!(asks(&run(
+        json!({ "program": "git", "args": ["difftool"] })
+    )));
+    // No arguments is a missing `args`, too.
+    assert_eq!(run(json!({ "program": "ls" })), ToolDecision::Allow);
+    assert!(asks(&run(json!({ "program": "ls", "args": ["-l"] }))));
+}
+
+#[test]
+fn malformed_input_matches_no_rule() {
+    let config = shell_config(json!([["git", "status"], ["ls"]]));
+    for input in [
+        json!(null),
+        json!("git status"),
+        json!({ "program": ["git"], "args": ["status"] }),
+        json!({ "program": "git", "args": "status" }),
+        json!({ "program": "git", "args": ["status", 1] }),
+        json!({ "args": ["status"] }),
+        json!({ "command": "git status" }),
+    ] {
+        assert!(asks(&shell_call(config.clone(), input.clone())), "{input}");
+    }
+}
+
+#[test]
+fn a_rule_never_overrides_a_decision_a_denial_or_another_tool() {
+    let input = json!({ "program": "git", "args": ["status"] });
+    let mut config = shell_config(json!([["git", "status"]]));
+    config["decisions"] = json!({ "shell.exec": "ask" });
+    assert!(asks(&shell_call(config.clone(), input.clone())));
+    config["decisions"] = json!({ "shell.exec": "deny" });
+    assert!(matches!(
+        shell_call(config, input.clone()),
+        ToolDecision::Deny { .. }
+    ));
+    // Without an assignment the tool is denied, rule or not.
+    let unassigned = json!({ "commands": [["git", "status"]] });
+    assert!(matches!(
+        shell_call(unassigned, input.clone()),
+        ToolDecision::Deny { .. }
+    ));
+    // A tool that takes the same arguments under another name is not covered.
+    let policy = parse(json!({
+        "tools": { "other.exec": "execute" },
+        "commands": [["git", "status"]],
+    }));
+    let decision = policy.decide_call(&ToolRequestContext {
+        session: SessionId::new(),
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("other.exec"),
+            input: ToolInput(input),
+        },
+        definition: definition("other.exec", PermissionLevel::Execute),
+    });
+    assert!(asks(&decision));
+}
+
+#[test]
+fn a_command_rule_does_not_lower_a_denied_level() {
+    // `execute` is neither allowed nor asked: the tool is denied.
+    let config = json!({
+        "ask": [],
+        "tools": { "shell.exec": "execute" },
+        "commands": [["git", "status"]],
+    });
+    assert!(matches!(
+        shell_call(config, json!({ "program": "git", "args": ["status"] })),
+        ToolDecision::Deny { .. }
+    ));
+}
+
+#[test]
+fn invalid_command_rules_are_refused() {
+    for (commands, expected) in [
+        (json!([[]]), "needs a program"),
+        (json!([[""]]), "needs a program"),
+        (json!([["*"]]), "`*` may only be the last"),
+        (json!([["git", "*", "status"]]), "`*` may only be the last"),
+        (json!([["git", "*", "*"]]), "`*` may only be the last"),
+    ] {
+        let config: PolicyConfig = serde_json::from_value(json!({ "commands": commands })).unwrap();
+        let error = Policy::new(config).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn the_plugin_applies_command_rules_to_the_invoker() {
+    let kernel = Kernel::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let shell = Counter {
+        name: "shell.exec",
+        permission: PermissionLevel::Execute,
+        calls: calls.clone(),
+    };
+    struct Shell(PluginManifest, Arc<dyn Tool>);
+    #[async_trait]
+    impl Plugin for Shell {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+            provide_tools(scope, vec![self.1.clone()])?;
+            Ok(())
+        }
+    }
+    kernel
+        .mount(
+            Arc::new(Shell(
+                PluginManifest::new("shell", "1").provides(["tools"]),
+                Arc::new(shell),
+            )),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .mount(
+            Arc::new(PolicyAuthorityPlugin::new("policy")),
+            MountOptions::with_config(shell_config(json!([["git", "status"]]))),
+        )
+        .await
+        .unwrap();
+    let invoker = ToolInvoker::new(kernel.handle());
+    let call = |input: Value| Invocation {
+        session: SessionId::new(),
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("shell.exec"),
+            input: ToolInput(input),
+        },
+        cancel: CancellationToken::new(),
+    };
+    // No approver is mounted, so an Ask is a denial and a rule is the only
+    // way through.
+    let allowed = invoker
+        .invoke(call(json!({ "program": "git", "args": ["status"] })), || {})
+        .await;
+    assert!(
+        allowed.authorized && !allowed.output.is_error,
+        "{allowed:?}"
+    );
+    let asked = invoker
+        .invoke(call(json!({ "program": "git", "args": ["push"] })), || {})
+        .await;
+    assert!(!asked.authorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

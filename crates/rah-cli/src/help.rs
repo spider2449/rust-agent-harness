@@ -199,6 +199,10 @@ pub fn fallback(kind: &str) -> Help {
                 "decisions",
                 "Fixed `allow`, `ask` or `deny` per tool name or `prefix*`; replaces the level rules for it.",
             ),
+            (
+                "commands",
+                "`shell.exec` commands that run without asking: [program, arg, ...]; a last `*` also accepts more arguments.",
+            ),
             ("max_in_flight", "Most tool calls running at once (128)."),
         ],
         "scheduler-basic" => &[
