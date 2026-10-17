@@ -678,6 +678,9 @@ function busyEvent(event) {
     case "model_reasoning_started":
       setBusyPhase("Thinking…");
       break;
+    case "model_retrying":
+      setBusyPhase(`Model busy, retry ${event.attempt} of ${event.retries}…`);
+      break;
     case "model_delta":
       setBusyPhase("Writing…");
       break;
@@ -980,6 +983,9 @@ function onEvent(session, event) {
       break;
     case "model_reasoning_started":
       showLive("[thinking]\n");
+      break;
+    case "model_retrying":
+      showLive(`[model busy: ${event.reason}; retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s]\n`);
       break;
     case "tool_requested":
       showLive(`\n[tool] ${event.tool_call.name} ${JSON.stringify(event.tool_call.input)}\n`);
@@ -1895,6 +1901,9 @@ function eventActivity(event) {
   switch (event.type) {
     case "model_request_started":
       logActivity("… model request", "muted");
+      break;
+    case "model_retrying":
+      logActivity(`↻ model busy, retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s`, "warn");
       break;
     case "tool_requested":
       toolActivity(event.tool_call.name, event.tool_call.input);

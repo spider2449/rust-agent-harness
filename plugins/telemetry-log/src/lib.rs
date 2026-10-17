@@ -158,6 +158,8 @@ pub enum Record {
         #[serde(skip_serializing_if = "Option::is_none")]
         first_text_ms: Option<u64>,
         reasoning: bool,
+        #[serde(skip_serializing_if = "is_zero")]
+        retries: u32,
         #[serde(flatten)]
         tokens: Tokens,
     },
@@ -188,6 +190,7 @@ struct ModelState {
     started: Instant,
     first_text: Option<Duration>,
     reasoning: bool,
+    retries: u32,
     tokens: Tokens,
 }
 
@@ -219,6 +222,10 @@ pub struct Tracker {
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 fn clip(text: &str) -> String {
@@ -257,6 +264,7 @@ impl Tracker {
             duration_ms: millis(now.saturating_duration_since(model.started)),
             first_text_ms: model.first_text.map(millis),
             reasoning: model.reasoning,
+            retries: model.retries,
             tokens: model.tokens,
         };
         self.send(record);
@@ -293,6 +301,7 @@ impl Tracker {
                         started: now,
                         first_text: None,
                         reasoning: false,
+                        retries: 0,
                         tokens: Tokens::default(),
                     });
                 }
@@ -305,6 +314,20 @@ impl Tracker {
                     && model.first_text.is_none()
                 {
                     model.first_text = Some(now.saturating_duration_since(model.started));
+                }
+            }
+            AgentEvent::ModelRetrying {
+                session_id,
+                model_request_id,
+                ..
+            } => {
+                if let Some(model) = self
+                    .turns
+                    .get_mut(session_id)
+                    .and_then(|turn| turn.model.as_mut())
+                    .filter(|model| model.id == *model_request_id)
+                {
+                    model.retries += 1;
                 }
             }
             AgentEvent::ModelReasoningStarted { session_id, .. } => {

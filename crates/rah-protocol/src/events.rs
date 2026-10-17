@@ -72,6 +72,23 @@ pub enum AgentEvent {
         /// The reported counts.
         usage: ModelUsage,
     },
+    /// The provider could not take a model request and RAH will open it
+    /// again after a wait (ADR 0051). Nothing of the failed attempt was
+    /// shown or recorded.
+    ModelRetrying {
+        /// Session associated with the operation.
+        session_id: SessionId,
+        /// Model request that is being opened again.
+        model_request_id: ModelRequestId,
+        /// 1 for the first retry.
+        attempt: u32,
+        /// Retries allowed for this request.
+        retries: u32,
+        /// How long RAH waits before the retry.
+        delay_ms: u64,
+        /// Why the attempt failed; carries no credentials.
+        reason: String,
+    },
     /// The model began private reasoning for a model request.
     ///
     /// Progress signal only: reasoning content is never carried. Emitted at

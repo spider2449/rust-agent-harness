@@ -17,7 +17,11 @@
 //! call), resolves the model per request, and runs each turn as a task of
 //! this plugin's scope.
 //!
-//! Configuration: `{ "max_steps": 8, "max_rounds_per_step": 16 }`.
+//! Model requests are opened again as in `loop-react` (ADR 0051):
+//! `retries` (default 10) and `retry_delay_ms` (default 2000).
+//!
+//! Configuration: `{ "max_steps": 8, "max_rounds_per_step": 16, "retries": 10,
+//! "retry_delay_ms": 2000 }`.
 
 use std::sync::Arc;
 
@@ -29,6 +33,7 @@ use rah_api::{
     hooks::ModelBeforeRequest,
     kernel::Spawner,
     model::MODEL,
+    retry::RetryPolicy,
     session::{SESSION, SessionLog, rebuild_context},
     tools::{Invocation, ToolInvoker},
 };
@@ -60,6 +65,8 @@ impl PlanLoopPlugin {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    retries: Option<u32>,
+    retry_delay_ms: Option<u64>,
     max_steps: Option<usize>,
     max_rounds_per_step: Option<u32>,
 }
@@ -71,7 +78,8 @@ impl Plugin for PlanLoopPlugin {
     }
 
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
-        rah_api::config::parse::<Config>(config)?;
+        let config: Config = rah_api::config::parse(config)?;
+        RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?;
         Ok(())
     }
 
@@ -83,6 +91,7 @@ impl Plugin for PlanLoopPlugin {
             spawner: scope.spawner(),
             max_steps: config.max_steps.unwrap_or(8).max(1),
             max_rounds: config.max_rounds_per_step.unwrap_or(16).max(1),
+            retry: RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?,
         };
         scope.provide(LOOP, Arc::new(plan))?;
         Ok(())
@@ -124,6 +133,7 @@ struct PlanLoop {
     spawner: Spawner,
     max_steps: usize,
     max_rounds: u32,
+    retry: RetryPolicy,
 }
 
 impl AgentLoop for PlanLoop {
@@ -134,6 +144,7 @@ impl AgentLoop for PlanLoop {
             session: self.session.clone(),
             max_steps: self.max_steps,
             max_rounds: self.max_rounds,
+            retry: self.retry,
             id: RequestId::new(),
             sid: request.session.clone(),
             cancel: request.cancel.clone(),
@@ -176,6 +187,7 @@ struct Turn {
     session: Arc<dyn SessionLog>,
     max_steps: usize,
     max_rounds: u32,
+    retry: RetryPolicy,
     id: RequestId,
     sid: SessionId,
     cancel: CancellationToken,
@@ -395,10 +407,25 @@ impl Turn {
             session_id: self.sid.clone(),
             model_request_id: model_request_id.clone(),
         });
-        let mut stream = model
-            .stream(request, self.cancel.clone())
-            .await
-            .map_err(|error| failure(AgentErrorCode::Model, error.to_string()))?;
+        let mut stream = rah_api::retry::stream(
+            model.as_ref(),
+            Some(&self.kernel),
+            request,
+            &self.cancel,
+            &self.retry,
+            |notice| {
+                self.emit(AgentEvent::ModelRetrying {
+                    session_id: self.sid.clone(),
+                    model_request_id: model_request_id.clone(),
+                    attempt: notice.attempt,
+                    retries: notice.retries,
+                    delay_ms: u64::try_from(notice.delay.as_millis()).unwrap_or(u64::MAX),
+                    reason: notice.reason.to_owned(),
+                });
+            },
+        )
+        .await
+        .map_err(|error| failure(AgentErrorCode::Model, error.to_string()))?;
         let (mut text, mut calls, mut reasoning) = (String::new(), Vec::new(), false);
         loop {
             let event = tokio::select! {
@@ -518,7 +545,9 @@ impl PlanLoopPlugin {
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
   "max_steps": 8,
-  "max_rounds_per_step": 16
+  "max_rounds_per_step": 16,
+  "retries": 10,
+  "retry_delay_ms": 2000
 }"#;
 }
 

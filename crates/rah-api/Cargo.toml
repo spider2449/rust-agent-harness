@@ -12,8 +12,8 @@ rah-protocol = { path = "../rah-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "time"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }

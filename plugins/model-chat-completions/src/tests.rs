@@ -24,6 +24,10 @@ enum Reply {
     Sse(String),
     Json(u16, Value),
     Status(u16, &'static str),
+    /// A status with a `Retry-After: 7` header.
+    Limited(u16),
+    /// A status with this JSON body.
+    Body(u16, &'static str),
     Hold,
 }
 
@@ -82,6 +86,12 @@ impl Server {
                     Reply::Sse(body) => (200, "text/event-stream; charset=utf-8", body),
                     Reply::Json(status, body) => (status, "application/json", body.to_string()),
                     Reply::Status(status, kind) => (status, kind, "{}".to_owned()),
+                    Reply::Limited(status) => (
+                        status,
+                        "application/json\r\nRetry-After: 7",
+                        "{}".to_owned(),
+                    ),
+                    Reply::Body(status, body) => (status, "application/json", body.to_owned()),
                     Reply::Hold => {
                         let _ = socket
                             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -608,4 +618,59 @@ async fn health_reports_reachable_unauthorized_and_down_servers() {
         down.health(CancellationToken::new()).await,
         ModelHealth::Unavailable(_)
     ));
+}
+
+#[tokio::test]
+async fn busy_statuses_are_unavailable_and_carry_retry_after() {
+    let server = Server::new(vec![
+        Reply::Limited(429),
+        Reply::Status(502, "application/json"),
+        Reply::Status(400, "application/json"),
+    ])
+    .await;
+    let model = model(settings(&server, Some("m")));
+    let mut errors = Vec::new();
+    for _ in 0..3 {
+        errors.push(
+            collect(&model, request(user("x"), vec![]))
+                .await
+                .unwrap_err(),
+        );
+    }
+    let seven = Some(std::time::Duration::from_secs(7));
+    assert!(
+        matches!(&errors[0], ModelError::Unavailable { message, retry_after } if message.contains("429") && *retry_after == seven)
+    );
+    assert!(
+        matches!(&errors[1], ModelError::Unavailable { message, retry_after } if message.contains("502") && retry_after.is_none())
+    );
+    assert!(matches!(&errors[2], ModelError::Rejected(_)));
+}
+
+#[tokio::test]
+async fn a_request_that_does_not_fit_is_a_context_overflow() {
+    let server = Server::new(vec![
+        Reply::Body(
+            400,
+            r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 65536 tokens"}}"#,
+        ),
+        Reply::Body(
+            400,
+            r#"{"error":{"type":"exceed_context_size_error","message":"the request exceeds the available context size"}}"#,
+        ),
+        Reply::Body(422, r#"{"error":{"message":"unknown field"}}"#),
+    ])
+    .await;
+    let model = model(settings(&server, Some("m")));
+    let mut errors = Vec::new();
+    for _ in 0..3 {
+        errors.push(
+            collect(&model, request(user("x"), vec![]))
+                .await
+                .unwrap_err(),
+        );
+    }
+    assert!(matches!(&errors[0], ModelError::ContextOverflow(m) if !m.contains("65536")));
+    assert!(matches!(&errors[1], ModelError::ContextOverflow(_)));
+    assert!(matches!(&errors[2], ModelError::Rejected(m) if m.contains("422")));
 }

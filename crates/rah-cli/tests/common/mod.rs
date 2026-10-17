@@ -116,6 +116,7 @@ pub fn kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ModelDelta { .. } => "delta",
             AgentEvent::ModelReasoningStarted { .. } => "reasoning",
             AgentEvent::ModelUsage { .. } => "usage",
+            AgentEvent::ModelRetrying { .. } => "retry",
             AgentEvent::ToolRequested { .. } => "tool-requested",
             AgentEvent::ToolStarted { .. } => "tool-started",
             AgentEvent::ToolFinished { .. } => "tool-finished",

@@ -227,6 +227,18 @@ impl ModelProvider for ResponsesModel {
         match response.status().as_u16() {
             200 => {}
             401 | 403 => return Err(E::Authentication.into()),
+            status if rah_api::model::is_unavailable_status(status) => {
+                return Err(E::unavailable(status, response.headers()).into());
+            }
+            status @ (400 | 413 | 422) => {
+                let body = rah_api::model::error_body(response.bytes_stream(), 8192).await;
+                return Err(if rah_api::model::is_context_overflow(&body) {
+                    E::ContextOverflow
+                } else {
+                    E::HttpStatus(status)
+                }
+                .into());
+            }
             status => return Err(E::HttpStatus(status).into()),
         }
         let event_stream = response

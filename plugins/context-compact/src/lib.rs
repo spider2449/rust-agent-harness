@@ -21,6 +21,12 @@
 //! none), and the `context-default` window bounds the rest. The same history is not
 //! summarized again for five minutes after a failure.
 //!
+//! When the provider says a request does not fit its context window (ADR 0052),
+//! the plugin also answers `model.overflow`: it summarizes more than the
+//! limits above ask for, whatever `trigger_chars` says, keeping about a quarter
+//! of the history (at most `keep_chars`), and the loop sends the smaller request
+//! once.
+//!
 //! The summary is model output derived from untrusted content. It is marked
 //! as background, not instructions, and grants nothing: tool calls still go
 //! through the policy.
@@ -39,7 +45,11 @@ use std::{
 use futures::StreamExt;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    async_trait, hooks::ModelBeforeRequest, model::MODEL, storage::STORAGE, tools::describe_image,
+    async_trait,
+    hooks::{ModelBeforeRequest, ModelOverflow},
+    model::MODEL,
+    storage::STORAGE,
+    tools::describe_image,
 };
 use rah_protocol::{ContextItem, ModelEvent, ModelRequest, ToolContent};
 use serde::{Deserialize, Serialize};
@@ -145,9 +155,14 @@ impl Plugin for CompactPlugin {
             failed: Mutex::new(VecDeque::new()),
             stop: scope.spawner().cancellation(),
         });
+        let shrinker = compactor.clone();
         scope.hook_waterfall::<ModelBeforeRequest, _, _>(PRIORITY, move |request| {
             let compactor = compactor.clone();
             async move { compactor.compact(request).await }
+        });
+        scope.hook_waterfall::<ModelOverflow, _, _>(PRIORITY, move |request| {
+            let compactor = shrinker.clone();
+            async move { compactor.shrink(request).await }
         });
         Ok(())
     }
@@ -269,26 +284,48 @@ struct Compactor {
 
 impl Compactor {
     async fn compact(&self, request: ModelRequest) -> ModelRequest {
+        self.compact_under(request, self.limits).await
+    }
+
+    /// The provider said the request does not fit (ADR 0052): summarize
+    /// more than the normal limits ask, keeping about a quarter of the
+    /// history as it is, so the request goes down by about half.
+    async fn shrink(&self, request: ModelRequest) -> ModelRequest {
+        let split = leading_system(&request.items);
+        let total: usize = request.items[split..].iter().map(size).sum();
+        let keep = (total / 4).min(self.limits.keep_chars);
+        let limits = Limits {
+            trigger_chars: (total / 2).max(keep + 1),
+            keep_chars: keep,
+            ..self.limits
+        };
+        self.compact_under(request, limits).await
+    }
+
+    async fn compact_under(&self, request: ModelRequest, limits: Limits) -> ModelRequest {
         let split = leading_system(&request.items);
         let history = &request.items[split..];
         let sizes: Vec<usize> = history.iter().map(size).collect();
-        if sizes.iter().sum::<usize>() <= self.limits.trigger_chars {
+        if sizes.iter().sum::<usize>() <= limits.trigger_chars {
             return request;
         }
         let hashes = prefix_hashes(history);
         let mut best = self.cache.best(history, &hashes);
-        if self.needs_more(&sizes, best.as_ref()) {
+        if self.needs_more(limits, &sizes, best.as_ref()) {
             let _one_at_a_time = self.summarizing.lock().await;
             best = self.cache.best(history, &hashes);
-            if self.needs_more(&sizes, best.as_ref()) {
+            if self.needs_more(limits, &sizes, best.as_ref()) {
                 let covered = best.as_ref().map_or(0, |summary| summary.items);
                 if let Some(found) = self.cache.best_stored(history, &hashes, covered).await {
                     best = Some(found);
                 }
             }
             let from = hashes[best.as_ref().map_or(0, |summary| summary.items)];
-            if self.needs_more(&sizes, best.as_ref()) && !self.failed_recently(from) {
-                match self.extend(history, &sizes, &hashes, best.clone()).await {
+            if self.needs_more(limits, &sizes, best.as_ref()) && !self.failed_recently(from) {
+                match self
+                    .extend(limits, history, &sizes, &hashes, best.clone())
+                    .await
+                {
                     Extension::Done(longer) => {
                         self.cache.store(longer.clone()).await;
                         best = Some(longer);
@@ -305,9 +342,9 @@ impl Compactor {
     }
 
     /// Whether the history after `summary` is still above the trigger.
-    fn needs_more(&self, sizes: &[usize], summary: Option<&Summary>) -> bool {
+    fn needs_more(&self, limits: Limits, sizes: &[usize], summary: Option<&Summary>) -> bool {
         let (covered, text) = summary.map_or((0, 0), |summary| (summary.items, summary.text.len()));
-        sizes[covered..].iter().sum::<usize>() + text > self.limits.trigger_chars
+        sizes[covered..].iter().sum::<usize>() + text > limits.trigger_chars
     }
 
     fn failed_recently(&self, from: u64) -> bool {
@@ -327,21 +364,22 @@ impl Compactor {
     /// Summarizes from the end of `base` up to a new cut.
     async fn extend(
         &self,
+        limits: Limits,
         history: &[ContextItem],
         sizes: &[usize],
         hashes: &[u64],
         base: Option<Summary>,
     ) -> Extension {
         let start = base.as_ref().map_or(0, |summary| summary.items);
-        let Some(cut) = choose_cut(history, sizes, start, self.limits.keep_chars) else {
+        let Some(cut) = choose_cut(history, sizes, start, limits.keep_chars) else {
             return Extension::NothingToCut;
         };
         let mut text = base.map(|summary| summary.text);
-        for chunk in chunks(&history[start..cut], self.limits.chunk_chars) {
+        for chunk in chunks(&history[start..cut], limits.chunk_chars) {
             if self.stop.is_cancelled() {
                 return Extension::Failed;
             }
-            match self.summarize(text.as_deref(), &chunk).await {
+            match self.summarize(limits, text.as_deref(), &chunk).await {
                 Some(summary) => text = Some(summary),
                 None => return Extension::Failed,
             }
@@ -356,7 +394,12 @@ impl Compactor {
         }
     }
 
-    async fn summarize(&self, earlier: Option<&str>, transcript: &str) -> Option<String> {
+    async fn summarize(
+        &self,
+        limits: Limits,
+        earlier: Option<&str>,
+        transcript: &str,
+    ) -> Option<String> {
         let model = self.kernel.get(MODEL)?;
         let mut input = String::new();
         if let Some(earlier) = earlier {
@@ -396,7 +439,7 @@ impl Compactor {
                 return None;
             }
         };
-        clean(&text, self.limits.max_summary_chars)
+        clean(&text, limits.max_summary_chars)
     }
 }
 

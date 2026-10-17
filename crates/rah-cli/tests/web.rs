@@ -440,7 +440,7 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     }
     assert_eq!(
         catalog["examples"]["loop-react"],
-        json!({ "max_rounds": 32 })
+        json!({ "max_rounds": 32, "retries": 10, "retry_delay_ms": 2000 })
     );
     // Kinds with help describe their keys for the editor.
     let help_keys = |kind: &str| -> Vec<String> {

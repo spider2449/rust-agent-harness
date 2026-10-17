@@ -428,3 +428,66 @@ fn clean_removes_reasoning_and_bounds_the_summary() {
     assert_eq!(clean("<think>unfinished", 10), None);
     assert_eq!(clean("abcdef", 3), Some("abc…".into()));
 }
+
+#[tokio::test]
+async fn an_overflow_summarizes_history_that_was_under_the_trigger() {
+    let model = FakeModel::new(Mode::Reply);
+    // 8 items of 30 bytes are under the trigger of 1000, so the normal hook
+    // leaves them.
+    let kernel = setup(
+        &model,
+        json!({ "trigger_chars": 1000, "keep_chars": 400, "timeout_secs": 1 }),
+    )
+    .await;
+    let items = vec![
+        system("rules"),
+        u("one"),
+        a("one"),
+        u("two"),
+        a("two"),
+        u("three"),
+        a("three"),
+        u("four"),
+        a("four"),
+        u("now"),
+    ];
+    let same = shaped(&kernel, items.clone()).await;
+    assert_eq!(same, items);
+    assert_eq!(model.calls(), 0);
+
+    let smaller = kernel
+        .handle()
+        .waterfall::<ModelOverflow>(request(items.clone()))
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(model.calls(), 1);
+    assert!(smaller.len() < items.len(), "{smaller:?}");
+    assert_eq!(smaller[0], system("rules"));
+    // The summary stands for the oldest items; the current turn stays.
+    assert!(matches!(&smaller[1], ContextItem::System { text } if text.contains("summary 1")));
+    assert_eq!(smaller.last(), Some(&u("now")));
+    let size_before: usize = items.iter().map(size).sum();
+    let size_after: usize = smaller.iter().map(size).sum();
+    assert!(size_after < size_before, "{size_after} >= {size_before}");
+}
+
+#[tokio::test]
+async fn an_overflow_with_a_failing_model_leaves_the_request_as_it_was() {
+    let model = FakeModel::new(Mode::Fail);
+    let kernel = setup(&model, small(json!({}))).await;
+    let items = vec![
+        system("rules"),
+        u("one"),
+        a("one"),
+        u("two"),
+        a("two"),
+        u("now"),
+    ];
+    let unchanged = kernel
+        .handle()
+        .waterfall::<ModelOverflow>(request(items.clone()))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.items, items);
+}

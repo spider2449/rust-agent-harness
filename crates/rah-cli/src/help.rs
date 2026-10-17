@@ -98,8 +98,26 @@ pub fn fallback(kind: &str) -> Help {
                 "max_rounds_per_step",
                 "Most model requests that may call tools per step (16).",
             ),
+            (
+                "retries",
+                "How many times a model request the provider could not take is opened again (10; 0 turns it off).",
+            ),
+            (
+                "retry_delay_ms",
+                "Wait before the first retry, doubling up to five times that (2000).",
+            ),
         ],
-        "loop-react" => &[("max_rounds", "Most model requests per turn (32).")],
+        "loop-react" => &[
+            ("max_rounds", "Most model requests per turn (32)."),
+            (
+                "retries",
+                "How many times a model request the provider could not take is opened again (10; 0 turns it off).",
+            ),
+            (
+                "retry_delay_ms",
+                "Wait before the first retry, doubling up to five times that (2000).",
+            ),
+        ],
         "lsp-diagnostics" => &[
             (
                 "root",

@@ -189,3 +189,20 @@ fn usage_omits_unknown_counts_on_the_wire() {
     assert_eq!(value["usage"]["input_tokens"], 12);
     assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
 }
+
+#[test]
+fn model_retrying_carries_the_wait_and_the_reason() {
+    let event = AgentEvent::ModelRetrying {
+        session_id: SessionId::new(),
+        model_request_id: ModelRequestId::new(),
+        attempt: 2,
+        retries: 10,
+        delay_ms: 4000,
+        reason: "the model is temporarily unavailable: HTTP response status 503".into(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "model_retrying");
+    assert_eq!(value["attempt"], 2);
+    assert_eq!(value["delay_ms"], 4000);
+    assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+}

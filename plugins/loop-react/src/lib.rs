@@ -14,7 +14,14 @@
 //! are used up, one more request without tools asks the model to answer with
 //! what it has, so a long search ends with an answer instead of an error.
 //!
-//! Configuration: `{ "max_rounds": <n> }` (default 32).
+//! A model request the provider cannot take (rate limit, overload, a lost
+//! connection before the response starts) is opened again after a wait
+//! (ADR 0051): `retries` times (default 10), the first after `retry_delay_ms`
+//! (default 2000), doubling up to five times that. `AgentEvent::ModelRetrying`
+//! reports each wait; `retries = 0` turns retrying off.
+//!
+//! Configuration: `{ "max_rounds": <n>, "retries": 10, "retry_delay_ms": 2000 }`
+//! (`max_rounds` defaults to 32).
 
 use std::sync::Arc;
 
@@ -26,6 +33,7 @@ use rah_api::{
     hooks::ModelBeforeRequest,
     kernel::Spawner,
     model::MODEL,
+    retry::RetryPolicy,
     session::{SESSION, SessionLog, rebuild_context},
     tools::{Invocation, ToolInvoker},
 };
@@ -56,6 +64,8 @@ impl ReactLoopPlugin {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    retries: Option<u32>,
+    retry_delay_ms: Option<u64>,
     max_rounds: Option<u32>,
 }
 
@@ -66,7 +76,8 @@ impl Plugin for ReactLoopPlugin {
     }
 
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
-        rah_api::config::parse::<Config>(config)?;
+        let config: Config = rah_api::config::parse(config)?;
+        RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?;
         Ok(())
     }
 
@@ -77,6 +88,7 @@ impl Plugin for ReactLoopPlugin {
             session: scope.inject(SESSION)?,
             spawner: scope.spawner(),
             max_rounds: config.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS).max(1),
+            retry: RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?,
         };
         scope.provide(LOOP, Arc::new(react))?;
         Ok(())
@@ -88,6 +100,7 @@ struct ReactLoop {
     session: Arc<dyn SessionLog>,
     spawner: Spawner,
     max_rounds: u32,
+    retry: RetryPolicy,
 }
 
 impl AgentLoop for ReactLoop {
@@ -97,6 +110,7 @@ impl AgentLoop for ReactLoop {
             kernel: self.kernel.clone(),
             session: self.session.clone(),
             max_rounds: self.max_rounds,
+            retry: self.retry,
             id: RequestId::new(),
             sid: request.session.clone(),
             cancel: request.cancel.clone(),
@@ -137,6 +151,7 @@ struct Turn {
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
     max_rounds: u32,
+    retry: RetryPolicy,
     id: RequestId,
     sid: SessionId,
     cancel: CancellationToken,
@@ -334,10 +349,25 @@ impl Turn {
             session_id: self.sid.clone(),
             model_request_id: model_request_id.clone(),
         });
-        let mut stream = model
-            .stream(request, self.cancel.clone())
-            .await
-            .map_err(|error| failure(AgentErrorCode::Model, error.to_string()))?;
+        let mut stream = rah_api::retry::stream(
+            model.as_ref(),
+            Some(&self.kernel),
+            request,
+            &self.cancel,
+            &self.retry,
+            |notice| {
+                self.emit(AgentEvent::ModelRetrying {
+                    session_id: self.sid.clone(),
+                    model_request_id: model_request_id.clone(),
+                    attempt: notice.attempt,
+                    retries: notice.retries,
+                    delay_ms: u64::try_from(notice.delay.as_millis()).unwrap_or(u64::MAX),
+                    reason: notice.reason.to_owned(),
+                });
+            },
+        )
+        .await
+        .map_err(|error| failure(AgentErrorCode::Model, error.to_string()))?;
 
         let (mut text, mut calls, mut reasoning) = (String::new(), Vec::new(), false);
         loop {
@@ -457,7 +487,9 @@ impl ReactLoopPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "max_rounds": 32
+  "max_rounds": 32,
+  "retries": 10,
+  "retry_delay_ms": 2000
 }"#;
 }
 

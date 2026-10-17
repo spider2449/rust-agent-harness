@@ -17,6 +17,7 @@ pub mod config;
 pub mod hooks;
 pub mod host;
 pub mod model;
+pub mod retry;
 pub mod sandbox;
 pub mod scheduler;
 pub mod session;

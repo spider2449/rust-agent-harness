@@ -86,3 +86,14 @@ impl WaterfallHook for ToolInputRepair {
     const NAME: &'static str = "tool.repair_input";
     type Value = ToolRequestContext;
 }
+
+/// A model request did not fit the model's context window (ADR 0052). A
+/// handler returns a smaller request, for example with old history
+/// summarized; the loop sends it once. A request that comes back unchanged
+/// ends the turn with the overflow error.
+pub struct ModelOverflow;
+
+impl WaterfallHook for ModelOverflow {
+    const NAME: &'static str = "model.overflow";
+    type Value = ModelRequest;
+}

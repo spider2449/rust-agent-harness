@@ -23,6 +23,10 @@ const KEY: &str = "FIXTURE-KEY-DO-NOT-EXPOSE";
 enum Reply {
     Sse(String),
     Status(u16, &'static str),
+    /// A status with a `Retry-After: 7` header.
+    Limited(u16),
+    /// A status with this JSON body.
+    Body(u16, &'static str),
     Hold,
 }
 
@@ -79,6 +83,12 @@ impl Server {
                 let (status, kind, body) = match reply {
                     Reply::Sse(body) => (200, "text/event-stream", body),
                     Reply::Status(status, kind) => (status, kind, "{}".to_owned()),
+                    Reply::Limited(status) => (
+                        status,
+                        "application/json\r\nRetry-After: 7",
+                        "{}".to_owned(),
+                    ),
+                    Reply::Body(status, body) => (status, "application/json", body.to_owned()),
                     Reply::Hold => {
                         let _ = socket
                             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -394,7 +404,9 @@ async fn failures_are_typed_and_carry_no_secrets() {
     }
     assert!(matches!(&errors[0], ModelError::Rejected(m) if m.contains("authentication")));
     assert!(matches!(&errors[1], ModelError::Rejected(m) if m.contains("400")));
-    assert!(matches!(&errors[2], ModelError::Transport(m) if m.contains("overloaded")));
+    assert!(
+        matches!(&errors[2], ModelError::Unavailable { message, .. } if message.contains("529"))
+    );
     assert!(matches!(errors[3], ModelError::Protocol(_)));
     assert!(matches!(errors[4], ModelError::Protocol(_)));
     assert!(matches!(errors[5], ModelError::Rejected(_)));
@@ -494,4 +506,55 @@ fn a_key_pasted_as_the_variable_name_is_refused_without_echoing_it() {
     assert!(!error.contains(pasted), "{error}");
     let error = read_key(&"a".repeat(80)).unwrap_err();
     assert!(error.contains("NAME of an environment variable"), "{error}");
+}
+
+#[tokio::test]
+async fn busy_statuses_are_unavailable_and_carry_retry_after() {
+    let server = Server::new(vec![
+        Reply::Limited(429),
+        Reply::Status(503, "application/json"),
+        Reply::Limited(529),
+        Reply::Status(400, "application/json"),
+    ])
+    .await;
+    let model = anthropic(&server, settings("claude-test"));
+    let mut errors = Vec::new();
+    for _ in 0..4 {
+        errors.push(collect(&model, request(user("x"))).await.unwrap_err());
+    }
+    let seven = Some(std::time::Duration::from_secs(7));
+    assert!(
+        matches!(&errors[0], ModelError::Unavailable { message, retry_after } if message.contains("429") && *retry_after == seven)
+    );
+    assert!(
+        matches!(&errors[1], ModelError::Unavailable { message, retry_after } if message.contains("503") && retry_after.is_none())
+    );
+    assert!(
+        matches!(&errors[2], ModelError::Unavailable { message, retry_after } if message.contains("529") && *retry_after == seven)
+    );
+    assert!(matches!(&errors[3], ModelError::Rejected(_)));
+}
+
+#[tokio::test]
+async fn a_request_that_does_not_fit_is_a_context_overflow() {
+    let server = Server::new(vec![
+        Reply::Body(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#,
+        ),
+        Reply::Body(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens must be positive"}}"#,
+        ),
+        Reply::Body(413, r#"{"error":"request_too_large"}"#),
+    ])
+    .await;
+    let model = anthropic(&server, settings("claude-test"));
+    let mut errors = Vec::new();
+    for _ in 0..3 {
+        errors.push(collect(&model, request(user("x"))).await.unwrap_err());
+    }
+    assert!(matches!(&errors[0], ModelError::ContextOverflow(m) if !m.contains("250000")));
+    assert!(matches!(&errors[1], ModelError::Rejected(m) if m.contains("400")));
+    assert!(matches!(&errors[2], ModelError::Rejected(m) if m.contains("413")));
 }

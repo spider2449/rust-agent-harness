@@ -497,6 +497,22 @@ where
                 out.flush().await?;
             }
             AgentEvent::ModelReasoningStarted { .. } => line(out, "[thinking]").await?,
+            AgentEvent::ModelRetrying {
+                attempt,
+                retries,
+                delay_ms,
+                reason,
+                ..
+            } => {
+                line(
+                    out,
+                    &format!(
+                        "[model busy: {reason}; retry {attempt} of {retries} in {} s]",
+                        delay_ms.div_ceil(1000)
+                    ),
+                )
+                .await?;
+            }
             AgentEvent::ToolRequested { tool_call, .. } => {
                 line(
                     out,
