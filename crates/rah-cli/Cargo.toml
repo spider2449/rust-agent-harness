@@ -32,6 +32,7 @@ rah-plugin-skills-fs = { path = "../../plugins/skills-fs" }
 rah-plugin-storage-fs = { path = "../../plugins/storage-fs" }
 rah-plugin-telemetry-log = { path = "../../plugins/telemetry-log" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
+rah-plugin-tools-http = { path = "../../plugins/tools-http" }
 rah-plugin-tools-mcp = { path = "../../plugins/tools-mcp" }
 rah-plugin-tools-repo = { path = "../../plugins/tools-repo" }
 rah-plugin-tools-repo-write = { path = "../../plugins/tools-repo-write" }

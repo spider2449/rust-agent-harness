@@ -47,6 +47,11 @@
         <span id="busy-text"></span>
         <span id="busy-time" class="busy-time"></span>
       </div>
+      <div id="api-bar" class="api-bar" hidden>
+        <span class="api-label">Internal API</span>
+        <span id="api-groups" class="api-groups" role="radiogroup" aria-label="Internal API"></span>
+        <span id="api-state" class="api-state" role="status"></span>
+      </div>
       <form id="composer" class="composer">
         <ul id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></ul>
         <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line, / for commands)" disabled aria-controls="slash-menu"></textarea>
@@ -117,7 +122,7 @@
         <form id="editor" class="editor" hidden>
           <h3 id="editor-title"></h3>
           <label id="editor-kind-row">Kind <select id="editor-kind"></select></label>
-          <label id="editor-id-row">Id <input id="editor-id" placeholder="defaults to the kind"></label>
+          <label id="editor-id-row">Name (id) <input id="editor-id" placeholder="defaults to the kind"></label>
           <label>Configuration (JSON)
             <textarea id="editor-config" rows="6" spellcheck="false"></textarea>
           </label>

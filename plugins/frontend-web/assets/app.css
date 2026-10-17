@@ -173,6 +173,15 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 .badge.good { color: var(--good); border-color: var(--good); }
 .badge.bad { color: var(--bad); border-color: var(--bad); }
 .mode { width: auto; }
+.api-bar { display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+.api-bar[hidden] { display: none; }
+.api-label { color: var(--muted); white-space: nowrap; }
+.api-groups { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.api-groups .group { border: 0; border-radius: 0; padding: 3px 12px; background: transparent; color: var(--text); }
+.api-groups .group + .group { border-left: 1px solid var(--line); }
+.api-groups .group.on { background: var(--accent); color: var(--accent-text); }
+.api-state { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.api-state.connected { color: var(--good); }
 /* A mode without the workspace hides its controls (see `applyMode`). */
 body.no-workspace #toggle-side,
 body.no-workspace #side-tabs [data-view="files"],

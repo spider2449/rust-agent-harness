@@ -1681,3 +1681,180 @@ async fn several_sessions_are_deleted_at_once_forks_first() {
         3
     );
 }
+
+#[tokio::test]
+async fn a_sub_mode_runs_its_api_group_and_leaving_it_stops_the_group() {
+    use reqwest::Method;
+    let web = start("modes-api-group", |distribution| {
+        distribution
+            .plugin
+            .retain(|spec| spec.kind != "frontend-web");
+        distribution.plugin.push(toml_spec(
+            r#"
+[[plugin]]
+id = "http-ddt"
+use = "tools-http"
+
+[plugin.config]
+base_url = "http://127.0.0.1:9"
+tools = [
+  { name = "ddt.order", description = "Looks up one order.", path = "/orders/{id}", params = { id = { type = "string", required = true } } },
+]
+"#,
+        ));
+        distribution.plugin.push(toml_spec(
+            r#"
+[[plugin]]
+use = "frontend-web"
+
+[plugin.config]
+bind = "127.0.0.1:0"
+
+[[plugin.config.modes]]
+id = "daily"
+label = "Daily work"
+instructions = "Be brief."
+
+[[plugin.config.modes]]
+id = "ddt"
+label = "DDT"
+extends = "daily"
+instructions = "Use the ddt.* tools."
+plugins = { "http-ddt" = true }
+"#,
+        ));
+    })
+    .await;
+    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
+    let group = PluginId::new("http-ddt");
+    let switch = |mode: &str| {
+        web.request(Method::PUT, "/api/mode")
+            .json(&json!({ "mode": mode }))
+    };
+
+    // The sub-mode lists its parent and carries the parent's instructions.
+    let state = web.json(web.get("/api/modes")).await;
+    assert_eq!(state["modes"][1]["extends"], "daily", "{state}");
+    assert_eq!(
+        state["modes"][1]["instructions"], "Be brief.\n\nUse the ddt.* tools.",
+        "{state}"
+    );
+
+    // The parent does not run the group; the sub-mode does.
+    let (status, reply) = web.status(switch("daily")).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["problems"], json!([]), "{reply}");
+    assert_eq!(admin.stopped(), std::slice::from_ref(&group));
+    let (status, reply) = web.status(switch("ddt")).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["problems"], json!([]), "{reply}");
+    assert!(admin.stopped().is_empty());
+    assert!(wait_active(&web.kernel, "http-ddt").await);
+
+    // Leaving it, to the parent or to no mode, stops the group again.
+    web.status(switch("daily")).await;
+    assert_eq!(admin.stopped(), std::slice::from_ref(&group));
+    web.status(switch("ddt")).await;
+    let (status, _) = web
+        .status(
+            web.request(Method::PUT, "/api/mode")
+                .json(&json!({ "mode": null })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(admin.stopped(), [group]);
+}
+
+#[tokio::test]
+async fn unlisted_tools_http_instances_are_api_groups_and_only_one_is_connected() {
+    use reqwest::Method;
+    let web = start("api-groups", |distribution| {
+        for id in ["http-ddt", "http-crm"] {
+            distribution.plugin.push(toml_spec(&format!(
+                r#"
+[[plugin]]
+id = "{id}"
+use = "tools-http"
+
+[plugin.config]
+base_url = "http://127.0.0.1:9"
+tools = [
+  {{ name = "{id}.order", description = "Looks up one order.", path = "/orders/{{id}}", params = {{ id = {{ type = "string", required = true }} }} }},
+]
+"#
+            )));
+        }
+    })
+    .await;
+    let press = |id: &str, on: bool| {
+        web.request(Method::PUT, "/api/group")
+            .json(&json!({ "id": id, "on": on }))
+    };
+    let active = || async {
+        let groups = web.json(web.get("/api/groups")).await;
+        groups["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|group| group["active"] == true)
+            .map(|group| group["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // The builtin daily mode offers groups, labelled without `http-`.
+    let state = web.json(web.get("/api/modes")).await;
+    assert_eq!(state["modes"][0]["groups"], true, "{state}");
+    let groups = web.json(web.get("/api/groups")).await;
+    assert_eq!(groups["groups"][0]["label"], "crm", "{groups}");
+    assert_eq!(groups["groups"][1]["label"], "ddt", "{groups}");
+
+    // Groups start disconnected, once the start-up restore has run.
+    let mut waited = 0;
+    while !active().await.is_empty() {
+        assert!(waited < 100, "groups were not stopped at start");
+        waited += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // Pressing one connects it; pressing another replaces it.
+    let (status, reply) = web.status(press("http-ddt", true)).await;
+    assert_eq!(status, 200, "{reply}");
+    assert!(wait_active(&web.kernel, "http-ddt").await);
+    assert_eq!(active().await, ["http-ddt"]);
+    let (status, reply) = web.status(press("http-crm", true)).await;
+    assert_eq!(status, 200, "{reply}");
+    assert!(wait_active(&web.kernel, "http-crm").await);
+    assert_eq!(active().await, ["http-crm"]);
+
+    // Pressing it again disconnects it.
+    let (status, _) = web.status(press("http-crm", false)).await;
+    assert_eq!(status, 200);
+    assert!(active().await.is_empty());
+
+    // Only API groups can be pressed.
+    let (status, _) = web.status(press("session-jsonl", true)).await;
+    assert_eq!(status, 400);
+
+    // A group added in the Plugins panel waits for its choice instead of
+    // starting, and starting one by hand replaces the connected group.
+    let (status, reply) = web
+        .status(web.request(Method::POST, "/api/plugins").json(&json!({
+            "kind": "tools-http",
+            "id": "http-erp",
+            "config": {
+                "base_url": "http://127.0.0.1:9",
+                "tools": [{ "name": "erp.order", "description": "Looks up one order.", "path": "/orders" }],
+            },
+        })))
+        .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["state"], "stopped", "{reply}");
+    assert!(active().await.is_empty());
+    web.status(press("http-ddt", true)).await;
+    assert!(wait_active(&web.kernel, "http-ddt").await);
+    let (status, _) = web
+        .status(web.request(Method::POST, "/api/plugins/http-erp/start"))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(active().await, ["http-erp"]);
+}

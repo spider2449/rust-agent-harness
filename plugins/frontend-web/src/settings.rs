@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ApiError, ApiResult, AppState, Shared, manage::admin, modes, panel, status_json, web_search,
+    ApiError, ApiResult, AppState, Shared, groups, manage::admin, modes, panel, status_json,
+    web_search,
 };
 
 /// Slots and the plugin kinds each may hold, in the order they are restored.
@@ -158,6 +159,7 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
     panel::restore(&shared, admin.as_ref()).await;
     web_search::restore(&shared, admin.as_ref()).await;
     modes::restore(&shared, admin.as_ref(), shared.start_mode.clone()).await;
+    groups::restore(&shared, admin.as_ref()).await;
 }
 
 fn key(slot: &str) -> String {

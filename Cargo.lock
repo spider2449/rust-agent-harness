@@ -2589,6 +2589,7 @@ dependencies = [
  "rah-plugin-storage-fs",
  "rah-plugin-telemetry-log",
  "rah-plugin-tools-builtin",
+ "rah-plugin-tools-http",
  "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
  "rah-plugin-tools-repo-write",
@@ -2889,6 +2890,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rah-plugin-tools-http"
+version = "0.44.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rah-plugin-tools-mcp"
 version = "0.44.0"
 dependencies = [
@@ -3080,6 +3093,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

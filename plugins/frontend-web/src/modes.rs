@@ -5,7 +5,7 @@
 //! A mode is defined in one place, this plugin's configuration (`modes`,
 //! else [`builtin`]), and changes three things while it is active:
 //!
-//! - `plugins`: plugin kinds to run (`true`) or stop (`false`), applied
+//! - `plugins`: plugin kinds (or instance ids) to run (`true`) or stop (`false`), applied
 //!   through the `admin` service. Running a kind starts a stopped instance
 //!   or mounts one with its default configuration; stopping keeps its
 //!   configuration, so running it again restores it. `tools-web-search` is
@@ -28,7 +28,7 @@ use std::{
 
 use axum::{Json, extract::State, http::StatusCode};
 use rah_api::{
-    PluginError, PluginStatus,
+    PluginError, PluginId, PluginStatus,
     admin::{AdminError, MountRequest, PluginAdmin},
     storage::STORAGE,
 };
@@ -46,19 +46,29 @@ pub(crate) struct Mode {
     pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The mode this one refines (a sub-mode, such as an API group of daily
+    /// work). It starts from the parent's plugins, instructions and
+    /// workspace; its own plugins override them and its instructions follow
+    /// the parent's. The parent must not extend another mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
     /// Added to every model request while the mode is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// Plugin kinds to run (`true`) or stop (`false`), in this order.
+    /// Plugin kinds or instance ids to run (`true`) or stop (`false`). An
+    /// instance id switches that one plugin (for example one `tools-http`
+    /// API group); an instance another mode runs and this one does not list
+    /// is stopped when this mode is entered.
     #[serde(default)]
     pub plugins: BTreeMap<String, bool>,
-    /// Whether the UI shows the workspace: files, Git and the folder.
-    #[serde(default = "yes")]
-    pub workspace: bool,
-}
-
-fn yes() -> bool {
-    true
+    /// Whether the UI shows the workspace: files, Git and the folder
+    /// (default: the parent's, else shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<bool>,
+    /// Whether the UI offers the API groups (`tools-http` instances) here
+    /// (default: the parent's, else not).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub groups: bool,
 }
 
 /// The modes used when the configuration names none.
@@ -68,6 +78,7 @@ pub(crate) fn builtin() -> Vec<Mode> {
             id: "daily".into(),
             label: "Daily work".into(),
             description: "Writing, research and planning: web search on, no file changes.".into(),
+            extends: None,
             instructions: Some(
                 "You are helping with everyday work: writing, research, planning and \
                  questions. Answer directly and concisely. Use web search for facts that \
@@ -78,13 +89,15 @@ pub(crate) fn builtin() -> Vec<Mode> {
                 ("tools-repo-write".into(), false),
                 (web_search::KIND.into(), true),
             ]),
-            workspace: false,
+            workspace: Some(false),
+            groups: true,
         },
         Mode {
             id: "coding".into(),
             label: "Coding".into(),
             description: "Software work in the workspace: file and Git tools, the file panel."
                 .into(),
+            extends: None,
             instructions: Some(
                 "You are helping with software development in the workspace. Read the \
                  relevant files before changing them, keep changes small and focused, \
@@ -92,7 +105,8 @@ pub(crate) fn builtin() -> Vec<Mode> {
                     .into(),
             ),
             plugins: BTreeMap::from([("tools-repo-write".into(), true)]),
-            workspace: true,
+            workspace: Some(true),
+            groups: false,
         },
     ]
 }
@@ -120,8 +134,53 @@ pub(crate) fn check(modes: &[Mode]) -> Result<(), PluginError> {
             )
             .into());
         }
+        if let Some(parent) = &mode.extends {
+            match modes.iter().find(|other| &other.id == parent) {
+                None => {
+                    return Err(
+                        format!("mode `{}` extends unknown mode `{parent}`", mode.id).into(),
+                    );
+                }
+                Some(found) if found.extends.is_some() => {
+                    return Err(format!(
+                        "mode `{}` extends `{parent}`, which extends another mode: only one level",
+                        mode.id
+                    )
+                    .into());
+                }
+                Some(_) => {}
+            }
+        }
     }
     Ok(())
+}
+
+/// Folds each sub-mode into its parent's settings, so the rest of the plugin
+/// and the UI see complete modes. `modes` passed [`check`].
+fn resolve(modes: Vec<Mode>) -> Vec<Mode> {
+    let parents = modes.clone();
+    modes
+        .into_iter()
+        .map(|mut mode| {
+            let Some(parent) = mode
+                .extends
+                .as_deref()
+                .and_then(|id| parents.iter().find(|parent| parent.id == id))
+            else {
+                return mode;
+            };
+            let mut plugins = parent.plugins.clone();
+            plugins.append(&mut mode.plugins);
+            mode.plugins = plugins;
+            mode.instructions = match (&parent.instructions, mode.instructions.take()) {
+                (Some(parent), Some(own)) => Some(format!("{parent}\n\n{own}")),
+                (parent, own) => own.or_else(|| parent.clone()),
+            };
+            mode.workspace = mode.workspace.or(parent.workspace);
+            mode.groups |= parent.groups;
+            mode
+        })
+        .collect()
 }
 
 fn switchable(kind: &str) -> bool {
@@ -139,10 +198,18 @@ pub(crate) struct Modes {
 impl Modes {
     pub fn new(list: Vec<Mode>) -> Self {
         Self {
-            list,
+            list: resolve(list),
             active: Mutex::new(None),
             switching: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Every plugin key some mode lists.
+    pub fn listed_plugins(&self) -> std::collections::BTreeSet<&str> {
+        self.list
+            .iter()
+            .flat_map(|mode| mode.plugins.keys().map(String::as_str))
+            .collect()
     }
 
     fn find(&self, id: &str) -> Option<&Mode> {
@@ -242,7 +309,25 @@ const KEY: &str = "mode";
 async fn enter(shared: &Shared, admin: &dyn PluginAdmin, mode: Option<String>) -> Vec<String> {
     let _switching = shared.modes.switching.lock().await;
     let mut problems = Vec::new();
-    if let Some(found) = mode.as_deref().and_then(|id| shared.modes.find(id)) {
+    let found = mode.as_deref().and_then(|id| shared.modes.find(id));
+    // An instance another mode runs and this one does not list is stopped,
+    // so leaving an API group removes its tools.
+    let kinds = admin.kinds();
+    let leaving: std::collections::BTreeSet<&String> = shared
+        .modes
+        .list
+        .iter()
+        .flat_map(|other| &other.plugins)
+        .filter(|(key, run)| **run && !kinds.contains(*key))
+        .map(|(key, _)| key)
+        .filter(|key| !found.is_some_and(|found| found.plugins.contains_key(*key)))
+        .collect();
+    for key in leaving {
+        if let Err(error) = switch_kind(shared, admin, key, false).await {
+            problems.push(format!("{key}: {error}"));
+        }
+    }
+    if let Some(found) = found {
         for (kind, run) in &found.plugins {
             if let Err(error) = switch_kind(shared, admin, kind, *run).await {
                 problems.push(format!("{kind}: {error}"));
@@ -258,7 +343,7 @@ async fn enter(shared: &Shared, admin: &dyn PluginAdmin, mode: Option<String>) -
     problems
 }
 
-async fn switch_kind(
+pub(crate) async fn switch_kind(
     shared: &Shared,
     admin: &dyn PluginAdmin,
     kind: &str,
@@ -271,7 +356,24 @@ async fn switch_kind(
             web_search::disable(shared, admin).await
         };
     }
-    let instances = web_search::instances(shared, admin, kind);
+    // A kind switches all its instances; any other key is one instance id.
+    let by_id = !admin.kinds().iter().any(|known| known == kind);
+    let instances = if by_id {
+        let id = PluginId::new(kind);
+        let all = shared
+            .kernel
+            .plugins()
+            .into_iter()
+            .map(|(id, status)| (id, Some(status)))
+            .chain(admin.stopped().into_iter().map(|id| (id, None)));
+        all.filter(|(found, _)| *found == id && admin.instance(found).is_some())
+            .collect()
+    } else {
+        web_search::instances(shared, admin, kind)
+    };
+    if by_id && run && instances.is_empty() {
+        return Err(AdminError::Failed("no plugin with this id".into()));
+    }
     if !run {
         for (id, status) in instances {
             if status.is_some() {
@@ -342,6 +444,65 @@ mod tests {
         let mut twice = builtin();
         twice[1].id = twice[0].id.clone();
         assert!(check(&twice).is_err());
+    }
+
+    fn group(id: &str, parent: Option<&str>, instructions: &str, plugins: &[(&str, bool)]) -> Mode {
+        Mode {
+            id: id.into(),
+            label: id.into(),
+            description: String::new(),
+            extends: parent.map(Into::into),
+            instructions: Some(instructions.into()),
+            plugins: plugins.iter().map(|(k, v)| ((*k).into(), *v)).collect(),
+            workspace: None,
+            groups: false,
+        }
+    }
+
+    #[test]
+    fn a_sub_mode_adds_to_its_parent() {
+        let modes = vec![
+            group("daily", None, "Be brief.", &[("tools-web-search", true)]),
+            group(
+                "ddt",
+                Some("daily"),
+                "Use ddt.* tools.",
+                &[("http-ddt", true)],
+            ),
+        ];
+        assert!(check(&modes).is_ok());
+        let resolved = resolve(modes);
+        assert_eq!(
+            resolved[1].plugins,
+            BTreeMap::from([("http-ddt".into(), true), ("tools-web-search".into(), true)])
+        );
+        assert_eq!(
+            resolved[1].instructions.as_deref(),
+            Some("Be brief.\n\nUse ddt.* tools.")
+        );
+        assert_eq!(resolved[1].extends.as_deref(), Some("daily"));
+    }
+
+    #[test]
+    fn a_sub_mode_inherits_the_workspace_unless_it_sets_one() {
+        let mut parent = group("daily", None, "x", &[]);
+        parent.workspace = Some(false);
+        let own = group("ddt", Some("daily"), "y", &[]);
+        let mut explicit = group("other", Some("daily"), "z", &[]);
+        explicit.workspace = Some(true);
+        let resolved = resolve(vec![parent, own, explicit]);
+        assert_eq!(resolved[1].workspace, Some(false));
+        assert_eq!(resolved[2].workspace, Some(true));
+    }
+
+    #[test]
+    fn a_sub_mode_needs_an_existing_parent_that_is_not_a_sub_mode() {
+        let daily = group("daily", None, "x", &[]);
+        let lost = group("ddt", Some("missing"), "y", &[]);
+        assert!(check(&[daily.clone(), lost]).is_err());
+        let first = group("ddt", Some("daily"), "y", &[]);
+        let second = group("deep", Some("ddt"), "z", &[]);
+        assert!(check(&[daily, first, second]).is_err());
     }
 
     #[test]

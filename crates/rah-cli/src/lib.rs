@@ -36,6 +36,7 @@ use rah_plugin_skills_fs::SkillsPlugin;
 use rah_plugin_storage_fs::StorageFsPlugin;
 use rah_plugin_telemetry_log::TelemetryPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
+use rah_plugin_tools_http::HttpToolsPlugin;
 use rah_plugin_tools_mcp::{McpHttpToolsPlugin, McpToolsPlugin};
 use rah_plugin_tools_repo::RepoToolsPlugin;
 use rah_plugin_tools_repo_write::RepoWriteToolsPlugin;
@@ -49,7 +50,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 27] = [
+    let entries: [(&'static str, Constructor); 28] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("frontend-cli", |id| Arc::new(CliFrontendPlugin::new(id))),
@@ -81,6 +82,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("storage-fs", |id| Arc::new(StorageFsPlugin::new(id))),
         ("telemetry-log", |id| Arc::new(TelemetryPlugin::new(id))),
         ("tools-builtin", |id| Arc::new(BuiltinToolsPlugin::new(id))),
+        ("tools-http", |id| Arc::new(HttpToolsPlugin::new(id))),
         ("tools-mcp", |id| Arc::new(McpToolsPlugin::new(id))),
         ("tools-mcp-http", |id| Arc::new(McpHttpToolsPlugin::new(id))),
         ("tools-repo", |id| Arc::new(RepoToolsPlugin::new(id))),
@@ -118,6 +120,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "storage-fs" => StorageFsPlugin::CONFIG_EXAMPLE,
         "telemetry-log" => TelemetryPlugin::CONFIG_EXAMPLE,
         "tools-builtin" => BuiltinToolsPlugin::CONFIG_EXAMPLE,
+        "tools-http" => HttpToolsPlugin::CONFIG_EXAMPLE,
         "tools-mcp" => McpToolsPlugin::CONFIG_EXAMPLE,
         "tools-mcp-http" => McpHttpToolsPlugin::CONFIG_EXAMPLE,
         "tools-repo" => RepoToolsPlugin::CONFIG_EXAMPLE,

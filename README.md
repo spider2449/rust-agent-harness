@@ -321,10 +321,44 @@ workspace = false
 plugins = { "tools-repo-write" = false }
 ```
 
-`plugins` runs (`true`) or stops (`false`) plugin kinds; policy and frontend
-plugins cannot be listed. `instructions` is added to every model request
-after the system prompt. `workspace = false` hides the files, Git state and
-folder in the UI.
+`plugins` runs (`true`) or stops (`false`) plugin kinds or single instance
+ids; policy and frontend plugins cannot be listed. `instructions` is added to
+every model request after the system prompt. `workspace = false` hides the
+files, Git state and folder in the UI.
+
+**API groups**: every `tools-http` instance is one internal API with its
+endpoints declared in configuration. In daily work an "Internal API" selector
+above the message box lists `Off` and one choice per instance; picking one
+connects that API (the model can then use its tools) and a line beside it says
+what is connected. Only one group is connected at a time, and groups start
+disconnected
+([ADR 0047](docs/adr/0047-api-groups-as-sub-modes.md)):
+
+```toml
+[[plugin]]
+id = "http-ddt"                  # the button reads "ddt"
+use = "tools-http"
+
+[plugin.config]
+base_url = "https://ddt.example/api"
+header_env = { Authorization = "DDT_AUTH" }   # the value comes from this environment variable
+tools = [
+  { name = "ddt.order", description = "Looks up one order.", path = "/orders/{id}", params = { id = { type = "string", required = true } } },
+  { name = "ddt.search", description = "Searches orders.", path = "/orders", params = { q = { type = "string", required = true }, limit = { type = "integer" } } },
+]
+
+[[plugin]]
+use = "policy-authority"
+config = { decisions = { "ddt.*" = "allow" } }
+```
+
+Another group is another `tools-http` instance. Tools default to `GET` and
+`read`; declare `method = "POST"` for body parameters and
+`permission = "write"` for an endpoint that changes anything. To give a group
+its own instructions, add a mode with `extends = "daily"`,
+`plugins = { "http-ddt" = true }` and `instructions`; it then appears as a
+button of its own. A runnable version with a mock API is in
+`examples/http-api/`.
 
 `rah` prints the address with a per-start access token; open exactly that
 URL. The UI lists sessions grouped by the folder they worked in (the current

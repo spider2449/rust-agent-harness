@@ -132,7 +132,9 @@ Implemented:
   `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-mcp-http` (one Streamable HTTP
   MCP server per instance, ADR 0038); `tools-shell` (opt-in `shell.exec`,
-  requires `sandbox`); `tools-web-search` (opt-in keyless `web.search` over
+  requires `sandbox`); `tools-http` (opt-in; one instance is one API group
+  whose endpoints are declared as tools in configuration, ADR 0047);
+  `tools-web-search` (opt-in keyless `web.search` over
   DuckDuckGo, Bing and SearXNG with failover, merged `web.multi_search`, and
   `web.fetch` limited to public addresses); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API

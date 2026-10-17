@@ -78,6 +78,7 @@ mod approvals;
 mod export;
 mod files;
 mod git;
+mod groups;
 mod jobs;
 mod manage;
 mod modes;
@@ -265,6 +266,8 @@ fn router(shared: AppState) -> Router {
         )
         .route("/modes", get(modes::list))
         .route("/mode", put(modes::set))
+        .route("/groups", get(groups::list))
+        .route("/group", put(groups::set))
         .route("/catalog", get(manage::catalog))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))

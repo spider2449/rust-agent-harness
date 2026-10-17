@@ -26,6 +26,7 @@ members = [
     "plugins/storage-fs",
     "plugins/telemetry-log",
     "plugins/tools-builtin",
+    "plugins/tools-http",
     "plugins/tools-mcp",
     "plugins/tools-repo",
     "plugins/tools-repo-write",

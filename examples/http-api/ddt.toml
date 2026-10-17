@@ -1,0 +1,52 @@
+# An API group ("DDT") against the mock server in this folder (ADR 0047).
+#
+#   1. node examples/http-api/server.mjs
+#   2. $env:DDT_AUTH = "Bearer demo-token"; cargo run -p rah-cli -- --config examples/http-api/ddt.toml --mode daily
+#   3. Open the printed URL. In "Daily work" the "Internal API" selector above the
+#      message box offers "ddt" (the instance id without "http-"); pick it to
+#      connect the API, then ask
+#      for example:
+#        "What is the status of order 1001?"
+#        "List the pending orders."
+#        "Add the note 'called customer' to order 1002."
+#
+# The model reaches the API only through the ddt.* tools, and only while the
+# API is connected. The credential comes from DDT_AUTH (the full header
+# value), not from this file.
+
+# Read tools run without asking; the write tool asks first.
+[[plugin]]
+use = "policy-authority"
+config = { allow = ["none", "read"], ask = ["write", "execute"], decisions = { "ddt.order" = "allow", "ddt.search" = "allow" }, tools = { "ddt.add_note" = "write" } }
+
+[[plugin]]
+use = "session-jsonl"
+
+[[plugin]]
+use = "context-default"
+config = { memory_dir = "memory" }
+
+# A local llama-server on http://127.0.0.1:8080; swap for model-anthropic or
+# model-openai as needed.
+[[plugin]]
+use = "model-llamacpp"
+
+[[plugin]]
+use = "loop-react"
+
+# One instance is one API group. It is started by the DDT mode, not here.
+[[plugin]]
+id = "http-ddt"
+use = "tools-http"
+
+[plugin.config]
+base_url = "http://127.0.0.1:8787"
+header_env = { Authorization = "DDT_AUTH" }
+tools = [
+  { name = "ddt.order", description = "Looks up one order by id.", path = "/orders/{id}", params = { id = { type = "string", description = "Order id, e.g. 1001.", required = true } } },
+  { name = "ddt.search", description = "Searches orders by customer name or status.", path = "/orders", params = { q = { type = "string", description = "Text to match, e.g. a customer or 'pending'.", required = true }, limit = { type = "integer", description = "Maximum results." } } },
+  { name = "ddt.add_note", description = "Appends a note to an order.", method = "POST", permission = "write", path = "/orders/{id}/note", params = { id = { type = "string", required = true }, text = { type = "string", description = "The note.", required = true } } },
+]
+
+[[plugin]]
+use = "frontend-web"

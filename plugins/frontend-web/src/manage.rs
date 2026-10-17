@@ -14,7 +14,7 @@ use rah_api::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ApiError, ApiResult, AppState, panel, status_json};
+use crate::{ApiError, ApiResult, AppState, groups, panel, status_json};
 
 pub(crate) fn admin(shared: &AppState) -> Result<Arc<dyn PluginAdmin>, ApiError> {
     shared.kernel.get(ADMIN).ok_or_else(|| {
@@ -133,8 +133,17 @@ impl Mount {
 /// start (see [`crate::panel`]).
 pub(crate) async fn mount(State(shared): State<AppState>, Json(mount): Json<Mount>) -> ApiResult {
     let request = mount.request();
-    let (id, status) = admin(&shared)?.mount(request.clone()).await?;
+    let admin = admin(&shared)?;
+    let (id, status) = admin.mount(request.clone()).await?;
     panel::mounted(&shared, &id, &request).await;
+    groups::changed(&shared, admin.as_ref(), &id, groups::Change::Added).await;
+    // An API group waits for its choice in the selector.
+    if admin.stopped().contains(&id) {
+        record(&shared, admin.as_ref(), &id, true).await;
+        return Ok(Json(
+            json!({ "id": id.as_str(), "state": "stopped", "detail": "" }),
+        ));
+    }
     Ok(status_reply(id.as_str(), &status))
 }
 
@@ -176,6 +185,7 @@ pub(crate) async fn start(State(shared): State<AppState>, Path(id): Path<String>
     let plugin = PluginId::new(id.clone());
     let status = admin.start(&plugin).await?;
     record(&shared, admin.as_ref(), &plugin, false).await;
+    groups::changed(&shared, admin.as_ref(), &plugin, groups::Change::Started).await;
     Ok(status_reply(&id, &status))
 }
 
@@ -193,9 +203,25 @@ pub(crate) async fn configure(
 ) -> ApiResult {
     let admin = admin(&shared)?;
     let plugin = PluginId::new(id.clone());
+    let was_active = shared
+        .kernel
+        .plugins()
+        .iter()
+        .any(|(found, status)| *found == plugin && *status == PluginStatus::Active);
     let status = admin.configure(&plugin, configure.config.clone()).await?;
     if let Some(instance) = admin.instance(&plugin) {
         panel::configured(&shared, &plugin, &instance.kind, configure.config, false).await;
+    }
+    groups::changed(
+        &shared,
+        admin.as_ref(),
+        &plugin,
+        groups::Change::Edited { was_active },
+    )
+    .await;
+    if admin.stopped().contains(&plugin) {
+        record(&shared, admin.as_ref(), &plugin, true).await;
+        return Ok(Json(json!({ "id": id, "state": "stopped", "detail": "" })));
     }
     Ok(status_reply(&id, &status))
 }

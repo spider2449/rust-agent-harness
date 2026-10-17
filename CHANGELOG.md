@@ -1,4 +1,21 @@
 # Changelog
+
+## Unreleased
+
+- Model providers refuse an `api_key_env` that cannot be an environment
+  variable name (a key pasted there by mistake) and no longer echo it in the
+  error.
+- `tools-http`: opt-in tools declared in configuration, one instance per API
+  group (endpoints, typed parameters, `read` or `write`, credentials from
+  environment variables, bounded and wrapped responses).
+- Sub-modes: a mode may `extends` another, and a mode `plugins` key may be an
+  instance id, so a daily-work group such as "DDT" runs its API tools only
+  while selected (ADR 0047). Every `tools-http` instance is an API group: daily work shows an "Internal API"
+  selector above the message box (Off or one group) with a line saying what
+  is connected. Only one group is connected at a time, and groups start
+  disconnected; the selector starts and stops the instance, so the Plugins
+  panel needs no manual start.
+
 ## v0.44.0 (2026-10-16)
 
 - `rah-desktop`: the Web UI in a native window (tao and wry; WebView2 on

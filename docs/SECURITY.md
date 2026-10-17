@@ -169,6 +169,15 @@ configuration; its messages and metadata are untrusted:
   timeout leaves a `write` or `execute` effect `uncertain`, and a request is
   never resent. A `404` for an ended session means the server did not run
   the request.
+- `tools-http` sends model-chosen parameters to the API its configuration
+  names (ADR 0047). The plugin is opt-in and each tool declares `read` or
+  `write`, so the policy must assign every tool. Input is checked against the
+  declared parameters, path values are percent-encoded, redirects are not
+  followed, credentials come from environment variables, and responses are
+  bounded, have angle brackets replaced and arrive inside
+  `<untrusted-api-response>`. A `write` tool that loses its response is
+  `uncertain` and is never replayed. It is not network isolation: the
+  process can reach whatever `base_url` reaches.
 - `tools-web-search` sends model-chosen query text to DuckDuckGo, Bing or
   configured SearXNG instances (`web.multi_search` sends it to all of them
   at once), and `web.fetch` requests a model-chosen URL, so a model can leak

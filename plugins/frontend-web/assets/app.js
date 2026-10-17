@@ -15,6 +15,8 @@ const state = {
   prefs: { raw_markdown: false },
   // `GET /api/modes`: `{modes, active}`; one mode is active for every window.
   modes: { modes: [], active: null },
+  // `GET /api/groups`: the API groups (tools-http instances): `{id, label, active}`.
+  groups: [],
   liveText: "",
   retry: 500,
   // Last seen model and loop providers, to announce a switch.
@@ -1087,26 +1089,92 @@ function workspaceShown() {
   return activeMode()?.workspace !== false;
 }
 
+// The mode whose API groups are offered: the active mode, or the parent of
+// the active sub-mode.
+function groupParent() {
+  const active = activeMode();
+  return active?.extends || active?.id || null;
+}
+
 function renderModes() {
   const select = $("mode");
   select.hidden = state.modes.modes.length === 0;
   const none = el("option", "", "No mode");
   none.value = "";
-  const options = state.modes.modes.map((mode) => {
-    const option = el("option", "", mode.label);
-    option.value = mode.id;
-    option.title = mode.description || "";
-    return option;
-  });
+  // Sub-modes (API groups) are not listed here: they are the buttons below.
+  const options = state.modes.modes
+    .filter((mode) => !mode.extends)
+    .map((mode) => {
+      const option = el("option", "", mode.label);
+      option.value = mode.id;
+      option.title = mode.description || "";
+      return option;
+    });
   select.replaceChildren(none, ...options);
-  select.value = state.modes.active || "";
+  select.value = groupParent() || "";
   select.title = activeMode()?.description || "Mode: the tools, instructions and panels to work with";
+  renderApiGroups();
+}
+
+// The internal APIs as one choice above the message box: "Off" or one API
+// (a group, or a sub-mode of the selected mode). Only one can be connected,
+// and the line beside it says what the model can reach right now.
+function renderApiGroups() {
+  const box = $("api-groups");
+  const parent = groupParent();
+  const subModes = parent ? state.modes.modes.filter((mode) => mode.extends === parent) : [];
+  // Instances no mode lists are offered in a mode with `groups`.
+  const offered = activeMode()?.groups ? state.groups : [];
+  $("api-bar").hidden = subModes.length === 0 && offered.length === 0;
+  const connected = offered.find((group) => group.active)?.label
+    || subModes.find((mode) => mode.id === state.modes.active)?.label
+    || null;
+  const choice = (label, on, title, run) => {
+    const button = el("button", on ? "group on" : "group", label);
+    button.type = "button";
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(on));
+    button.title = title;
+    button.addEventListener("click", () => {
+      if (!on) run();
+    });
+    return button;
+  };
+  const off = async () => {
+    const group = offered.find((item) => item.active);
+    if (group) await switchGroup(group.id, false);
+    if (parent && state.modes.active !== parent) await switchMode(parent);
+  };
+  box.replaceChildren(
+    choice("Off", connected === null, "Connect no internal API", off),
+    ...offered.map((group) =>
+      choice(group.label, group.active, `Connect the ${group.label} API (disconnects any other)`, () =>
+        switchGroup(group.id, true),
+      ),
+    ),
+    ...subModes.map((mode) =>
+      choice(mode.label, mode.id === state.modes.active, mode.description || `Connect the ${mode.label} API`, () =>
+        switchMode(mode.id),
+      ),
+    ),
+  );
+  const line = $("api-state");
+  line.textContent = connected
+    ? `Connected to ${connected}: the model can query this API.`
+    : "No API connected: the model cannot reach any internal API.";
+  line.classList.toggle("connected", connected !== null);
+}
+
+// A mode or group switch starts and stops plugins: show it in the plugin list.
+function refreshPluginList() {
+  if (!$("side").hidden && sideView() === "plugins") loadPlugins().catch(report);
 }
 
 // Applies the active mode to this window. The side panel's own preference
 // is kept: a mode without the workspace only hides the files view.
 function applyMode() {
   renderModes();
+  refreshPluginList();
   const shown = workspaceShown();
   document.body.classList.toggle("no-workspace", !shown);
   if (!shown && !$("side").hidden && sideView() === "files") $("side").hidden = true;
@@ -1123,6 +1191,30 @@ async function loadModes() {
     state.modes = { modes: [], active: null };
   }
   applyMode();
+}
+
+async function loadGroups() {
+  try {
+    state.groups = (await api("/groups")).groups;
+  } catch {
+    // Older servers have no groups.
+    state.groups = [];
+  }
+  renderApiGroups();
+  refreshPluginList();
+}
+
+async function switchGroup(id, on) {
+  for (const button of $("api-groups").children) button.disabled = true;
+  try {
+    state.groups = (await api("/group", { method: "PUT", body: JSON.stringify({ id, on }) })).groups;
+    refreshStatus();
+  } catch (error) {
+    report(error);
+  } finally {
+    renderApiGroups();
+    refreshPluginList();
+  }
 }
 
 async function switchMode(id) {
@@ -1841,6 +1933,7 @@ function connect() {
     // A switch made while this window was not connected (such as the mode
     // entered at start) sent no notice here.
     loadModes();
+    loadGroups();
   });
   socket.addEventListener("message", (message) => {
     const data = JSON.parse(message.data);
@@ -1851,6 +1944,8 @@ function connect() {
     } else if (data.type === "approval_resolved") {
       $(`approval-${data.id}`)?.remove();
       if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
+    } else if (data.type === "groups") {
+      loadGroups();
     } else if (data.type === "mode") {
       // Another window (or this one) switched the mode.
       if (data.active !== state.modes.active) {
@@ -1950,7 +2045,14 @@ async function manage(path, method, body) {
   }
   refreshStatus();
   await loadPlugins();
+  loadGroups();
   return result;
+}
+
+// An API group (tools-http) needs a name; its button shows it without "http-".
+function showIdHint() {
+  const group = $("editor-kind").value === "tools-http";
+  $("editor-id").placeholder = group ? "required, e.g. http-ddt (the button reads \"ddt\")" : "defaults to the kind";
 }
 
 function openEditor(mode, plugin) {
@@ -1965,8 +2067,10 @@ function openEditor(mode, plugin) {
   const config = mode === "add" ? null : plugin?.config;
   $("editor-config").value = isEmptyConfig(config) ? "" : JSON.stringify(config, null, 2);
   showConfigExample();
+  showIdHint();
   $("editor").hidden = false;
-  $("editor-config").focus();
+  $("editor").scrollIntoView({ block: "nearest" });
+  $("editor-id").focus();
 }
 
 async function saveEditor(event) {
@@ -1983,7 +2087,14 @@ async function saveEditor(event) {
     showNotice(`Replace ${missing.join(", ")} before saving.`);
     return;
   }
-  const request = { kind: $("editor-kind").value, id: $("editor-id").value.trim() || null, config };
+  const kind = $("editor-kind").value;
+  const id = $("editor-id").value.trim() || null;
+  if (editor.mode === "add" && kind === "tools-http" && !id) {
+    showNotice("Name this API group (for example http-ddt) so its button can be told apart.");
+    $("editor-id").focus();
+    return;
+  }
+  const request = { kind, id, config };
   const target = editor.target ? encodeURIComponent(editor.target.id) : "";
   try {
     if (editor.mode === "add") await manage("/plugins", "POST", request);
@@ -2334,7 +2445,10 @@ async function start() {
   $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
   $("add-plugin").addEventListener("click", () => openEditor("add", null));
   $("editor").addEventListener("submit", saveEditor);
-  $("editor-kind").addEventListener("change", showConfigExample);
+  $("editor-kind").addEventListener("change", () => {
+    showConfigExample();
+    showIdHint();
+  });
   $("editor-example").addEventListener("click", fillConfigExample);
   $("editor-cancel").addEventListener("click", () => {
     $("editor").hidden = true;
@@ -2347,6 +2461,7 @@ async function start() {
   });
   $("mode").addEventListener("change", () => switchMode($("mode").value));
   await loadModes();
+  await loadGroups();
   const side = sidePrefs();
   if (side.open ?? window.innerWidth >= 1100) showSide(side.view === "plugins" ? "plugins" : "files");
   try {
