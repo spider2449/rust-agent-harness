@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- New opt-in plugin `format-on-write` (feature `format`, ADR 0053): after a
+  `write` tool completes, runs the project's formatter on the files it named
+  (`rustfmt`, `gofmt`, `ruff`/`black` where `pyproject.toml` configures them,
+  `clang-format` with a `.clang-format`, or any formatter in `formatters`) and
+  tells the model which files changed so it reads them again before editing.
+  Formatters that run project code (`prettier`) are not defaults. It runs
+  before `lsp-diagnostics`. From the opencode study (item 9).
+- `docs/SECURITY.md` now says plainly that a language server can run
+  workspace code (`rust-analyzer` build scripts), so `lsp-diagnostics` turns a
+  `write` approval into code execution at the sandbox's isolation unless
+  `sandbox-os` confines it.
+- A request that does not fit the model's context window is no longer the end
+  of the turn (ADR 0052): the providers recognize the 400/413/422 answer
+  (`ModelError::ContextOverflow`, without repeating the provider's text), the
+  loops run the new `model.overflow` hook, and `context-compact` answers it by
+  summarizing about half of the history at once, so the request is sent
+  again, once, smaller. The session log keeps the whole conversation. From the
+  opencode study (item 8); its `auto` and token `buffer` settings and `manual`
+  compaction were not adopted (no token counts, no shared command surface).
+- `tools-repo-write` serializes its writes (item 7 of the opencode study): a
+  lock per file, taken in sorted order for multi-file edits, and `repo.patch`
+  waits for every running edit. Edits from several sessions, background jobs or
+  subagents no longer overwrite each other (a test fails without the lock). The
+  locks cover cooperating RAH calls only, not an editor or a build. A byte order
+  mark at the start of a file was already kept; a test now says so.
+- Model requests the provider cannot take (HTTP 429, 500, 502, 503, 504, 529,
+  or a connection lost before the response starts) are opened again by both
+  loops: ten retries waiting 2, 4, 8, then 10 seconds with jitter, honoring
+  `Retry-After` up to 15 minutes, never after output has started (ADR 0051).
+  New `ModelError::Unavailable` and `AgentEvent::ModelRetrying`; the Web UI and
+  terminal show the wait, `telemetry-log` counts retries, and the loops take
+  `retries` and `retry_delay_ms` (`retries = 0` turns it off). From the
+  opencode study (item 6).
+- `policy-authority` takes `commands` (ADR 0050): `shell.exec` commands that
+  run without asking, matched on the exact program and arguments (a last `"*"`
+  accepts more). It only turns an Ask into an Allow and never overrides
+  `decisions`. RAH has no shell string, so opencode's shell parser and its
+  `opaque` case are not needed; only the prefix matching was adopted (item 5
+  of the opencode study).
+- New hook `tool.repair_input` (ADR 0049), run by `ToolInvoker` before
+  `tool.before_invoke`, and the plugin `tool-input-repair`, mounted by every
+  preset. When the tool's input schema makes the fix certain, it converts
+  numeric and boolean strings, parses a stringified object or array, wraps a
+  lone value in a one-item array and drops `null`, `{}` and undeclared fields
+  the schema rejects, so the policy and the tool see the corrected input. A
+  value that does not fit is left for the tool to report. From the opencode
+  study (item 2).
+- New opt-in plugin `lsp-diagnostics` (feature `lsp`, ADR 0048): after a
+  `write` tool completes, it sends the changed files to the language server
+  for their extension (`rust-analyzer`, `typescript-language-server`,
+  `pyright-langserver`, `gopls`, `clangd` when installed, or any server in
+  `servers`) and appends the errors the server reports to the tool output.
+  It is a `tool.after_invoke` hook, so no service contract changed. Servers
+  start through `sandbox`; diagnostics are bounded and marked as output of an
+  external program. From the opencode study
+  (`docs/plans/2026-10-17-opencode-lessons-plan.md`, item 1).
 - Features: `--with <feature>[=args]` (repeatable, also on `rah-desktop`),
   `features = [...]` in `rah.toml` and `rah --list-features` turn on opt-in
   capabilities (`shell`, `web-search`, `compact`, `telemetry`, `plan`) in one

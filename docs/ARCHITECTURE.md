@@ -58,8 +58,10 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
 ```text
 frontend --TurnRequest--> loop
   loop: model.before_request hooks (context, skills, memory)
-     -> model.stream()
+     -> model.stream() (opened again with a wait when the provider cannot take it, ADR 0051;
+        with a smaller request from model.overflow when it does not fit, ADR 0052)
      -> ToolCall -> ToolInvoker.invoke()
+          -> tool.repair_input hooks (tool-input-repair: only call.input changes)
           -> tool.before_invoke hooks (policy: Allow / Deny / Ask)
           -> tool-admission providers (policy: in-flight limit)
           -> ToolStarted
@@ -90,7 +92,7 @@ Implemented:
   `session`, `sandbox` (`ExecEnv`: `run` to completion, or `spawn` a
   long-running program with pipes), tools with `ToolInvoker`, and the standard
   hooks
-  `tool.before_invoke`, `tool.approval`, `tool.after_invoke` and
+  `tool.repair_input` (ADR 0049), `tool.before_invoke`, `tool.approval`, `tool.after_invoke`, `model.overflow` (ADR 0052) and
   `model.before_request`. `tool-admission` (`ToolAdmission`, ADR 0045)
   admits authorized calls before they start; `policy-authority` uses it to
   bound how many calls run at once. Loops publish each turn event on the event bus as
@@ -109,6 +111,15 @@ Implemented:
   model for a title after a session's first turn); `policy-authority`;
   `telemetry-log` (opt-in: JSONL records of turns, model requests and tools
   with durations, policy decisions and token usage);
+  `tool-input-repair` (mounted by every preset: converts arguments that are
+  one unambiguous step from valid for the tool's schema, such as `"20"` for
+  an integer, before the policy sees the call; ADR 0049);
+  `format-on-write` (opt-in: runs the project's formatter on files completed
+  `write` tools changed, through `sandbox`, before `lsp-diagnostics` looks at
+  them; ADR 0053);
+  `lsp-diagnostics` (opt-in: appends language server diagnostics to the
+  output of completed `write` tools through `tool.after_invoke`; servers
+  start through `sandbox`, ADR 0048);
   `context-compact` (opt-in: summarizes history beyond a size limit with the
   model before `context-default` applies its window; summaries are cached by
   the history prefix they cover, and kept in `storage` when it is mounted);

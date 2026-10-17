@@ -2570,12 +2570,14 @@ dependencies = [
  "rah-api",
  "rah-plugin-context-compact",
  "rah-plugin-context-default",
+ "rah-plugin-format-on-write",
  "rah-plugin-frontend-cli",
  "rah-plugin-frontend-web",
  "rah-plugin-host-process",
  "rah-plugin-host-wasm",
  "rah-plugin-loop-plan",
  "rah-plugin-loop-react",
+ "rah-plugin-lsp-diagnostics",
  "rah-plugin-model-anthropic",
  "rah-plugin-model-chat-completions",
  "rah-plugin-model-mock",
@@ -2588,6 +2590,7 @@ dependencies = [
  "rah-plugin-skills-fs",
  "rah-plugin-storage-fs",
  "rah-plugin-telemetry-log",
+ "rah-plugin-tool-input-repair",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-http",
  "rah-plugin-tools-mcp",
@@ -2652,6 +2655,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rah-plugin-format-on-write"
+version = "0.44.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2727,6 +2742,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rah-plugin-lsp-diagnostics"
+version = "0.44.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2873,6 +2900,16 @@ dependencies = [
  "rah-api",
  "rah-protocol",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tool-input-repair"
+version = "0.44.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
  "serde_json",
  "tokio",
 ]

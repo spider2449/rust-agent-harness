@@ -57,7 +57,8 @@ directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 approval), `context-default` (a
 sliding history window and memory notes kept per workspace in
 `~/.rah/memory/<folder>-<hash>.md`, which the model can extend with
-`memory.remember` after you approve), `skills-fs` (skills, shared by all
+`memory.remember` after you approve), `tool-input-repair` (converts arguments such as `"20"` for an
+integer before the policy sees the call), `skills-fs` (skills, shared by all
 workspaces, in
 `~/.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
 `skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
@@ -91,7 +92,7 @@ a refused change at runtime leaves the running plugin as it was.
 
 **Features** are the simple way to turn on what no preset mounts. Each one
 mounts its plugins and adds the policy entries they need, so nothing else is
-edited by hand: `rah --list-features` lists them (`shell`, `web-search`,
+edited by hand: `rah --list-features` lists them (`shell`, `web-search`, `format`, `lsp`,
 `compact`, `telemetry`, `plan`), `rah --preset deepseek --with web-search
 --with shell=git,cargo` turns some on for one run (`rah-desktop` takes
 `--with` too), and `features = ["shell=git", "web-search"]` at the top of
@@ -121,6 +122,14 @@ config = { allow_programs = ["git", "cargo"] }   # optional allow list
 `shell.exec` runs one program with an argument vector (no shell syntax), with
 a timeout, bounded output and process-tree termination. With the mock model,
 `/call shell.exec {"program":"git","args":["status"]}` exercises it.
+
+To stop asking about commands you always approve, list them in the policy
+(ADR 0050). A rule matches the program and arguments exactly, and a last `"*"`
+accepts any further arguments, so prefer exact rules:
+
+```toml
+config = { tools = { "shell.exec" = "execute" }, commands = [["git", "status"], ["git", "log", "--oneline"], ["cargo", "check", "*"]] }
+```
 
 Programs start with a cleared environment refilled from a short default list
 (the path, system, temporary and home directories, and on Windows
@@ -229,6 +238,13 @@ use = "context-compact"
 config = { trigger_chars = 60000, keep_chars = 20000 }   # all optional
 ```
 
+When a provider answers that a request does not fit the model's context window
+(a character count only approximates that), the plugin summarizes more of the
+history at once and the turn sends the smaller request once (ADR 0052), so a
+`trigger_chars` that is too high for a small local model costs one failed
+request, not the turn. A model that is busy, rate limited or briefly
+unreachable is retried by the loops (`retries`, `retry_delay_ms`; ADR 0051).
+
 Data directory: everything RAH keeps between runs (sessions, plugin
 storage, memory notes, skills and telemetry) lives in one directory,
 `~/.rah` (`%USERPROFILE%\.rah` on Windows), whichever directory `rah`
@@ -268,6 +284,33 @@ was loaded.
 [[plugin]]
 use = "telemetry-log"
 config = { dir = "telemetry", keep_days = 14, include_arguments = false }   # all optional
+```
+
+Diagnostics from the compiler: the opt-in `lsp-diagnostics` plugin (`--with
+lsp`) tells a language server about every file a write tool changed and
+appends the errors it reports to the tool's output, so the model sees at
+once that an edit broke the build (ADR 0048). It tries `rust-analyzer`,
+`typescript-language-server`, `pyright-langserver`, `gopls` and `clangd`
+when they are installed; `servers` adds or overrides any other.
+
+```toml
+[[plugin]]
+use = "lsp-diagnostics"
+config = { severity = "error", servers = { zig = { command = ["zls"], extensions = [".zig"] } } }   # all optional
+```
+
+Formatting: the opt-in `format-on-write` plugin (`--with format`) runs the
+project's formatter on every file a write tool changed (ADR 0053): `rustfmt`
+and `gofmt`, `ruff` or `black` where `pyproject.toml` configures them, and
+`clang-format` where a `.clang-format` file exists. It tells the model which
+files changed, since the text on disk then differs from what the model wrote.
+`prettier` and other formatters that run project code are not defaults; name
+one in `formatters` to opt in.
+
+```toml
+[[plugin]]
+use = "format-on-write"
+config = { formatters = { zig = { command = ["zig", "fmt", "$FILE"], extensions = [".zig"] } } }   # all optional
 ```
 
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0

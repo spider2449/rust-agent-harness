@@ -55,6 +55,14 @@ The policy decides each call from its own configuration only:
   tools. It is the user's configuration (the Web UI's Settings write it); it
   can allow a tool that declares `write` without asking, turn off one tool of
   a pattern, or ask before a read. Tool metadata still cannot grant anything.
+- `commands` lists `shell.exec` commands that run without asking (ADR 0050):
+  `["git", "status"]` matches the program and arguments exactly, and a last
+  element `"*"` accepts any further arguments. A rule only turns Ask into
+  Allow; it does not override `decisions`, a missing assignment or a denied
+  level. A wildcard allows every option of the program, such as
+  `git diff --output=<file>`, so write one only for a program whose options
+  are all acceptable. `program` is compared as a string, so `./git` and
+  `/usr/bin/git` are not `git`.
 - An invalid configuration is refused before it is applied (ADR 0044): at
   boot `rah` refuses to start instead of running unguarded, and a changed
   configuration (Web UI Settings or the Plugins panel) that is refused
@@ -240,6 +248,52 @@ arguments, which can contain paths or secrets the model passed, are
 recorded only with `include_arguments = true`. Files are plain text in
 `dir`, deleted after `keep_days`. Token counts are provider metadata: they
 are shown and recorded, never used for a decision.
+
+## `tool-input-repair`
+
+`tool-input-repair` attaches to `tool.repair_input`, which `ToolInvoker`
+runs before `tool.before_invoke` (ADR 0049). The policy, the approver and
+tool admission therefore see the repaired input, the same input the tool
+receives. A handler can change only `call.input`: the invoker keeps the
+tool name, call id and definition it found, and a handler that fails leaves
+the input as the model sent it. The plugin converts, unwraps or drops
+values; it never adds one, and only where the tool's input schema makes the
+fix certain. The session log records the call as the model requested it.
+
+## `format-on-write`
+
+`format-on-write` runs formatters through the `sandbox` service on files that
+write tools changed (ADR 0053). A formatter reads the project's own
+configuration, so the defaults are limited to `rustfmt`, `gofmt`, `ruff`,
+`black` and `clang-format`, none of which run code from that configuration.
+`prettier` is not a default because its configuration can be JavaScript and
+its plugins are code: naming it in `formatters` lets a file the model writes
+make it run code at the sandbox's isolation, after only a `write` approval.
+The same holds for any formatter you name. Only files that resolve inside
+`root` and are at most 1 MiB are handed to a formatter, as a path relative to
+it. The formatter's error output is shown to the model on one line, cut to
+200 characters.
+
+## `lsp-diagnostics`
+
+`lsp-diagnostics` starts language servers through the `sandbox` service and
+sends them the text of files that write tools changed. A language server is
+trusted code the user configured (the defaults only run when the program is
+installed): it can read the workspace and does whatever its isolation
+allows, which under `sandbox-process` is anything the user's account can do.
+
+A server can also run code from the workspace it analyzes: `rust-analyzer`
+runs build scripts and procedural macros, and some servers load configuration
+scripts. A build script the model writes can therefore run when the server
+checks it, so a `write` approval can become code execution at the sandbox's
+isolation. Enable the feature with `sandbox-os` confinement, or only for
+workspaces whose writes you review.
+
+Diagnostics are text from that program about files that may come from
+untrusted sources. They are appended to tool output cut to `max_diagnostics`
+entries of `max_message_chars` each, on one line and marked as output of an
+external program. They grant nothing; the policy decides every later tool
+call. Only files that resolve inside `root` and are at most 1 MiB are sent.
 
 ## `frontend-web`
 
