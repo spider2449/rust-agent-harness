@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::hooks::{
     ApprovalRequest, ToolAfterInvoke, ToolApproval, ToolBeforeInvoke, ToolCompletion, ToolDecision,
-    ToolRequestContext,
+    ToolInputRepair, ToolRequestContext,
 };
 
 /// Service name tool providers declare in their manifest's `provides`.
@@ -214,11 +214,20 @@ impl ToolInvoker {
         let Some((tool, definition)) = self.find(&call.name) else {
             return rejected(format!("unknown tool `{}`", call.name));
         };
-        let request = ToolRequestContext {
+        let mut request = ToolRequestContext {
             session: session.clone(),
             call: call.clone(),
             definition: definition.clone(),
         };
+        // Only the input may change; a failing repair leaves it as sent.
+        if let Ok(repaired) = self
+            .kernel
+            .waterfall::<ToolInputRepair>(request.clone())
+            .await
+        {
+            request.call.input = repaired.call.input;
+        }
+        let call = request.call.clone();
         // Cancellation while the policy or an approver decides (an approval
         // can wait for minutes) ends the call; nothing has started yet.
         let decision = tokio::select! {

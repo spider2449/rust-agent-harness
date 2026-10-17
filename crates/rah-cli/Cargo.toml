@@ -29,6 +29,7 @@ rah-plugin-sandbox-process = { path = "../../plugins/sandbox-process" }
 rah-plugin-scheduler-basic = { path = "../../plugins/scheduler-basic" }
 rah-plugin-session-jsonl = { path = "../../plugins/session-jsonl" }
 rah-plugin-session-titles = { path = "../../plugins/session-titles" }
+rah-plugin-tool-input-repair = { path = "../../plugins/tool-input-repair" }
 rah-plugin-skills-fs = { path = "../../plugins/skills-fs" }
 rah-plugin-storage-fs = { path = "../../plugins/storage-fs" }
 rah-plugin-telemetry-log = { path = "../../plugins/telemetry-log" }

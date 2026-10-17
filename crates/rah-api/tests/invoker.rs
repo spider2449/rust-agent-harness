@@ -5,7 +5,10 @@ use std::sync::{
 
 use rah_api::{
     Kernel, MountOptions, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
-    hooks::{ToolAfterInvoke, ToolApproval, ToolBeforeInvoke, ToolDecision, ToolRequestContext},
+    hooks::{
+        ToolAfterInvoke, ToolApproval, ToolBeforeInvoke, ToolDecision, ToolInputRepair,
+        ToolRequestContext,
+    },
     protocol::{
         PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent, ToolDefinition, ToolEffect,
         ToolInput, ToolName, ToolOutput,
@@ -466,4 +469,120 @@ async fn a_panicking_admission_refuses_the_call() {
         "not started: tool admission `limit` panicked"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn repaired_input_is_what_the_policy_judges_and_the_tool_receives() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Read, None).await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let policy = {
+        let seen = seen.clone();
+        plugin(PluginManifest::new("policy", "1"), move |scope| {
+            let seen = seen.clone();
+            scope.hook_bail::<ToolBeforeInvoke, _, _>(0, move |request| {
+                seen.lock().unwrap().push(request.call.input.0.clone());
+                async { Some(ToolDecision::Allow) }
+            });
+            Ok(())
+        })
+    };
+    kernel.mount(policy, MountOptions::default()).await.unwrap();
+    let repair = plugin(PluginManifest::new("repair", "1"), |scope| {
+        scope.hook_waterfall::<ToolInputRepair, _, _>(0, |mut request| async move {
+            request.call.input = ToolInput(json!({"x": 2}));
+            // Only the input counts: the tool and its definition are the invoker's.
+            request.call.name = ToolName::new("other");
+            request.definition.permission = PermissionLevel::Execute;
+            request
+        });
+        Ok(())
+    });
+    kernel.mount(repair, MountOptions::default()).await.unwrap();
+    let outcome = ToolInvoker::new(kernel.handle())
+        .invoke(invocation("count"), || {})
+        .await;
+    assert!(
+        outcome.authorized && !outcome.output.is_error,
+        "{outcome:?}"
+    );
+    assert_eq!(text(&outcome.output), r#"{"x":2}"#);
+    assert_eq!(outcome.effect, ToolEffect::None);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*seen.lock().unwrap(), [json!({"x": 2})]);
+}
+
+#[tokio::test]
+async fn a_failing_repair_leaves_the_input_as_sent() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Read, None).await;
+    let repair = plugin(PluginManifest::new("repair", "1"), |scope| {
+        scope.hook_waterfall::<ToolInputRepair, _, _>(0, |_request| async move {
+            panic!("repair bug");
+        });
+        Ok(())
+    });
+    kernel.mount(repair, MountOptions::default()).await.unwrap();
+    let outcome = ToolInvoker::new(kernel.handle())
+        .invoke(invocation("count"), || {})
+        .await;
+    assert!(
+        outcome.authorized && !outcome.output.is_error,
+        "{outcome:?}"
+    );
+    assert_eq!(text(&outcome.output), r#"{"x":1}"#);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// A provider with a tool called `count` whose description says who it is.
+async fn mount_named_counter(kernel: &Kernel, id: &'static str, description: &'static str) {
+    struct Named(&'static str, Counter);
+
+    #[async_trait]
+    impl Tool for Named {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                description: self.0.into(),
+                ..self.1.definition()
+            }
+        }
+
+        async fn call(&self, input: Value, cx: ToolContext) -> Result<ToolOutput, ToolError> {
+            self.1.call(input, cx).await
+        }
+    }
+
+    let provider = plugin(
+        PluginManifest::new(id, "1").provides(["tools"]),
+        move |scope| {
+            let counter = Counter {
+                name: "count",
+                permission: PermissionLevel::Read,
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+            };
+            provide_tools(scope, vec![Arc::new(Named(description, counter))])?;
+            Ok(())
+        },
+    );
+    kernel
+        .mount(provider, MountOptions::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn on_a_name_clash_the_oldest_provider_wins_until_it_goes_away() {
+    // Policy assigns permissions by tool name, so a later plugin must not be
+    // able to take over a name an earlier one already serves.
+    let kernel = Kernel::new();
+    mount_named_counter(&kernel, "first", "first").await;
+    mount_named_counter(&kernel, "second", "second").await;
+    let invoker = ToolInvoker::new(kernel.handle());
+    let definitions = invoker.definitions();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].description, "first");
+
+    kernel.unmount(&PluginId::new("first")).await.unwrap();
+    assert_eq!(invoker.definitions()[0].description, "second");
+    let outcome = invoker.invoke(invocation("count"), || {}).await;
+    assert!(outcome.authorized && !outcome.output.is_error);
 }

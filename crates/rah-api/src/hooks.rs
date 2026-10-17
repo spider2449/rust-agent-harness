@@ -74,3 +74,15 @@ impl WaterfallHook for ModelBeforeRequest {
     const NAME: &'static str = "model.before_request";
     type Value = ModelRequest;
 }
+
+/// Repairs the arguments of a tool call before anything judges them. A
+/// handler may change only `call.input`; the invoker keeps the call id, the
+/// tool name and the definition it found. It runs before
+/// [`ToolBeforeInvoke`], so the policy sees the input the tool will receive
+/// (ADR 0049). A handler error (panic) leaves the input as it was.
+pub struct ToolInputRepair;
+
+impl WaterfallHook for ToolInputRepair {
+    const NAME: &'static str = "tool.repair_input";
+    type Value = ToolRequestContext;
+}

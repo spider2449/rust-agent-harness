@@ -1,0 +1,13 @@
+[package]
+name = "rah-plugin-tool-input-repair"
+version.workspace = true
+edition.workspace = true
+description = "Repairs tool call arguments that are one unambiguous step away from valid for the tool's input schema"
+
+[dependencies]
+rah-api = { path = "../../crates/rah-api" }
+rah-protocol = { path = "../../crates/rah-protocol" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
