@@ -89,7 +89,18 @@ plugin fails to start, `rah` refuses to run. The policy also runs at most
 limit. A plugin configuration with a typo is refused before it is applied, so
 a refused change at runtime leaves the running plugin as it was.
 
-General program execution is opt-in. Add `tools-shell` to a distribution file
+**Features** are the simple way to turn on what no preset mounts. Each one
+mounts its plugins and adds the policy entries they need, so nothing else is
+edited by hand: `rah --list-features` lists them (`shell`, `web-search`,
+`compact`, `telemetry`, `plan`), `rah --preset deepseek --with web-search
+--with shell=git,cargo` turns some on for one run (`rah-desktop` takes
+`--with` too), and `features = ["shell=git", "web-search"]` at the top of
+`rah.toml`, before the first `[[plugin]]`, keeps them. A policy entry you wrote
+is never overwritten, a feature applied twice changes nothing, and tools still
+go through the policy: `shell` and `web-search` ask before each call. The
+manual way for program execution follows. `rah --show-config` prints what would
+run, which plugins a feature added, and the Web UI settings that override the
+file. Add `tools-shell` to a distribution file
 next to `sandbox-process` (process supervision, not an OS sandbox), and assign
 `shell.exec` in the policy:
 

@@ -142,3 +142,109 @@ fn programs_outside_allow_programs_never_start() {
     );
     assert!(session_log(&dir).contains(r#""effect":"none""#));
 }
+
+#[test]
+fn the_shell_flag_enables_shell_exec_on_a_preset() {
+    let dir = TempDir::new("shell-flag");
+    let run_flag_with = |flag_args: &[&str], prompt: &str, answer: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rah"))
+            .args(["--preset", "dev", "--prompt", prompt, "--session-dir"])
+            .arg(dir.sessions())
+            .arg("--root")
+            .arg(dir.workspace())
+            .args(flag_args)
+            .env(rah_cli::DATA_HOME_ENV, dir.0.join("home"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(answer.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let run_flag = |flag_args: &[&str], answer: &str| run_flag_with(flag_args, CALL, answer);
+
+    // Without the flag the preset has no `shell.exec`.
+    let output = run_flag(&[], "y\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("[approve]"), "{stdout}");
+
+    // With the flag the policy asks, then the program runs (the rustup shim
+    // may fail without a toolchain in the sandbox, which still means it ran).
+    let output = run_flag(&["--with", "shell=rustc"], "y\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[approve] shell.exec"), "{stdout}");
+    assert!(stdout.contains(r#""exit_code":"#), "{stdout}");
+
+    // A program outside the list never starts.
+    let output = run_flag_with(
+        &["--with", "shell=rustc"],
+        r#"/call shell.exec {"program":"cargo","args":["--version"]}"#,
+        "y\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("is not in this tool's allow_programs"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn features_in_the_distribution_file_enable_shell_exec() {
+    let dir = TempDir::new("shell-features-file");
+    let toml_path = |path: std::path::PathBuf| path.display().to_string().replace('\\', "/");
+    let path = dir.0.join("rah.toml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"features = ["shell=rustc"]
+
+[[plugin]]
+use = "policy-authority"
+
+[[plugin]]
+use = "session-jsonl"
+config = {{ dir = "{}" }}
+
+[[plugin]]
+use = "sandbox-process"
+config = {{ root = "{}" }}
+
+[[plugin]]
+use = "model-mock"
+
+[[plugin]]
+use = "loop-react"
+
+[[plugin]]
+use = "frontend-cli"
+"#,
+            toml_path(dir.sessions()),
+            toml_path(dir.workspace())
+        ),
+    )
+    .unwrap();
+    let output = run(&path, CALL, Some("y\n"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[approve] shell.exec"), "{stdout}");
+    assert!(stdout.contains(r#""exit_code":"#), "{stdout}");
+}
+
+#[test]
+fn list_features_names_every_feature() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rah"))
+        .arg("--list-features")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    for name in ["shell", "web-search", "compact", "telemetry", "plan"] {
+        assert!(stdout.contains(name), "{stdout}");
+    }
+}

@@ -55,6 +55,9 @@ struct Args {
     /// last one used.
     #[arg(long)]
     mode: Option<String>,
+    /// Turn on an opt-in feature, as for `rah`; repeatable.
+    #[arg(long = "with", value_name = "FEATURE")]
+    with: Vec<String>,
 }
 
 /// How long the Web UI may take to start listening.
@@ -77,6 +80,9 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         args.preset.as_deref(),
         &absolute(&home)?,
     )?;
+    for request in &args.with {
+        distribution.enable(request)?;
+    }
     if !distribution.use_web_frontend() {
         return Err("the distribution needs a `frontend-cli` or `frontend-web` plugin".into());
     }

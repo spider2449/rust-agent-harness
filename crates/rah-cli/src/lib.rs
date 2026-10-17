@@ -5,6 +5,13 @@
 
 mod admin;
 mod data;
+mod features;
+mod help;
+
+mod show;
+
+pub use features::{Applied, FEATURES, Feature, feature, list as list_features};
+pub use show::show_config;
 
 use std::{
     collections::BTreeMap,
@@ -142,7 +149,7 @@ pub fn config_help(kind: &str) -> &'static [(&'static str, &'static str)] {
         "sandbox-os" => SandboxOsPlugin::CONFIG_HELP,
         "sandbox-process" => SandboxProcessPlugin::CONFIG_HELP,
         "tools-shell" => ShellToolsPlugin::CONFIG_HELP,
-        _ => &[],
+        _ => help::fallback(kind),
     }
 }
 
@@ -300,6 +307,10 @@ impl PluginSpec {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Distribution {
+    /// Opt-in features to apply at start (`"shell=git"`, `"web-search"`; see
+    /// [`FEATURES`]). Put the key before the first `[[plugin]]`.
+    #[serde(default)]
+    pub features: Vec<String>,
     #[serde(default)]
     pub plugin: Vec<PluginSpec>,
     /// The data home. When set, the data paths of the plugins (sessions,
@@ -309,6 +320,9 @@ pub struct Distribution {
     /// the plugins resolve relative paths against the current directory.
     #[serde(skip)]
     pub data_home: Option<PathBuf>,
+    /// The features applied to this distribution, for `--show-config`.
+    #[serde(skip)]
+    pub applied: Vec<Applied>,
 }
 
 impl Distribution {
@@ -403,6 +417,7 @@ pub fn select_distribution(
         ),
     };
     distribution.data_home = Some(home.to_path_buf());
+    distribution.apply_features()?;
     Ok((distribution, used))
 }
 

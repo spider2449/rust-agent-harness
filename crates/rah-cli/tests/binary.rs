@@ -262,7 +262,7 @@ fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
     let path = home.join("rah.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("use = \"model-mock\""), "{text}");
-    assert!(text.contains("# use = \"tools-shell\""), "{text}");
+    assert!(text.contains("# features = ["), "{text}");
 
     // The written file is what runs without --preset and --config.
     let output = rah(&dir)
@@ -310,4 +310,23 @@ fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(!missing.exists());
+}
+
+#[test]
+fn show_config_prints_the_plugins_features_and_source() {
+    let dir = TempDir::new("bin-show-config");
+    let output = rah(&dir)
+        .args(["--preset", "dev", "--with", "shell=git", "--show-config"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("source:    --preset `dev`"), "{stdout}");
+    assert!(stdout.contains("features:  shell=git"), "{stdout}");
+    assert!(
+        stdout.contains("tools-shell  <- feature shell=git"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("web ui overrides: none"), "{stdout}");
 }

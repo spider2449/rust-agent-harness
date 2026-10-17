@@ -59,10 +59,22 @@ struct Args {
     /// tools-repo-write, sandbox-process, sandbox-os).
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Turn on an opt-in feature on top of any preset or config, such as
+    /// `--with web-search` or `--with shell=git,cargo`; repeatable. See
+    /// --list-features.
+    #[arg(long = "with", value_name = "FEATURE")]
+    with: Vec<String>,
+    /// Print what would run (plugins in mount order, their configuration, the
+    /// features applied and the Web UI's stored overrides) and exit.
+    #[arg(long)]
+    show_config: bool,
+    /// List the opt-in features and exit.
+    #[arg(long)]
+    list_features: bool,
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root"])]
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "list_features", "show_config"])]
     init_config: bool,
 }
 
@@ -83,18 +95,6 @@ fn data_home(args: &Args) -> Result<PathBuf, String> {
     absolute(&home)
 }
 
-/// Appended to a file written by `--init-config`: the opt-in plugins no
-/// preset mounts, commented out.
-const INIT_CONFIG_FOOTER: &str = r#"
-# Opt-in: program execution (`shell.exec`), here limited to `git`.
-# Uncomment it and add `"shell.exec" = "execute"` to the policy's `tools`.
-# The `sandbox-process` above is process supervision, not an OS sandbox.
-#
-# [[plugin]]
-# use = "tools-shell"
-# config = { allow_programs = ["git"] }
-"#;
-
 /// `--init-config`: writes the preset's distribution file; returns its path.
 fn init_config(args: &Args) -> Result<PathBuf, String> {
     let path = match &args.config {
@@ -107,7 +107,9 @@ fn init_config(args: &Args) -> Result<PathBuf, String> {
         "# RAH distribution, written by `rah --init-config` from the `{preset}` preset.\n\
          # Without --preset and --config, `rah` runs `rah.toml` in the data directory.\n\
          # Settings saved in the Web UI are kept in `storage` and replace a plugin's\n\
-         # configuration from this file at the next start.\n{text}{INIT_CONFIG_FOOTER}"
+         # configuration from this file at the next start.\n\
+         # Opt-in features (see `rah --list-features`) go here, before the first plugin:\n\
+         # features = [\"shell=git\", \"web-search\"]\n{text}"
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -179,6 +181,9 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     {
         return Err("--root needs a `tools-builtin` or sandbox plugin".into());
     }
+    for request in &args.with {
+        distribution.enable(request)?;
+    }
     if let Some(model) = &args.model {
         let mut matched = false;
         for kind in [
@@ -200,7 +205,39 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     Ok(distribution)
 }
 
+/// Where the distribution comes from, in the order `select_distribution` tries.
+fn source(args: &Args, home: &Path) -> String {
+    let user_config = home.join(USER_CONFIG);
+    match (&args.config, &args.preset) {
+        (Some(path), _) => format!("--config `{}`", path.display()),
+        (None, Some(preset)) => format!("--preset `{preset}`"),
+        (None, None) if user_config.is_file() => format!("`{}`", user_config.display()),
+        (None, None) => "preset `default`".to_owned(),
+    }
+}
+
 async fn run(args: Args) -> i32 {
+    if args.list_features {
+        print!("{}", rah_cli::list_features());
+        return 0;
+    }
+    if args.show_config {
+        let result = data_home(&args).and_then(|home| {
+            distribution(&args).map(|distribution| {
+                rah_cli::show_config(&distribution, &source(&args, &home), &home)
+            })
+        });
+        return match result {
+            Ok(text) => {
+                print!("{text}");
+                0
+            }
+            Err(message) => {
+                eprintln!("rah: {message}");
+                2
+            }
+        };
+    }
     if args.init_config {
         return match init_config(&args) {
             Ok(path) => {

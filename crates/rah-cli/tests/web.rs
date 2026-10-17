@@ -454,7 +454,7 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     assert!(help_keys("sandbox-process").contains(&"inherit_env_extra".to_owned()));
     assert!(help_keys("sandbox-os").contains(&"inherit_env_extra".to_owned()));
     assert!(help_keys("tools-shell").contains(&"allow_programs".to_owned()));
-    assert!(catalog["help"]["loop-react"].is_null(), "{catalog}");
+    assert!(help_keys("loop-react").contains(&"max_rounds".to_owned()));
     let plugins = web.json(web.get("/api/plugins")).await;
     let find = |plugins: &Value, id: &str| {
         plugins

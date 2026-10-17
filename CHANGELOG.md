@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Features: `--with <feature>[=args]` (repeatable, also on `rah-desktop`),
+  `features = [...]` in `rah.toml` and `rah --list-features` turn on opt-in
+  capabilities (`shell`, `web-search`, `compact`, `telemetry`, `plan`) in one
+  step. Each feature is one entry in a table in `rah-cli`: the plugins it
+  mounts, where, and the policy entries it needs (kept when the user already
+  wrote them). `shell` still asks before each call.
+- `rah --show-config` prints what would run: the source (preset, `--config` or
+  `rah.toml`), the features applied, the plugins in mount order with their
+  configuration (marking those a feature added) and the entries the Web UI
+  stored, which replace plugin configuration at start.
+- Every plugin now has configuration help in the Web UI editor; a test requires
+  a help entry for each key of each plugin's example configuration.
+
 - Model providers refuse an `api_key_env` that cannot be an environment
   variable name (a key pasted there by mistake) and no longer echo it in the
   error.
