@@ -265,11 +265,13 @@ fix certain. The session log records the call as the model requested it.
 `format-on-write` runs formatters through the `sandbox` service on files that
 write tools changed (ADR 0053). A formatter reads the project's own
 configuration, so the defaults are limited to `rustfmt`, `gofmt`, `ruff`,
-`black` and `clang-format`, none of which run code from that configuration.
-`prettier` is not a default because its configuration can be JavaScript and
-its plugins are code: naming it in `formatters` lets a file the model writes
-make it run code at the sandbox's isolation, after only a `write` approval.
-The same holds for any formatter you name. Only files that resolve inside
+`black` and `clang-format`. Their configuration files (`rustfmt.toml`,
+`pyproject.toml`, `.clang-format`) are data, but this has not been verified
+for every version or option, and `rustfmt` also reads the module files a
+formatted file names. `prettier` is not a default because its configuration
+can be JavaScript and its plugins are code: naming it in `formatters` lets a
+file the model writes make it run code at the sandbox's isolation, after only
+a `write` approval. The same holds for any formatter you name. Only files that resolve inside
 `root` and are at most 1 MiB are handed to a formatter, as a path relative to
 it. The formatter's error output is shown to the model on one line, cut to
 200 characters.
@@ -286,8 +288,10 @@ A server can also run code from the workspace it analyzes: `rust-analyzer`
 runs build scripts and procedural macros, and some servers load configuration
 scripts. A build script the model writes can therefore run when the server
 checks it, so a `write` approval can become code execution at the sandbox's
-isolation. Enable the feature with `sandbox-os` confinement, or only for
-workspaces whose writes you review.
+isolation. The feature starts with either `sandbox-process` or `sandbox-os`
+mounted and does not warn about the difference, so `--with lsp` on the
+default preset gives no confinement. Mount `sandbox-os` first, or enable the
+feature only for workspaces whose writes you review.
 
 Diagnostics are text from that program about files that may come from
 untrusted sources. They are appended to tool output cut to `max_diagnostics`
