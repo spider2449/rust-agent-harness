@@ -46,12 +46,24 @@
 - 模型回報的工具只有 `repo.create-file`、`repo.edit-files`、`repo.patch`；沒看到刪除、改名、搬移與 git commit。
 - 舊架構有對應的 ADR（0016 到 0020），但那條線不管轄 `master`。若要補回，是新的 plugin，依 `tools-repo-write` 的模式，經 `ToolInvoker` 與 policy 的權限等級。
 - 先決：確認這些工具在目前的 `master` 是否真的不存在，並由使用者決定要補哪些。
+- 結果（2026-10-19，完成，ADR 0055）：確認目前只有 `repo.create-file`、`repo.edit-files`、`repo.patch`。使用者選了刪除、改名、commit 三個都做。ADR 0036 第 4 點寫「其餘留在 legacy」，理由是舊工具內建很重的 HostExplicit 審核流程；現在審核是通用的 policy `Ask`，理由不再適用，所以依使用者指示新增，並以 ADR 0055 修訂（0036 第 4 點加了註記）。這不是還原 legacy crate，而是在 `tools-repo-write` 內的新工具。
+  - `repo.delete-file {path}`、`repo.move-file {from, to}`：宣告 `write`，只處理一般檔案，拒絕符號連結、目錄、不存在的路徑；move 不覆蓋、會建立缺少的上層目錄；路徑規則與每檔鎖同其他工具（拒絕 `.git`、`.rah/`、`..`）。
+  - `repo.commit {message, paths}`：宣告 `execute`（寫入 git 歷史並執行 repo 的 hooks）。只有設定了 `commit = { name, email }` 才存在；以該身分提交，不讀 Git 的全域或系統設定，不能 amend、不能略過 hooks、不能 push；`paths` 是字面檔名（`--literal-pathspecs`，`*` 不是樣式，目錄被拒絕），只提交指定的檔案，先前暫存的其他檔案不會被帶進去；沒有變更時拒絕，不產生空 commit。
+  - 預設 policy 已加指派（`repo.delete-file`、`repo.move-file` 為 `write`，`repo.commit` 為 `execute`）。
+  - 驗證：`tools-repo-write` 在這台 Windows 機器上 14 個測試通過，其中新增 5 個（刪除、移動、commit 設定與等級、commit 只提交指定檔案與身分與刪除、commit 拒絕樣式與目錄等不安全輸入）；另有 1 個符號連結測試只在 Unix 編譯執行，這台沒跑，未經驗證；用 llama.cpp 在暫存的 git 工作區實測，模型依序改名、刪除、提交，Git 顯示 `R100 old.txt → new.txt`、`D junk.txt`，作者為設定的身分，工作樹乾淨。符號連結的測試在這台 Windows 機器上不會執行（`cfg(unix)`）。
 
 ## 6. 工作階段內的「一律允許」（推測）
 
 - 現象：核准只有一次性的 y/N。`policy-authority` 已有 `commands` 規則，可能只缺互動入口。
 - 做法：在 `ToolApproval` 的回答加上「本 session 內允許這類呼叫」，狀態放在 plugin 的 scope，不寫進設定檔，session 結束即失效。
 - 先決：確認不會與 ADR 0050 的 `commands` 規則重複；需 ADR。
+- 結果（2026-10-19，完成，ADR 0056）：修正先前的判斷，不需要改 `tool.approval` 的回傳型別。兩個前端各自回答這個 hook，所以由前端在記憶體記住「這個 session 允許這個工具」即可，`rah-api` 與 plugin 協定都不動。使用者選「依工具名稱、CLI 與 Web 都做」。
+  - CLI：回答 `a`（或 `always`），提示變成 `[y/N/a=always]`；Web：多一個「Allow for this session」按鈕，WebSocket 訊息多可選的 `always`，`approval_required` 通知多 `may_remember`。
+  - 單位是（session、工具名稱），不看參數；存活到程序結束，不寫入 session log、storage 或設定；`/new` 或換 session 會重新詢問。
+  - `execute` 等級不提供：宣告為 `execute` 的工具，以及 policy 指派為 `execute` 的工具（核准請求只帶宣告等級，所以另外讀 reason 文字中的 `` `execute` ``，只會更嚴不會更寬）。Web 伺服器自己強制，不信任瀏覽器送來的 `always`。
+  - 已知限制（寫在 ADR）：沒有列出或撤銷的指令，要靠 `/new`、換 session 或重啟；`decisions = ask` 第一次仍會問，使用者答 always 後該前端就不再問；reason 文字判斷是因為請求沒有有效等級的權宜之計。
+  - 驗證：CLI 4 個單元測試（含順序）、Web 3 個單元測試與 1 個整合測試（WebSocket），瀏覽器測試（真實瀏覽器）通過；用 llama.cpp 實測：要求建立兩個檔案、只輸入一次 `a`，只出現一次提示，兩個檔案都建立。既有整合測試的提示字串因此更新為 `Allow? [y/N/a=always]`。
+
 
 ## 7. Session 內檔案還原（推測，需設計）
 
@@ -78,6 +90,10 @@
 - 現象：預設的 `rustfmt`、`rust-analyzer` 失敗時完全靜默（設計：沒安裝是常態），但「功能開了卻什麼都沒做」很難診斷；這輪因此花了多步才找到原因（自訂 `RUSTUP_HOME`、缺少元件）。
 - 方向：每個預設程式第一次失敗時，在 stderr 或工具輸出附一次性的簡短提示（只提一次，之後的靜默維持）；或讓 `--show-config` 檢查程式是否可執行。不改變「沒安裝就跳過」的預設。
 - 先決：決定提示放哪裡（工具輸出會進模型的上下文，stderr 不會），屬使用者決定。
+- 結果（2026-10-19，完成，ADR 0057）：使用者選「stderr 一次性提示」。`rah_api::host` 新增事件 `HostNotice {plugin, message}` 與 `NoticeOnce`（每個鍵只發一次）；`format-on-write`、`lsp-diagnostics` 在預設程式第一次失敗（無法啟動、逾時、非零結束）時發出。`rah` 印在 stderr，Web UI 顯示為通知（`rah-desktop` 內嵌 Web UI，所以也看得到）。工具輸出與模型的上下文不變；使用者明確設定的程式仍照舊在輸出裡回報。訊息把處理方式放前面、原因放後面（長原因會在 300 字元被截）。
+  - 驗證：`NoticeOnce` 單元測試；format-on-write 2 個新測試、lsp-diagnostics 擴充 1 個；Web 整合測試確認瀏覽器收到 `host_notice`。實測重現當初的情況（沙箱裡 `rustfmt` 找不到工具鏈）：stderr 現在出現一行說明哪個程式失敗、原因（rustup 找不到預設工具鏈），以及怎麼處理。
+  - 沒做：`rah-desktop` 的原生視窗沒有另外的 stderr 輸出（靠 Web UI 通知）；process plugin 還不能發這個事件。
+
 
 ## 狀態
 
@@ -87,10 +103,10 @@
 | 2 輸出順序 | 實測缺口 | 否 | 完成 |
 | 3 非互動核准選項 | 實測缺口 | 是（0054） | 完成 |
 | 4 推理內容回送 | 文件缺口 | 是（若做） | 已量測，暫不實作（等實際失敗） |
-| 5 刪除、改名、commit | 推測 | 是 | 等使用者決定 |
-| 6 session 內一律允許 | 推測 | 是 | 未開始 |
+| 5 刪除、改名、commit | 已確認 | 是（0055） | 完成（未 commit） |
+| 6 session 內一律允許 | 已確認 | 是（0056） | 完成（未 commit） |
 | 7 檔案還原 | 推測 | 是 | 未開始（先設計） |
 | 8 補驗證 | 驗證 | 否 | 進行中（format、lsp 已驗證並修一個缺陷） |
-| 9 預設程式失敗看不見 | 建議 | 否 | 等使用者決定 |
+| 9 預設程式失敗看不見 | 建議 | 是（0057） | 完成（未 commit） |
 
 建議順序：1、2 先做（小、可獨立測試、不碰架構）；8 可穿插進行；3、6 共用核准路徑，一起設計；4、5、7 等量測或決定後再動。
