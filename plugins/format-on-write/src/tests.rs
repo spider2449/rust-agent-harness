@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rah_api::{
     Kernel, MountOptions, PluginStatus,
+    host::HostNotice,
     kernel::KernelError,
     sandbox::{ExecOutput, SpawnSpec, Spawned, Termination},
 };
@@ -455,4 +456,52 @@ fn defaults_can_be_overridden_and_disabled() {
 fn the_config_example_is_a_valid_configuration() {
     let value: Value = serde_json::from_str(FormatOnWritePlugin::CONFIG_EXAMPLE).unwrap();
     assert!(parse_config(&value).is_ok());
+}
+
+fn collect_notices(fixture: &Fixture) -> (Arc<Mutex<Vec<HostNotice>>>, impl Sized) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let guard = fixture
+        .kernel
+        .handle()
+        .subscribe(move |notice: &HostNotice| sink.lock().unwrap().push(notice.clone()));
+    (seen, guard)
+}
+
+#[tokio::test]
+async fn a_default_formatter_that_fails_tells_the_user_once_and_not_the_model() {
+    let fixture = mount(json!({ "defaults": true })).await;
+    let (notices, _guard) = collect_notices(&fixture);
+    fixture.write("a.rs", "fn main(){}\n");
+    fixture.write("b.rs", "fn main(){}\n");
+    fixture.write("main.go", "package main\n");
+    // Neither the model's tool output nor the policy sees anything.
+    for path in ["a.rs", "b.rs", "main.go"] {
+        assert_eq!(appended(&fixture.created(path).await), None, "{path}");
+    }
+    let seen = notices.lock().unwrap().clone();
+    // One notice for each default formatter, however many files it failed on.
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen.iter().all(|n| n.plugin == PluginId::new("format")));
+    let text: Vec<&str> = seen.iter().map(|n| n.message.as_str()).collect();
+    assert!(
+        text[0].contains("`rustfmt`") && text[0].contains("a.rs"),
+        "{text:?}"
+    );
+    assert!(text[1].contains("`gofmt`"), "{text:?}");
+    assert!(text[0].contains("could not be started"), "{text:?}");
+    assert!(text[0].contains("`formatters`"), "{text:?}");
+    assert!(!text[0].contains('\n'));
+}
+
+#[tokio::test]
+async fn a_formatter_the_user_named_reports_in_the_output_not_as_a_notice() {
+    let fixture = mount(json!({
+        "formatters": { "broken": { "command": ["broken", "$FILE"], "extensions": [".bad"] } },
+    }))
+    .await;
+    let (notices, _guard) = collect_notices(&fixture);
+    fixture.write("x.bad", "x\n");
+    assert!(appended(&fixture.created("x.bad").await).is_some());
+    assert!(notices.lock().unwrap().is_empty());
 }

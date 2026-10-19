@@ -11,7 +11,10 @@
 //!
 //! Servers are started lazily through the `sandbox` service, one process per
 //! server for the life of the plugin, and end with its scope. A server that
-//! cannot start or ends is not restarted for five minutes. The first check
+//! cannot start or ends is not restarted for five minutes; for a default
+//! server the user gets one
+//! [`HostNotice`](rah_api::host::HostNotice) the first time, and a server
+//! named in `servers` reports in the output (ADR 0057). The first check
 //! of a slow server (indexing) may time out; the output then says so, and
 //! later checks use what the server has loaded.
 //!
@@ -41,6 +44,7 @@ use std::{
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::{ToolAfterInvoke, ToolCompletion},
+    host::NoticeOnce,
     sandbox::{ExecEnv, SANDBOX},
 };
 use rah_protocol::{PermissionLevel, ToolContent, ToolEffect};
@@ -185,6 +189,7 @@ impl Plugin for LspDiagnosticsPlugin {
             ),
             root,
             settings,
+            notices: NoticeOnce::new(scope.kernel(), scope.id().clone()),
         });
         scope.hook_waterfall::<ToolAfterInvoke, _, _>(PRIORITY, move |completion| {
             let checker = checker.clone();
@@ -198,6 +203,8 @@ struct Checker {
     servers: Servers,
     root: PathBuf,
     settings: Settings,
+    /// Tells the user, once per server, that a default one failed.
+    notices: NoticeOnce,
 }
 
 impl Checker {
@@ -238,11 +245,22 @@ impl Checker {
                     server.name,
                     self.settings.wait.as_millis()
                 )),
-                // A default server that is not installed is the normal case.
                 Err(error) if server.explicit => {
                     notes.push(format!("{relative}: `{}`: {error}", server.name));
                 }
-                Err(_) => {}
+                // A default server that is not installed is the normal case:
+                // no note in the tool's output, but the user is told once
+                // (ADR 0057).
+                Err(error) => self.notices.emit(
+                    &server.name,
+                    // The advice first: a long reason is cut at the end.
+                    &format!(
+                        "the default language server `{}` failed for `{relative}` and is \
+                         skipped quietly from now on (name it in `servers` to see every error, \
+                         or set it to `{{\"disabled\": true}}`): {error}",
+                        server.name
+                    ),
+                ),
             }
         }
         if let Some(text) = self.render(found, notes) {

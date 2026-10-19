@@ -12,6 +12,7 @@ use std::{
 
 use rah_api::{
     CancellationToken, Kernel, KernelHandle, MountOptions, PluginStatus,
+    host::HostNotice,
     kernel::KernelError,
     sandbox::{ExecEnv, ExecError, ExecOutput, ProcessHandle, ProgramSpec, SpawnSpec, Spawned},
 };
@@ -662,6 +663,11 @@ async fn a_default_server_that_is_not_installed_stays_quiet() {
         )
         .await
         .unwrap();
+    let notices = Arc::new(std::sync::Mutex::new(Vec::<HostNotice>::new()));
+    let sink = notices.clone();
+    let _guard = kernel2
+        .handle()
+        .subscribe(move |notice: &HostNotice| sink.lock().unwrap().push(notice.clone()));
     let completion = ToolCompletion {
         request: rah_api::hooks::ToolRequestContext {
             session: SessionId::new(),
@@ -688,7 +694,21 @@ async fn a_default_server_that_is_not_installed_stays_quiet() {
         .waterfall::<ToolAfterInvoke>(completion.clone())
         .await
         .unwrap();
+    assert_eq!(after, completion, "the tool's output is not touched");
+    // The user is told, once (ADR 0057).
+    let after = kernel2
+        .handle()
+        .waterfall::<ToolAfterInvoke>(completion.clone())
+        .await
+        .unwrap();
     assert_eq!(after, completion);
+    let seen = notices.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].plugin, PluginId::new("lsp"));
+    assert!(seen[0].message.contains("`rust-analyzer`"), "{seen:?}");
+    assert!(seen[0].message.contains("a.rs"), "{seen:?}");
+    assert!(seen[0].message.contains("`servers`"), "{seen:?}");
+    assert!(!seen[0].message.contains('\n'));
     let _ = std::fs::remove_dir_all(&root);
 }
 

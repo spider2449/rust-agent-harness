@@ -317,8 +317,11 @@ files changed, since the text on disk then differs from what the model wrote.
 one in `formatters` to opt in.
 
 A default formatter or language server that fails (not installed, or unable to
-start) is skipped without a message, because a missing one is the normal case.
-Name it in the plugin's `formatters` or `servers` to see its errors. Programs
+start) is skipped without a note in the tool's output, because a missing one is
+the normal case and the model has no use for it; you get one line on standard
+error (a notice in the Web UI) the first time, with the reason (ADR 0057).
+Name it in the plugin's `formatters` or `servers` to see its errors on every
+write, or set it to `{ disabled = true }` to stop it. Programs
 run with a cleared environment, so a `rustup` kept outside the home directory
 (`RUSTUP_HOME`, `CARGO_HOME`) needs both names in the sandbox's
 `inherit_env_extra`; without them `rustfmt` and `rust-analyzer` cannot find

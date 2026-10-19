@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A default formatter or language server that fails is no longer invisible
+  (ADR 0057): `format-on-write` and `lsp-diagnostics` now emit a `HostNotice`
+  (new in `rah_api::host`, once per program) the first time it cannot start,
+  times out or exits with an error. `rah` prints it on standard error and the
+  Web UI shows it as a notice. The model's context and the tool output are
+  unchanged, and a program you named in `formatters` or `servers` still reports
+  in the output.
+
 - You can allow a tool for the rest of a session instead of answering the same
   question again (ADR 0056): `a` at the terminal prompt (`[y/N/a=always]`), or
   "Allow for this session" in the Web UI. It is by tool name within that

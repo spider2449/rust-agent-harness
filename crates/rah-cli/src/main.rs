@@ -6,7 +6,7 @@ use std::{
 use clap::Parser;
 use rah_api::{
     Kernel, PluginStatus,
-    host::{ExitRequested, FrontendListening, Interrupt},
+    host::{ExitRequested, FrontendListening, HostNotice, Interrupt},
     tools::ToolInvoker,
 };
 use rah_cli::{Distribution, USER_CONFIG, boot, default_data_home, select_distribution};
@@ -290,6 +290,11 @@ async fn run(args: Args) -> i32 {
         if let Some(sender) = sender {
             let _ = sender.send(exit.code);
         }
+    });
+
+    // Something a plugin skips quietly but the user can act on (ADR 0057).
+    let _notices = handle.subscribe(|notice: &HostNotice| {
+        eprintln!("rah: {}: {}", notice.plugin, notice.message);
     });
 
     let _listening = handle.subscribe(|listening: &FrontendListening| {

@@ -15,7 +15,10 @@
 //! `gofmt` always, `ruff` and `black` when `pyproject.toml` configures them
 //! (or `ruff.toml`), and `clang-format` when a `.clang-format` file is found
 //! up the tree. A formatter that is not installed is skipped for five
-//! minutes. The defaults do not include formatters that run code from the
+//! minutes. A default formatter that fails leaves no note in the tool's
+//! output; the user gets one [`HostNotice`](rah_api::host::HostNotice) the first
+//! time, and a formatter named in `formatters` reports in the output (ADR
+//! 0057). The defaults do not include formatters that run code from the
 //! project's configuration, such as `prettier` with a `.js` configuration or
 //! plugins; name such a formatter in `formatters` to opt in.
 //!
@@ -37,6 +40,7 @@ use std::{
 use rah_api::{
     CancellationToken, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::{ToolAfterInvoke, ToolCompletion},
+    host::NoticeOnce,
     sandbox::{ExecEnv, ExecError, ProgramSpec, SANDBOX},
 };
 use rah_protocol::{PermissionLevel, ToolContent, ToolEffect};
@@ -297,6 +301,7 @@ impl Plugin for FormatOnWritePlugin {
             root,
             settings,
             stop: scope.spawner().cancellation(),
+            notices: NoticeOnce::new(scope.kernel(), scope.id().clone()),
         });
         scope.hook_waterfall::<ToolAfterInvoke, _, _>(PRIORITY, move |completion| {
             let runner = runner.clone();
@@ -313,6 +318,8 @@ struct Runner {
     settings: Settings,
     /// Cancelled when the plugin stops.
     stop: CancellationToken,
+    /// Tells the user, once per formatter, that a default one failed.
+    notices: NoticeOnce,
 }
 
 /// What happened to one file.
@@ -348,7 +355,19 @@ impl Runner {
                 Outcome::Failed(reason) if formatter.explicit => {
                     notes.push(format!("{relative}: `{}` failed: {reason}", formatter.name));
                 }
-                Outcome::Failed(_) => {}
+                // A default formatter that fails is skipped without a note in
+                // the tool's output (the model has no use for it), but the
+                // user is told once (ADR 0057).
+                Outcome::Failed(reason) => self.notices.emit(
+                    &formatter.name,
+                    // The advice first: a long reason is cut at the end.
+                    &format!(
+                        "the default formatter `{}` failed on `{relative}` and is skipped \
+                         quietly from now on (name it in `formatters` to see every error, or \
+                         set it to `{{\"disabled\": true}}`): {reason}",
+                        formatter.name
+                    ),
+                ),
             }
         }
         if changed.is_empty() && notes.is_empty() {

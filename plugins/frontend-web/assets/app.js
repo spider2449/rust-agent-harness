@@ -1961,6 +1961,9 @@ function connect() {
       if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
     } else if (data.type === "groups") {
       loadGroups();
+    } else if (data.type === "host_notice") {
+      // A plugin skipped something quietly that the user can act on.
+      showTransientNotice(`${data.plugin}: ${data.message}`, 20000);
     } else if (data.type === "mode") {
       // Another window (or this one) switched the mode.
       if (data.active !== state.modes.active) {

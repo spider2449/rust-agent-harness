@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use common::{TempDir, headless};
 use futures::{SinkExt, StreamExt};
-use rah_api::{Kernel, PluginId, host::FrontendListening};
+use rah_api::{
+    Kernel, PluginId,
+    host::{FrontendListening, HostNotice},
+};
 use rah_cli::{Distribution, boot};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
@@ -1901,3 +1904,19 @@ tools = [
     assert_eq!(active().await, ["http-erp"]);
 }
 
+#[tokio::test]
+async fn a_host_notice_reaches_the_browser() {
+    let web = start("web-notice", |_| {}).await;
+    let mut socket = web.socket().await;
+    web.kernel.handle().emit(&HostNotice {
+        plugin: PluginId::new("format-on-write"),
+        message: "the default formatter `rustfmt` failed".into(),
+    });
+    let notice = next_json(&mut socket).await;
+    assert_eq!(notice["type"], "host_notice", "{notice}");
+    assert_eq!(notice["plugin"], "format-on-write");
+    assert!(
+        notice["message"].as_str().unwrap().contains("`rustfmt`"),
+        "{notice}"
+    );
+}

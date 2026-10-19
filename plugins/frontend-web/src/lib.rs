@@ -106,7 +106,7 @@ use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
     Scope, async_trait,
     hooks::{ModelBeforeRequest, ToolApproval},
-    host::FrontendListening,
+    host::{FrontendListening, HostNotice},
     session::{SESSION, SessionError, SessionLog},
     tools::ToolInvoker,
 };
@@ -218,6 +218,15 @@ impl Plugin for WebFrontendPlugin {
             panel: tokio::sync::Mutex::new(()),
             modes: modes::Modes::new(config.modes()),
             start_mode: config.mode.clone(),
+        });
+        // What a plugin skips quietly but the user can act on (ADR 0057).
+        let notices = shared.clone();
+        scope.on::<HostNotice>(move |notice| {
+            notices.approvals.notify(serde_json::json!({
+                "type": "host_notice",
+                "plugin": notice.plugin.to_string(),
+                "message": notice.message,
+            }));
         });
         let asker = shared.clone();
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
