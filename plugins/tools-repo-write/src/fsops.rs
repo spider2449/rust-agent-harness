@@ -121,24 +121,7 @@ impl Root {
         if tokio::fs::symlink_metadata(&target).await.is_ok() {
             return Err(invalid(format!("`{path}` already exists")));
         }
-        // The deepest existing ancestor must be inside the root, so creating
-        // the missing directories cannot follow a link out of it.
-        let mut ancestor = target.parent().map(Path::to_path_buf).unwrap_or_default();
-        while tokio::fs::symlink_metadata(&ancestor).await.is_err() {
-            match ancestor.parent() {
-                Some(parent) => ancestor = parent.to_path_buf(),
-                None => break,
-            }
-        }
-        let resolved = tokio::fs::canonicalize(&ancestor)
-            .await
-            .map_err(|error| invalid(format!("`{path}`: {error}")))?;
-        self.inside(&resolved, path)?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                ToolError::Execution(format!("cannot create the directory: {error}"))
-            })?;
-        }
+        self.make_parents(&target, path).await?;
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         let mut file = options
@@ -154,6 +137,83 @@ impl Root {
         .await;
         written.map_err(|error| ToolError::Execution(format!("cannot write `{path}`: {error}")))?;
         Ok(())
+    }
+
+    /// Creates the missing directories above `target`. The deepest existing
+    /// ancestor must be inside the root, so creating them cannot follow a
+    /// link out of it.
+    async fn make_parents(&self, target: &Path, shown: &str) -> Result<(), ToolError> {
+        let mut ancestor = target.parent().map(Path::to_path_buf).unwrap_or_default();
+        while tokio::fs::symlink_metadata(&ancestor).await.is_err() {
+            match ancestor.parent() {
+                Some(parent) => ancestor = parent.to_path_buf(),
+                None => break,
+            }
+        }
+        let resolved = tokio::fs::canonicalize(&ancestor)
+            .await
+            .map_err(|error| invalid(format!("`{shown}`: {error}")))?;
+        self.inside(&resolved, shown)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                ToolError::Execution(format!("cannot create the directory: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The canonical path of a regular file that is not a symbolic link: the
+    /// delete and move tools act on the file itself, never on what a link
+    /// points to.
+    async fn plain_file(&self, path: &str) -> Result<PathBuf, ToolError> {
+        validate(path)?;
+        let metadata = tokio::fs::symlink_metadata(self.path.join(path))
+            .await
+            .map_err(|_| invalid(format!("`{path}` does not exist")))?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid(format!(
+                "`{path}` is a symbolic link; this tool does not change links"
+            )));
+        }
+        if !metadata.is_file() {
+            return Err(invalid(format!("`{path}` is not a regular file")));
+        }
+        self.existing_file(path).await
+    }
+
+    /// Deletes one regular file.
+    pub async fn delete(&self, path: &str) -> Result<(), ToolError> {
+        let resolved = self.plain_file(path).await?;
+        let _writing = self.locks.files(std::slice::from_ref(&resolved)).await;
+        // The file may have changed while the lock was awaited.
+        if self.plain_file(path).await? != resolved {
+            return Err(invalid(format!("`{path}` changed while it was locked")));
+        }
+        tokio::fs::remove_file(&resolved)
+            .await
+            .map_err(|error| ToolError::NotStarted(format!("cannot delete `{path}`: {error}")))
+    }
+
+    /// Renames one regular file to a path that does not exist yet, creating
+    /// the missing directories above it.
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), ToolError> {
+        let source = self.plain_file(from).await?;
+        validate(to)?;
+        if from == to {
+            return Err(invalid("`from` and `to` are the same path"));
+        }
+        let target = self.path.join(to);
+        let _writing = self.locks.files(&[source.clone(), target.clone()]).await;
+        if self.plain_file(from).await? != source {
+            return Err(invalid(format!("`{from}` changed while it was locked")));
+        }
+        if tokio::fs::symlink_metadata(&target).await.is_ok() {
+            return Err(invalid(format!("`{to}` already exists")));
+        }
+        self.make_parents(&target, to).await?;
+        tokio::fs::rename(&source, &target).await.map_err(|error| {
+            ToolError::NotStarted(format!("cannot move `{from}` to `{to}`: {error}"))
+        })
     }
 
     /// Checks every edit, then writes every changed file. Returns the paths.

@@ -460,6 +460,20 @@ workspace contains the default data directory:
 renames included. A failure after the first write is recorded as an
 `uncertain` effect.
 
+`repo.delete-file` and `repo.move-file` (ADR 0055) declare `write`, follow the
+same path rules and take the same per-file locks. They act on regular files
+only: a symbolic link, a directory or a missing path is refused, and a move
+never overwrites. RAH keeps no copy of a deleted file.
+
+`repo.commit` (ADR 0055) declares `execute` and exists only when the plugin's
+`commit = { name, email }` is configured. It stages the named files and
+commits only them, as that identity, with no amend, no hook skipping and no
+push. Git reads no system or global configuration, and paths are literal (a
+directory or a pattern is refused), so a name cannot widen the commit. The
+repository's hooks run, through the `sandbox` service; that is code the
+repository defines, which is why the call asks at `execute`. The path tools
+refuse anything under `.git`, so they cannot plant a hook.
+
 ## `tools-repo`
 
 `tools-repo` provides `repo.status`, `repo.diff`, `repo.list` and

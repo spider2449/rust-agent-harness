@@ -357,3 +357,214 @@ async fn a_patch_waits_for_running_edits() {
     }
     assert!(edited.is_ok() || patched.is_ok());
 }
+
+fn invalid(result: Result<ToolOutput, ToolError>) -> bool {
+    matches!(result, Err(ToolError::InvalidInput(_)))
+}
+
+#[tokio::test]
+async fn delete_file_removes_one_regular_file_inside_the_root() {
+    let repo = Repo::new("delete");
+    let tools = repo.tools(json!({})).await;
+    let delete = &tools["repo.delete-file"];
+    assert_eq!(
+        delete.definition().permission,
+        PermissionLevel::Write,
+        "deleting a file asks like any write"
+    );
+    let done = delete
+        .call(json!({ "path": "crlf.txt" }), cx())
+        .await
+        .unwrap();
+    assert!(!done.is_error);
+    assert!(!repo.0.join("crlf.txt").exists());
+    assert!(repo.0.join("src/lib.rs").exists(), "other files are kept");
+    for path in [
+        "crlf.txt", // already gone
+        "src",      // a directory
+        "../escape.txt",
+        ".git/config",
+        ".rah/storage/frontend-web/settings-tools",
+        "/abs",
+        r"a\b",
+    ] {
+        assert!(
+            invalid(delete.call(json!({ "path": path }), cx()).await),
+            "{path}"
+        );
+    }
+    assert!(repo.0.join("src").is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn delete_and_move_do_not_touch_symbolic_links() {
+    let repo = Repo::new("links");
+    std::os::unix::fs::symlink("src/lib.rs", repo.0.join("link.rs")).unwrap();
+    let tools = repo.tools(json!({})).await;
+    assert!(invalid(
+        tools["repo.delete-file"]
+            .call(json!({ "path": "link.rs" }), cx())
+            .await
+    ));
+    assert!(invalid(
+        tools["repo.move-file"]
+            .call(json!({ "from": "link.rs", "to": "moved.rs" }), cx())
+            .await
+    ));
+    assert!(repo.0.join("src/lib.rs").exists());
+    assert!(std::fs::symlink_metadata(repo.0.join("link.rs")).is_ok());
+}
+
+#[tokio::test]
+async fn move_file_renames_without_overwriting() {
+    let repo = Repo::new("move");
+    let tools = repo.tools(json!({})).await;
+    let mv = &tools["repo.move-file"];
+    mv.call(
+        json!({ "from": "crlf.txt", "to": "deep/er/lines.txt" }),
+        cx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repo.read("deep/er/lines.txt"), "one\r\ntwo\r\n");
+    assert!(!repo.0.join("crlf.txt").exists());
+    for (from, to) in [
+        ("src/lib.rs", "deep/er/lines.txt"), // the target exists
+        ("src/lib.rs", "src/lib.rs"),        // the same path
+        ("missing.txt", "x.txt"),
+        ("src", "other"), // a directory
+        ("src/lib.rs", "../escape.txt"),
+        ("src/lib.rs", ".git/hooks/pre-commit"),
+        ("src/lib.rs", ".rah/storage/x"),
+        ("../escape.txt", "x.txt"),
+    ] {
+        assert!(
+            invalid(mv.call(json!({ "from": from, "to": to }), cx()).await),
+            "{from} -> {to}"
+        );
+    }
+    assert!(
+        repo.0.join("src/lib.rs").exists(),
+        "a refused move changes nothing"
+    );
+}
+
+fn git(repo: &Repo, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(&repo.0)
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn author() -> Value {
+    json!({ "commit": { "name": "Test Author", "email": "test@example.com" } })
+}
+
+#[tokio::test]
+async fn commit_exists_only_with_an_identity_and_asks_at_execute() {
+    let repo = Repo::new("commit-config");
+    let tools = repo.tools(json!({})).await;
+    assert!(!tools.contains_key("repo.commit"));
+    let tools = repo.tools(author()).await;
+    assert_eq!(
+        tools["repo.commit"].definition().permission,
+        PermissionLevel::Execute
+    );
+    for commit in [
+        json!({ "name": "", "email": "a@b.c" }),
+        json!({ "name": "A", "email": " " }),
+        json!({ "name": "A\nB", "email": "a@b.c" }),
+        json!({ "name": "A", "email": "<a@b.c>" }),
+    ] {
+        let config: RepoWriteConfig = serde_json::from_value(json!({ "commit": commit })).unwrap();
+        assert!(
+            write_tools(Arc::new(TestEnv(repo.0.clone())), config)
+                .await
+                .is_err(),
+            "{commit}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn commit_commits_only_the_named_files_as_the_configured_identity() {
+    let repo = Repo::new("commit");
+    let tools = repo.tools(author()).await;
+    let commit = &tools["repo.commit"];
+    std::fs::write(repo.0.join("a.txt"), "a").unwrap();
+    std::fs::write(repo.0.join("b.txt"), "b").unwrap();
+    // Something staged earlier is not swept into the commit.
+    git(&repo, &["add", "--", "b.txt"]);
+    let done = commit
+        .call(
+            json!({ "message": "add a\n\nbody", "paths": ["a.txt"] }),
+            cx(),
+        )
+        .await
+        .unwrap();
+    assert!(!done.is_error);
+    assert_eq!(
+        git(&repo, &["log", "-1", "--format=%an|%ae|%cn|%ce|%s"]),
+        "Test Author|test@example.com|Test Author|test@example.com|add a"
+    );
+    assert_eq!(
+        git(&repo, &["show", "--name-only", "--format=", "HEAD"]),
+        "a.txt"
+    );
+    assert!(git(&repo, &["status", "--porcelain"]).contains("A  b.txt"));
+
+    // Nothing changed for the path: refused, no empty commit.
+    assert!(invalid(
+        commit
+            .call(json!({ "message": "again", "paths": ["a.txt"] }), cx())
+            .await
+    ));
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]), "1");
+
+    // A deletion is committed too.
+    std::fs::remove_file(repo.0.join("a.txt")).unwrap();
+    commit
+        .call(json!({ "message": "drop a", "paths": ["a.txt"] }), cx())
+        .await
+        .unwrap();
+    assert_eq!(
+        git(&repo, &["show", "--name-status", "--format=", "HEAD"]),
+        "D\ta.txt"
+    );
+}
+
+#[tokio::test]
+async fn commit_refuses_patterns_directories_and_unsafe_input() {
+    let repo = Repo::new("commit-input");
+    let tools = repo.tools(author()).await;
+    let commit = &tools["repo.commit"];
+    std::fs::write(repo.0.join("a.txt"), "a").unwrap();
+    std::fs::write(repo.0.join("b.txt"), "b").unwrap();
+    for input in [
+        json!({ "message": "x", "paths": ["*.txt"] }), // not a pattern
+        json!({ "message": "x", "paths": ["src"] }),   // a directory
+        json!({ "message": "x", "paths": [".git/config"] }),
+        json!({ "message": "x", "paths": ["../a.txt"] }),
+        json!({ "message": "x", "paths": [":(top)a.txt"] }),
+        json!({ "message": "x", "paths": [] }),
+        json!({ "message": "  ", "paths": ["a.txt"] }),
+        json!({ "message": "x", "paths": ["nosuch.txt"] }),
+        json!({ "message": "x", "paths": ["a.txt"], "amend": true }),
+    ] {
+        let result = commit.call(input.clone(), cx()).await;
+        assert!(invalid(result), "{input}");
+    }
+    assert!(
+        git(&repo, &["status", "--porcelain"]).contains("?? a.txt"),
+        "a refused call stages nothing"
+    );
+}

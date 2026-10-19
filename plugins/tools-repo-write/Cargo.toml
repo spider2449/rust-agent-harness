@@ -2,7 +2,7 @@
 name = "rah-plugin-tools-repo-write"
 version.workspace = true
 edition.workspace = true
-description = "Repository write tools (repo.create-file, repo.edit-files, repo.patch)"
+description = "Repository write tools (create, edit, patch, delete, move, commit)"
 
 [dependencies]
 rah-api = { path = "../../crates/rah-api" }

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `tools-repo-write` gets `repo.delete-file`, `repo.move-file` and `repo.commit`
+  (ADR 0055, which amends ADR 0036 section 4). Delete and move act on regular
+  files only, never on links or directories, and move never overwrites; both
+  declare `write`. `repo.commit {message, paths}` stages the named files and
+  commits only them as the identity set in the plugin's `commit = { name,
+  email }`, with no amend, no hook skipping and no push; it declares `execute`
+  and does not exist without that setting. The presets assign all three.
+
 - Fixed: `rah --root <dir> --with format` (and `--with lsp`) mounted the
   plugin after `--root` was applied, so it kept the current directory as its
   root and never touched files in `<dir>`. `--with` now applies first; a test

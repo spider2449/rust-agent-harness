@@ -232,7 +232,7 @@ pub const PRESETS: [Preset; 6] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"

@@ -89,6 +89,8 @@ ABI.
    `repo.create-file` are ported (to `tools-repo-write`). The other legacy
    mutation tools and every HostExplicit review flow remain on the legacy line.
    Confirmation is provided generically by the policy `Ask` outcome.
+   (ADR 0055 added `repo.delete-file`, `repo.move-file` and `repo.commit` as
+   new tools of the same plugin.)
 5. **Documentation language.** ADRs, `AGENTS.md` and the architecture and
    security documents are written in English. Plans may be written in Chinese.
 
