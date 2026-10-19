@@ -184,6 +184,24 @@ pub fn parse_request(request: &str) -> (&str, Vec<String>) {
     (name.trim(), arguments)
 }
 
+/// The tool names of the `--approve` values: each value is a name or a comma
+/// separated list. A name must be exact, so no value can approve every tool.
+pub fn approved_tools(requests: &[String]) -> Result<Vec<String>, String> {
+    let mut tools: Vec<String> = Vec::new();
+    for name in requests.iter().flat_map(|request| request.split(',')) {
+        let name = name.trim();
+        if name.is_empty() || name.contains('*') {
+            return Err(format!(
+                "--approve takes exact tool names, such as `repo.create-file`, not `{name}`"
+            ));
+        }
+        if !tools.iter().any(|known| known == name) {
+            tools.push(name.to_owned());
+        }
+    }
+    Ok(tools)
+}
+
 impl Distribution {
     /// Applies the feature request `request` (`name` or `name=a,b`).
     pub fn enable(&mut self, request: &str) -> Result<(), String> {
@@ -203,6 +221,44 @@ impl Distribution {
             self.applied.push(applied);
         }
         Ok(())
+    }
+
+    /// Lets the tools `requests` (`--approve`, each a name or a comma
+    /// separated list) run without asking, by adding them to `approve` of
+    /// every mounted policy (ADR 0054). Returns the tool names. It fails for
+    /// a name that is empty or a pattern, and when no policy is mounted:
+    /// nothing asks without one, so the option would mean nothing.
+    pub fn approve(&mut self, requests: &[String]) -> Result<Vec<String>, String> {
+        let tools = approved_tools(requests)?;
+        let mut matched = false;
+        for spec in self
+            .plugin
+            .iter_mut()
+            .filter(|spec| spec.kind == "policy-authority")
+        {
+            if !spec.config.is_object() {
+                spec.config = Value::Object(Map::new());
+            }
+            let Value::Object(config) = &mut spec.config else {
+                continue;
+            };
+            let approved = config
+                .entry("approve")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(approved) = approved {
+                for tool in &tools {
+                    if !approved.iter().any(|known| known == tool.as_str()) {
+                        approved.push(Value::String(tool.clone()));
+                    }
+                }
+                matched = true;
+            }
+        }
+        if matched {
+            Ok(tools)
+        } else {
+            Err("--approve needs a `policy-authority` plugin in the distribution".into())
+        }
     }
 
     /// Applies every feature `features` lists in the distribution file, then
@@ -389,6 +445,47 @@ mod tests {
             .find(|spec| spec.kind == "policy-authority")
             .unwrap()
             .config
+    }
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn approve_adds_exact_tool_names_to_the_policy_once() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        let tools = distribution
+            .approve(&names(&[
+                "repo.create-file, repo.edit-files",
+                "repo.create-file",
+            ]))
+            .unwrap();
+        assert_eq!(tools, ["repo.create-file", "repo.edit-files"]);
+        assert_eq!(
+            policy(&distribution)["approve"],
+            serde_json::json!(["repo.create-file", "repo.edit-files"])
+        );
+        // Again, and with a name the policy already lists: nothing is added.
+        distribution.approve(&names(&["repo.edit-files"])).unwrap();
+        assert_eq!(
+            policy(&distribution)["approve"],
+            serde_json::json!(["repo.create-file", "repo.edit-files"])
+        );
+        // The permission assignments are untouched.
+        assert!(policy(&distribution)["tools"]["repo.create-file"] == "write");
+    }
+
+    #[test]
+    fn approve_refuses_patterns_empty_names_and_a_missing_policy() {
+        for bad in ["*", "repo.*", "", "repo.create-file,", " "] {
+            let mut distribution = Distribution::preset("dev").unwrap();
+            let error = distribution.approve(&names(&[bad])).unwrap_err();
+            assert!(error.contains("exact tool names"), "{bad}: {error}");
+            assert!(policy(&distribution).get("approve").is_none(), "{bad}");
+        }
+        let mut bare = Distribution::parse("[[plugin]]\nuse = \"loop-react\"\n").unwrap();
+        let error = bare.approve(&names(&["repo.create-file"])).unwrap_err();
+        assert!(error.contains("needs a `policy-authority`"), "{error}");
     }
 
     #[test]

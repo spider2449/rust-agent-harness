@@ -63,6 +63,12 @@ The policy decides each call from its own configuration only:
   `git diff --output=<file>`, so write one only for a program whose options
   are all acceptable. `program` is compared as a string, so `./git` and
   `/usr/bin/git` are not `git`.
+- `approve` lists exact tool names that run without asking (ADR 0054), for a
+  scripted run: `rah --prompt ... --approve repo.create-file` adds the names
+  for one run and prints a warning. Like `commands` it only turns Ask into
+  Allow and never overrides `decisions`, a missing assignment or a denied
+  level; patterns and `*` are refused. It trusts the tool, not one call, so
+  every argument the model sends to a listed tool is allowed.
 - An invalid configuration is refused before it is applied (ADR 0044): at
   boot `rah` refuses to start instead of running unguarded, and a changed
   configuration (Web UI Settings or the Plugins panel) that is refused

@@ -24,10 +24,15 @@
 //!   Allow: it never overrides a `decisions` entry or a denial, and a call
 //!   that matches no rule is judged as before.
 //!
+//! - `approve` lets the host run chosen tools without asking (ADR 0054). It
+//!   lists exact tool names, no patterns. Like `commands`, it only turns an
+//!   Ask into an Allow: a `decisions` entry, a missing assignment or a denied
+//!   level still wins.
+//!
 //! Configuration (all fields optional):
 //!
 //! ```toml
-//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" }, decisions = { "repo.patch" = "deny" }, commands = [["git", "status"], ["cargo", "check", "*"]] }
+//! config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.read" = "read", "repo.*" = "read" }, decisions = { "repo.patch" = "deny" }, commands = [["git", "status"], ["cargo", "check", "*"]], approve = ["repo.create-file"] }
 //! ```
 //!
 //! The defaults are `allow = ["none", "read"]`, `ask = ["write", "execute"]`
@@ -35,7 +40,7 @@
 //! the `ToolInvoker` treats Ask as a denial.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -115,6 +120,9 @@ pub struct PolicyConfig {
     /// arguments.
     #[serde(default)]
     pub commands: Vec<Vec<String>>,
+    /// Exact tool names that run without asking (ADR 0054).
+    #[serde(default)]
+    pub approve: Vec<String>,
     /// The most tool calls that may run at once, across all sessions
     /// (default [`DEFAULT_MAX_IN_FLIGHT`]). A call over the limit is not
     /// started.
@@ -139,6 +147,7 @@ impl Default for PolicyConfig {
             tools: BTreeMap::new(),
             decisions: BTreeMap::new(),
             commands: Vec::new(),
+            approve: Vec::new(),
             max_in_flight: None,
         }
     }
@@ -247,6 +256,7 @@ pub struct Policy {
     assignments: Patterns<PermissionLevel>,
     decisions: Patterns<Decision>,
     commands: Vec<CommandRule>,
+    approve: BTreeSet<String>,
 }
 
 impl Policy {
@@ -260,6 +270,15 @@ impl Policy {
                 level_name(*level)
             ));
         }
+        if let Some(name) = config
+            .approve
+            .iter()
+            .find(|name| name.trim().is_empty() || name.contains('*'))
+        {
+            return Err(format!(
+                "`approve` takes exact tool names, not `{name}`: a name must not be empty or contain `*`"
+            ));
+        }
         Ok(Self {
             allow: config.allow,
             ask: config.ask,
@@ -270,6 +289,7 @@ impl Policy {
                 .into_iter()
                 .map(CommandRule::new)
                 .collect::<Result<_, _>>()?,
+            approve: config.approve.into_iter().collect(),
         })
     }
 
@@ -278,16 +298,20 @@ impl Policy {
         self.assignments.get(name)
     }
 
-    /// Decides one call: [`Policy::decide`] for its tool, except that a
-    /// `commands` rule turns an Ask for `shell.exec` into an Allow. The call
-    /// input is untrusted: anything but a program string and an array of
-    /// argument strings matches no rule.
+    /// Decides one call: [`Policy::decide`] for its tool, except that an
+    /// `approve` entry for the tool, or a `commands` rule for `shell.exec`,
+    /// turns an Ask into an Allow. The call input is untrusted: anything but
+    /// a program string and an array of argument strings matches no rule.
     pub fn decide_call(&self, request: &ToolRequestContext) -> ToolDecision {
         let decision = self.decide(&request.definition);
-        if !matches!(decision, ToolDecision::Ask { .. })
-            || request.definition.name.as_str() != COMMAND_TOOL
-            || self.decisions.get(COMMAND_TOOL).is_some()
-        {
+        let name = request.definition.name.as_str();
+        if !matches!(decision, ToolDecision::Ask { .. }) || self.decisions.get(name).is_some() {
+            return decision;
+        }
+        if self.approve.contains(name) {
+            return ToolDecision::Allow;
+        }
+        if name != COMMAND_TOOL {
             return decision;
         }
         let input = &request.call.input.0;

@@ -69,7 +69,13 @@ hand a task to a subagent in its own session), `model-mock`,
 stops a plugin and keeps its configuration, `/start <plugin>` mounts it again
 and `/restart <plugin>` restarts it. `/` or `/help` lists the commands, and
 Ctrl-C cancels a running turn (with no turn running, it exits). `--prompt <text>` runs one turn and exits, and
-`--session <id>` resumes a session.
+`--session <id>` resumes a session. With `--prompt`, a policy question is
+answered from standard input (only `y` or `yes` approves, and end of input
+denies); for a script, `--approve repo.create-file,repo.edit-files` runs
+exactly those tools without asking for this run (ADR 0054). It takes exact tool
+names and prints a warning, and the policy still denies a tool it has no
+assignment for. In Windows PowerShell 5.1 a piped `y` may arrive with a byte
+order mark and be refused; use `--approve`, or pipe from Bash.
 
 | Preset | Model plugin | Policy |
 |---|---|---|

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `rah --approve <tool,...>` runs exactly the named tools without asking, for
+  one scripted run (ADR 0054). It adds the names to the new `approve` list of
+  `policy-authority`, which, like `commands`, only turns an Ask into an Allow:
+  a `decisions` entry, a missing assignment or a denied level still wins, and
+  patterns are refused. A warning on standard error lists the tools.
 - A tool call the user declines now tells the model not to send the same call
   again. Before, a model sent it up to four times and asked each time (seen
   with a local llama.cpp model); the message still starts with `denied:

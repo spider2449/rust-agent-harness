@@ -73,6 +73,12 @@ struct Args {
     /// --list-features.
     #[arg(long = "with", value_name = "FEATURE")]
     with: Vec<String>,
+    /// Run these tools without asking, such as `--approve repo.create-file`
+    /// or `--approve repo.create-file,repo.edit-files`; repeatable. Exact
+    /// tool names only; the policy still denies a tool it has no assignment
+    /// for. For this run only.
+    #[arg(long, value_name = "TOOL")]
+    approve: Vec<String>,
     /// Print what would run (plugins in mount order, their configuration, the
     /// features applied and the Web UI's stored overrides) and exit.
     #[arg(long)]
@@ -83,7 +89,7 @@ struct Args {
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "list_features", "show_config"])]
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "approve", "list_features", "show_config"])]
     init_config: bool,
 }
 
@@ -193,6 +199,9 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     for request in &args.with {
         distribution.enable(request)?;
     }
+    if !args.approve.is_empty() {
+        distribution.approve(&args.approve)?;
+    }
     if let Some(model) = &args.model {
         let mut matched = false;
         for kind in [
@@ -300,6 +309,14 @@ async fn run(args: Args) -> i32 {
             let _ = kernel.shutdown().await;
             return 2;
         }
+    }
+    if !args.approve.is_empty() {
+        // Already validated when the distribution was built.
+        let tools = rah_cli::approved_tools(&args.approve).unwrap_or_default();
+        eprintln!(
+            "rah: WARNING: --approve - these tools run without asking: {}.",
+            tools.join(", ")
+        );
     }
     if !ToolInvoker::new(handle.clone()).is_guarded() {
         eprintln!(

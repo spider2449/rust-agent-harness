@@ -10,7 +10,7 @@ mod help;
 
 mod show;
 
-pub use features::{Applied, FEATURES, Feature, feature, list as list_features};
+pub use features::{Applied, FEATURES, Feature, approved_tools, feature, list as list_features};
 pub use show::show_config;
 
 use std::{

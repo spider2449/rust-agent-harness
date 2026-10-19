@@ -497,6 +497,106 @@ fn a_command_rule_does_not_lower_a_denied_level() {
     ));
 }
 
+fn tool_call(config: Value, name: &str, permission: PermissionLevel) -> ToolDecision {
+    parse(config).decide_call(&ToolRequestContext {
+        session: SessionId::new(),
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new(name),
+            input: ToolInput(json!({ "path": "a.txt" })),
+        },
+        definition: definition(name, permission),
+    })
+}
+
+#[test]
+fn an_approved_tool_runs_without_asking_and_others_are_still_asked() {
+    let config = json!({
+        "tools": { "repo.create-file": "write", "repo.patch": "write" },
+        "approve": ["repo.create-file"],
+    });
+    let write = PermissionLevel::Write;
+    assert_eq!(
+        tool_call(config.clone(), "repo.create-file", write),
+        ToolDecision::Allow
+    );
+    assert!(asks(&tool_call(config, "repo.patch", write)));
+}
+
+#[test]
+fn approve_never_overrides_a_decision_a_denial_or_a_missing_assignment() {
+    let write = PermissionLevel::Write;
+    // The host's explicit decision wins, `ask` and `deny` alike.
+    for (decision, asked) in [("ask", true), ("deny", false)] {
+        let config = json!({
+            "tools": { "repo.create-file": "write" },
+            "decisions": { "repo.create-file": decision },
+            "approve": ["repo.create-file"],
+        });
+        let outcome = tool_call(config, "repo.create-file", write);
+        assert_eq!(asks(&outcome), asked, "{decision}");
+        assert_ne!(outcome, ToolDecision::Allow, "{decision}");
+    }
+    // Without an assignment the tool is denied, listed or not (a decision of
+    // `allow` would let it through; `approve` must not).
+    let unassigned = json!({ "approve": ["repo.create-file"] });
+    assert!(matches!(
+        tool_call(unassigned, "repo.create-file", write),
+        ToolDecision::Deny { .. }
+    ));
+    // A level that is neither allowed nor asked stays denied.
+    let denied = json!({
+        "ask": [],
+        "tools": { "repo.create-file": "write" },
+        "approve": ["repo.create-file"],
+    });
+    assert!(matches!(
+        tool_call(denied, "repo.create-file", write),
+        ToolDecision::Deny { .. }
+    ));
+}
+
+#[test]
+fn approve_covers_the_tool_named_and_no_other() {
+    let config = json!({
+        "tools": { "repo.*": "write" },
+        "approve": ["repo.create-file"],
+    });
+    let write = PermissionLevel::Write;
+    // Another name, and a name that merely starts the same way, are asked.
+    assert!(asks(&tool_call(config.clone(), "repo.create-files", write)));
+    assert!(asks(&tool_call(config.clone(), "repo.create", write)));
+    // Names are case sensitive: this one has no assignment, so it is denied.
+    let other_case = tool_call(config, "REPO.CREATE-FILE", write);
+    assert!(
+        matches!(other_case, ToolDecision::Deny { .. }),
+        "{other_case:?}"
+    );
+}
+
+#[test]
+fn approve_takes_exact_names_only() {
+    for name in ["*", "repo.*", "", "  "] {
+        let config: PolicyConfig = serde_json::from_value(json!({ "approve": [name] })).unwrap();
+        let error = Policy::new(config).unwrap_err();
+        assert!(
+            error.contains("`approve` takes exact tool names"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn approve_leaves_command_rules_alone() {
+    // Approving `shell.exec` runs every command; a command rule still works
+    // for a policy that does not list it.
+    let input = json!({ "program": "git", "args": ["push"] });
+    let mut config = shell_config(json!([["git", "status"]]));
+    assert!(asks(&shell_call(config.clone(), input.clone())));
+    config["approve"] = json!(["shell.exec"]);
+    assert_eq!(shell_call(config, input), ToolDecision::Allow);
+}
+
 #[test]
 fn invalid_command_rules_are_refused() {
     for (commands, expected) in [
