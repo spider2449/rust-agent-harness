@@ -58,6 +58,12 @@ struct ToolSet(Vec<Arc<dyn Tool>>);
 
 const TOOLS: ServiceKey<ToolSet> = ServiceKey::new(TOOLS_SERVICE);
 
+/// What the model reads when the user declines a call. The model tends to
+/// send a declined call again unchanged, which asks the user the same
+/// question each time.
+const USER_REJECTION: &str =
+    "rejected by the user; do not send the same call again, ask what to do instead";
+
 /// Service name of tool admission providers (ADR 0045).
 pub const TOOL_ADMISSION_SERVICE: &str = "tool-admission";
 
@@ -178,7 +184,7 @@ impl ToolInvoker {
                 };
                 match self.kernel.bail::<ToolApproval>(approval).await {
                     Ok(Some(true)) => Ok(()),
-                    Ok(Some(false)) => Err("rejected by the user".to_owned()),
+                    Ok(Some(false)) => Err(USER_REJECTION.to_owned()),
                     Ok(None) => Err("approval required but no approver is available".to_owned()),
                     Err(error) => Err(format!("approval failure: {error}")),
                 }

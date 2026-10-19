@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A tool call the user declines now tells the model not to send the same call
+  again. Before, a model sent it up to four times and asked each time (seen
+  with a local llama.cpp model); the message still starts with `denied:
+  rejected by the user`.
 - New opt-in plugin `format-on-write` (feature `format`, ADR 0053): after a
   `write` tool completes, runs the project's formatter on the files it named
   (`rustfmt`, `gofmt`, `ruff`/`black` where `pyproject.toml` configures them,

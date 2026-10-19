@@ -208,6 +208,41 @@ async fn ask_requires_an_approver() {
 }
 
 #[tokio::test]
+async fn a_declined_call_tells_the_model_not_to_send_it_again() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Write, None).await;
+    mount_policy(
+        &kernel,
+        Some(ToolDecision::Ask {
+            reason: "risky".into(),
+        }),
+        false,
+    )
+    .await;
+    let approver = plugin(PluginManifest::new("approver", "1"), |scope| {
+        scope.hook_bail::<ToolApproval, _, _>(0, |_request| async move { Some(false) });
+        Ok(())
+    });
+    kernel
+        .mount(approver, MountOptions::default())
+        .await
+        .unwrap();
+    let invoker = ToolInvoker::new(kernel.handle());
+    let outcome = invoker.invoke(invocation("count"), || {}).await;
+    assert!(!outcome.authorized && outcome.output.is_error);
+    let message = text(&outcome.output);
+    assert!(
+        message.starts_with("denied: rejected by the user"),
+        "{message}"
+    );
+    assert!(
+        message.contains("do not send the same call again"),
+        "{message}"
+    );
+    assert_eq!(outcome.effect, ToolEffect::None);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn cancellation_ends_a_call_waiting_for_approval() {
     let (kernel, calls) = kernel_with_tools(PermissionLevel::Write, None).await;
     mount_policy(
