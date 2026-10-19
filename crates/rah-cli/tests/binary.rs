@@ -313,6 +313,26 @@ fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
 }
 
 #[test]
+fn root_reaches_the_workspace_plugins_that_features_mount() {
+    let dir = TempDir::new("bin-root-features");
+    let output = rah(&dir)
+        .args(["--preset", "dev", "--root", "workspace-x"])
+        .args(["--with", "format", "--with", "lsp", "--show-config"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    for plugin in ["format-on-write", "lsp-diagnostics"] {
+        let at = stdout
+            .find(&format!("  {plugin}  <- feature"))
+            .unwrap_or_else(|| panic!("{plugin} is not mounted: {stdout}"));
+        let section = stdout[at..].lines().take(2).collect::<Vec<_>>().join("\n");
+        assert!(section.contains("workspace-x"), "{plugin}: {section}");
+    }
+}
+
+#[test]
 fn show_config_prints_the_plugins_features_and_source() {
     let dir = TempDir::new("bin-show-config");
     let output = rah(&dir)

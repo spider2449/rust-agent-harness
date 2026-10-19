@@ -191,13 +191,16 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             ));
         }
     }
+    // Features first: `--root` then reaches the workspace plugins they mount
+    // (`format`, `lsp`); applied the other way round, those keep the current
+    // directory as their root.
+    for request in &args.with {
+        distribution.enable(request)?;
+    }
     if let Some(root) = &args.root
         && !distribution.set_root(root)
     {
         return Err("--root needs a `tools-builtin` or sandbox plugin".into());
-    }
-    for request in &args.with {
-        distribution.enable(request)?;
     }
     if !args.approve.is_empty() {
         distribution.approve(&args.approve)?;

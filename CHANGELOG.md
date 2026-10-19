@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: `rah --root <dir> --with format` (and `--with lsp`) mounted the
+  plugin after `--root` was applied, so it kept the current directory as its
+  root and never touched files in `<dir>`. `--with` now applies first; a test
+  checks that both plugins get the root. `rah-desktop` already had this order.
+
 - `rah --approve <tool,...>` runs exactly the named tools without asking, for
   one scripted run (ADR 0054). It adds the names to the new `approve` list of
   `policy-authority`, which, like `commands`, only turns an Ask into an Allow:
