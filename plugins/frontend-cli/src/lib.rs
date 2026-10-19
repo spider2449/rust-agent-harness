@@ -479,7 +479,10 @@ where
         cancel: cancel.clone(),
     });
     loop {
+        // Events first: the loop sends `ToolRequested` before it asks for
+        // the approval, so a call is shown before its question.
         let event = tokio::select! {
+            biased;
             event = events.next() => event,
             (request, reply) = next_prompt(terminal.approvals) => {
                 let approved = confirm(terminal, &request, &cancel).await?;
@@ -612,4 +615,127 @@ impl CliFrontendPlugin {
 fn the_config_example_is_a_valid_configuration() {
     let parsed: Result<ReplOptions, _> = serde_json::from_str(CliFrontendPlugin::CONFIG_EXAMPLE);
     assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream;
+    use rah_api::{
+        Kernel, MountOptions,
+        agent_loop::{AgentLoop, TurnStream},
+        hooks::ToolRequestContext,
+    };
+    use rah_protocol::{
+        AgentOutput, Message, MessageRole, PermissionLevel, ToolCall, ToolCallId, ToolDefinition,
+        ToolInput, ToolName,
+    };
+
+    use super::*;
+
+    fn call() -> ToolCall {
+        ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("repo.create-file"),
+            input: ToolInput(serde_json::json!({"path": "a.txt"})),
+        }
+    }
+
+    /// A turn that requests one tool call and ends once the question about it
+    /// is answered, as a loop does when the tool waits for the approval.
+    struct OneToolCall(SessionId, Mutex<Option<oneshot::Receiver<bool>>>);
+
+    impl AgentLoop for OneToolCall {
+        fn run_turn(&self, _request: TurnRequest) -> TurnStream {
+            let session = self.0.clone();
+            let answered = self.1.lock().unwrap().take().unwrap();
+            let requested = AgentEvent::ToolRequested {
+                session_id: session.clone(),
+                tool_call: call(),
+            };
+            let completed = async move {
+                let _ = answered.await;
+                AgentEvent::Completed {
+                    session_id: session,
+                    output: AgentOutput {
+                        message: Message {
+                            role: MessageRole::Assistant,
+                            content: String::new(),
+                        },
+                    },
+                }
+            };
+            stream::once(async move { requested })
+                .chain(stream::once(completed))
+                .boxed()
+        }
+    }
+
+    struct LoopPlugin(PluginManifest, Arc<OneToolCall>);
+
+    #[async_trait]
+    impl Plugin for LoopPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+
+        async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+            scope.provide(LOOP, self.1.clone())?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_is_shown_before_its_approval_question() {
+        // The question is already waiting when the turn starts, so both the
+        // event and the prompt are ready at the first poll. A random choice
+        // between them would show the question first in about half the runs.
+        for _ in 0..40 {
+            let session = SessionId::new();
+            let (reply, answer) = oneshot::channel();
+            let agent_loop = Arc::new(OneToolCall(session.clone(), Mutex::new(Some(answer))));
+            let kernel = Kernel::new();
+            let plugin = LoopPlugin(
+                PluginManifest::new("loop", "1").provides(["loop"]),
+                agent_loop,
+            );
+            kernel
+                .mount(Arc::new(plugin), MountOptions::default())
+                .await
+                .unwrap();
+            let handle = kernel.handle();
+
+            let (prompts, receiver) = mpsc::channel::<ApprovalPrompt>(1);
+            let mut approvals = Some(receiver);
+            let request = ApprovalRequest {
+                request: ToolRequestContext {
+                    session: session.clone(),
+                    call: call(),
+                    definition: ToolDefinition {
+                        name: ToolName::new("repo.create-file"),
+                        description: String::new(),
+                        input_schema: serde_json::json!({}),
+                        permission: PermissionLevel::Write,
+                    },
+                },
+                reason: "needs `write`".into(),
+            };
+            prompts.send((request, reply)).await.unwrap();
+
+            let mut out = Vec::new();
+            let mut lines = BufReader::new(&b"y\n"[..]).lines();
+            let running = RunningTurn::default();
+            let mut terminal = Terminal {
+                out: &mut out,
+                lines: &mut lines,
+                approvals: &mut approvals,
+                running: &running,
+            };
+            assert!(turn(&handle, &session, "go", &mut terminal).await.unwrap());
+
+            let shown = String::from_utf8(out).unwrap();
+            let tool = shown.find("[tool] ").expect(&shown);
+            let question = shown.find("[approve] ").expect(&shown);
+            assert!(tool < question, "{shown}");
+        }
+    }
 }

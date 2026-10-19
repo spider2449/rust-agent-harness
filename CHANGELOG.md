@@ -6,6 +6,10 @@
   again. Before, a model sent it up to four times and asked each time (seen
   with a local llama.cpp model); the message still starts with `denied:
   rejected by the user`.
+- `frontend-cli` shows a tool call before the question about it: the turn loop
+  now takes events before approval prompts (a race showed them in either
+  order).
+
 - New opt-in plugin `format-on-write` (feature `format`, ADR 0053): after a
   `write` tool completes, runs the project's formatter on the files it named
   (`rustfmt`, `gofmt`, `ruff`/`black` where `pyproject.toml` configures them,
