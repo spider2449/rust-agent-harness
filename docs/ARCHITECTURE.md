@@ -91,9 +91,10 @@ Implemented:
 - `rah-kernel` (P1) and `rah-api` (P2): service contracts `model`, `loop`,
   `session`, `sandbox` (`ExecEnv`: `run` to completion, or `spawn` a
   long-running program with pipes), tools with `ToolInvoker`, and the standard
-  hooks
-  `tool.repair_input` (ADR 0049), `tool.before_invoke`, `tool.approval`, `tool.after_invoke`, `model.overflow` (ADR 0052) and
-  `model.before_request`. `tool-admission` (`ToolAdmission`, ADR 0045)
+  hooks `tool.repair_input` (ADR 0049), `tool.before_invoke`, `tool.approval`,
+  `tool.after_invoke`, `model.before_request` and `model.overflow` (ADR 0052,
+  runs after `model.stream()` fails to fit, never before
+  `model.before_request`). `tool-admission` (`ToolAdmission`, ADR 0045)
   admits authorized calls before they start; `policy-authority` uses it to
   bound how many calls run at once. Loops publish each turn event on the event bus as
   `TurnEvent`, and providers report token usage as `ModelEvent::Usage`

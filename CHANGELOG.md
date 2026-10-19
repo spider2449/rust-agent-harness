@@ -53,7 +53,7 @@
 - `docs/SECURITY.md` now says plainly that a language server can run
   workspace code (`rust-analyzer` build scripts), so `lsp-diagnostics` turns a
   `write` approval into code execution at the sandbox's isolation unless
-  `sandbox-os` confines it.
+  `sandbox-os` confines it (ADR 0048).
 - A request that does not fit the model's context window is no longer the end
   of the turn (ADR 0052): the providers recognize the 400/413/422 answer
   (`ModelError::ContextOverflow`, without repeating the provider's text), the

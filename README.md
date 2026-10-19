@@ -59,7 +59,8 @@ directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 sliding history window and memory notes kept per workspace in
 `~/.rah/memory/<folder>-<hash>.md`, which the model can extend with
 `memory.remember` after you approve), `tool-input-repair` (converts arguments such as `"20"` for an
-integer before the policy sees the call), `skills-fs` (skills, shared by all
+integer before the policy sees the call; it is a hook, so it also runs
+without policy in `minimal`), `skills-fs` (skills, shared by all
 workspaces, in
 `~/.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
 `skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
