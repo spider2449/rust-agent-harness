@@ -10,6 +10,9 @@
 //! The plugin answers `tool.approval`: while a turn runs, a policy `Ask` is
 //! shown on the terminal and approved only by an explicit `y` or `yes`. End
 //! of input, any other answer, or a REPL that is no longer running denies it.
+//! The answer `a` (or `always`) approves and also allows that tool for the
+//! rest of the session without asking again (ADR 0056); a tool that declares
+//! `execute` is not offered it.
 //!
 //! It also answers `host.interrupt` (Ctrl-C): a running turn is cancelled
 //! and the REPL continues. Without a running turn the host exits.
@@ -18,6 +21,7 @@
 //! `admin` service, when one is mounted.
 
 use std::{
+    collections::BTreeSet,
     str::FromStr,
     sync::{Arc, Mutex, PoisonError},
 };
@@ -34,7 +38,7 @@ use rah_api::{
     session::{SESSION, SessionLog},
     tools::describe_image,
 };
-use rah_protocol::{AgentEvent, SessionEntry, SessionId, ToolContent, ToolOutput};
+use rah_protocol::{AgentEvent, PermissionLevel, SessionEntry, SessionId, ToolContent, ToolOutput};
 use serde::Deserialize;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines},
@@ -44,9 +48,15 @@ use tokio::{
 /// A pending `Ask` confirmation and where to send the answer.
 pub type ApprovalPrompt = (ApprovalRequest, oneshot::Sender<bool>);
 
-/// The cancellation token of the turn the REPL is running, if any.
+/// The cancellation token of the turn the REPL is running, if any, and the
+/// tools the user allowed for the rest of a session (answer `a`).
 #[derive(Clone, Default)]
-pub struct RunningTurn(Arc<Mutex<Option<CancellationToken>>>);
+pub struct RunningTurn {
+    token: Arc<Mutex<Option<CancellationToken>>>,
+    /// `(session, tool)`. It lives as long as the process: a session that is
+    /// started again later asks again.
+    allowed: Arc<Mutex<BTreeSet<(String, String)>>>,
+}
 
 impl RunningTurn {
     /// Cancels the running turn. Returns whether there was one.
@@ -61,7 +71,21 @@ impl RunningTurn {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<CancellationToken>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.token.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_allowed(&self, session: &SessionId, tool: &str) -> bool {
+        self.allowed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(session.to_string(), tool.to_owned()))
+    }
+
+    fn allow(&self, session: &SessionId, tool: &str) {
+        self.allowed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((session.to_string(), tool.to_owned()));
     }
 
     /// Registers a new turn; the returned guard clears it when dropped.
@@ -427,7 +451,9 @@ async fn next_prompt(approvals: &mut Option<mpsc::Receiver<ApprovalPrompt>>) -> 
     std::future::pending().await
 }
 
-/// Asks the user to confirm one tool call. Only `y` or `yes` approves.
+/// Asks the user to confirm one tool call. Only `y` or `yes` approves, and
+/// `a` or `always` approves and allows the tool for the rest of the session,
+/// except for a tool that declares `execute`, which is asked every time.
 /// Cancelling the turn denies it.
 async fn confirm<R, W>(
     terminal: &mut Terminal<'_, R, W>,
@@ -439,9 +465,16 @@ where
     W: AsyncWrite + Unpin,
 {
     let call = &request.request.call;
+    // A tool that declares `execute`, or that the policy treats as `execute`
+    // (its reason says so: the request carries no level), asks every time.
+    let may_remember = request.request.definition.permission != PermissionLevel::Execute
+        && !request.reason.contains("`execute`");
     let question = format!(
-        "[approve] {} {} ({}). Allow? [y/N] ",
-        call.name, call.input.0, request.reason
+        "[approve] {} {} ({}). Allow? [y/N{}] ",
+        call.name,
+        call.input.0,
+        request.reason,
+        if may_remember { "/a=always" } else { "" }
     );
     terminal.out.write_all(question.as_bytes()).await?;
     terminal.out.flush().await?;
@@ -450,8 +483,19 @@ where
         answer = terminal.lines.next_line() => answer?.unwrap_or_default(),
         () = cancel.cancelled() => String::new(),
     };
-    let approved = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-    if !approved {
+    let answer = answer.trim().to_ascii_lowercase();
+    let always = may_remember && matches!(answer.as_str(), "a" | "always");
+    let approved = always || matches!(answer.as_str(), "y" | "yes");
+    if always {
+        terminal
+            .running
+            .allow(&request.request.session, call.name.as_str());
+        line(
+            terminal.out,
+            &format!("[`{}` is allowed for the rest of this session]", call.name),
+        )
+        .await?;
+    } else if !approved {
         line(terminal.out, "[denied]").await?;
     }
     Ok(approved)
@@ -485,7 +529,9 @@ where
             biased;
             event = events.next() => event,
             (request, reply) = next_prompt(terminal.approvals) => {
-                let approved = confirm(terminal, &request, &cancel).await?;
+                let tool = request.request.call.name.as_str();
+                let approved = terminal.running.is_allowed(&request.request.session, tool)
+                    || confirm(terminal, &request, &cancel).await?;
                 let _ = reply.send(approved);
                 continue;
             }
@@ -632,28 +678,43 @@ mod tests {
 
     use super::*;
 
-    fn call() -> ToolCall {
+    fn call(tool: &str) -> ToolCall {
         ToolCall {
             id: ToolCallId::new(),
-            name: ToolName::new("repo.create-file"),
+            name: ToolName::new(tool),
             input: ToolInput(serde_json::json!({"path": "a.txt"})),
         }
     }
 
-    /// A turn that requests one tool call and ends once the question about it
-    /// is answered, as a loop does when the tool waits for the approval.
-    struct OneToolCall(SessionId, Mutex<Option<oneshot::Receiver<bool>>>);
+    /// A turn that requests one tool call per entry of `answers` and ends once
+    /// every question about them is answered, as a loop does when the tools
+    /// wait for their approvals.
+    struct ToolCalls {
+        session: SessionId,
+        tools: Vec<String>,
+        answers: Mutex<Option<Vec<oneshot::Receiver<bool>>>>,
+        /// What the terminal answered, in the order of the calls.
+        seen: Arc<Mutex<Vec<bool>>>,
+    }
 
-    impl AgentLoop for OneToolCall {
+    impl AgentLoop for ToolCalls {
         fn run_turn(&self, _request: TurnRequest) -> TurnStream {
-            let session = self.0.clone();
-            let answered = self.1.lock().unwrap().take().unwrap();
-            let requested = AgentEvent::ToolRequested {
-                session_id: session.clone(),
-                tool_call: call(),
-            };
+            let session = self.session.clone();
+            let answers = self.answers.lock().unwrap().take().unwrap();
+            let requested: Vec<AgentEvent> = self
+                .tools
+                .iter()
+                .map(|tool| AgentEvent::ToolRequested {
+                    session_id: session.clone(),
+                    tool_call: call(tool),
+                })
+                .collect();
+            let seen = self.seen.clone();
             let completed = async move {
-                let _ = answered.await;
+                for answer in answers {
+                    let answer = answer.await.unwrap_or(false);
+                    seen.lock().unwrap().push(answer);
+                }
                 AgentEvent::Completed {
                     session_id: session,
                     output: AgentOutput {
@@ -664,13 +725,13 @@ mod tests {
                     },
                 }
             };
-            stream::once(async move { requested })
+            stream::iter(requested)
                 .chain(stream::once(completed))
                 .boxed()
         }
     }
 
-    struct LoopPlugin(PluginManifest, Arc<OneToolCall>);
+    struct LoopPlugin(PluginManifest, Arc<ToolCalls>);
 
     #[async_trait]
     impl Plugin for LoopPlugin {
@@ -684,55 +745,182 @@ mod tests {
         }
     }
 
+    fn approval(session: &SessionId, tool: &str, permission: PermissionLevel) -> ApprovalRequest {
+        ApprovalRequest {
+            request: ToolRequestContext {
+                session: session.clone(),
+                call: call(tool),
+                definition: ToolDefinition {
+                    name: ToolName::new(tool),
+                    description: String::new(),
+                    input_schema: serde_json::json!({}),
+                    permission,
+                },
+            },
+            reason: "needs `write`".into(),
+        }
+    }
+
+    /// Runs one turn that requests every tool in `asked` with its approval
+    /// question already waiting, and `typed` on standard input. Returns what
+    /// the terminal showed and the answer each question got.
+    async fn run_turn(
+        running: &RunningTurn,
+        session: &SessionId,
+        asked: &[(&str, PermissionLevel)],
+        typed: &str,
+    ) -> (String, Vec<bool>) {
+        let mut replies = Vec::new();
+        let mut answers = Vec::new();
+        for _ in asked {
+            let (reply, answer) = oneshot::channel();
+            replies.push(reply);
+            answers.push(answer);
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent_loop = Arc::new(ToolCalls {
+            session: session.clone(),
+            tools: asked.iter().map(|(tool, _)| (*tool).to_owned()).collect(),
+            answers: Mutex::new(Some(answers)),
+            seen: seen.clone(),
+        });
+        let kernel = Kernel::new();
+        let plugin = LoopPlugin(
+            PluginManifest::new("loop", "1").provides(["loop"]),
+            agent_loop,
+        );
+        kernel
+            .mount(Arc::new(plugin), MountOptions::default())
+            .await
+            .unwrap();
+        let handle = kernel.handle();
+
+        let (prompts, receiver) = mpsc::channel::<ApprovalPrompt>(asked.len().max(1));
+        let mut approvals = Some(receiver);
+        for ((tool, permission), reply) in asked.iter().zip(replies) {
+            prompts
+                .send((approval(session, tool, *permission), reply))
+                .await
+                .unwrap();
+        }
+
+        let mut out = Vec::new();
+        let mut lines = BufReader::new(typed.as_bytes()).lines();
+        let mut terminal = Terminal {
+            out: &mut out,
+            lines: &mut lines,
+            approvals: &mut approvals,
+            running,
+        };
+        assert!(turn(&handle, session, "go", &mut terminal).await.unwrap());
+        let got = seen.lock().unwrap().clone();
+        (String::from_utf8(out).unwrap(), got)
+    }
+
+    const WRITE: PermissionLevel = PermissionLevel::Write;
+    const EXECUTE: PermissionLevel = PermissionLevel::Execute;
+
+    #[tokio::test]
+    async fn always_allows_a_tool_for_the_session_and_asks_about_nothing_else() {
+        let running = RunningTurn::default();
+        let session = SessionId::new();
+        // One answer `a` is typed; the second call to the same tool is not
+        // asked about, and the other tool still is.
+        let (shown, answers) = run_turn(
+            &running,
+            &session,
+            &[("repo.create-file", WRITE), ("repo.create-file", WRITE)],
+            "a\n",
+        )
+        .await;
+        assert_eq!(answers, [true, true], "{shown}");
+        assert_eq!(shown.matches("[approve]").count(), 1, "{shown}");
+        assert!(shown.contains("/a=always]"), "{shown}");
+        assert!(
+            shown.contains("allowed for the rest of this session"),
+            "{shown}"
+        );
+
+        // A later turn of the same session is not asked either, another tool
+        // and another session are.
+        let (shown, answers) = run_turn(
+            &running,
+            &session,
+            &[("repo.create-file", WRITE), ("repo.edit-files", WRITE)],
+            "n\n",
+        )
+        .await;
+        assert_eq!(answers, [true, false], "{shown}");
+        assert_eq!(shown.matches("[approve]").count(), 1, "{shown}");
+        let (shown, answers) = run_turn(
+            &running,
+            &SessionId::new(),
+            &[("repo.create-file", WRITE)],
+            "n\n",
+        )
+        .await;
+        assert_eq!(answers, [false], "{shown}");
+        assert_eq!(shown.matches("[approve]").count(), 1, "{shown}");
+    }
+
+    #[tokio::test]
+    async fn an_execute_tool_is_never_offered_always() {
+        let running = RunningTurn::default();
+        let session = SessionId::new();
+        let (shown, answers) = run_turn(
+            &running,
+            &session,
+            &[("shell.exec", EXECUTE), ("shell.exec", EXECUTE)],
+            "a\ny\n",
+        )
+        .await;
+        // `a` is no answer there (denied), and nothing was remembered, so the
+        // second call asks again and `y` approves it once.
+        assert_eq!(answers, [false, true], "{shown}");
+        assert_eq!(shown.matches("[approve]").count(), 2, "{shown}");
+        assert!(!shown.contains("/a=always"), "{shown}");
+        assert!(!running.is_allowed(&session, "shell.exec"));
+    }
+
+    #[tokio::test]
+    async fn only_a_or_always_is_remembered_and_yes_is_once() {
+        let running = RunningTurn::default();
+        let session = SessionId::new();
+        let (_, answers) = run_turn(
+            &running,
+            &session,
+            &[("repo.create-file", WRITE), ("repo.create-file", WRITE)],
+            "yes\nAlways\n",
+        )
+        .await;
+        assert_eq!(answers, [true, true]);
+        assert!(running.is_allowed(&session, "repo.create-file"));
+        let running = RunningTurn::default();
+        let (shown, answers) = run_turn(
+            &running,
+            &session,
+            &[("repo.create-file", WRITE), ("repo.create-file", WRITE)],
+            "y\ny\n",
+        )
+        .await;
+        assert_eq!(answers, [true, true]);
+        assert_eq!(shown.matches("[approve]").count(), 2, "{shown}");
+        assert!(!running.is_allowed(&session, "repo.create-file"));
+    }
+
     #[tokio::test]
     async fn a_tool_call_is_shown_before_its_approval_question() {
         // The question is already waiting when the turn starts, so both the
         // event and the prompt are ready at the first poll. A random choice
         // between them would show the question first in about half the runs.
         for _ in 0..40 {
-            let session = SessionId::new();
-            let (reply, answer) = oneshot::channel();
-            let agent_loop = Arc::new(OneToolCall(session.clone(), Mutex::new(Some(answer))));
-            let kernel = Kernel::new();
-            let plugin = LoopPlugin(
-                PluginManifest::new("loop", "1").provides(["loop"]),
-                agent_loop,
-            );
-            kernel
-                .mount(Arc::new(plugin), MountOptions::default())
-                .await
-                .unwrap();
-            let handle = kernel.handle();
-
-            let (prompts, receiver) = mpsc::channel::<ApprovalPrompt>(1);
-            let mut approvals = Some(receiver);
-            let request = ApprovalRequest {
-                request: ToolRequestContext {
-                    session: session.clone(),
-                    call: call(),
-                    definition: ToolDefinition {
-                        name: ToolName::new("repo.create-file"),
-                        description: String::new(),
-                        input_schema: serde_json::json!({}),
-                        permission: PermissionLevel::Write,
-                    },
-                },
-                reason: "needs `write`".into(),
-            };
-            prompts.send((request, reply)).await.unwrap();
-
-            let mut out = Vec::new();
-            let mut lines = BufReader::new(&b"y\n"[..]).lines();
-            let running = RunningTurn::default();
-            let mut terminal = Terminal {
-                out: &mut out,
-                lines: &mut lines,
-                approvals: &mut approvals,
-                running: &running,
-            };
-            assert!(turn(&handle, &session, "go", &mut terminal).await.unwrap());
-
-            let shown = String::from_utf8(out).unwrap();
+            let (shown, _) = run_turn(
+                &RunningTurn::default(),
+                &SessionId::new(),
+                &[("repo.create-file", PermissionLevel::Write)],
+                "y\n",
+            )
+            .await;
             let tool = shown.find("[tool] ").expect(&shown);
             let question = shown.find("[approve] ").expect(&shown);
             assert!(tool < question, "{shown}");

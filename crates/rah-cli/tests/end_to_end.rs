@@ -352,7 +352,7 @@ async fn an_interrupt_cancels_the_running_turn_and_the_repl_continues() {
         .write_all(b"/call repo.create-file {\"path\":\"a.txt\",\"content\":\"a\"}\n")
         .await
         .unwrap();
-    read_until(&mut output, &mut seen, "Allow? [y/N] ").await;
+    read_until(&mut output, &mut seen, "Allow? [y/N/a=always] ").await;
     assert!(running.interrupt(), "the turn is running");
     read_until(&mut output, &mut seen, "[cancelled]").await;
     assert!(seen.contains("[denied]"), "{seen}");

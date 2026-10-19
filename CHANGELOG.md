@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- You can allow a tool for the rest of a session instead of answering the same
+  question again (ADR 0056): `a` at the terminal prompt (`[y/N/a=always]`), or
+  "Allow for this session" in the Web UI. It is by tool name within that
+  session, held in memory until the process ends, and not offered for a tool
+  that needs `execute`. The Web message gets an optional `always`, and the
+  approval notice `may_remember`.
+
 - `tools-repo-write` gets `repo.delete-file`, `repo.move-file` and `repo.commit`
   (ADR 0055, which amends ADR 0036 section 4). Delete and move act on regular
   files only, never on links or directories, and move never overwrites; both

@@ -114,6 +114,17 @@ async fn run_turn(
     input: &str,
     approve: Option<bool>,
 ) -> (String, String) {
+    run_turn_with(socket, session, input, approve, false).await
+}
+
+/// `always` also allows the tool for the rest of the session (ADR 0056).
+async fn run_turn_with(
+    socket: &mut Socket,
+    session: &str,
+    input: &str,
+    approve: Option<bool>,
+    always: bool,
+) -> (String, String) {
     send(
         socket,
         json!({ "type": "turn", "session": session, "input": input }),
@@ -128,7 +139,7 @@ async fn run_turn(
                 assert_eq!(message["tool"], "echo");
                 send(
                     socket,
-                    json!({ "type": "approval", "id": message["id"], "approve": approve }),
+                    json!({ "type": "approval", "id": message["id"], "approve": approve, "always": always }),
                 )
                 .await;
             }
@@ -287,6 +298,37 @@ async fn ask_decisions_are_answered_by_the_browser() {
     let (_, text) = run_turn(&mut socket, &session, "approved call", Some(true)).await;
     assert_eq!(text, "[model-mock] echo returned: approved call");
     let (_, text) = run_turn(&mut socket, &session, "denied call", Some(false)).await;
+    assert!(text.contains("denied: rejected by the user"), "{text}");
+}
+
+#[tokio::test]
+async fn always_allows_a_tool_for_that_session_only() {
+    let web = start("web-always", |distribution| {
+        distribution.set_config(
+            "policy-authority",
+            "tools",
+            json!({ "echo": "write", "fs.read": "read", "repo.*": "read" }),
+        );
+    })
+    .await;
+    let new_session = || async {
+        web.json(web.post("/api/sessions")).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (first, second) = (new_session().await, new_session().await);
+    let mut socket = web.socket().await;
+    // Asked once, and answered with "for this session".
+    let (_, text) = run_turn_with(&mut socket, &first, "one", Some(true), true).await;
+    assert_eq!(text, "[model-mock] echo returned: one");
+    // `None` panics if the browser is asked again: it is not.
+    let (_, text) = run_turn(&mut socket, &first, "two", None).await;
+    assert_eq!(text, "[model-mock] echo returned: two");
+    // Another session is asked, and a plain "allow" remembers nothing.
+    let (_, text) = run_turn(&mut socket, &second, "three", Some(true)).await;
+    assert_eq!(text, "[model-mock] echo returned: three");
+    let (_, text) = run_turn(&mut socket, &second, "four", Some(false)).await;
     assert!(text.contains("denied: rejected by the user"), "{text}");
 }
 
@@ -1858,3 +1900,4 @@ tools = [
     assert_eq!(status, 200);
     assert_eq!(active().await, ["http-erp"]);
 }
+

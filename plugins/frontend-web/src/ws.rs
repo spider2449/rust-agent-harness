@@ -31,9 +31,18 @@ pub(crate) async fn upgrade(State(shared): State<AppState>, upgrade: WebSocketUp
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Turn { session: String, input: String },
+    Turn {
+        session: String,
+        input: String,
+    },
     Cancel,
-    Approval { id: String, approve: bool },
+    Approval {
+        id: String,
+        approve: bool,
+        /// Also allow the tool for the rest of the session (ADR 0056).
+        #[serde(default)]
+        always: bool,
+    },
 }
 
 struct Running {
@@ -151,7 +160,11 @@ fn handle(
             }
             None
         }
-        ClientMessage::Approval { id, approve } => (!shared.approvals.answer(&id, approve))
+        ClientMessage::Approval {
+            id,
+            approve,
+            always,
+        } => (!shared.approvals.answer(&id, approve, always))
             .then(|| error("that approval is no longer pending")),
     }
 }

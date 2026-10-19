@@ -76,7 +76,11 @@ The policy decides each call from its own configuration only:
 - `Ask` needs a `tool.approval` handler; without one it is a denial.
   `frontend-cli` shows the call and its arguments on the terminal and
   approves only an explicit `y` or `yes`. End of input or any other answer
-  denies.
+  denies. The answer `a` (the Web UI's "Allow for this session") also allows
+  that tool, by name, in that session until the process ends (ADR 0056). It
+  trusts the tool, not one call, so every argument is allowed; it is held in
+  the frontend's memory, never saved, and never offered for a tool that
+  declares `execute` or that the policy treats as `execute`.
 
 The policy registers at hook priority 0. A mounted plugin with a higher
 priority runs first and can pre-empt it; mounting such a plugin is a trust

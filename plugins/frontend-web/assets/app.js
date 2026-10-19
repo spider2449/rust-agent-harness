@@ -1023,11 +1023,16 @@ function showApproval(request) {
   card.append(el("div", "", request.reason));
   card.append(el("pre", "", JSON.stringify(request.input, null, 2)));
   const buttons = el("div", "buttons");
-  for (const [label, approve] of [["Deny", false], ["Allow", true]]) {
+  // "Always" allows this tool for the rest of the session. The server decides
+  // whether it may (a tool that needs `execute` is asked about every time);
+  // the button only follows `may_remember`.
+  const choices = [["Deny", false, false], ["Allow", true, false]];
+  if (request.may_remember) choices.push(["Allow for this session", true, true]);
+  for (const [label, approve, always] of choices) {
     const button = el("button", approve ? "" : "ghost", label);
     button.type = "button";
     button.addEventListener("click", () => {
-      send({ type: "approval", id: request.id, approve });
+      send({ type: "approval", id: request.id, approve, always });
       card.remove();
     });
     buttons.append(button);

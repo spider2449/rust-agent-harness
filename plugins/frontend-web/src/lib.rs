@@ -60,13 +60,16 @@
 //!   {title}` (`null` clears it) and `GET /api/sessions/{id}/export?format=md|json`
 //!   (a download).
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
-//!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve}`. Server
-//!   messages: `{type: "event", session, event}`, `approval_required`,
+//!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve, always}`.
+//!   Server messages: `{type: "event", session, event}`, `approval_required`,
 //!   `approval_resolved`, `error`.
 //!
 //! The plugin answers `tool.approval` through connected browsers: with none
 //! connected it does not answer (a denial), and an unanswered request is
-//! denied after `approval_timeout_secs` (300).
+//! denied after `approval_timeout_secs` (300). An approval sent with
+//! `always: true` also allows that tool for the rest of the session until the
+//! process ends (ADR 0056); a tool that needs `execute` is not remembered
+//! (`approval_required` carries `may_remember`).
 //!
 //! The loop and session services are resolved per request, so other plugins
 //! can be swapped while the server runs. HTTP connections are served by
