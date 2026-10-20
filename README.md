@@ -482,7 +482,8 @@ has no external resources.
 Real models use the same composition with a different model plugin:
 
 ```powershell
-# llama.cpp: start llama-server on http://127.0.0.1:8080 first (loopback only).
+# llama.cpp: start llama-server on http://127.0.0.1:8080 first, or set
+# `endpoint` to a server on the network (such as http://192.168.1.5:8080).
 cargo run -p rah-cli                                 # default preset, sole served model
 cargo run -p rah-cli -- --model qwen
 
@@ -516,8 +517,10 @@ config = { provider = "ollama", model = "qwen3:8b" }
 # or: config = { base_url = "https://gateway.example/v1", model = "some-model", api_key_env = "GATEWAY_KEY" }
 ```
 
-`base_url` must be HTTPS, or plain HTTP to a loopback address, so a key never
-crosses the network in clear text. Without a model, the server's sole model
+`base_url` may be HTTPS or plain HTTP, including a server on the local
+network. A key is sent only over HTTPS or to a loopback address, so it never
+crosses the network in clear text: a key with plain HTTP to another host
+fails the configuration. `model-llamacpp`'s `endpoint` follows the same rule. Without a model, the server's sole model
 (from `<base_url>/models`) is used. Images in tool results are sent as a
 short text, since many servers accept only text in a tool message.
 Reasoning is not sent back in later requests; if a thinking model (such as

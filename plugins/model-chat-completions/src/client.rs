@@ -28,8 +28,7 @@ pub(crate) struct Settings {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
-    /// Whether the server is on this machine: plain HTTP is allowed and no
-    /// proxy is used.
+    /// Whether the server is on this machine: no proxy is used.
     pub loopback: bool,
 }
 
@@ -47,7 +46,7 @@ pub struct ChatCompletionsModel {
 impl ChatCompletionsModel {
     pub(crate) fn new(key: String, settings: Settings) -> Result<Self, String> {
         let mut builder = reqwest::Client::builder()
-            .https_only(!settings.loopback)
+            .https_only(settings.base_url.starts_with("https://"))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(30))

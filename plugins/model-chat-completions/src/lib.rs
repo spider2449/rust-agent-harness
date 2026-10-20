@@ -23,8 +23,10 @@
 //!
 //! The key is read from the environment variable `api_key_env` names when
 //! the plugin starts, and is then required. The mounting configuration is
-//! trusted, so `base_url` may name any server; plain HTTP is accepted only
-//! for a loopback address, so a key never crosses the network in clear text.
+//! trusted, so `base_url` may name any server, over HTTPS or plain HTTP (such
+//! as a llama-server on the local network). A key is sent only over HTTPS or
+//! to a loopback address, so it never crosses the network in clear text; a
+//! key with plain HTTP to another host fails the configuration.
 //! Without a model, `<base_url>/models` is asked on the first request and its
 //! sole model is used.
 //!
@@ -95,14 +97,13 @@ fn is_loopback(url: &reqwest::Url) -> bool {
     })
 }
 
-/// Validates `base_url`: HTTPS, or plain HTTP to a loopback address; no
-/// credentials, query or fragment. Returns it without a trailing slash and
-/// whether it is a loopback address.
+/// Validates `base_url`: HTTP(S), without credentials, query or fragment.
+/// Returns it without a trailing slash and whether it is a loopback address.
 pub fn base_url(configured: &str) -> Result<(String, bool), String> {
     let invalid = || {
         format!(
-            "base_url must be an https URL, or http to a loopback address \
-             (such as http://127.0.0.1:8080/v1); got `{configured}`"
+            "base_url must be an http(s) URL without credentials, query or \
+             fragment (such as http://127.0.0.1:8080/v1); got `{configured}`"
         )
     };
     let url = reqwest::Url::parse(configured).map_err(|_| invalid())?;
@@ -112,12 +113,23 @@ pub fn base_url(configured: &str) -> Result<(String, bool), String> {
         && url.query().is_none()
         && url.fragment().is_none()
         && url.port() != Some(0);
-    match url.scheme() {
-        "https" if plain => {}
-        "http" if plain && loopback => {}
-        _ => return Err(invalid()),
+    if !plain || !matches!(url.scheme(), "http" | "https") {
+        return Err(invalid());
     }
     Ok((url.as_str().trim_end_matches('/').to_owned(), loopback))
+}
+
+/// Whether a key sent to the server would cross the network in clear text.
+fn cleartext(settings: &Settings) -> bool {
+    !settings.loopback && settings.base_url.starts_with("http://")
+}
+
+fn cleartext_key(variable: &str, base_url: &str) -> String {
+    format!(
+        "a key ({variable}) is sent only over https or to a loopback address, \
+         and `{base_url}` is plain http to another host; use https, or a \
+         server without a key"
+    )
 }
 
 /// `api_key_env` names an environment variable. A value that cannot be one
@@ -227,6 +239,13 @@ impl Config {
             temperature: self.temperature,
             loopback,
         };
+        // A required key is always sent; an optional one is checked when it
+        // is read.
+        if let Some((variable, true)) = &key
+            && cleartext(&settings)
+        {
+            return Err(cleartext_key(variable, &settings.base_url));
+        }
         Ok((settings, key))
     }
 }
@@ -247,7 +266,13 @@ impl Plugin for ChatCompletionsPlugin {
         let config: Config = rah_api::config::parse(scope.config())?;
         let (settings, key) = config.resolve()?;
         let key = match key {
-            Some((variable, required)) => read_key(&variable, required)?,
+            Some((variable, required)) => {
+                let key = read_key(&variable, required)?;
+                if !key.is_empty() && cleartext(&settings) {
+                    return Err(cleartext_key(&variable, &settings.base_url).into());
+                }
+                key
+            }
             None => String::new(),
         };
         let model = ChatCompletionsModel::new(key, settings)?;

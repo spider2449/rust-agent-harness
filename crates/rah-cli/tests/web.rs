@@ -569,7 +569,7 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     // start, keeps the plugin it would replace.
     let (status, reply) = web
         .status(web.post("/api/plugins/model-mock-2/replace").json(
-            &json!({ "kind": "model-llamacpp", "config": { "endpoint": "http://example.com" } }),
+            &json!({ "kind": "model-llamacpp", "config": { "endpoint": "ftp://example.com" } }),
         ))
         .await;
     assert_eq!(status, 400, "{reply}");

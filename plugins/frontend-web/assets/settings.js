@@ -154,7 +154,7 @@ function modelForm() {
       inputs.endpoint = textInput(value("endpoint"), "http://127.0.0.1:8080");
       inputs.model = textInput(value("model"), "the model the server runs");
       fields.append(
-        field("Server address", inputs.endpoint, "llama-server's address; loopback only."),
+        field("Server address", inputs.endpoint, "llama-server's address, on this machine or the network (such as http://192.168.1.5:8080). A key is sent only over https or to this machine."),
         field("Model name", inputs.model, "Leave empty when the server runs one model."),
       );
     } else if (kind.value === "model-openai") {
@@ -179,12 +179,12 @@ function modelForm() {
       );
     } else if (kind.value === "model-chat-completions") {
       inputs.provider = select(CHAT_PROVIDERS, value("provider") || "");
-      inputs.base_url = textInput(value("base_url"), "https://… or http://127.0.0.1:…/v1");
+      inputs.base_url = textInput(value("base_url"), "https://… or http://host:port/v1");
       inputs.model = textInput(value("model"), "for example deepseek-chat");
       inputs.api_key_env = textInput(value("api_key_env"), "DEEPSEEK_API_KEY");
       fields.append(
         field("Server", inputs.provider, "A known server fills in the address, model and key variable; the fields below override them."),
-        field("Address", inputs.base_url, "The base URL, before /chat/completions. HTTPS, or http to this machine. Required for another server."),
+        field("Address", inputs.base_url, "The base URL, before /chat/completions. HTTPS or http; a key is sent only over HTTPS or to this machine. Required for another server."),
         field("Model", inputs.model, "Leave empty for the server's default, or when it runs one model."),
         field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
       );

@@ -506,9 +506,13 @@ fn endpoints_are_bounded_to_official_or_loopback_origins() {
         llamacpp_origin("http://localhost:8080/").unwrap(),
         "http://localhost:8080"
     );
+    assert_eq!(
+        llamacpp_origin("http://10.0.0.2:8080").unwrap(),
+        "http://10.0.0.2:8080"
+    );
     for rejected in [
-        "http://10.0.0.2:8080",
         "http://127.0.0.1:8080/v1",
+        "http://user:pw@10.0.0.2:8080",
         "ftp://127.0.0.1",
     ] {
         assert!(llamacpp_origin(rejected).is_err(), "{rejected}");
@@ -537,14 +541,29 @@ async fn plugins_fail_closed_on_missing_credentials_and_bad_configuration() {
         .await
         .unwrap_err();
     assert!(status.to_string().contains("configuration needs `model`"));
+    // A server on the network is allowed over plain HTTP, but not with a key.
     let status = kernel
         .mount(
             Arc::new(LlamaCppPlugin::new("remote-llama")),
             MountOptions::with_config(json!({"endpoint":"http://192.168.1.5:8080"})),
         )
         .await
+        .unwrap();
+    assert_eq!(status, PluginStatus::Active);
+    let status = kernel
+        .mount(
+            Arc::new(LlamaCppPlugin::new("remote-llama-key")),
+            MountOptions::with_config(
+                json!({"endpoint":"http://192.168.1.5:8080","api_key_env":"PATH"}),
+            ),
+        )
+        .await
         .unwrap_err();
-    assert!(status.to_string().contains("loopback"), "{status}");
+    assert!(status.to_string().contains("plain http"), "{status}");
+    assert!(check_key_transport("K", "https://192.168.1.5:8080").is_ok());
+    assert!(check_key_transport("K", "http://127.0.0.1:8080").is_ok());
+    assert!(check_key_transport("K", "http://[::1]:8080").is_ok());
+    assert!(check_key_transport("K", "http://192.168.1.5:8080").is_err());
     let status = kernel
         .mount(
             Arc::new(LlamaCppPlugin::new("llama")),

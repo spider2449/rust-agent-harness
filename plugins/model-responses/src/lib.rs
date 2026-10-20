@@ -5,9 +5,10 @@
 //!   "endpoint": "<url>" }`. The key is read from the named environment
 //!   variable when the plugin starts. `endpoint` may only be the official
 //!   endpoint or a loopback URL, so credentials never go elsewhere.
-//! - `model-llamacpp` ([`LlamaCppPlugin`]): a local llama-server.
+//! - `model-llamacpp` ([`LlamaCppPlugin`]): a llama-server.
 //!   Configuration: `{ "endpoint": "http://127.0.0.1:8080", "model": "<id>",
-//!   "api_key_env": "<VAR>" }`. The endpoint must be a loopback origin.
+//!   "api_key_env": "<VAR>" }`. The endpoint is an HTTP(S) origin, local or
+//!   on the network; a key is sent only over HTTPS or to a loopback address.
 //!   Readiness and served models are checked lazily on the first request, so
 //!   the plugin can start before the server. Without `model`, the sole served
 //!   model is used. The optional key defaults to `RAH_LLAMA_CPP_API_KEY` and
@@ -68,13 +69,29 @@ pub fn openai_endpoint(configured: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// Validates a llama-server origin: loopback, http(s), root path only.
+/// Validates a llama-server origin: http(s), root path only.
 pub fn llamacpp_origin(endpoint: &str) -> Result<String, String> {
     match reqwest::Url::parse(endpoint) {
-        Ok(url) if plain_http(&url) && is_loopback(&url) && url.path() == "/" => {
+        Ok(url) if plain_http(&url) && url.path() == "/" => {
             Ok(url.as_str().trim_end_matches('/').to_owned())
         }
-        _ => Err("endpoint must be a loopback HTTP(S) origin such as http://127.0.0.1:8080".into()),
+        _ => Err("endpoint must be an HTTP(S) origin such as http://127.0.0.1:8080".into()),
+    }
+}
+
+/// A key is sent only over HTTPS or to a loopback address, never in clear
+/// text to another host.
+fn check_key_transport(variable: &str, origin: &str) -> Result<(), String> {
+    let cleartext =
+        reqwest::Url::parse(origin).is_ok_and(|url| url.scheme() == "http" && !is_loopback(&url));
+    if cleartext {
+        Err(format!(
+            "a key ({variable}) is sent only over https or to a loopback address, \
+             and `{origin}` is plain http to another host; use https, or a \
+             server without a key"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -188,12 +205,16 @@ impl Plugin for LlamaCppPlugin {
 
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
         let config: LlamaConfig = rah_api::config::parse(config)?;
-        llamacpp_origin(
+        let origin = llamacpp_origin(
             config
                 .endpoint
                 .as_deref()
                 .unwrap_or(DEFAULT_LLAMACPP_ENDPOINT),
         )?;
+        // A named variable makes the key required, so it is always sent.
+        if let Some(variable) = config.api_key_env.as_deref() {
+            check_key_transport(variable, &origin)?;
+        }
         Ok(())
     }
 
@@ -205,10 +226,14 @@ impl Plugin for LlamaCppPlugin {
                 .as_deref()
                 .unwrap_or(DEFAULT_LLAMACPP_ENDPOINT),
         )?;
-        let key = match config.api_key_env.as_deref() {
-            Some(variable) => read_key(variable, true)?,
-            None => read_key("RAH_LLAMA_CPP_API_KEY", false)?,
-        };
+        let variable = config
+            .api_key_env
+            .as_deref()
+            .unwrap_or("RAH_LLAMA_CPP_API_KEY");
+        let key = read_key(variable, config.api_key_env.is_some())?;
+        if !key.is_empty() {
+            check_key_transport(variable, &origin)?;
+        }
         let model = ResponsesModel::llamacpp(origin, key, config.model)?;
         scope.provide(MODEL, Arc::new(model))?;
         Ok(())

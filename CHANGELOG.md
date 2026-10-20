@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `model-llamacpp` and `model-chat-completions` accept a server on another
+  host over plain HTTP, such as a llama-server at `http://172.16.3.14:8080`.
+  Both used to require HTTPS or loopback. A key is still sent only over
+  HTTPS or to a loopback address: plain HTTP to another host with a key
+  (`api_key_env`, or a set `RAH_LLAMA_CPP_API_KEY`) fails the configuration.
+
+- The Web UI notice (such as a configuration error) has a close button.
+
 - A default formatter or language server that fails is no longer invisible
   (ADR 0057): `format-on-write` and `lsp-diagnostics` now emit a `HostNotice`
   (new in `rah_api::host`, once per program) the first time it cannot start,

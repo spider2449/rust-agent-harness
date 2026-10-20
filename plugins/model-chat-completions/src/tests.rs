@@ -468,9 +468,12 @@ fn base_urls_need_https_or_a_loopback_address() {
     assert!(base_url("http://localhost:8080/v1").unwrap().1);
     assert!(base_url("http://[::1]:8080/v1").unwrap().1);
     assert!(base_url("https://gateway.example/openai/v1").is_ok());
+    assert_eq!(
+        base_url("http://192.168.1.10:8080/v1").unwrap(),
+        ("http://192.168.1.10:8080/v1".to_owned(), false)
+    );
     for rejected in [
-        "http://api.deepseek.com",
-        "http://192.168.1.10:8080/v1",
+        "http://user:pw@192.168.1.10:8080/v1",
         "https://user:pw@api.deepseek.com",
         "https://api.deepseek.com/v1?x=1",
         "https://api.deepseek.com/#x",
@@ -511,12 +514,25 @@ fn providers_fill_in_defaults_that_the_configuration_overrides() {
     assert!(settings.model.is_none());
     assert_eq!(key, None);
 
+    // A llama-server on the network without a key; the optional key is
+    // checked when it is read.
+    let (settings, key) =
+        resolve(json!({"provider": "llamacpp", "base_url": "http://172.16.3.14:8080/v1"})).unwrap();
+    assert!(!settings.loopback && cleartext(&settings));
+    assert_eq!(key, Some(("RAH_LLAMA_CPP_API_KEY".to_owned(), false)));
+
     for (bad, message) in [
         (json!({}), "needs `base_url` or `provider`"),
         (json!({"provider": "nope"}), "provider must be one of"),
+        (json!({"base_url": "ftp://10.0.0.1/v1"}), "base_url must be"),
+        // A required key is never sent in clear text to another host.
         (
-            json!({"base_url": "http://10.0.0.1/v1"}),
-            "base_url must be",
+            json!({"base_url": "http://10.0.0.1/v1", "api_key_env": "MY_KEY"}),
+            "plain http",
+        ),
+        (
+            json!({"provider": "deepseek", "base_url": "http://api.deepseek.com"}),
+            "plain http",
         ),
         (
             json!({"provider": "ollama", "max_tokens": 0}),

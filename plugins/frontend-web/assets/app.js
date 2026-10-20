@@ -48,7 +48,7 @@ function el(tag, className, text) {
 }
 
 function showNotice(text) {
-  $("notice").textContent = text;
+  $("notice-text").textContent = text;
   $("notice").hidden = !text;
 }
 
@@ -59,7 +59,7 @@ function showTransientNotice(text, milliseconds = 8000) {
   showNotice(text);
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => {
-    if ($("notice").textContent === text) showNotice("");
+    if ($("notice-text").textContent === text) showNotice("");
   }, milliseconds);
 }
 
@@ -70,7 +70,7 @@ function showInfo(text) {
 }
 
 function clearInfo() {
-  if (state.info && $("notice").textContent === state.info) showNotice("");
+  if (state.info && $("notice-text").textContent === state.info) showNotice("");
   state.info = null;
 }
 
@@ -1944,7 +1944,7 @@ function connect() {
     $("connection").textContent = "connected";
     $("connection").hidden = true;
     // Keep other notices, such as a failed startup request.
-    if ($("notice").textContent === NOT_CONNECTED) showNotice("");
+    if ($("notice-text").textContent === NOT_CONNECTED) showNotice("");
     // A switch made while this window was not connected (such as the mode
     // entered at start) sent no notice here.
     loadModes();
@@ -2458,6 +2458,7 @@ async function start() {
     tab.addEventListener("click", () => showSide(tab.dataset.view));
   }
   $("side-close").addEventListener("click", hideSide);
+  $("notice-close").addEventListener("click", () => showNotice(""));
   $("tree-refresh").addEventListener("click", () => reloadFiles().catch(report));
   $("close-all").addEventListener("click", closeAllFiles);
   $("wrap-files").addEventListener("click", () => toggleWrap("wrap_files"));

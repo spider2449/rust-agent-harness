@@ -39,7 +39,10 @@
           <button id="session-delete" type="button" class="ghost danger">Delete</button>
         </span>
       </div>
-      <div id="notice" class="notice" hidden></div>
+      <div id="notice" class="notice" hidden>
+        <span id="notice-text" class="notice-text"></span>
+        <button id="notice-close" type="button" class="ghost icon" title="Dismiss" aria-label="Dismiss">✕</button>
+      </div>
       <ol id="transcript" class="transcript"></ol>
       <div id="live" class="live" hidden></div>
       <div id="busy" class="busy" role="status" aria-live="polite" hidden>
