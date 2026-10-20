@@ -1030,6 +1030,13 @@ async fn git_changes_and_diffs_are_shown_and_branches_switched() {
     std::fs::write(workspace.join("notes.txt"), "draft").unwrap();
 
     let changes = web.json(web.get("/api/git/changes")).await;
+    assert_eq!(
+        changes["repos"].as_array().map(Vec::len),
+        Some(1),
+        "{changes}"
+    );
+    let changes = &changes["repos"][0];
+    assert_eq!(changes["path"], "", "{changes}");
     assert_eq!(changes["branch"], "trunk", "{changes}");
     let brief: Vec<(String, String)> = changes["changes"]
         .as_array()
@@ -1094,7 +1101,98 @@ async fn git_changes_and_diffs_are_shown_and_branches_switched() {
         .await;
     assert_eq!(switched["branch"], "side", "{switched}");
     let changes = web.json(web.get("/api/git/changes")).await;
-    assert_eq!(changes["branch"], "side", "{changes}");
+    assert_eq!(changes["repos"][0]["branch"], "side", "{changes}");
+}
+
+#[tokio::test]
+async fn several_repositories_in_one_workspace_are_shown_each() {
+    let web = start("web-git-repos", |_| {}).await;
+    let workspace = web.dir.workspace();
+    let git = |dir: &str, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@example.com",
+            ])
+            .args(args)
+            .current_dir(workspace.join(dir))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    // Two repositories in folders of a workspace that is none itself.
+    for (dir, branch) in [("api", "main"), ("web", "trunk")] {
+        std::fs::create_dir_all(workspace.join(dir).join("src")).unwrap();
+        git(dir, &["init", "-q", "-b", branch]);
+        std::fs::write(workspace.join(dir).join("src").join("lib.rs"), "one\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "first commit"]);
+    }
+    std::fs::write(
+        workspace.join("api").join("src").join("lib.rs"),
+        "one\ntwo\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("web").join("notes.txt"), "draft").unwrap();
+
+    let changes = web.json(web.get("/api/git/changes")).await;
+    let repos = changes["repos"].as_array().unwrap();
+    let brief: Vec<_> = repos
+        .iter()
+        .map(|repo| {
+            (
+                repo["path"].as_str().unwrap().to_owned(),
+                repo["branch"].as_str().unwrap().to_owned(),
+                repo["changes"][0]["path"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        brief,
+        [
+            ("api".into(), "main".into(), "api/src/lib.rs".into()),
+            ("web".into(), "trunk".into(), "web/notes.txt".into()),
+        ],
+        "{changes}"
+    );
+
+    // A diff is read in its repository, and only for a path inside it.
+    let diff = web
+        .json(web.get("/api/git/diff?repo=api&path=api%2Fsrc%2Flib.rs"))
+        .await;
+    assert!(diff["text"].as_str().unwrap().contains("\n+two"), "{diff}");
+    for refused in [
+        "/api/git/diff?repo=api&path=web%2Fsrc%2Flib.rs",
+        "/api/git/diff?repo=..&path=api%2Fsrc%2Flib.rs",
+        "/api/git/diff?repo=api&path=api",
+    ] {
+        let (status, body) = web.status(web.get(refused)).await;
+        assert_eq!(status, 400, "{refused}: {body}");
+    }
+
+    // Branches belong to one repository; switching changes only that one.
+    git("web", &["branch", "side"]);
+    let branches = web.json(web.get("/api/git/branches?repo=web")).await;
+    assert_eq!(branches["current"], "trunk", "{branches}");
+    let switched = web
+        .json(
+            web.post("/api/git/checkout")
+                .json(&serde_json::json!({ "branch": "side", "repo": "web" })),
+        )
+        .await;
+    assert_eq!(switched["branch"], "side", "{switched}");
+    let changes = web.json(web.get("/api/git/changes")).await;
+    assert_eq!(changes["repos"][0]["branch"], "main", "{changes}");
+    assert_eq!(changes["repos"][1]["branch"], "side", "{changes}");
+
+    // The status line sums them.
+    let status = web.json(web.get("/api/status")).await;
+    let git = &status["workspace"]["git"];
+    assert_eq!(git["repos"], 2, "{status}");
+    assert_eq!(git["changed"], 1, "{status}");
+    assert_eq!(git["untracked"], 1, "{status}");
 }
 
 /// Waits until `kind`'s default instance is active in `kernel`.

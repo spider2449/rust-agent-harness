@@ -1302,6 +1302,7 @@ function resetFiles() {
   $("tree").replaceChildren();
   renderFile();
   git.loaded = false;
+  git.collapsed.clear();
   renderGit();
   if (!$("side").hidden && sideView() === "files") {
     loadDir("").catch(treeError);
@@ -1369,7 +1370,7 @@ function renderTree() {
 // error}. A file's key is its path, so the tree can mark it.
 const TAB_SOURCES = {
   file: (tab) => `/files/content?path=${encodeURIComponent(tab.path)}`,
-  diff: (tab) => `/git/diff?path=${encodeURIComponent(tab.path)}`,
+  diff: (tab) => `/git/diff?path=${encodeURIComponent(tab.path)}&repo=${encodeURIComponent(tab.repo || "")}`,
 };
 
 async function readFile(file) {
@@ -1382,11 +1383,11 @@ async function readFile(file) {
   }
 }
 
-async function openTab(kind, path, label) {
+async function openTab(kind, path, label, extra = {}) {
   const key = kind === "file" ? path : `${kind}:${path}`;
   let file = files.open.find((open) => open.key === key);
   if (!file) {
-    file = { key, kind, path, label, data: null, error: null };
+    file = { key, kind, path, label, data: null, error: null, ...extra };
     files.open.push(file);
     await readFile(file);
   }
@@ -1401,8 +1402,9 @@ function openFile(path) {
   return openTab("file", path, folderName(path));
 }
 
-function openDiff(path) {
-  return openTab("diff", path, `${folderName(path)} (diff)`);
+// `repo` is the repository's folder in the workspace ("" for the root).
+function openDiff(path, repo) {
+  return openTab("diff", path, `${folderName(path)} (diff)`, { repo });
 }
 
 function closeFile(key) {
@@ -1559,9 +1561,12 @@ function renderFile() {
 
 // ---- Source control ---------------------------------------------------------
 
-// The Git state under the file tree, read-only: the branch and the changed
-// files, grouped by folder. Paths are untrusted text.
-const git = { loaded: false, loading: null, branch: null, changes: [], truncated: false, error: null, signature: null };
+// The Git state under the file tree, read-only: per repository (the root's,
+// and the ones in folders below it), the branch and the changed files,
+// grouped by folder. A repository is `{path, branch, changes, truncated}` or
+// `{path, error}`; `path` is its folder ("" for the root). Paths are
+// untrusted text.
+const git = { loaded: false, loading: null, repos: [], error: null, signature: null, collapsed: new Set() };
 
 const STATUS_NAMES = {
   M: "modified", A: "added", D: "deleted", R: "renamed", C: "copied", T: "type changed", U: "untracked", "!": "conflicted",
@@ -1571,12 +1576,12 @@ async function loadGit() {
   if (git.loading) return git.loading;
   git.loading = (async () => {
     try {
-      const changes = await api("/git/changes");
+      const listing = await api("/git/changes");
       // Not a repository (or no Git): a state, not a failure.
-      if (changes.error) throw new Error(changes.error);
-      Object.assign(git, { branch: changes.branch, changes: changes.changes, truncated: changes.truncated, error: null });
+      if (listing.error) throw new Error(listing.error);
+      Object.assign(git, { repos: listing.repos, error: null });
     } catch (error) {
-      Object.assign(git, { branch: null, changes: [], truncated: false, error: error.message });
+      Object.assign(git, { repos: [], error: error.message });
     } finally {
       git.loaded = true;
       git.loading = null;
@@ -1586,7 +1591,11 @@ async function loadGit() {
   return git.loading;
 }
 
-function changeItem(change, nested) {
+function branchLabel(branch) {
+  return branch && branch !== "(detached)" ? `⎇ ${branch}` : branch ? "⎇ detached" : "";
+}
+
+function changeItem(change, nested, repo) {
   const item = el("li", "change");
   const button = el("button");
   button.type = "button";
@@ -1601,29 +1610,21 @@ function changeItem(change, nested) {
     el("span", `badge-status status-${change.status === "!" ? "conflict" : change.status}`, change.status),
   );
   // Untracked files have no diff: their content is the change.
-  button.addEventListener("click", () => (change.status === "U" ? openFile(change.path) : openDiff(change.path)).catch(report));
+  button.addEventListener("click", () => (change.status === "U" ? openFile(change.path) : openDiff(change.path, repo)).catch(report));
   item.append(button);
   return item;
 }
 
-function renderGit() {
-  const branch = git.branch && git.branch !== "(detached)" ? `⎇ ${git.branch}` : git.branch ? "⎇ detached" : "";
-  $("git-branch").textContent = branch;
-  $("changes-count").textContent = git.loaded && !git.error ? String(git.changes.length) : "";
-  const changes = $("changes");
-  if (!git.loaded) {
-    changes.replaceChildren(el("li", "note", "Loading…"));
-    return;
-  }
-  if (git.error) {
-    changes.replaceChildren(el("li", "note", git.error));
-    return;
-  }
-  // One row per folder, then its files; files at the root come last.
+// One repository's changed files: one row per folder (relative to the
+// repository), then its files; files at the repository's root come last.
+function changeRows(repo) {
+  if (repo.error) return [el("li", "note", repo.error)];
+  const prefix = repo.path ? `${repo.path}/` : "";
   const folders = new Map();
-  for (const change of git.changes) {
-    const cut = change.path.lastIndexOf("/");
-    const folder = cut < 0 ? "" : change.path.slice(0, cut);
+  for (const change of repo.changes) {
+    const inner = change.path.startsWith(prefix) ? change.path.slice(prefix.length) : change.path;
+    const cut = inner.lastIndexOf("/");
+    const folder = cut < 0 ? "" : inner.slice(0, cut);
     if (!folders.has(folder)) folders.set(folder, []);
     folders.get(folder).push(change);
   }
@@ -1635,21 +1636,81 @@ function renderGit() {
       row.title = folder;
       rows.push(row);
     }
-    for (const change of folders.get(folder)) rows.push(changeItem(change, !!folder));
+    for (const change of folders.get(folder)) rows.push(changeItem(change, !!folder, repo.path));
   }
   if (!rows.length) rows.push(el("li", "note", "No changes"));
-  if (git.truncated) rows.push(el("li", "note", "…more changes not shown"));
-  changes.replaceChildren(...rows);
+  if (repo.truncated) rows.push(el("li", "note", "…more changes not shown"));
+  return rows;
 }
 
-// The branch menu, opened from the status line or the source control header.
-// Switching runs `git switch` in the workspace, then everything that shows
-// the work tree is read again: status line, file tree, open tabs, changes.
+// One collapsible section per repository. With one repository the section is
+// "Changes" and its branch sits in the pane header; with several, each
+// section is named after its folder and carries its own branch control.
+function repoSection(repo, several) {
+  const section = el("details");
+  section.open = !git.collapsed.has(repo.path);
+  section.addEventListener("toggle", () => {
+    if (section.open) git.collapsed.delete(repo.path);
+    else git.collapsed.add(repo.path);
+  });
+  const summary = el("summary");
+  if (several) {
+    const name = el("span", "repo-name", repo.path ? folderName(repo.path) : files.root ? folderName(files.root) : "Workspace");
+    name.title = repo.path || "The workspace folder";
+    summary.append(name);
+    const label = branchLabel(repo.branch);
+    if (label) {
+      const branch = el("button", "git-branch", label);
+      branch.type = "button";
+      branch.title = "Switch branch";
+      branch.setAttribute("aria-haspopup", "listbox");
+      branch.addEventListener("click", (event) => {
+        // A click in the summary would also fold the section.
+        event.preventDefault();
+        event.stopPropagation();
+        openBranchMenu(branch, repo.path).catch(report);
+      });
+      summary.append(branch);
+    }
+  } else {
+    summary.append("Changes");
+  }
+  summary.append(el("span", "count", repo.error ? "" : String(repo.changes.length)));
+  const list = el("ul", "tree changes");
+  list.setAttribute("aria-label", repo.path ? `Changed files in ${repo.path}` : "Changed files");
+  list.append(...changeRows(repo));
+  section.append(summary, list);
+  return section;
+}
+
+function renderGit() {
+  const several = git.repos.length > 1;
+  const header = $("git-branch");
+  const only = !several ? git.repos[0] : null;
+  header.textContent = only ? branchLabel(only.branch) : "";
+  header.dataset.repo = only ? only.path : "";
+  const body = $("git-body");
+  const scroll = body.scrollTop;
+  if (!git.loaded || git.error) {
+    const list = el("ul", "tree changes");
+    list.append(el("li", "note", git.loaded ? git.error : "Loading…"));
+    body.replaceChildren(list);
+    return;
+  }
+  body.replaceChildren(...git.repos.map((repo) => repoSection(repo, several)));
+  body.scrollTop = scroll;
+}
+
+// The branch menu of one repository (`repo` is its folder, "" for the root),
+// opened from the status line, the source control header or a repository's
+// section. Switching runs `git switch` in that repository, then everything
+// that shows the work tree is read again: status line, file tree, open tabs,
+// changes.
 function closeBranchMenu() {
   $("branch-menu").hidden = true;
 }
 
-async function openBranchMenu(anchor) {
+async function openBranchMenu(anchor, repo = "") {
   const menu = $("branch-menu");
   if (!menu.hidden && menu.anchor === anchor) {
     closeBranchMenu();
@@ -1667,7 +1728,7 @@ async function openBranchMenu(anchor) {
   menu.style.bottom = above ? `${window.innerHeight - box.top + 4}px` : "";
   let listing;
   try {
-    listing = await api("/git/branches");
+    listing = await api(`/git/branches?repo=${encodeURIComponent(repo)}`);
   } catch (error) {
     menu.replaceChildren(el("div", "note", error.message));
     return;
@@ -1681,7 +1742,7 @@ async function openBranchMenu(anchor) {
     button.setAttribute("aria-selected", String(current));
     button.title = branch.remote ? `Create a local branch tracking ${branch.name}` : `Switch to ${branch.name}`;
     button.append(el("span", "menu-name", branch.name), el("span", "menu-tag", current ? "✓" : branch.remote ? "remote" : ""));
-    button.addEventListener("click", () => switchBranch(branch.name, current).catch(report));
+    button.addEventListener("click", () => switchBranch(branch.name, current, repo).catch(report));
     return button;
   });
   if (!rows.length) rows.push(el("div", "note", "No branches"));
@@ -1689,15 +1750,15 @@ async function openBranchMenu(anchor) {
   (menu.querySelector(".current") || rows[0])?.focus?.();
 }
 
-async function switchBranch(name, current) {
+async function switchBranch(name, current, repo) {
   closeBranchMenu();
   if (current) return;
   if (state.running) {
     showNotice("A turn is running: switching branch now would change files under it. Cancel it or wait.");
     return;
   }
-  await api("/git/checkout", { method: "POST", body: JSON.stringify({ branch: name }) });
-  showInfo(`Switched to branch ${name}.`);
+  await api("/git/checkout", { method: "POST", body: JSON.stringify({ branch: name, repo }) });
+  showInfo(repo ? `Switched ${repo} to branch ${name}.` : `Switched to branch ${name}.`);
   refreshStatus();
   await reloadFiles();
 }
@@ -1705,7 +1766,7 @@ async function switchBranch(name, current) {
 // The status line's Git summary changed (every 30 seconds it is read): the
 // list is probably stale.
 function gitSignature(state) {
-  const signature = state ? JSON.stringify([state.branch, state.changed, state.untracked, state.conflicts, state.ahead, state.error]) : "";
+  const signature = state ? JSON.stringify([state.branch, state.repos, state.changed, state.untracked, state.conflicts, state.ahead, state.error]) : "";
   if (signature !== git.signature) {
     const known = git.signature !== null;
     git.signature = signature;
@@ -2209,6 +2270,7 @@ function statusItem(id, text, title, className) {
 function gitText(git) {
   if (!git) return ["", ""];
   if (git.error) return ["no git repository", git.error];
+  if (git.repos) return gitReposText(git);
   const parts = [`⎇ ${git.detached ? "detached HEAD" : git.branch}`];
   const dirty = git.changed + git.untracked;
   if (dirty) parts.push(`● ${dirty}`);
@@ -2219,6 +2281,22 @@ function gitText(git) {
     git.detached ? "Detached HEAD" : `Branch ${git.branch}`,
     git.upstream ? `tracking ${git.upstream} (ahead ${git.ahead}, behind ${git.behind})` : "no upstream",
     `${git.changed} changed, ${git.untracked} untracked, ${git.conflicts} conflicts`,
+  ].join("\n");
+  return [parts.join(" "), title];
+}
+
+// The workspace is no repository but holds several: their counts, summed.
+function gitReposText(git) {
+  const parts = [`⎇ ${git.repos} ${git.repos === 1 ? "repository" : "repositories"}`];
+  const dirty = git.changed + git.untracked;
+  if (dirty) parts.push(`● ${dirty}`);
+  if (git.conflicts) parts.push(`⚠ ${git.conflicts} conflicts`);
+  if (git.ahead) parts.push(`↑${git.ahead}`);
+  if (git.behind) parts.push(`↓${git.behind}`);
+  const title = [
+    `${git.repos} Git ${git.repos === 1 ? "repository" : "repositories"} in folders of the workspace`,
+    `${git.changed} changed, ${git.untracked} untracked, ${git.conflicts} conflicts`,
+    "Click to show them in source control",
   ].join("\n");
   return [parts.join(" "), title];
 }
@@ -2270,6 +2348,7 @@ async function loadStatus() {
   const [gitLabel, gitTitle] = gitText(workspace.git);
   const dirty = workspace.git && !workspace.git.error && workspace.git.changed + workspace.git.untracked > 0;
   statusItem("status-git", gitLabel, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
+  $("status-git").dataset.repos = workspace.git?.repos ? String(workspace.git.repos) : "";
   const [model, modelTitle] = providerText("model", status.model);
   // The server behind the model may be down while RAH itself is fine.
   const down = status.model?.health?.state === "unavailable";
@@ -2416,12 +2495,20 @@ async function start() {
   applyTheme();
   $("session-search").addEventListener("input", renderSessions);
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
-  for (const id of ["status-git", "git-branch"]) {
-    $(id).addEventListener("click", (event) => {
-      event.stopPropagation();
-      openBranchMenu($(id)).catch(report);
-    });
-  }
+  $("git-branch").addEventListener("click", (event) => {
+    event.stopPropagation();
+    openBranchMenu($("git-branch"), $("git-branch").dataset.repo || "").catch(report);
+  });
+  $("status-git").addEventListener("click", (event) => {
+    event.stopPropagation();
+    // Several repositories have several branches: show them in source control.
+    if ($("status-git").dataset.repos) {
+      showSide("files");
+      loadGit();
+      return;
+    }
+    openBranchMenu($("status-git")).catch(report);
+  });
   document.addEventListener("click", (event) => {
     if (!$("branch-menu").contains(event.target)) closeBranchMenu();
   });

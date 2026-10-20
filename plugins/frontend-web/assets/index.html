@@ -89,12 +89,7 @@
               <button id="git-branch" type="button" class="git-branch" aria-haspopup="listbox" title="Switch branch"></button>
               <button id="git-refresh" type="button" class="ghost icon" title="Reload the Git state" aria-label="Reload the Git state">⟳</button>
             </div>
-            <div class="git-body">
-              <details open>
-                <summary>Changes <span id="changes-count" class="count"></span></summary>
-                <ul id="changes" class="tree changes" aria-label="Changed files"></ul>
-              </details>
-            </div>
+            <div id="git-body" class="git-body"></div>
           </div>
         </div>
         <div id="tree-splitter" class="vsplit" role="separator" aria-orientation="vertical" aria-label="Resize the file tree" tabindex="0" title="Drag to resize"></div>

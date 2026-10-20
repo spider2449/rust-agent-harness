@@ -22,11 +22,14 @@
 //! - With a `sandbox` service: `GET /api/files?path=` lists one directory of
 //!   the workspace and `GET /api/files/content?path=` returns the start of one
 //!   file, for the read-only file browser. Paths are relative to the
-//!   workspace root and cannot leave it. `GET /api/git/changes` and
-//!   `/api/git/diff?path=` are read-only Git views of the workspace (one
-//!   `git` run each, through the `sandbox` service). `GET /api/git/branches`
-//!   lists the branches and `POST /api/git/checkout {branch}` switches to one
-//!   of them (`git switch`; Git refuses when local changes are in the way).
+//!   workspace root and cannot leave it. `GET /api/git/changes` (per
+//!   repository: the root's and those in folders below it) and
+//!   `/api/git/diff?repo=&path=` are read-only Git views of the workspace
+//!   (`git` runs through the `sandbox` service). `GET /api/git/branches?repo=`
+//!   lists one repository's branches and `POST /api/git/checkout {branch,
+//!   repo}` switches to one of them (`git switch`; Git refuses when local
+//!   changes are in the way). `repo` is the repository's folder, empty for
+//!   the root.
 //! - With an `admin` service: `GET|PUT /api/web-search {enabled}` turns
 //!   web search on (the policy asks before `web.*`, then `tools-web-search`
 //!   is mounted) or off, and remembers the choice in `storage` for the next

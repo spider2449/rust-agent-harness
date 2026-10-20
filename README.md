@@ -464,7 +464,10 @@ highlighting for common languages), shows the branch and the Git changes
 (by folder) under the tree, with a splitter between the two, opens a
 change's diff read-only, and keeps an
 activity log of the open session's turns and tool calls; it can be resized
-or hidden. Every divider (the session list, the file tree, the file view and
+or hidden. With several Git repositories (the workspace's own and those in its
+folders, up to three levels deep) source control shows a section per
+repository, each with its own branch control; when the workspace itself is no
+repository, the status line sums their changes. Every divider (the session list, the file tree, the file view and
 activity log) can be dragged, and **Wrap** in the file tabs and the activity
 header wraps long lines; **Settings → Display** also picks a theme (follow the
 system, Light, Dark, Sepia, Midnight, High contrast). All of these are kept in

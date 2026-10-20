@@ -423,6 +423,9 @@ button.danger { color: var(--bad); border-color: var(--bad); }
   position: sticky; top: 0; z-index: 1; background: var(--panel);
   padding: 3px 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); cursor: pointer; user-select: none;
 }
+/* With several repositories, each section names its folder and branch. */
+.git-body summary .repo-name { text-transform: none; letter-spacing: normal; color: var(--text); }
+.git-body summary .git-branch { display: inline-block; vertical-align: bottom; margin-left: 4px; text-transform: none; letter-spacing: normal; font-weight: normal; }
 .git-body .count { font-weight: normal; margin-left: 4px; padding: 0 6px; border-radius: 999px; background: var(--tool); }
 .git-body .count:empty { display: none; }
 .git-body .tree { overflow: visible; flex: none; padding-bottom: 4px; }

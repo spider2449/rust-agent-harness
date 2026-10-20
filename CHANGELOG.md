@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The Web UI's source control supports a workspace with several Git
+  repositories. A workspace folder that is no repository itself used to show
+  only `fatal: not a git repository`. Now the folders below it (up to three
+  levels deep, skipping hidden folders, `node_modules` and `target`) that hold
+  a `.git` entry each get a section with their changes and their own branch
+  control, and the status line shows `⎇ N repositories` with the changes
+  summed. `GET /api/git/changes` now returns `{repos: [...]}`, and the diff,
+  branches and checkout routes take `repo`, the repository's folder.
+
 - `model-llamacpp` and `model-chat-completions` accept a server on another
   host over plain HTTP, such as a llama-server at `http://172.16.3.14:8080`.
   Both used to require HTTPS or loopback. A key is still sent only over

@@ -280,7 +280,7 @@ window.idle = () => !byId('send').disabled && !shown(byId('cancel')) && !shown(b
 window.sessionItems = () => [...document.querySelectorAll('#sessions li.session')];
 window.folderItems = () => [...document.querySelectorAll('#sessions li.folder')];
 window.treeButton = (path) => document.querySelector(`#tree button[data-path="${path}"]`);
-window.changeButton = (path) => document.querySelector(`#changes button[data-path="${path}"]`);
+window.changeButton = (path) => document.querySelector(`#git-body .changes button[data-path="${path}"]`);
 window.treeNames = () => [...document.querySelectorAll('#tree button')].map((button) => button.dataset.path);
 window.headTitle = () => byId('session-title').textContent;
 window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta button')]
@@ -1321,6 +1321,83 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
             .await,
         false
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn several_repositories_get_a_section_each_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-repos").await;
+    // Two repositories in folders of a workspace that is none itself.
+    let workspace = web.dir.workspace();
+    let git = |dir: &str, args: &[&str]| {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@example.com",
+            ])
+            .args(args)
+            .current_dir(workspace.join(dir))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    for (dir, branch) in [("api", "main"), ("web", "trunk")] {
+        std::fs::create_dir_all(workspace.join(dir).join("src")).unwrap();
+        git(dir, &["init", "-q", "-b", branch]);
+        std::fs::write(workspace.join(dir).join("src").join("lib.rs"), "one\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "first commit"]);
+    }
+    std::fs::write(
+        workspace.join("api").join("src").join("lib.rs"),
+        "one\ntwo\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("web").join("notes.txt"), "draft").unwrap();
+
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-repos");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    // The status line counts the repositories; a click shows them.
+    page.wait(
+        "the repositories in the status line",
+        "byId('status-git').textContent.startsWith('⎇ 2 repositories ● 2')",
+    )
+    .await;
+    page.eval("byId('status-git').click(); true").await;
+    page.wait(
+        "a section per repository",
+        "[...document.querySelectorAll('#git-body .repo-name')].map((n) => n.textContent).join() === 'api,web' && \
+         [...document.querySelectorAll('#git-body summary .git-branch')].map((n) => n.textContent).join() === '⎇ main,⎇ trunk' && \
+         !!changeButton('api/src/lib.rs') && !!changeButton('web/notes.txt') && \
+         byId('git-branch').textContent === ''",
+    )
+    .await;
+    // A change opens its diff, read in its own repository.
+    page.eval("changeButton('api/src/lib.rs').click(); true")
+        .await;
+    page.wait(
+        "the diff",
+        "document.querySelector('#file-tabs .file-tab.current')?.dataset.key === 'diff:api/src/lib.rs' && \
+         [...byId('file-view').querySelectorAll('.tok-inserted')].some((s) => s.textContent === '+two')",
+    )
+    .await;
+    // A section's branch control lists that repository's branches.
+    page.eval("document.querySelectorAll('#git-body summary .git-branch')[1].click(); true")
+        .await;
+    page.wait(
+        "the second repository's branches",
+        "!byId('branch-menu').hidden && byId('branch-menu').textContent.includes('trunk') && \
+         !byId('branch-menu').textContent.includes('main')",
+    )
+    .await;
 }
 
 /// Standard base64 (as DevTools returns screenshots), without a dependency.

@@ -128,7 +128,7 @@ pub(crate) async fn content(
     })))
 }
 
-async fn workspace_root(shared: &AppState) -> Result<PathBuf, ApiError> {
+pub(crate) async fn workspace_root(shared: &AppState) -> Result<PathBuf, ApiError> {
     let root = shared
         .kernel
         .get(SANDBOX)
