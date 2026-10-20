@@ -17,5 +17,5 @@ tao = "0.37"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 wry = "0.57"
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
 embed-resource = "3"
