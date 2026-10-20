@@ -302,7 +302,7 @@ window.fetch = (input, init) => {
 };
 document.addEventListener('DOMContentLoaded', () => {
   new MutationObserver(() => {
-    const text = byId('notice').textContent;
+    const text = byId('notice-text').textContent;
     if (text) notices.push(text);
   }).observe(byId('notice'), { childList: true, characterData: true, subtree: true });
 });
@@ -315,7 +315,7 @@ const SNAPSHOT: &str = r#"(async () => ({
     new Promise((resolve) => setTimeout(() => resolve('hung'), 3000)),
   ]),
   notices: window.notices,
-  notice: document.getElementById('notice')?.textContent,
+  notice: document.getElementById('notice-text')?.textContent,
   connection: document.getElementById('connection')?.textContent,
   plugins: [...document.querySelectorAll('#plugins tr')].map((row) => [...row.cells].map((cell) => cell.textContent)),
   approvals: document.getElementById('approvals')?.textContent,
@@ -619,7 +619,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     page.wait(
         "the reconnect notice",
-        "byId('notice').textContent === 'Reconnected to model model-mock-2. The next message uses it.'",
+        "byId('notice-text').textContent === 'Reconnected to model model-mock-2. The next message uses it.'",
     )
     .await;
     page.send_message("/notool after replace").await;
@@ -682,7 +682,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     page.wait(
         "the refused example value",
-        "shown(byId('notice')) && byId('notice').textContent.includes('<provider model id>') \
+        "shown(byId('notice')) && byId('notice-text').textContent.includes('<provider model id>') \
          && shown(byId('editor')) && !rowOf('context-compact')",
     )
     .await;
@@ -703,7 +703,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     page.wait(
         "the JSON error",
-        "shown(byId('notice')) && byId('notice').textContent.includes('not valid JSON')",
+        "shown(byId('notice')) && byId('notice-text').textContent.includes('not valid JSON')",
     )
     .await;
     page.eval("byId('editor-cancel').click(); true").await;
@@ -793,7 +793,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.eval(&key("Enter")).await;
     page.wait(
         "the unknown command notice",
-        "byId('notice').textContent === 'Unknown command /bogus. Type / to see the commands.'",
+        "byId('notice-text').textContent === 'Unknown command /bogus. Type / to see the commands.'",
     )
     .await;
     page.eval("true").await;
@@ -828,7 +828,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.wait(
         "the startup error after connecting",
         "connected() && shown(byId('notice')) && \
-         byId('notice').textContent.includes('no session service is mounted')",
+         byId('notice-text').textContent.includes('no session service is mounted')",
     )
     .await;
 }
@@ -1035,7 +1035,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     .await;
     page.wait(
         "the refusal",
-        "shown(byId('notice')) && byId('notice').textContent.includes('has forks')",
+        "shown(byId('notice')) && byId('notice-text').textContent.includes('has forks')",
     )
     .await;
     assert_eq!(page.eval("sessionItems().length").await, 2);
@@ -1142,7 +1142,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     page.wait(
         "the session's own folder",
         "byId('status-root').textContent.endsWith('workspace') && \
-         byId('notice').textContent.includes('Switched the workspace') && \
+         byId('notice-text').textContent.includes('Switched the workspace') && \
          !byId('input').disabled && entries().length > 0",
     )
     .await;
@@ -1317,7 +1317,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     )
     .await;
     assert_eq!(
-        page.eval("byId('notice').textContent.includes('not deleted')")
+        page.eval("byId('notice-text').textContent.includes('not deleted')")
             .await,
         false
     );
@@ -1404,7 +1404,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     .await;
     // The reconnect is also shown under the conversation, until the next turn.
     assert_eq!(
-        page.eval("byId('notice').textContent").await,
+        page.eval("byId('notice-text').textContent").await,
         "Reconnected: Mock (for testing) as model-mock. The next message uses it."
     );
     page.send_message("/notool hi").await;
@@ -1419,7 +1419,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     page.eval(&format!(
         "{{ const kind = document.querySelector('#settings-body select'); kind.value = 'model-llamacpp'; \
          kind.dispatchEvent(new Event('change')); \
-         document.querySelector('#settings-body input').value = 'http://example.com'; {}; true }}",
+         document.querySelector('#settings-body input').value = 'ftp://example.com'; {}; true }}",
         save("Save model")
     ))
     .await;
@@ -1632,7 +1632,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     // after the status refresh, so a status poll during the save cannot
     // replace it.
     assert_eq!(
-        page.eval("byId('notice').textContent").await,
+        page.eval("byId('notice-text').textContent").await,
         "Switched to loop loop-plan. The next message uses it."
     );
     let notices = page.eval("notices").await;
