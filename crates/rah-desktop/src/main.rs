@@ -30,7 +30,7 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
-    window::{Window, WindowBuilder},
+    window::{Icon, Window, WindowBuilder},
 };
 use wry::{WebView, WebViewBuilder};
 
@@ -58,6 +58,13 @@ struct Args {
     /// Turn on an opt-in feature, as for `rah`; repeatable.
     #[arg(long = "with", value_name = "FEATURE")]
     with: Vec<String>,
+}
+
+/// The window and taskbar icon: the logo as 64x64 RGBA, made by
+/// `scripts/make-icons.ps1`. A bad asset only leaves the default icon.
+fn window_icon() -> Option<Icon> {
+    const RGBA: &[u8] = include_bytes!("../assets/icon.rgba");
+    Icon::from_rgba(RGBA.to_vec(), 64, 64).ok()
 }
 
 /// How long the Web UI may take to start listening.
@@ -183,6 +190,7 @@ fn run(args: Args) -> Result<(), String> {
     });
     let window = WindowBuilder::new()
         .with_title("RAH")
+        .with_window_icon(window_icon())
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(480.0, 360.0))
         .build(&event_loop)

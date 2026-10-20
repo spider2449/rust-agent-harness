@@ -37,7 +37,8 @@ as `powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1`):
 | Script | Does |
 |---|---|
 | `scripts\start.ps1` | Builds and runs `rah`. Web UI by default, opening the printed URL with its token; `-Cli` for the REPL, `-Desktop` for the native window (`rah-desktop`; not with `-Model`, `-SessionDir` or `-Bind`). Options: `-Preset`, `-Config`, `-Model`, `-Root`, `-SessionDir`, `-Bind`, `-Mode`, `-Release`, `-NoBrowser`. Warns when llama-server does not answer. |
-| `scripts\install.ps1` | `cargo install` of `rah`, so `rah --web` works anywhere. Run it again after updating; `-Uninstall` removes it. |
+| `scripts\install.ps1` | `cargo install` of `rah` and `rah-desktop`, so `rah --web` and `rah-desktop` work anywhere. `-Only Web` or `-Only Desktop` installs one; `-Shortcuts` adds Start Menu entries. Run it again after updating; `-Uninstall` removes it. |
+| `scripts\package.ps1` | Builds `dist\rah-<version>-setup.exe` (Inno Setup, per-user, Start Menu entries, optional PATH) and `dist\rah-<version>-portable.zip`. Needs Inno Setup 6 for the installer; the zip is built without it. |
 | `scripts\check.ps1` | The validation suite (fmt, check, test, clippy, `git diff --check`), with the browser tests when Edge or Chrome is found. `-Quick`, `-Fix`, `-NoBrowser`, `-Browser <path>`. |
 | `scripts\sessions.ps1` | Lists deleted sessions, `-Restore <id prefix>` moves one back, `-Purge [-OlderThanDays n]` removes them for good. |
 

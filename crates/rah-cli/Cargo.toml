@@ -53,3 +53,6 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 tokio-tungstenite = "0.29"
 rah-protocol = { path = "../rah-protocol" }
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "signal", "sync"] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

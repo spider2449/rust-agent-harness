@@ -122,6 +122,7 @@ const APP_CSS: &str = include_str!("../assets/app.css");
 const SETTINGS_JS: &str = include_str!("../assets/settings.js");
 const HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
 const MARKDOWN_JS: &str = include_str!("../assets/markdown.js");
+const LOGO_SVG: &str = include_str!("../assets/logo.svg");
 
 pub struct WebFrontendPlugin {
     manifest: PluginManifest,
@@ -319,6 +320,10 @@ fn router(shared: AppState) -> Router {
         .route(
             "/markdown.js",
             get(|| async { asset("text/javascript; charset=utf-8", MARKDOWN_JS) }),
+        )
+        .route(
+            "/logo.svg",
+            get(|| async { asset("image/svg+xml", LOGO_SVG) }),
         )
         .route(
             "/app.css",
