@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RAH Web
+Comment=RAH Web UI in the default browser
+Exec=@BIN@/rah-web
+Icon=rah
+Terminal=true
+Categories=Development;

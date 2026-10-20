@@ -1,0 +1,17 @@
+#!/bin/sh
+# Starts the RAH Web UI and opens the first URL that carries the access
+# token in the default browser. The terminal stays open as the server's log.
+here=$(cd "$(dirname "$0")" && pwd)
+opened=0
+"$here/rah" --web "$@" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [ "$opened" = 0 ]; then
+        url=$(printf '%s\n' "$line" | grep -oE 'http://[^ ]+/#token=[0-9a-f]+' | head -n 1)
+        if [ -n "$url" ]; then
+            opened=1
+            if command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "$url" >/dev/null 2>&1 &
+            fi
+        fi
+    fi
+done

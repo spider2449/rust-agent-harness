@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=RAH Desktop
+Comment=RAH Web UI in a native window
+Exec=@BIN@/rah-desktop
+Icon=rah
+Terminal=false
+Categories=Development;
+StartupWMClass=rah-desktop
