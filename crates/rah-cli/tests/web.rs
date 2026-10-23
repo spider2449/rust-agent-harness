@@ -1187,12 +1187,166 @@ async fn several_repositories_in_one_workspace_are_shown_each() {
     assert_eq!(changes["repos"][0]["branch"], "main", "{changes}");
     assert_eq!(changes["repos"][1]["branch"], "side", "{changes}");
 
-    // The status line sums them.
+    // The status line has each one's state, to show the one in use.
     let status = web.json(web.get("/api/status")).await;
-    let git = &status["workspace"]["git"];
-    assert_eq!(git["repos"], 2, "{status}");
-    assert_eq!(git["changed"], 1, "{status}");
-    assert_eq!(git["untracked"], 1, "{status}");
+    let repos = status["workspace"]["git"]["repos"].as_array().unwrap();
+    let brief: Vec<_> = repos
+        .iter()
+        .map(|repo| {
+            (
+                repo["path"].as_str().unwrap().to_owned(),
+                repo["branch"].as_str().unwrap().to_owned(),
+                repo["changed"].as_u64().unwrap(),
+                repo["untracked"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        brief,
+        [
+            ("api".into(), "main".into(), 1, 0),
+            ("web".into(), "side".into(), 0, 1),
+        ],
+        "{status}"
+    );
+    assert_eq!(status["workspace"]["git"]["branch"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_workspace_holds_several_folders_and_one_is_active() {
+    use reqwest::Method;
+    let web = start("web-folders", |_| {}).await;
+    let workspace = web.dir.workspace();
+    std::fs::write(workspace.join("here.txt"), "first").unwrap();
+    let other = web.dir.0.join("other");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    std::fs::write(other.join(".git").join("HEAD"), "ref: refs/heads/side\n").unwrap();
+    std::fs::write(other.join("there.txt"), "second").unwrap();
+    let outside = web.dir.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "no").unwrap();
+    let query = |path: &std::path::Path| {
+        path.display()
+            .to_string()
+            .replace('%', "%25")
+            .replace('\\', "%5C")
+            .replace(':', "%3A")
+            .replace(' ', "%20")
+    };
+
+    // At first the workspace is the root alone.
+    let first = web.json(web.get("/api/workspace")).await;
+    assert_eq!(
+        first["folders"].as_array().map(Vec::len),
+        Some(1),
+        "{first}"
+    );
+    assert_eq!(first["folders"][0]["active"], true);
+    let root = first["root"].as_str().unwrap().to_owned();
+
+    // A second folder joins; the active folder stays and nothing restarts.
+    let (status, added) = web
+        .status(web.request(Method::PUT, "/api/workspace").json(&json!({
+            "root": root,
+            "folders": [root, other.display().to_string()],
+            "name": "product",
+        })))
+        .await;
+    assert_eq!(status, 200, "{added}");
+    assert_eq!(added["plugins"], json!([]), "{added}");
+    let folders = added["workspace"]["folders"].as_array().unwrap();
+    assert_eq!(added["workspace"]["name"], "product");
+    assert_eq!(
+        folders
+            .iter()
+            .map(|folder| (folder["name"].as_str().unwrap(), folder["active"] == true))
+            .collect::<Vec<_>>(),
+        [("workspace", true), ("other", false)],
+        "{added}"
+    );
+    // The other folder's branch comes from its `HEAD` file.
+    assert_eq!(
+        folders[1]["repos"],
+        json!([{ "path": "", "branch": "side" }])
+    );
+    let status_line = web.json(web.get("/api/status")).await;
+    assert_eq!(status_line["workspace"]["name"], "product", "{status_line}");
+    assert_eq!(status_line["workspace"]["folders"], 2);
+
+    // The file browser reads every folder of the workspace, and no other.
+    let listing = web
+        .json(web.get(&format!("/api/files?folder={}", query(&other))))
+        .await;
+    let names: Vec<_> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["there.txt"], "{listing}");
+    let file = web
+        .json(web.get(&format!(
+            "/api/files/content?folder={}&path=there.txt",
+            query(&other)
+        )))
+        .await;
+    assert_eq!(file["text"], "second", "{file}");
+    let here = web.json(web.get("/api/files/content?path=here.txt")).await;
+    assert_eq!(here["text"], "first", "{here}");
+    let (status, refused) = web
+        .status(web.get(&format!(
+            "/api/files/content?folder={}&path=secret.txt",
+            query(&outside)
+        )))
+        .await;
+    assert_eq!(status, 400, "{refused}");
+
+    // Making the other folder active keeps the workspace; tools follow it.
+    let (status, switched) = web
+        .status(
+            web.request(Method::PUT, "/api/workspace")
+                .json(&json!({ "root": other.display().to_string() })),
+        )
+        .await;
+    assert_eq!(status, 200, "{switched}");
+    assert!(switched["root"].as_str().unwrap().ends_with("other"));
+    assert!(!switched["plugins"].as_array().unwrap().is_empty());
+    assert_eq!(switched["workspace"]["name"], "product");
+    assert_eq!(switched["workspace"]["folders"][1]["active"], true);
+    let there = web.json(web.get("/api/files/content?path=there.txt")).await;
+    assert_eq!(there["text"], "second", "{there}");
+
+    // Opening a folder alone starts a new workspace.
+    let (status, alone) = web
+        .status(web.request(Method::PUT, "/api/workspace").json(&json!({
+            "root": root,
+            "folders": [root],
+        })))
+        .await;
+    assert_eq!(status, 200, "{alone}");
+    assert_eq!(alone["workspace"]["name"], Value::Null, "{alone}");
+    assert_eq!(
+        alone["workspace"]["folders"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let (status, _) = web
+        .status(web.get(&format!("/api/files?folder={}", query(&other))))
+        .await;
+    assert_eq!(status, 400);
+
+    for bad in [
+        json!({ "root": root, "folders": [web.dir.0.join("missing").display().to_string()] }),
+        json!({ "root": root, "folders": [root], "name": "x".repeat(101) }),
+        json!({ "root": root, "folders": vec![root.clone(); 33] }),
+    ] {
+        assert_eq!(
+            web.status(web.request(Method::PUT, "/api/workspace").json(&bad))
+                .await
+                .0,
+            400,
+            "{bad}"
+        );
+    }
 }
 
 /// Waits until `kind`'s default instance is active in `kernel`.

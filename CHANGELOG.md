@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- The Web UI supports workspaces of several folders, like a multi-root
+  workspace in VS Code. The folder picker (**Open folder or workspace**) can
+  open a folder alone, add it to the workspace, or name the workspace, and it
+  lists recent workspaces with their folders. The file tree shows every
+  folder. Tools and Git still work in one folder: the active one, which is
+  the sandbox root. You switch it from the tree or from source control, where
+  the other folders show their checked-out branch, read from Git's `HEAD`
+  file. `frontend-web` keeps the folders in `storage`. New and changed
+  routes: `GET /api/workspace`, `PUT /api/workspace {root, folders, name}`
+  (without `folders`, `root` only becomes active), and `folder` on
+  `/api/files` and `/api/files/content`. In `recent_workspaces`, an entry can
+  now be `{name, folders, root}` as well as a path.
+
+- The status line's Git item shows the branch of the repository you are
+  working in: the one that holds the open file or diff, otherwise the one
+  last used in source control, otherwise the first. With several
+  repositories it adds the repository's folder name (`⎇ main · api`), and a
+  click lists that repository's branches. This replaces the
+  `⎇ N repositories` sum. In `GET /api/status`, `workspace.git.repos` is now
+  a per-repository list, and `workspace` has `name` and `folders`.
+
 - The Web UI's source control supports a workspace with several Git
   repositories. A workspace folder that is no repository itself used to show
   only `fatal: not a git repository`. Now the folders below it (up to three

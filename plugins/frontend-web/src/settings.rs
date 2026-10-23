@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ApiError, ApiResult, AppState, Shared, groups, manage::admin, modes, panel, status_json,
-    web_search,
+    web_search, workspace,
 };
 
 /// Slots and the plugin kinds each may hold, in the order they are restored.
@@ -240,9 +240,9 @@ pub(crate) struct Preferences {
     /// lowercase path (`""`: sessions without a folder).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     folders: BTreeMap<String, bool>,
-    /// Workspaces picked recently, the latest first.
+    /// Folders and workspaces opened recently, the latest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    recent_workspaces: Vec<String>,
+    recent_workspaces: Vec<Recent>,
     /// Layout of the side panel.
     #[serde(default, skip_serializing_if = "SidePanel::is_empty")]
     side: SidePanel,
@@ -283,6 +283,35 @@ impl SidePanel {
     }
 }
 
+/// A recently opened folder (its path), or a workspace of several folders.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum Recent {
+    Folder(String),
+    Workspace(RecentWorkspace),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecentWorkspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    folders: Vec<String>,
+    /// The folder that was active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+}
+
+impl Recent {
+    fn paths(&self) -> impl Iterator<Item = &String> {
+        let (folders, root): (&[String], _) = match self {
+            Self::Folder(path) => (std::slice::from_ref(path), None),
+            Self::Workspace(workspace) => (&workspace.folders, workspace.root.as_ref()),
+        };
+        folders.iter().chain(root)
+    }
+}
+
 const PREFERENCES: &str = "preferences";
 /// The most folders remembered, and the longest path kept.
 const MAX_FOLDERS: usize = 1000;
@@ -304,8 +333,26 @@ impl Preferences {
             return bad("too many folders in `folders`");
         }
         let long = |path: &String| path.chars().count() > MAX_PATH_CHARS;
-        if self.folders.keys().any(long) || self.recent_workspaces.iter().any(long) {
+        if self.folders.keys().any(long)
+            || self
+                .recent_workspaces
+                .iter()
+                .any(|recent| recent.paths().any(long))
+        {
             return bad("a path in the preferences is too long");
+        }
+        if self.recent_workspaces.iter().any(|recent| match recent {
+            Recent::Folder(_) => false,
+            Recent::Workspace(workspace) => {
+                workspace.folders.is_empty()
+                    || workspace.folders.len() > workspace::MAX_FOLDERS
+                    || workspace
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.chars().count() > workspace::MAX_NAME_CHARS)
+            }
+        }) {
+            return bad("a recent workspace has no folders, too many or a long name");
         }
         if matches!(&self.side.view, Some(view) if view != "files" && view != "plugins") {
             return bad("`side.view` must be `files` or `plugins`");

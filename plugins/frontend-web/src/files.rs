@@ -1,11 +1,13 @@
 //! The workspace file browser: read-only views of the workspace for the
 //! local user, who already holds the access token.
 //!
-//! `GET /api/files?path=` lists one directory of the workspace and
-//! `GET /api/files/content?path=` returns the start of one file as text.
-//! Paths are relative to the workspace root (the `sandbox` service's root)
-//! and must stay inside it: absolute paths, `..` and links leading outside
-//! are refused. Nothing here writes, and no tool can reach these routes.
+//! `GET /api/files?folder=&path=` lists one directory of a workspace folder
+//! and `GET /api/files/content?folder=&path=` returns the start of one file
+//! as text. `folder` is one of the workspace's folders (see
+//! [`crate::workspace`]), the active one (the `sandbox` service's root) when
+//! it is missing. Paths are relative to that folder and must stay inside it:
+//! absolute paths, `..` and links leading outside are refused. Nothing here
+//! writes, and no tool can reach these routes.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -30,6 +32,7 @@ const HIDDEN: &[&str] = &[".git"];
 
 #[derive(Deserialize)]
 pub(crate) struct FileQuery {
+    folder: Option<String>,
     path: Option<String>,
 }
 
@@ -38,7 +41,7 @@ pub(crate) async fn list(
     State(shared): State<AppState>,
     Query(query): Query<FileQuery>,
 ) -> ApiResult {
-    let root = workspace_root(&shared).await?;
+    let root = crate::workspace::readable_folder(&shared, query.folder.as_deref()).await?;
     let relative = query.path.unwrap_or_default();
     let path = resolve(&root, &relative).await?;
     let mut reader = tokio::fs::read_dir(&path)
@@ -92,7 +95,7 @@ pub(crate) async fn content(
     State(shared): State<AppState>,
     Query(query): Query<FileQuery>,
 ) -> ApiResult {
-    let root = workspace_root(&shared).await?;
+    let root = crate::workspace::readable_folder(&shared, query.folder.as_deref()).await?;
     let relative = query.path.unwrap_or_default();
     let path = resolve(&root, &relative).await?;
     let file = tokio::fs::File::open(&path)

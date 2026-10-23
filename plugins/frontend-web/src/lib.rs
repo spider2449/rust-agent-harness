@@ -12,17 +12,21 @@
 //! API:
 //!
 //! - `GET /api/info`: tools and whether a policy guards them.
-//! - `GET /api/status`: the workspace root and its Git state (through the
-//!   `sandbox` service), the model and loop the next turn uses, and whether
-//!   a policy guards tools.
-//! - With an `admin` service: `PUT /api/workspace {root}` points the
-//!   workspace plugins at another directory. `GET /api/fs/dirs?path=` lists
-//!   a directory's subdirectories (names, and whether each is a Git
-//!   repository) for the folder picker.
-//! - With a `sandbox` service: `GET /api/files?path=` lists one directory of
-//!   the workspace and `GET /api/files/content?path=` returns the start of one
-//!   file, for the read-only file browser. Paths are relative to the
-//!   workspace root and cannot leave it. `GET /api/git/changes` (per
+//! - `GET /api/status`: the workspace root and the Git state of each of its
+//!   repositories (through the `sandbox` service), the model and loop the
+//!   next turn uses, and whether a policy guards tools.
+//! - `GET /api/workspace`: the workspace's name and folders (a multi-root
+//!   workspace, as in VS Code); the active one is the `sandbox` service's
+//!   root, where tools work. `PUT /api/workspace {root, folders, name}` makes
+//!   `root` active (with an `admin` service, pointing the workspace plugins
+//!   at it when it moves) and sets the folders and name (see [`workspace`]).
+//!   `GET /api/fs/dirs?path=` lists a directory's subdirectories (names, and
+//!   whether each is a Git repository) for the folder picker.
+//! - With a `sandbox` service: `GET /api/files?folder=&path=` lists one
+//!   directory of a workspace folder (the active one without `folder`) and
+//!   `GET /api/files/content?folder=&path=` returns the start of one file,
+//!   for the read-only file browser. Paths are relative to the folder and
+//!   cannot leave it. `GET /api/git/changes` (per
 //!   repository: the root's and those in folders below it) and
 //!   `/api/git/diff?repo=&path=` are read-only Git views of the workspace
 //!   (`git` runs through the `sandbox` service). `GET /api/git/branches?repo=`
@@ -182,6 +186,8 @@ pub(crate) struct Shared {
     pub modes: modes::Modes,
     /// The `mode` configuration key.
     pub start_mode: Option<String>,
+    /// The workspace's folders, once read from `storage` (see [`workspace`]).
+    pub folders: std::sync::Mutex<Option<workspace::Folders>>,
 }
 
 pub(crate) type AppState = Arc<Shared>;
@@ -222,6 +228,7 @@ impl Plugin for WebFrontendPlugin {
             panel: tokio::sync::Mutex::new(()),
             modes: modes::Modes::new(config.modes()),
             start_mode: config.mode.clone(),
+            folders: std::sync::Mutex::new(None),
         });
         // What a plugin skips quietly but the user can act on (ADR 0057).
         let notices = shared.clone();
@@ -264,7 +271,7 @@ fn router(shared: AppState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
         .route("/status", get(status::status))
-        .route("/workspace", put(workspace::set))
+        .route("/workspace", get(workspace::get).put(workspace::set))
         .route("/fs/dirs", get(workspace::list))
         .route("/files", get(files::list))
         .route("/files/content", get(files::content))

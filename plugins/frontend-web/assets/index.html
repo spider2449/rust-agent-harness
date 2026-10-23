@@ -78,6 +78,7 @@
           <div class="tree-section">
             <div class="pane-head">
               <span id="tree-root" class="pane-title">Files</span>
+              <button id="tree-add" type="button" class="ghost icon" title="Open a folder or add one to the workspace" aria-label="Open a folder or add one to the workspace">+</button>
               <button id="tree-refresh" type="button" class="ghost icon" title="Reload the files" aria-label="Reload the files">⟳</button>
             </div>
             <ul id="tree" class="tree" role="tree" aria-label="Files"></ul>
@@ -155,8 +156,16 @@
   </footer>
   <div id="branch-menu" class="menu" role="listbox" aria-label="Switch branch" hidden></div>
   <dialog id="workspace-dialog" class="dialog" aria-labelledby="workspace-title">
-    <h2 id="workspace-title">Workspace folder</h2>
-    <p class="hint">File, Git and shell tools work inside this folder. Sessions are kept where they are.</p>
+    <h2 id="workspace-title">Open folder or workspace</h2>
+    <p class="hint">A workspace holds one or more folders, all shown in the file browser. File, Git and shell tools work in its active folder. Sessions are kept where they are.</p>
+    <div id="ws-current-block" hidden>
+      <h3>This workspace</h3>
+      <div class="path-row">
+        <input id="ws-name" aria-label="Workspace name" placeholder="Name (optional)" maxlength="100" spellcheck="false">
+        <button id="ws-save-name" type="button" class="ghost">Rename</button>
+      </div>
+      <ul id="ws-folders" class="dirs"></ul>
+    </div>
     <div class="path-row">
       <input id="ws-path" aria-label="Folder path" spellcheck="false">
       <button id="ws-go" type="button" class="ghost">Go</button>
@@ -174,7 +183,8 @@
     <ul id="ws-dirs" class="dirs"></ul>
     <div class="buttons">
       <button id="ws-cancel" type="button" class="ghost">Cancel</button>
-      <button id="ws-use" type="button">Use this folder</button>
+      <button id="ws-add" type="button" class="ghost" title="Keep the workspace and add this folder to it">Add to workspace</button>
+      <button id="ws-use" type="button" title="A new workspace of this folder alone">Open folder</button>
     </div>
   </dialog>
   <dialog id="settings-dialog" class="dialog settings" aria-labelledby="settings-title">

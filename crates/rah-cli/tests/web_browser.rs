@@ -1142,7 +1142,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     page.wait(
         "the session's own folder",
         "byId('status-root').textContent.endsWith('workspace') && \
-         byId('notice-text').textContent.includes('Switched the workspace') && \
+         byId('notice-text').textContent.includes('Switched the active folder') && \
          !byId('input').disabled && entries().length > 0",
     )
     .await;
@@ -1365,13 +1365,22 @@ async fn several_repositories_get_a_section_each_in_the_browser() {
     let mut page = browser.page().await;
     page.call("Page.navigate", json!({ "url": web.url })).await;
     page.wait("the page to connect", "connected()").await;
-    // The status line counts the repositories; a click shows them.
+    // The status line shows the branch of one repository, the first at
+    // first; a click lists that repository's branches.
     page.wait(
-        "the repositories in the status line",
-        "byId('status-git').textContent.startsWith('⎇ 2 repositories ● 2')",
+        "the first repository's branch in the status line",
+        "byId('status-git').textContent === '⎇ main · api ● 1'",
     )
     .await;
     page.eval("byId('status-git').click(); true").await;
+    page.wait(
+        "the first repository's branches",
+        "!byId('branch-menu').hidden && byId('branch-menu').textContent.includes('main') && \
+         !byId('branch-menu').textContent.includes('trunk')",
+    )
+    .await;
+    page.eval("closeBranchMenu(); showSide('files'); true")
+        .await;
     page.wait(
         "a section per repository",
         "[...document.querySelectorAll('#git-body .repo-name')].map((n) => n.textContent).join() === 'api,web' && \
@@ -1396,6 +1405,102 @@ async fn several_repositories_get_a_section_each_in_the_browser() {
         "the second repository's branches",
         "!byId('branch-menu').hidden && byId('branch-menu').textContent.includes('trunk') && \
          !byId('branch-menu').textContent.includes('main')",
+    )
+    .await;
+    // A file of the other repository makes the status line follow it.
+    page.eval("closeBranchMenu(); changeButton('web/notes.txt').click(); true")
+        .await;
+    page.wait(
+        "the second repository's branch in the status line",
+        "byId('status-git').textContent === '⎇ trunk · web ● 1'",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_of_several_folders_is_shown_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-folders").await;
+    let workspace = web.dir.workspace();
+    std::fs::write(workspace.join("here.txt"), "the first folder").unwrap();
+    // A second folder, a repository on its own branch.
+    let other = web.dir.0.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("there.txt"), "the second folder").unwrap();
+    let output = Command::new("git")
+        .args(["init", "-q", "-b", "side"])
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git init: {output:?}");
+
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-folders");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.wait("the status line", "!!state.workspace").await;
+    // The folder picker adds the second folder to the workspace.
+    page.eval("byId('tree-add').click(); true").await;
+    page.wait(
+        "the folder picker",
+        "byId('workspace-dialog').open && shown(byId('ws-add')) && byId('ws-path').value.endsWith('workspace')",
+    )
+    .await;
+    let other_path = serde_json::to_string(&other.display().to_string()).unwrap();
+    page.eval(&format!(
+        "byId('ws-path').value = {other_path}; byId('ws-add').click(); true"
+    ))
+    .await;
+    page.wait(
+        "the added folder",
+        "!byId('workspace-dialog').open && state.workspaceInfo?.folders?.length === 2",
+    )
+    .await;
+    // The active folder did not move; both folders head the tree.
+    page.eval("showSide('files'); true").await;
+    page.wait(
+        "both folders in the tree",
+        "[...document.querySelectorAll('#tree .folder-name')].map((n) => n.textContent).join() === 'workspace,other' && \
+         !!treeButton('here.txt') && byId('status-root').textContent.startsWith('2 folders: ') && \
+         byId('status-root').textContent.endsWith('workspace')",
+    )
+    .await;
+    // The other folder's files are read from it, without making it active.
+    page.eval("document.querySelector('#tree button[data-folder$=\"other\"]').click(); true")
+        .await;
+    page.wait("the other folder's files", "!!treeButton('there.txt')")
+        .await;
+    page.eval("treeButton('there.txt').click(); true").await;
+    page.wait(
+        "the other folder's file",
+        "byId('file-view').textContent.includes('the second folder')",
+    )
+    .await;
+    // Source control names its branch and offers to make it active.
+    page.wait(
+        "the other folder in source control",
+        "!!document.querySelector('#git-body .other-folder') && \
+         document.querySelector('#git-body .other-folder').textContent.includes('⎇ side')",
+    )
+    .await;
+    page.eval("document.querySelector('#git-body .other-folder .activate').click(); true")
+        .await;
+    page.wait(
+        "the other folder active",
+        "byId('status-root').textContent.endsWith('other') && \
+         byId('status-git').textContent.startsWith('⎇ side') && \
+         state.workspaceInfo.folders.length === 2 && \
+         state.workspaceInfo.folders[1].active",
+    )
+    .await;
+    // The picker remembers the workspace, with its folders.
+    page.wait(
+        "the remembered workspace",
+        "api('/preferences').then((p) => p.recent_workspaces?.[0]?.folders?.length === 2)",
     )
     .await;
 }

@@ -99,6 +99,39 @@ fn repo_dir(repo: &str) -> Result<Option<PathBuf>, ApiError> {
     Ok((!path.as_os_str().is_empty()).then_some(path))
 }
 
+/// The branch checked out in the repository folder `dir`, read from Git's
+/// `HEAD` file without running Git (for workspace folders outside the
+/// sandbox root): `(detached)` for a detached HEAD, `None` when `dir` holds no
+/// repository. A `.git` file (a linked work tree or a submodule) names the
+/// Git folder with `gitdir:`.
+pub(crate) async fn head_branch(dir: &Path) -> Option<String> {
+    let dot_git = dir.join(".git");
+    let git_dir = match tokio::fs::metadata(&dot_git).await.ok()? {
+        metadata if metadata.is_dir() => dot_git,
+        _ => {
+            let text = tokio::fs::read_to_string(&dot_git).await.ok()?;
+            dir.join(text.trim().strip_prefix("gitdir:")?.trim())
+        }
+    };
+    let head = tokio::fs::read_to_string(git_dir.join("HEAD")).await.ok()?;
+    Some(parse_head(&head))
+}
+
+/// The branch a `HEAD` file names: `ref: refs/heads/<branch>`, or a commit
+/// for a detached HEAD.
+fn parse_head(text: &str) -> String {
+    match text.trim().strip_prefix("ref:") {
+        Some(target) => {
+            let target = target.trim();
+            target
+                .strip_prefix("refs/heads/")
+                .unwrap_or(target)
+                .to_owned()
+        }
+        None => "(detached)".to_owned(),
+    }
+}
+
 /// The folders below `root` (canonical) that hold a `.git` entry (a folder,
 /// or a file for a submodule or linked work tree), `/`-separated and sorted,
 /// at most [`MAX_DEPTH`] levels deep. Links are not followed, so the search
@@ -450,6 +483,13 @@ fn parse_status(text: &str) -> (Option<String>, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_files_name_the_branch() {
+        assert_eq!(parse_head("ref: refs/heads/main\n"), "main");
+        assert_eq!(parse_head("ref: refs/heads/feature/x\n"), "feature/x");
+        assert_eq!(parse_head("4ccfb59a2e1f0c3d\n"), "(detached)");
+    }
 
     #[test]
     fn diff_paths_must_lie_inside_the_repository() {

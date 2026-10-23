@@ -1,10 +1,13 @@
 //! `GET /api/status`: what the status line shows.
 //!
-//! The workspace is the `sandbox` service's root. Git state comes from one
-//! read-only `git status` run through that service (never a shell, with
-//! `--no-optional-locks` so it does not write the index); when the root is no
-//! repository, from one run in each repository below it, summed. Model and loop are
-//! the providers the next turn will use.
+//! The workspace is the `sandbox` service's root (the active folder), with
+//! the workspace's name and number of folders. Git state comes from
+//! read-only `git status` runs through that service (never a shell, with
+//! `--no-optional-locks` so they do not write the index): one in the root and
+//! one in each repository below it, listed as `repos` so the UI can show the
+//! branch of the repository the user works in. When the root is a
+//! repository, its own summary is also the top level. Model and loop are the
+//! providers the next turn will use.
 
 use std::{
     path::{Path, PathBuf},
@@ -23,7 +26,7 @@ use rah_api::{
 };
 use serde_json::{Value, json};
 
-use crate::{ApiResult, AppState};
+use crate::{ApiResult, AppState, Shared};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -31,7 +34,7 @@ pub(crate) async fn status(State(shared): State<AppState>) -> ApiResult {
     let kernel = &shared.kernel;
     let models = kernel.get_all(MODEL);
     let (workspace, health) = tokio::join!(
-        workspace(kernel, &shared.stop),
+        workspace(&shared),
         model_health(models.first().map(|(_, model)| model.clone()), &shared.stop),
     );
     let mut model = provider(kernel, models.first().map(|(id, _)| id.clone()));
@@ -77,41 +80,68 @@ fn provider(kernel: &KernelHandle, instance: Option<String>) -> Value {
     json!({ "plugin": instance, "kind": kind, "model": model })
 }
 
-async fn workspace(kernel: &KernelHandle, stop: &CancellationToken) -> Value {
+async fn workspace(shared: &Shared) -> Value {
+    let (kernel, stop) = (&shared.kernel, &shared.stop);
     let Some(sandbox) = kernel.get(SANDBOX) else {
         return Value::Null;
     };
     let root = sandbox.root();
-    let git = match git_status(sandbox.as_ref(), None, stop).await {
-        Ok(text) => parse_git_status(&text),
-        // The root is no repository: the ones below it, summed.
-        Err(reason) => {
-            let nested = match &root {
-                Some(root) => match tokio::fs::canonicalize(root).await {
-                    Ok(root) => crate::git::nested_repos(&root).await,
-                    Err(_) => Vec::new(),
-                },
-                None => Vec::new(),
-            };
-            let statuses = futures::future::join_all(
-                nested
-                    .iter()
-                    .map(|repo| git_status(sandbox.as_ref(), Some(PathBuf::from(repo)), stop)),
-            )
-            .await;
-            let summaries: Vec<_> = statuses
-                .iter()
-                .filter_map(|status| status.as_deref().ok())
-                .map(parse_git_status)
-                .collect();
-            if summaries.is_empty() {
-                json!({ "error": reason })
-            } else {
-                sum_git_status(&summaries)
-            }
-        }
+    let nested = match &root {
+        Some(root) => match tokio::fs::canonicalize(root).await {
+            Ok(root) => crate::git::nested_repos(&root).await,
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
     };
-    json!({ "root": root.map(|root| display_path(&root)), "git": git })
+    let (own, statuses) = tokio::join!(
+        git_status(sandbox.as_ref(), None, stop),
+        futures::future::join_all(nested.iter().map(|repo| git_status(
+            sandbox.as_ref(),
+            Some(PathBuf::from(repo)),
+            stop
+        )),),
+    );
+    let repos = repo_summaries(
+        own.as_deref().ok(),
+        nested
+            .iter()
+            .zip(&statuses)
+            .filter_map(|(path, status)| Some((path.as_str(), status.as_deref().ok()?))),
+    );
+    let git = match own {
+        Ok(text) => {
+            let mut git = parse_git_status(&text);
+            git["repos"] = json!(repos);
+            git
+        }
+        Err(reason) if repos.is_empty() => json!({ "error": reason }),
+        // The root is no repository, the folders below it hold some.
+        Err(_) => json!({ "repos": repos }),
+    };
+    let (_, folders) = crate::workspace::current(shared).await;
+    json!({
+        "root": root.map(|root| display_path(&root)),
+        "name": folders.name,
+        "folders": folders.folders.len(),
+        "git": git,
+    })
+}
+
+/// Each repository's summary with its folder as `path` (empty for the
+/// root's): the root's first, then the nested ones.
+fn repo_summaries<'a>(
+    own: Option<&'a str>,
+    nested: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Vec<Value> {
+    own.map(|text| ("", text))
+        .into_iter()
+        .chain(nested)
+        .map(|(path, text)| {
+            let mut summary = parse_git_status(text);
+            summary["path"] = json!(path);
+            summary
+        })
+        .collect()
 }
 
 /// `git status --porcelain=v2 --branch` in `cwd` (the root when `None`), or
@@ -153,25 +183,6 @@ async fn git_status(
         }
         Err(error) => Err(error.to_string()),
     }
-}
-
-/// Several repositories' summaries as one: `{repos, ahead, behind, changed,
-/// untracked, conflicts}`, each count summed.
-fn sum_git_status(summaries: &[Value]) -> Value {
-    let sum = |key: &str| {
-        summaries
-            .iter()
-            .map(|summary| summary[key].as_u64().unwrap_or(0))
-            .sum::<u64>()
-    };
-    json!({
-        "repos": summaries.len(),
-        "ahead": sum("ahead"),
-        "behind": sum("behind"),
-        "changed": sum("changed"),
-        "untracked": sum("untracked"),
-        "conflicts": sum("conflicts"),
-    })
 }
 
 /// A path for people: without Windows' verbatim `\\?\` prefix.
@@ -247,17 +258,28 @@ mod tests {
     }
 
     #[test]
-    fn nested_repository_summaries_are_summed() {
-        let api = parse_git_status("# branch.head main\n# branch.ab +1 -0\n? a\n");
-        let web = parse_git_status(
-            "# branch.head dev\n1 .M N... 1 2 3 a b x\nu UU N... 1 2 3 4 a b c y\n",
-        );
+    fn every_repository_is_summarized_with_its_folder() {
+        let nested = [
+            ("api", "# branch.head main\n# branch.ab +1 -0\n? a\n"),
+            ("web", "# branch.head dev\n1 .M N... 1 2 3 a b x\n"),
+        ];
+        let repos = repo_summaries(Some("# branch.head trunk\n"), nested.into_iter());
+        let brief: Vec<_> = repos
+            .iter()
+            .map(|repo| (repo["path"].clone(), repo["branch"].clone()))
+            .collect();
         assert_eq!(
-            sum_git_status(&[api, web]),
-            json!({
-                "repos": 2, "ahead": 1, "behind": 0, "changed": 1, "untracked": 1, "conflicts": 1,
-            })
+            brief,
+            [
+                (json!(""), json!("trunk")),
+                (json!("api"), json!("main")),
+                (json!("web"), json!("dev")),
+            ]
         );
+        assert_eq!(repos[1]["ahead"], 1);
+        assert_eq!(repos[2]["changed"], 1);
+        // The root is no repository: only the nested ones.
+        assert_eq!(repo_summaries(None, nested.into_iter()).len(), 2);
     }
 
     #[test]

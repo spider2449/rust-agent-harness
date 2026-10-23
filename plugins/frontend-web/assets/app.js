@@ -310,9 +310,11 @@ async function ensureWorkspace(info) {
   if (!info?.workspace || !state.workspace || sameFolder(info.workspace, state.workspace)) return true;
   try {
     const result = await api("/workspace", { method: "PUT", body: JSON.stringify({ root: info.workspace }) });
-    rememberWorkspace(result.root);
+    state.workspaceInfo = result.workspace;
+    rememberWorkspace(result.workspace);
     await loadStatus().catch(() => {});
-    showTransientNotice(`Switched the workspace to ${result.root}, where this session's work happened.`);
+    const kept = result.workspace?.folders?.length > 1 ? " (a folder of this workspace)" : "";
+    showTransientNotice(`Switched the active folder to ${result.root}${kept}, where this session's work happened.`);
     return true;
   } catch (error) {
     showNotice(`This session belongs to ${info.workspace}, which cannot be used now: ${error.message}`);
@@ -1050,6 +1052,8 @@ const files = {
   // Directory path ("" is the root) -> its listing, once loaded.
   dirs: new Map(),
   expanded: new Set([""]),
+  // With several workspace folders: whether the active one is folded.
+  collapsedActive: false,
   // Open files in tab order: {path, data, error}.
   open: [],
   current: null,
@@ -1257,14 +1261,27 @@ function treeError(error) {
   $("tree").replaceChildren(el("li", "note", error.message));
 }
 
-async function loadDir(path) {
-  const listing = await api(`/files?path=${encodeURIComponent(path)}`);
-  if (path === "") {
-    files.root = listing.root;
-    $("tree-root").textContent = folderName(listing.root);
-    $("tree-root").title = listing.root;
-  }
-  files.dirs.set(path, listing);
+// The tree holds every folder of the workspace. A folder is "" for the
+// active one (the sandbox root) and its path for the others; a directory or
+// file is keyed by its path in the active folder and by folder and path in
+// the others.
+function dirKey(folder, path) {
+  return folder ? `${folder}\u0000${path}` : path;
+}
+
+function splitKey(key) {
+  const cut = key.indexOf("\u0000");
+  return cut < 0 ? ["", key] : [key.slice(0, cut), key.slice(cut + 1)];
+}
+
+function folderQuery(folder) {
+  return folder ? `&folder=${encodeURIComponent(folder)}` : "";
+}
+
+async function loadDir(path, folder = "") {
+  const listing = await api(`/files?path=${encodeURIComponent(path)}${folderQuery(folder)}`);
+  if (path === "" && !folder) files.root = listing.root;
+  files.dirs.set(dirKey(folder, path), listing);
   renderTree();
 }
 
@@ -1274,14 +1291,15 @@ async function reloadFiles() {
     if (git.loaded) await loadGit();
     return;
   }
-  const paths = [...files.expanded].filter((path) => files.dirs.has(path));
+  const keys = [...files.expanded].filter((key) => files.dirs.has(key));
   files.dirs.clear();
-  for (const path of paths) {
+  for (const key of keys) {
     try {
-      await loadDir(path);
+      const [folder, path] = splitKey(key);
+      await loadDir(path, folder);
     } catch {
       // Gone: shown closed.
-      files.expanded.delete(path);
+      files.expanded.delete(key);
     }
   }
   renderTree();
@@ -1295,10 +1313,10 @@ function resetFiles() {
   files.root = null;
   files.dirs.clear();
   files.expanded = new Set([""]);
+  files.collapsedActive = false;
   files.open = [];
   files.current = null;
-  $("tree-root").textContent = "Files";
-  $("tree-root").title = "";
+  renderTreeHead();
   $("tree").replaceChildren();
   renderFile();
   git.loaded = false;
@@ -1316,10 +1334,11 @@ function treeNote(text, depth) {
   return note;
 }
 
-function treeNodes(path, depth) {
-  const listing = files.dirs.get(path);
+function treeNodes(path, depth, folder = "") {
+  const listing = files.dirs.get(dirKey(folder, path));
   if (!listing) return [treeNote("Loading…", depth)];
   const nodes = listing.entries.map((entry) => {
+    const key = dirKey(folder, entry.path);
     const item = el("li", entry.dir ? "dir" : "file");
     item.setAttribute("role", "treeitem");
     const button = el("button");
@@ -1327,9 +1346,9 @@ function treeNodes(path, depth) {
     button.title = entry.path;
     button.dataset.path = entry.path;
     button.style.setProperty("--depth", depth);
-    const open = entry.dir && files.expanded.has(entry.path);
+    const open = entry.dir && files.expanded.has(key);
     if (entry.dir) item.setAttribute("aria-expanded", String(open));
-    if (!entry.dir && entry.path === files.current) button.classList.add("open-file");
+    if (!entry.dir && key === files.current) button.classList.add("open-file");
     button.append(
       el("span", "caret", entry.dir ? (open ? "▾" : "▸") : ""),
       el("span", "icon-glyph", entry.dir ? "▣" : "▢"),
@@ -1337,19 +1356,19 @@ function treeNodes(path, depth) {
     );
     button.addEventListener("click", () => {
       if (!entry.dir) {
-        openFile(entry.path).catch(report);
+        openFile(entry.path, folder).catch(report);
         return;
       }
-      if (open) files.expanded.delete(entry.path);
-      else files.expanded.add(entry.path);
-      if (!open && !files.dirs.has(entry.path)) loadDir(entry.path).catch(report);
+      if (open) files.expanded.delete(key);
+      else files.expanded.add(key);
+      if (!open && !files.dirs.has(key)) loadDir(entry.path, folder).catch(report);
       renderTree();
     });
     item.append(button);
     if (open) {
       const children = el("ul");
       children.setAttribute("role", "group");
-      children.append(...treeNodes(entry.path, depth + 1));
+      children.append(...treeNodes(entry.path, depth + 1, folder));
       item.append(children);
     }
     return item;
@@ -1359,17 +1378,95 @@ function treeNodes(path, depth) {
   return nodes;
 }
 
+// The folders of the workspace (`GET /api/workspace`), the active one marked.
+function workspaceFolders() {
+  return state.workspaceInfo?.folders || [];
+}
+
+function severalFolders() {
+  return workspaceFolders().length > 1;
+}
+
+// The tree's folder parameter for a workspace folder.
+function folderParam(folder) {
+  return folder.active ? "" : folder.path;
+}
+
+function renderTreeHead() {
+  const head = $("tree-root");
+  const info = state.workspaceInfo;
+  if (severalFolders()) {
+    head.textContent = info.name || "Workspace";
+    head.title = `${info.name ? `Workspace ${info.name}` : "Workspace"}: ${info.folders.length} folders`;
+  } else {
+    head.textContent = files.root ? folderName(files.root) : "Files";
+    head.title = files.root || "";
+  }
+}
+
+// A small action button of a folder row; a click does not fold the folder.
+function folderAction(label, title, run) {
+  const button = el("button", "row-action", label);
+  button.type = "button";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    run();
+  });
+  return button;
+}
+
+// One workspace folder as the top of its tree: the active folder is open
+// until closed, the others closed until opened.
+function folderNode(folder) {
+  const param = folderParam(folder);
+  const key = dirKey(param, "");
+  const open = folder.active ? !files.collapsedActive : files.expanded.has(key);
+  const item = el("li", folder.active ? "dir root-folder active" : "dir root-folder");
+  item.setAttribute("role", "treeitem");
+  item.setAttribute("aria-expanded", String(open));
+  const row = el("div", "folder-row");
+  const button = el("button");
+  button.type = "button";
+  button.title = folder.active ? `${folder.path}\nThe active folder: tools work here` : folder.path;
+  button.dataset.folder = folder.path;
+  button.append(el("span", "caret", open ? "▾" : "▸"), el("span", "folder-name", folder.name));
+  if (folder.active) button.append(el("span", "tag", "active"));
+  button.addEventListener("click", () => {
+    if (folder.active) files.collapsedActive = open;
+    else if (open) files.expanded.delete(key);
+    else files.expanded.add(key);
+    if (!open && !files.dirs.has(key)) loadDir("", param).catch(report);
+    renderTree();
+  });
+  row.append(button);
+  if (!folder.active) {
+    row.append(folderAction("◉", `Make ${folder.name} the active folder (tools work there)`, () => activateFolder(folder.path)));
+  }
+  row.append(folderAction("✕", `Remove ${folder.name} from the workspace`, () => removeFolder(folder.path)));
+  item.append(row);
+  if (open) {
+    const children = el("ul");
+    children.setAttribute("role", "group");
+    children.append(...treeNodes("", 1, param));
+    item.append(children);
+  }
+  return item;
+}
+
 function renderTree() {
+  renderTreeHead();
   const tree = $("tree");
   const scroll = tree.scrollTop;
-  tree.replaceChildren(...treeNodes("", 0));
+  tree.replaceChildren(...(severalFolders() ? workspaceFolders().map(folderNode) : treeNodes("", 0)));
   tree.scrollTop = scroll;
 }
 
-// An open tab is a file or a file's diff: {key, kind, path, label, data,
-// error}. A file's key is its path, so the tree can mark it.
+// An open tab is a file or a file's diff: {key, kind, path, folder, label,
+// data, error}. A file's key is its tree key, so the tree can mark it.
 const TAB_SOURCES = {
-  file: (tab) => `/files/content?path=${encodeURIComponent(tab.path)}`,
+  file: (tab) => `/files/content?path=${encodeURIComponent(tab.path)}${folderQuery(tab.folder)}`,
   diff: (tab) => `/git/diff?path=${encodeURIComponent(tab.path)}&repo=${encodeURIComponent(tab.repo || "")}`,
 };
 
@@ -1384,7 +1481,7 @@ async function readFile(file) {
 }
 
 async function openTab(kind, path, label, extra = {}) {
-  const key = kind === "file" ? path : `${kind}:${path}`;
+  const key = kind === "file" ? dirKey(extra.folder || "", path) : `${kind}:${path}`;
   let file = files.open.find((open) => open.key === key);
   if (!file) {
     file = { key, kind, path, label, data: null, error: null, ...extra };
@@ -1398,12 +1495,14 @@ async function openTab(kind, path, label, extra = {}) {
   renderGit();
 }
 
-function openFile(path) {
-  return openTab("file", path, folderName(path));
+// `folder` is "" for the active folder, otherwise another workspace folder.
+function openFile(path, folder = "") {
+  return openTab("file", path, folderName(path), { folder });
 }
 
 // `repo` is the repository's folder in the workspace ("" for the root).
 function openDiff(path, repo) {
+  git.focus = repo || "";
   return openTab("diff", path, `${folderName(path)} (diff)`, { repo });
 }
 
@@ -1515,7 +1614,7 @@ function fileTab(file) {
   const tab = el("div", current ? `file-tab current ${file.kind}` : `file-tab ${file.kind}`);
   tab.setAttribute("role", "tab");
   tab.setAttribute("aria-selected", String(current));
-  tab.title = file.kind === "file" ? file.path : `${file.label}: ${file.path}`;
+  tab.title = file.kind === "file" ? (file.folder ? `${file.folder}: ${file.path}` : file.path) : `${file.label}: ${file.path}`;
   tab.dataset.key = file.key;
   const close = el("button", "", "✕");
   close.type = "button";
@@ -1536,6 +1635,8 @@ function fileTab(file) {
 }
 
 function renderFile() {
+  // The status line shows the branch of the open file's repository.
+  renderGitStatus();
   $("file-tabs").replaceChildren(...files.open.map(fileTab));
   $("close-all").hidden = !files.open.length;
   const view = $("file-view");
@@ -1566,7 +1667,8 @@ function renderFile() {
 // grouped by folder. A repository is `{path, branch, changes, truncated}` or
 // `{path, error}`; `path` is its folder ("" for the root). Paths are
 // untrusted text.
-const git = { loaded: false, loading: null, repos: [], error: null, signature: null, collapsed: new Set() };
+// `focus` is the repository the user last worked with ("" for the root).
+const git = { loaded: false, loading: null, repos: [], error: null, signature: null, collapsed: new Set(), focus: null };
 
 const STATUS_NAMES = {
   M: "modified", A: "added", D: "deleted", R: "renamed", C: "copied", T: "type changed", U: "untracked", "!": "conflicted",
@@ -1575,6 +1677,8 @@ const STATUS_NAMES = {
 async function loadGit() {
   if (git.loading) return git.loading;
   git.loading = (async () => {
+    // The other folders' branches come with the workspace.
+    if (severalFolders()) await loadWorkspace();
     try {
       const listing = await api("/git/changes");
       // Not a repository (or no Git): a state, not a failure.
@@ -1683,21 +1787,57 @@ function repoSection(repo, several) {
   return section;
 }
 
+// Another workspace folder: Git runs only in the active folder (through the
+// sandbox), so it shows its repositories' branches and offers to make the
+// folder active.
+function otherFolderSection(folder) {
+  const key = `folder:${folder.path}`;
+  const section = el("details", "other-folder");
+  section.open = !git.collapsed.has(key);
+  section.addEventListener("toggle", () => {
+    if (section.open) git.collapsed.delete(key);
+    else git.collapsed.add(key);
+  });
+  const summary = el("summary");
+  const name = el("span", "repo-name", folder.name);
+  name.title = folder.path;
+  summary.append(name);
+  const list = el("ul", "tree changes");
+  list.setAttribute("aria-label", `Repositories in ${folder.name}`);
+  for (const repo of folder.repos || []) {
+    const row = el("li", "note", `${branchLabel(repo.branch)}${repo.path ? ` · ${repo.path}` : ""}`);
+    row.title = repo.path ? `${folder.path}: ${repo.path}` : folder.path;
+    list.append(row);
+  }
+  if (!folder.repos?.length) list.append(el("li", "note", "No Git repository"));
+  const item = el("li");
+  const activate = el("button", "activate", "Make active to see its changes");
+  activate.type = "button";
+  activate.title = `Make ${folder.name} the active folder: tools and Git work there`;
+  activate.addEventListener("click", () => activateFolder(folder.path));
+  item.append(activate);
+  list.append(item);
+  section.append(summary, list);
+  return section;
+}
+
 function renderGit() {
-  const several = git.repos.length > 1;
+  const others = workspaceFolders().filter((folder) => !folder.active);
+  const several = git.repos.length > 1 || others.length > 0;
   const header = $("git-branch");
   const only = !several ? git.repos[0] : null;
   header.textContent = only ? branchLabel(only.branch) : "";
   header.dataset.repo = only ? only.path : "";
   const body = $("git-body");
   const scroll = body.scrollTop;
+  const sections = others.map(otherFolderSection);
   if (!git.loaded || git.error) {
     const list = el("ul", "tree changes");
     list.append(el("li", "note", git.loaded ? git.error : "Loading…"));
-    body.replaceChildren(list);
+    body.replaceChildren(list, ...sections);
     return;
   }
-  body.replaceChildren(...git.repos.map((repo) => repoSection(repo, several)));
+  body.replaceChildren(...git.repos.map((repo) => repoSection(repo, several)), ...sections);
   body.scrollTop = scroll;
 }
 
@@ -1711,6 +1851,8 @@ function closeBranchMenu() {
 }
 
 async function openBranchMenu(anchor, repo = "") {
+  git.focus = repo;
+  renderGitStatus();
   const menu = $("branch-menu");
   if (!menu.hidden && menu.anchor === anchor) {
     closeBranchMenu();
@@ -1766,7 +1908,7 @@ async function switchBranch(name, current, repo) {
 // The status line's Git summary changed (every 30 seconds it is read): the
 // list is probably stale.
 function gitSignature(state) {
-  const signature = state ? JSON.stringify([state.branch, state.repos, state.changed, state.untracked, state.conflicts, state.ahead, state.error]) : "";
+  const signature = state ? JSON.stringify(state) : "";
   if (signature !== git.signature) {
     const known = git.signature !== null;
     git.signature = signature;
@@ -2267,38 +2409,57 @@ function statusItem(id, text, title, className) {
   node.hidden = !text;
 }
 
-function gitText(git) {
-  if (!git) return ["", ""];
-  if (git.error) return ["no git repository", git.error];
-  if (git.repos) return gitReposText(git);
-  const parts = [`⎇ ${git.detached ? "detached HEAD" : git.branch}`];
-  const dirty = git.changed + git.untracked;
-  if (dirty) parts.push(`● ${dirty}`);
-  if (git.conflicts) parts.push(`⚠ ${git.conflicts} conflicts`);
-  if (git.ahead) parts.push(`↑${git.ahead}`);
-  if (git.behind) parts.push(`↓${git.behind}`);
-  const title = [
-    git.detached ? "Detached HEAD" : `Branch ${git.branch}`,
-    git.upstream ? `tracking ${git.upstream} (ahead ${git.ahead}, behind ${git.behind})` : "no upstream",
-    `${git.changed} changed, ${git.untracked} untracked, ${git.conflicts} conflicts`,
-  ].join("\n");
-  return [parts.join(" "), title];
+// The repository the user works in, among the active folder's `repos` (as
+// the status reports them): the one holding the open file or diff, else the
+// one last used in source control, else the root's (or the first).
+function currentRepo(repos) {
+  const tab = files.open.find((file) => file.key === files.current);
+  if (tab && !tab.folder) {
+    const holding = tab.kind === "diff"
+      ? repos.find((repo) => repo.path === (tab.repo || ""))
+      : repos
+          .filter((repo) => !repo.path || tab.path === repo.path || tab.path.startsWith(`${repo.path}/`))
+          .sort((a, b) => b.path.length - a.path.length)[0];
+    if (holding) return holding;
+  }
+  return repos.find((repo) => repo.path === git.focus) || repos[0];
 }
 
-// The workspace is no repository but holds several: their counts, summed.
-function gitReposText(git) {
-  const parts = [`⎇ ${git.repos} ${git.repos === 1 ? "repository" : "repositories"}`];
-  const dirty = git.changed + git.untracked;
+// `[label, title, repo]` of the status line's Git item: the current
+// repository's branch, its changes and how it stands to its upstream.
+function gitText(status) {
+  if (!status) return ["", "", null];
+  if (status.error) return ["no git repository", status.error, null];
+  const repos = status.repos || [];
+  const repo = currentRepo(repos);
+  if (!repo) return ["", "", null];
+  const parts = [`⎇ ${repo.detached ? "detached HEAD" : repo.branch}`];
+  const named = repos.length > 1 || severalFolders();
+  const where = repo.path ? folderName(repo.path) : files.root ? folderName(files.root) : "";
+  if (named && where) parts.push(`· ${where}`);
+  const dirty = repo.changed + repo.untracked;
   if (dirty) parts.push(`● ${dirty}`);
-  if (git.conflicts) parts.push(`⚠ ${git.conflicts} conflicts`);
-  if (git.ahead) parts.push(`↑${git.ahead}`);
-  if (git.behind) parts.push(`↓${git.behind}`);
+  if (repo.conflicts) parts.push(`⚠ ${repo.conflicts} conflicts`);
+  if (repo.ahead) parts.push(`↑${repo.ahead}`);
+  if (repo.behind) parts.push(`↓${repo.behind}`);
   const title = [
-    `${git.repos} Git ${git.repos === 1 ? "repository" : "repositories"} in folders of the workspace`,
-    `${git.changed} changed, ${git.untracked} untracked, ${git.conflicts} conflicts`,
-    "Click to show them in source control",
-  ].join("\n");
-  return [parts.join(" "), title];
+    repos.length > 1 ? `Repository ${repo.path || where || "at the root"} (one of ${repos.length})` : null,
+    repo.detached ? "Detached HEAD" : `Branch ${repo.branch}`,
+    repo.upstream ? `tracking ${repo.upstream} (ahead ${repo.ahead}, behind ${repo.behind})` : "no upstream",
+    `${repo.changed} changed, ${repo.untracked} untracked, ${repo.conflicts} conflicts`,
+    "Click to switch branch",
+  ].filter(Boolean).join("\n");
+  return [parts.join(" "), title, repo];
+}
+
+// The status line's Git item, from the latest status.
+function renderGitStatus() {
+  if (!$("status-git")) return;
+  const status = state.gitStatus;
+  const [label, title, repo] = gitText(status);
+  const dirty = repo && (repo.changed + repo.untracked > 0 || repo.conflicts);
+  statusItem("status-git", label, title, dirty ? "dirty" : "");
+  $("status-git").dataset.repo = repo ? repo.path : "";
 }
 
 function providerText(label, provider) {
@@ -2339,16 +2500,23 @@ async function loadStatus() {
     resetFiles();
     renderSessions();
   }
+  // Another window may have changed the folders or the name.
+  const info = state.workspaceInfo;
+  if (moved || !info || (workspace.folders ?? 1) !== info.folders.length || (workspace.name || null) !== (info.name || null)) {
+    loadWorkspace().catch(() => {});
+  }
+  const several = (workspace.folders || 0) > 1;
+  const named = workspace.name ? `${workspace.name}: ` : several ? `${workspace.folders} folders: ` : "";
   statusItem(
     "status-root",
-    workspace.root || "Choose a workspace…",
-    workspace.root ? `Workspace: ${workspace.root}\nClick to change` : "Choose the folder tools work in",
+    workspace.root ? `${named}${workspace.root}` : "Choose a workspace…",
+    workspace.root
+      ? `${several || workspace.name ? `Workspace ${workspace.name || ""} (${workspace.folders} folders)\nActive folder (tools work here): ` : "Workspace: "}${workspace.root}\nClick to change`
+      : "Choose the folder tools work in",
   );
   gitSignature(workspace.git);
-  const [gitLabel, gitTitle] = gitText(workspace.git);
-  const dirty = workspace.git && !workspace.git.error && workspace.git.changed + workspace.git.untracked > 0;
-  statusItem("status-git", gitLabel, gitTitle, dirty || workspace.git?.conflicts ? "dirty" : "");
-  $("status-git").dataset.repos = workspace.git?.repos ? String(workspace.git.repos) : "";
+  state.gitStatus = workspace.git || null;
+  renderGitStatus();
   const [model, modelTitle] = providerText("model", status.model);
   // The server behind the model may be down while RAH itself is fine.
   const down = status.model?.health?.state === "unavailable";
@@ -2378,14 +2546,139 @@ function refreshStatus() {
 
 // ---- Workspace picker -----------------------------------------------------
 
+// Recent entries are a folder (its path) or a workspace `{name, folders,
+// root}` of several folders or with a name.
 function recentWorkspaces() {
   const list = state.prefs.recent_workspaces;
-  return Array.isArray(list) ? list.filter((item) => typeof item === "string") : [];
+  if (!Array.isArray(list)) return [];
+  return list.filter((item) => typeof item === "string" || (item && Array.isArray(item.folders) && item.folders.length));
 }
 
-function rememberWorkspace(path) {
-  state.prefs.recent_workspaces = [path, ...recentWorkspaces().filter((item) => item !== path)].slice(0, 8);
+function sameRecent(a, b) {
+  if (typeof a === "string" || typeof b === "string") return typeof a === typeof b && sameFolder(a, b);
+  return (a.name || null) === (b.name || null)
+    && a.folders.length === b.folders.length
+    && a.folders.every((folder) => b.folders.some((other) => sameFolder(folder, other)));
+}
+
+// Records the workspace as the server describes it (`GET /api/workspace`).
+function rememberWorkspace(info) {
+  if (!info?.root) return;
+  const folders = info.folders.map((folder) => folder.path);
+  const entry = folders.length > 1 || info.name
+    ? { ...(info.name ? { name: info.name } : {}), folders, root: info.root }
+    : info.root;
+  state.prefs.recent_workspaces = [entry, ...recentWorkspaces().filter((item) => !sameRecent(item, entry))].slice(0, 8);
   savePrefs();
+}
+
+async function loadWorkspace() {
+  try {
+    state.workspaceInfo = await api("/workspace");
+  } catch {
+    // Older servers have no workspace of several folders.
+    state.workspaceInfo = null;
+  }
+  renderTree();
+  renderGit();
+  renderGitStatus();
+  return state.workspaceInfo;
+}
+
+// `PUT /api/workspace`: `root` becomes the active folder and, with
+// `folders`, the workspace holds those folders under `name`. When the
+// active folder moves, the plugins restart in it and everything that shows
+// the workspace starts over. Returns false when it failed (the error is
+// shown by `fail`).
+async function changeWorkspace(body, fail = report) {
+  const moves = !sameFolder(body.root, state.workspace);
+  if (moves && state.running) {
+    fail(new Error("Wait for the running turn to finish or cancel it first."));
+    return false;
+  }
+  let result;
+  try {
+    result = await api("/workspace", { method: "PUT", body: JSON.stringify(body) });
+  } catch (error) {
+    fail(error);
+    return false;
+  }
+  state.workspaceInfo = result.workspace;
+  rememberWorkspace(result.workspace);
+  const failed = result.plugins.filter((plugin) => plugin.state !== "active");
+  if (failed.length) {
+    fail(new Error(`Switched, but not every plugin started: ${failed.map((p) => `${p.id} (${p.state})`).join(", ")}`));
+  }
+  if (moves) {
+    await loadPlugins().catch(report);
+    await loadStatus().catch(report);
+    // The open session belongs to the folder just left; close it.
+    const info = currentInfo();
+    if (info?.workspace && !sameFolder(info.workspace, result.root)) closeSession();
+    await loadSessions().catch(report);
+  } else {
+    refreshStatus();
+  }
+  renderTree();
+  renderGit();
+  return failed.length === 0;
+}
+
+function currentFolders() {
+  return workspaceFolders().map((folder) => folder.path);
+}
+
+function activateFolder(path) {
+  return changeWorkspace({ root: path });
+}
+
+function removeFolder(path) {
+  const rest = currentFolders().filter((folder) => !sameFolder(folder, path));
+  if (!rest.length) {
+    showTransientNotice("A workspace keeps at least one folder: open another folder instead.");
+    return Promise.resolve(false);
+  }
+  const root = sameFolder(path, state.workspace) ? rest[0] : state.workspace;
+  for (const key of [...files.expanded]) {
+    if (splitKey(key)[0] && sameFolder(splitKey(key)[0], path)) files.expanded.delete(key);
+  }
+  return changeWorkspace({ root, folders: rest, name: state.workspaceInfo?.name || null });
+}
+
+function openRecent(entry) {
+  const root = entry.root && entry.folders.some((folder) => sameFolder(folder, entry.root)) ? entry.root : entry.folders[0];
+  return changeWorkspace({ root, folders: entry.folders, name: entry.name || null }, (error) => workspaceError(error.message));
+}
+
+function recentButton(entry) {
+  if (typeof entry === "string") return folderButton(entry, entry, false, () => browse(entry));
+  const label = `${entry.name || folderName(entry.folders[0])} (${entry.folders.length} ${entry.folders.length === 1 ? "folder" : "folders"})`;
+  const item = folderButton(label, entry.folders.join("\n"), false, async () => {
+    if (await openRecent(entry)) $("workspace-dialog").close();
+  });
+  item.querySelector("button").prepend(el("span", "kind", "⧉"));
+  return item;
+}
+
+// The current workspace in the dialog: its name and folders.
+function renderDialogWorkspace() {
+  const info = state.workspaceInfo;
+  $("ws-current-block").hidden = !info?.folders?.length;
+  if (!info) return;
+  $("ws-name").value = info.name || "";
+  $("ws-folders").replaceChildren(
+    ...info.folders.map((folder) => {
+      const item = el("li");
+      const button = el("button");
+      button.type = "button";
+      button.title = folder.path;
+      button.append(el("span", "name", folder.path));
+      if (folder.active) button.append(el("span", "tag", "active"));
+      button.addEventListener("click", () => browse(folder.path));
+      item.append(button);
+      return item;
+    }),
+  );
 }
 
 function folderButton(label, path, git, onClick) {
@@ -2434,41 +2727,48 @@ async function browse(path) {
 async function openWorkspacePicker() {
   const recent = recentWorkspaces();
   $("ws-recent-block").hidden = recent.length === 0;
-  $("ws-recent").replaceChildren(
-    ...recent.map((path) => folderButton(path, path, false, () => browse(path))),
-  );
+  $("ws-recent").replaceChildren(...recent.map(recentButton));
+  await loadWorkspace();
+  renderDialogWorkspace();
+  $("ws-add").hidden = !state.workspaceInfo?.folders?.length;
   $("workspace-dialog").showModal();
   await browse(state.workspace);
 }
 
-async function useWorkspace() {
-  const path = $("ws-path").value.trim();
-  if (!path) return;
-  if (state.running) {
-    workspaceError("Wait for the running turn to finish or cancel it first.");
-    return;
-  }
-  $("ws-use").disabled = true;
+// The dialog's buttons: open the folder alone (a new workspace, as VS
+// Code's Open Folder), add it to the workspace, or rename the workspace.
+async function pickerChange(button, body) {
+  button.disabled = true;
   try {
-    const result = await api("/workspace", { method: "PUT", body: JSON.stringify({ root: path }) });
-    const failed = result.plugins.filter((plugin) => plugin.state !== "active");
-    if (failed.length) {
-      workspaceError(`Switched, but not every plugin started: ${failed.map((p) => `${p.id} (${p.state})`).join(", ")}`);
-    } else {
-      $("workspace-dialog").close();
-    }
-    rememberWorkspace(result.root);
-    await loadPlugins().catch(report);
-    await loadStatus().catch(report);
-    // The open session belongs to the folder just left; close it.
-    const info = currentInfo();
-    if (info?.workspace && !sameFolder(info.workspace, result.root)) closeSession();
-    await loadSessions().catch(report);
-  } catch (error) {
-    workspaceError(error.message);
+    if (await changeWorkspace(body, (error) => workspaceError(error.message))) $("workspace-dialog").close();
   } finally {
-    $("ws-use").disabled = false;
+    button.disabled = false;
   }
+}
+
+function useWorkspace() {
+  const path = $("ws-path").value.trim();
+  if (!path) return Promise.resolve();
+  return pickerChange($("ws-use"), { root: path, folders: [path] });
+}
+
+function addToWorkspace() {
+  const path = $("ws-path").value.trim();
+  if (!path || !state.workspace) return Promise.resolve();
+  return pickerChange($("ws-add"), {
+    root: state.workspace,
+    folders: [...currentFolders(), path],
+    name: state.workspaceInfo?.name || null,
+  });
+}
+
+function saveWorkspaceName() {
+  if (!state.workspace) return Promise.resolve();
+  return pickerChange($("ws-save-name"), {
+    root: state.workspace,
+    folders: currentFolders(),
+    name: $("ws-name").value.trim() || null,
+  });
 }
 
 async function start() {
@@ -2501,13 +2801,8 @@ async function start() {
   });
   $("status-git").addEventListener("click", (event) => {
     event.stopPropagation();
-    // Several repositories have several branches: show them in source control.
-    if ($("status-git").dataset.repos) {
-      showSide("files");
-      loadGit();
-      return;
-    }
-    openBranchMenu($("status-git")).catch(report);
+    // The branches of the repository the item shows.
+    openBranchMenu($("status-git"), $("status-git").dataset.repo || "").catch(report);
   });
   document.addEventListener("click", (event) => {
     if (!$("branch-menu").contains(event.target)) closeBranchMenu();
@@ -2527,6 +2822,15 @@ async function start() {
   });
   $("ws-cancel").addEventListener("click", () => $("workspace-dialog").close());
   $("ws-use").addEventListener("click", () => useWorkspace());
+  $("ws-add").addEventListener("click", () => addToWorkspace());
+  $("ws-save-name").addEventListener("click", () => saveWorkspaceName());
+  $("ws-name").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveWorkspaceName();
+    }
+  });
+  $("tree-add").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("session-rename").addEventListener("click", () => {
     const info = currentInfo();
     if (info) editTitle($("session-title"), info);

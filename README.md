@@ -449,8 +449,8 @@ regenerate the last answer or edit an earlier message and send it again (both
 in a new branch, so the original is kept). It streams turns and asks you to
 allow or deny tool calls the policy marks `Ask`. A status line shows the
 workspace root, its Git branch and pending changes, the model and loop in
-use, and whether a policy guards tool calls. Click the workspace path to
-switch the folder the tools work in, without restarting. **Settings** sets
+use, and whether a policy guards tool calls. The Git item shows the branch of the repository you work in (the one holding the open file or diff, or the one last used in source control) and lists its branches on a click. Click the workspace path to
+open another folder or add one to the workspace, without restarting. Like a multi-root workspace in VS Code, a workspace can hold several folders, with an optional name: the file tree shows each one, and tools and Git work in the active folder (marked, and switched from the tree or source control, where the other folders show their branch). Recent folders and workspaces are offered again. **Settings** sets
 the model (llama.cpp address and model, OpenAI, Anthropic, or the mock), the system
 prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms, and under **Display** whether replies show formatted (the default:
@@ -466,8 +466,7 @@ change's diff read-only, and keeps an
 activity log of the open session's turns and tool calls; it can be resized
 or hidden. With several Git repositories (the workspace's own and those in its
 folders, up to three levels deep) source control shows a section per
-repository, each with its own branch control; when the workspace itself is no
-repository, the status line sums their changes. Every divider (the session list, the file tree, the file view and
+repository, each with its own branch control. Every divider (the session list, the file tree, the file view and
 activity log) can be dragged, and **Wrap** in the file tabs and the activity
 header wraps long lines; **Settings → Display** also picks a theme (follow the
 system, Light, Dark, Sepia, Midnight, High contrast). All of these are kept in
