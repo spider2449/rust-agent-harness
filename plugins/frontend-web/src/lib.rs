@@ -99,7 +99,12 @@ mod web_search;
 mod workspace;
 mod ws;
 
-use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -130,6 +135,14 @@ const SETTINGS_JS: &str = include_str!("../assets/settings.js");
 const HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
 const MARKDOWN_JS: &str = include_str!("../assets/markdown.js");
 const LOGO_SVG: &str = include_str!("../assets/logo.svg");
+
+/// The page title, with the version of this build (`RAH 0.45.0`).
+const TITLE: &str = concat!("RAH ", env!("CARGO_PKG_VERSION"));
+
+/// `index.html` with [`TITLE`] in its `<title>`; the page script reads it
+/// from there.
+static INDEX_PAGE: LazyLock<String> =
+    LazyLock::new(|| INDEX_HTML.replace("<title>RAH</title>", &format!("<title>{TITLE}</title>")));
 
 pub struct WebFrontendPlugin {
     manifest: PluginManifest,
@@ -313,7 +326,7 @@ fn router(shared: AppState) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }),
+            get(|| async { asset("text/html; charset=utf-8", INDEX_PAGE.as_str()) }),
         )
         .route(
             "/app.js",

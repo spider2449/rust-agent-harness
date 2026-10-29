@@ -4,6 +4,9 @@
 
 const $ = (id) => document.getElementById(id);
 
+// The served title names the version, such as "RAH 0.45.0".
+const PAGE_TITLE = document.title;
+
 const state = {
   token: null,
   socket: null,
@@ -645,14 +648,14 @@ function startBusy() {
   tickBusy();
   clearInterval(busy.timer);
   busy.timer = setInterval(tickBusy, 1000);
-  document.title = "● RAH — working";
+  document.title = `● ${PAGE_TITLE} — working`;
 }
 
 function stopBusy() {
   clearInterval(busy.timer);
   busy.timer = null;
   $("busy").hidden = true;
-  document.title = "RAH";
+  document.title = PAGE_TITLE;
 }
 
 function tickBusy() {

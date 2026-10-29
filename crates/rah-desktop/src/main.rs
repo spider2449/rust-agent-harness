@@ -155,6 +155,9 @@ fn webview(window: &Window, builder: WebViewBuilder<'_>) -> wry::Result<WebView>
     }
 }
 
+/// The window title, with the version of this build (`RAH 0.45.0`).
+const TITLE: &str = concat!("RAH ", env!("CARGO_PKG_VERSION"));
+
 /// A page that shows why RAH did not start; a GUI program has no console.
 fn failure_page(message: &str) -> String {
     let escaped = message
@@ -162,9 +165,9 @@ fn failure_page(message: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;");
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>RAH</title>\
+        "<!doctype html><meta charset=\"utf-8\"><title>{TITLE}</title>\
          <body style=\"font:15px system-ui,sans-serif;margin:32px\">\
-         <h1 style=\"font-size:20px\">RAH did not start</h1><pre style=\"white-space:pre-wrap\">{escaped}</pre>"
+         <h1 style=\"font-size:20px\">{TITLE} did not start</h1><pre style=\"white-space:pre-wrap\">{escaped}</pre>"
     )
 }
 
@@ -189,7 +192,7 @@ fn run(args: Args) -> Result<(), String> {
             .send_event(UserEvent::Exit(exit.code));
     });
     let window = WindowBuilder::new()
-        .with_title("RAH")
+        .with_title(TITLE)
         .with_window_icon(window_icon())
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(480.0, 360.0))

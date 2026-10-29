@@ -176,7 +176,8 @@ async fn the_api_requires_the_token_this_host_and_this_origin() {
             .unwrap()
             .contains("default-src 'self'")
     );
-    assert!(page.text().await.unwrap().contains("<title>RAH</title>"));
+    let title = concat!("<title>RAH ", env!("CARGO_PKG_VERSION"), "</title>");
+    assert!(page.text().await.unwrap().contains(title));
 
     let status = |request: reqwest::RequestBuilder| async move {
         request.send().await.unwrap().status().as_u16()

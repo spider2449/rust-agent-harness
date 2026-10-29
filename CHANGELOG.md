@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The Web UI's page title and the `rah-desktop` window title show the
+  version, such as `RAH 0.45.0`; a running turn shows `● RAH 0.45.0 —
+  working`.
+
 - `rah` checks every plugin's configuration before it mounts anything
   (ADR 0059) and lists every mistake at once: unknown keys and values, an
   unknown plugin, a process or WASM plugin without an `id`, an instance id
