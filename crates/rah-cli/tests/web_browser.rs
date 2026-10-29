@@ -562,7 +562,12 @@ async fn the_web_ui_works_in_a_real_browser() {
     )
     .await;
     page.screenshot("busy-approval").await;
-    assert_eq!(page.eval("document.title").await, "● RAH — working");
+    // The title names the version.
+    let title = format!("RAH {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        page.eval("document.title").await,
+        format!("● {title} — working")
+    );
     assert_eq!(
         page.eval("approval().querySelector('div').textContent")
             .await,
@@ -574,7 +579,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         "transcript().includes('echo returned: allowed call') && idle() && !approval()",
     )
     .await;
-    assert_eq!(page.eval("document.title").await, "RAH");
+    assert_eq!(page.eval("document.title").await, title.as_str());
 
     page.send_message("denied call").await;
     page.wait("the second approval card", "shown(approval())")
