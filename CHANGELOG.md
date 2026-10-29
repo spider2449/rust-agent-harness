@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Undo for file changes (ADR 0060). `tools-repo-write` keeps, in memory,
+  each file's content before and after every completed `repo.create-file`,
+  `repo.edit-files`, `repo.patch`, `repo.delete-file` and `repo.move-file`
+  call of a session. `/undo` in the terminal, `/undo` or the **Undo** button
+  in the session header of the Web UI, or `POST /api/sessions/{id}/undo` takes
+  back the newest change, all files or none: when any file differs from what
+  the change left, nothing is written and the change leaves the history (409
+  in the Web API). `/changes` and `GET /api/sessions/{id}/changes` list what
+  can be undone. A formatter's rewrite (`format-on-write`) counts as part of
+  the change. The model is told at the next turn: its input starts with a
+  note naming the restored and removed files. The history is per session,
+  bounded (50 changes, 64 MiB), and forgotten on restart or reconfiguration;
+  `repo.commit` and other tools such as `shell.exec` are not covered.
+- `rah_api::undo` (the `file-undo` service) and `ToolContext.call`, the id of
+  the call a tool runs for. Code that builds a `ToolContext` must set it.
+
 ## v0.45.0 (2026-10-29)
 
 - The Web UI's page title and the `rah-desktop` window title show the

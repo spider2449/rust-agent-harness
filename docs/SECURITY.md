@@ -472,7 +472,7 @@ renames included. A failure after the first write is recorded as an
 `repo.delete-file` and `repo.move-file` (ADR 0055) declare `write`, follow the
 same path rules and take the same per-file locks. They act on regular files
 only: a symbolic link, a directory or a missing path is refused, and a move
-never overwrites. RAH keeps no copy of a deleted file.
+never overwrites.
 
 `repo.commit` (ADR 0055) declares `execute` and exists only when the plugin's
 `commit = { name, email }` is configured. It stages the named files and
@@ -482,6 +482,16 @@ directory or a pattern is refused), so a name cannot widen the commit. The
 repository's hooks run, through the `sandbox` service; that is code the
 repository defines, which is why the call asks at `execute`. The path tools
 refuse anything under `.git`, so they cannot plant a hook.
+
+The undo history (ADR 0060) keeps the content of the files each write call
+changed, per session and in memory only (at most 50 changes per session and
+64 MiB in all), and is never shown to the model. Only a frontend undoes, on
+the user's request, through the `file-undo` service; it is not a tool, so a
+model cannot call it and it does not pass `tool.before_invoke`. An undo
+writes back only paths the write tools validated, takes the same file locks,
+and refuses, writing nothing, when any file differs from what the change
+left. It cannot restore what other tools (`shell.exec`, MCP or process
+plugin tools) changed, and it does not touch Git history.
 
 ## `tools-repo`
 

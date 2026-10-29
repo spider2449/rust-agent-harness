@@ -18,7 +18,9 @@
 //! and the REPL continues. Without a running turn the host exits.
 //!
 //! `/stop`, `/start` and `/restart` manage plugins through the distribution's
-//! `admin` service, when one is mounted.
+//! `admin` service, when one is mounted. `/changes` and `/undo` list and take
+//! back the session's file changes through the `file-undo` service (ADR
+//! 0060); the next turn's input starts with a note telling the model.
 
 use std::{
     collections::BTreeSet,
@@ -37,6 +39,7 @@ use rah_api::{
     host::{ExitRequested, Interrupt},
     session::{SESSION, SessionLog},
     tools::describe_image,
+    undo,
 };
 use rah_protocol::{AgentEvent, PermissionLevel, SessionEntry, SessionId, ToolContent, ToolOutput};
 use serde::Deserialize;
@@ -178,7 +181,7 @@ impl Plugin for CliFrontendPlugin {
 const TURN_COMMANDS: [&str; 2] = ["/call", "/notool"];
 
 /// REPL commands: usage and description, as `/help` lists them.
-const COMMANDS: [(&str, &str); 15] = [
+const COMMANDS: [(&str, &str); 17] = [
     ("/new", "start a new session"),
     ("/sessions", "list sessions"),
     ("/resume <id>", "switch to a session"),
@@ -191,6 +194,14 @@ const COMMANDS: [(&str, &str); 15] = [
         "rename the current session (no title clears it)",
     ),
     ("/history", "show the current session log"),
+    (
+        "/changes",
+        "list the file changes of this session that /undo can take back",
+    ),
+    (
+        "/undo",
+        "undo the newest file change of this session, if no file changed since",
+    ),
     ("/plugins", "show plugin status"),
     ("/stop <plugin>", "stop a plugin, keeping its configuration"),
     ("/start <plugin>", "start a stopped plugin"),
@@ -353,6 +364,27 @@ where
                 }
                 Err(error) => line(&mut out, &format!("error: {error}")).await?,
             },
+            "/changes" => {
+                let changes = undo::changes(kernel, &current);
+                if changes.is_empty() {
+                    line(&mut out, "no file changes to undo in this session").await?;
+                }
+                for change in changes {
+                    line(
+                        &mut out,
+                        &format!("{} {}", change.tool, change.files.join(", ")),
+                    )
+                    .await?;
+                }
+            }
+            "/undo" => {
+                let message = match undo::undo_newest(kernel, &current).await {
+                    None => "error: undo is not available (no `file-undo` service)".to_owned(),
+                    Some(Ok(report)) => report.summary(),
+                    Some(Err(error)) => format!("error: {error}"),
+                };
+                line(&mut out, &message).await?;
+            }
             "/plugins" => {
                 let stopped = kernel
                     .get(ADMIN)
@@ -519,7 +551,8 @@ where
     let (cancel, _running) = terminal.running.begin();
     let mut events = agent_loop.run_turn(TurnRequest {
         session: session.clone(),
-        input: input.to_owned(),
+        // Tells the model about files the user undid since its last turn.
+        input: undo::with_notes(kernel, session, input.to_owned()),
         cancel: cancel.clone(),
     });
     loop {

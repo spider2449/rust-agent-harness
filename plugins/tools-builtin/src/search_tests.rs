@@ -30,6 +30,7 @@ impl Drop for TempDir {
 fn cx() -> ToolContext {
     ToolContext {
         session: SessionId::new(),
+        call: rah_protocol::ToolCallId::new(),
         cancel: CancellationToken::new(),
     }
 }
@@ -215,6 +216,7 @@ async fn a_cancelled_search_stops() {
     cancel.cancel();
     let cx = ToolContext {
         session: SessionId::new(),
+        call: rah_protocol::ToolCallId::new(),
         cancel,
     };
     assert!(matches!(

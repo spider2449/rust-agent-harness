@@ -142,7 +142,9 @@ Implemented:
   (read-only Git tools, requires `sandbox`); `tools-repo-write`
   (`repo.create-file`, `repo.edit-files`, `repo.patch`, `repo.delete-file`,
   `repo.move-file`, declared `write`, and `repo.commit`, declared `execute`
-  and provided only when a commit identity is configured, ADR 0055);
+  and provided only when a commit identity is configured, ADR 0055; it also
+  provides `file-undo`, an in-memory undo history of each session's file
+  changes that the frontends offer as `/undo` and an Undo button, ADR 0060);
   `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-mcp-http` (one Streamable HTTP
   MCP server per instance, ADR 0038); `tools-shell` (opt-in `shell.exec`,

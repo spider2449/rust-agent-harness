@@ -66,6 +66,11 @@
 //!   `POST /api/sessions/{id}/fork {at}`, `PUT /api/sessions/{id}/title
 //!   {title}` (`null` clears it) and `GET /api/sessions/{id}/export?format=md|json`
 //!   (a download).
+//! - `GET /api/sessions/{id}/changes` (`{available, changes: [{tool, files,
+//!   at_ms}]}`, newest first) and `POST /api/sessions/{id}/undo` take back the
+//!   session's file changes through the `file-undo` service (ADR 0060; 404
+//!   with nothing to undo, 409 when a file changed since). The session's next
+//!   turn starts with a note telling the model.
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
 //!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve, always}`.
 //!   Server messages: `{type: "event", session, event}`, `approval_required`,
@@ -95,6 +100,7 @@ mod modes;
 mod panel;
 mod settings;
 mod status;
+mod undo;
 mod web_search;
 mod workspace;
 mod ws;
@@ -318,6 +324,8 @@ fn router(shared: AppState) -> Router {
         .route("/sessions/{id}/fork", post(fork_session))
         .route("/sessions/{id}/title", put(rename_session))
         .route("/sessions/{id}/export", get(export_session))
+        .route("/sessions/{id}/changes", get(undo::changes))
+        .route("/sessions/{id}/undo", post(undo::undo))
         .route("/ws", get(ws::upgrade))
         .layer(middleware::from_fn_with_state(
             shared.clone(),
@@ -437,7 +445,7 @@ fn sessions(shared: &Shared) -> Result<Arc<dyn SessionLog>, ApiError> {
     })
 }
 
-fn session_id(id: &str) -> Result<SessionId, ApiError> {
+pub(crate) fn session_id(id: &str) -> Result<SessionId, ApiError> {
     SessionId::from_str(id).map_err(|_| {
         ApiError(
             StatusCode::BAD_REQUEST,

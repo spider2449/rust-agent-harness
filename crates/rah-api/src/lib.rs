@@ -23,6 +23,7 @@ pub mod scheduler;
 pub mod session;
 pub mod storage;
 pub mod tools;
+pub mod undo;
 
 pub use async_trait::async_trait;
 pub use rah_kernel as kernel;

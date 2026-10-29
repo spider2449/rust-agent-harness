@@ -51,6 +51,7 @@ fn exited(code: i32) -> Result<ExecOutput, ExecError> {
 fn cx() -> ToolContext {
     ToolContext {
         session: SessionId::new(),
+        call: rah_protocol::ToolCallId::new(),
         cancel: CancellationToken::new(),
     }
 }

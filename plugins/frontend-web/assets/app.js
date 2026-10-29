@@ -484,9 +484,51 @@ async function openSession(id) {
   await ensureWorkspace(state.sessions.find((info) => info.id === id));
   await loadSessions();
   await loadTranscript();
+  loadChanges().catch(report);
   $("input").disabled = false;
   $("send").disabled = false;
   $("input").focus();
+}
+
+// ---- Undo (ADR 0060) ------------------------------------------------------
+
+// Shows the Undo button when the session has file changes to take back.
+async function loadChanges() {
+  const session = state.current;
+  const button = $("session-undo");
+  if (!session) {
+    button.hidden = true;
+    return;
+  }
+  const { available, changes } = await api(`/sessions/${session}/changes`);
+  if (session !== state.current) return;
+  const newest = changes[0];
+  button.hidden = !available || !newest;
+  button.textContent = changes.length > 1 ? `Undo (${changes.length})` : "Undo";
+  button.title = newest ? `Undo ${newest.tool}: ${newest.files.join(", ")}` : "";
+}
+
+// Takes back the newest file change; the server refuses when a file changed
+// since. The model hears about it with the next message.
+async function undoLast() {
+  if (state.running) {
+    showNotice("A turn is running: wait for it or cancel it before you undo.");
+    return;
+  }
+  try {
+    const { changes } = await api(`/sessions/${state.current}/changes`);
+    if (!changes.length) {
+      showNotice("There is no file change to undo in this session.");
+      return;
+    }
+    const done = await api(`/sessions/${state.current}/undo`, { method: "POST" });
+    showInfo(`${done.summary}. The model is told with your next message.`);
+  } catch (error) {
+    showNotice(error.message);
+  }
+  reloadFiles().catch(report);
+  if (git.loaded) loadGit();
+  await loadChanges();
 }
 
 async function newSession() {
@@ -627,6 +669,7 @@ function setRunning(running) {
   const was = state.running;
   state.running = running;
   $("send").disabled = running || !state.current;
+  $("session-undo").disabled = running;
   $("cancel").hidden = !running;
   if (running && !was) startBusy();
   if (!running) {
@@ -758,6 +801,7 @@ const SLASH_COMMANDS = [
   { name: "/start", usage: "/start <plugin>", help: "Start a stopped plugin", plugin: (p) => p.state === "stopped" },
   { name: "/restart", usage: "/restart <plugin>", help: "Restart a plugin", plugin: (p) => p.state !== "stopped" && p.kind && !p.locked },
   { name: "/cancel", usage: "/cancel", help: "Cancel the running turn" },
+  { name: "/undo", usage: "/undo", help: "Undo the newest file change of this session" },
   { name: "/help", usage: "/help", help: "List the commands" },
   { name: "/call", usage: "/call <tool> <json>", help: "Run a turn that requests a tool (mock model)", turn: true },
   { name: "/notool", usage: "/notool <text>", help: "Run a turn without tools (mock model)", turn: true },
@@ -926,6 +970,9 @@ async function runSlash(input) {
         if (state.running) send({ type: "cancel" });
         else showNotice("No turn is running.");
         break;
+      case "/undo":
+        await undoLast();
+        break;
       case "/help":
         $("input").value = "/";
         updateSlashMenu();
@@ -1006,6 +1053,7 @@ function onEvent(session, event) {
       loadTranscript().catch((error) => showNotice(error.message));
       refreshStatus();
       reloadFiles().catch(report);
+      loadChanges().catch(report);
       loadSessions()
         .then(() => {
           if (event.type === "completed") awaitTitle();
@@ -2839,6 +2887,7 @@ async function start() {
     if (info) editTitle($("session-title"), info);
   });
   $("session-title").addEventListener("dblclick", () => $("session-rename").click());
+  $("session-undo").addEventListener("click", () => undoLast().catch(report));
   $("session-delete").addEventListener("click", () => {
     const info = currentInfo();
     if (info) deleteSession(info).catch(report);

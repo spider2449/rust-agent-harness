@@ -83,6 +83,7 @@ impl Drop for Repo {
 fn cx() -> ToolContext {
     ToolContext {
         session: SessionId::new(),
+        call: rah_protocol::ToolCallId::new(),
         cancel: CancellationToken::new(),
     }
 }
@@ -567,4 +568,248 @@ async fn commit_refuses_patterns_directories_and_unsafe_input() {
         git(&repo, &["status", "--porcelain"]).contains("?? a.txt"),
         "a refused call stages nothing"
     );
+}
+
+impl Repo {
+    /// The tools and their undo service.
+    async fn with_undo(&self) -> (BTreeMap<String, Arc<dyn Tool>>, Arc<RepoUndo>) {
+        let config = RepoWriteConfig {
+            root: Some(self.0.clone()),
+            ..RepoWriteConfig::default()
+        };
+        let (tools, undo) = build(Arc::new(TestEnv(self.0.clone())), config)
+            .await
+            .unwrap();
+        let tools = tools
+            .into_iter()
+            .map(|tool| (tool.definition().name.to_string(), tool))
+            .collect();
+        (tools, undo)
+    }
+}
+
+fn in_session(session: &SessionId) -> ToolContext {
+    ToolContext {
+        session: session.clone(),
+        ..cx()
+    }
+}
+
+#[tokio::test]
+async fn every_write_tool_can_be_undone_newest_first() {
+    use rah_api::undo::{FileUndo, UndoError};
+
+    let repo = Repo::new("undo");
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    let run = |tool: &str, input: Value| {
+        let tool = tools[tool].clone();
+        let cx = in_session(&session);
+        async move { tool.call(input, cx).await.unwrap() }
+    };
+    run(
+        "repo.edit-files",
+        json!({ "edits": [{ "path": "src/lib.rs", "old": "alpha", "new": "gamma" }] }),
+    )
+    .await;
+    run(
+        "repo.create-file",
+        json!({ "path": "new/notes.md", "content": "hi" }),
+    )
+    .await;
+    run("repo.delete-file", json!({ "path": "crlf.txt" })).await;
+    run(
+        "repo.move-file",
+        json!({ "from": "src/lib.rs", "to": "src/moved.rs" }),
+    )
+    .await;
+    let changes = undo.changes(&session);
+    let tools_in_order: Vec<&str> = changes.iter().map(|change| change.tool.as_str()).collect();
+    assert_eq!(
+        tools_in_order,
+        [
+            "repo.move-file",
+            "repo.delete-file",
+            "repo.create-file",
+            "repo.edit-files"
+        ]
+    );
+    assert_eq!(changes[0].files, ["src/lib.rs", "src/moved.rs"]);
+    assert!(undo.changes(&SessionId::new()).is_empty(), "per session");
+
+    let moved_back = undo.undo_last(&session).await.unwrap();
+    assert_eq!(moved_back.restored, ["src/lib.rs"]);
+    assert_eq!(moved_back.removed, ["src/moved.rs"]);
+    assert!(!repo.0.join("src/moved.rs").exists());
+    undo.undo_last(&session).await.unwrap();
+    assert_eq!(repo.read("crlf.txt"), "one\r\ntwo\r\n", "byte for byte");
+    let created = undo.undo_last(&session).await.unwrap();
+    assert_eq!(created.removed, ["new/notes.md"]);
+    assert!(!repo.0.join("new/notes.md").exists());
+    undo.undo_last(&session).await.unwrap();
+    assert_eq!(repo.read("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n");
+    assert_eq!(
+        undo.undo_last(&session).await.unwrap_err(),
+        UndoError::Nothing
+    );
+
+    // The model hears about each undo once, oldest first.
+    let notes = undo.take_notes(&session);
+    assert_eq!(notes.len(), 4);
+    assert!(notes[0].contains("`repo.move-file`"), "{notes:?}");
+    assert!(notes[3].contains("restored src/lib.rs"), "{notes:?}");
+    assert!(undo.take_notes(&session).is_empty());
+}
+
+#[tokio::test]
+async fn a_file_changed_since_refuses_the_undo_and_drops_only_that_change() {
+    use rah_api::undo::{FileUndo, UndoError};
+
+    let repo = Repo::new("undo-changed");
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    tools["repo.create-file"]
+        .call(
+            json!({ "path": "a.txt", "content": "a" }),
+            in_session(&session),
+        )
+        .await
+        .unwrap();
+    tools["repo.edit-files"]
+        .call(
+            json!({ "edits": [
+                { "path": "src/lib.rs", "old": "beta", "new": "delta" },
+                { "path": "crlf.txt", "old": "two", "new": "three" }
+            ] }),
+            in_session(&session),
+        )
+        .await
+        .unwrap();
+    // Someone else edits one of the files afterwards.
+    std::fs::write(repo.0.join("crlf.txt"), "mine").unwrap();
+    let refused = undo.undo_last(&session).await.unwrap_err();
+    assert_eq!(
+        refused,
+        UndoError::Changed {
+            tool: "repo.edit-files".into(),
+            files: vec!["crlf.txt".into()],
+        }
+    );
+    assert_eq!(repo.read("crlf.txt"), "mine", "nothing is written");
+    assert_eq!(
+        repo.read("src/lib.rs"),
+        "fn alpha() {}\nfn delta() {}\n",
+        "not even the file that still matches"
+    );
+    assert!(undo.take_notes(&session).is_empty());
+    // The older change can still be undone.
+    assert_eq!(undo.changes(&session).len(), 1);
+    undo.undo_last(&session).await.unwrap();
+    assert!(!repo.0.join("a.txt").exists());
+
+    // A file the change created that is gone again also refuses.
+    tools["repo.create-file"]
+        .call(
+            json!({ "path": "b.txt", "content": "b" }),
+            in_session(&session),
+        )
+        .await
+        .unwrap();
+    std::fs::remove_file(repo.0.join("b.txt")).unwrap();
+    assert!(matches!(
+        undo.undo_last(&session).await,
+        Err(UndoError::Changed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_history_follows_a_formatter_that_rewrote_the_file() {
+    use rah_api::undo::{FileUndo, UndoError};
+
+    let repo = Repo::new("undo-refresh");
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    let edit = |old: &'static str, new: &'static str| {
+        let tool = tools["repo.edit-files"].clone();
+        let cx = in_session(&session);
+        async move {
+            let call = cx.call.clone();
+            tool.call(
+                json!({ "edits": [{ "path": "src/lib.rs", "old": old, "new": new }] }),
+                cx,
+            )
+            .await
+            .unwrap();
+            call
+        }
+    };
+    // A formatter rewrites the file after the tool, before the call ends.
+    let call = edit("alpha", "gamma").await;
+    std::fs::write(repo.0.join("src/lib.rs"), "fn gamma() {}\n\nfn beta() {}\n").unwrap();
+    undo.refresh(&call).await;
+    undo.undo_last(&session).await.unwrap();
+    assert_eq!(repo.read("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n");
+
+    // Without the refresh, the formatted file is a change by someone else.
+    edit("beta", "delta").await;
+    std::fs::write(repo.0.join("src/lib.rs"), "formatted").unwrap();
+    assert!(matches!(
+        undo.undo_last(&session).await,
+        Err(UndoError::Changed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_patch_can_be_undone_and_a_large_file_has_no_undo() {
+    use rah_api::undo::FileUndo;
+
+    let repo = Repo::new("undo-patch");
+    git(&repo, &["add", "--", "src/lib.rs"]);
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    let patch = concat!(
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n",
+        "-fn alpha() {}\n+fn omega() {}\n fn beta() {}\n",
+        "--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1 @@\n+added\n"
+    );
+    tools["repo.patch"]
+        .call(json!({ "patch": patch }), in_session(&session))
+        .await
+        .unwrap();
+    assert_eq!(repo.read("added.txt"), "added\n");
+    assert_eq!(undo.changes(&session)[0].files, ["src/lib.rs", "added.txt"]);
+    let report = undo.undo_last(&session).await.unwrap();
+    assert_eq!(report.restored, ["src/lib.rs"]);
+    assert_eq!(report.removed, ["added.txt"]);
+    assert_eq!(repo.read("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n");
+    assert!(!repo.0.join("added.txt").exists());
+
+    // Over `max_file_bytes`: the call works, without an undo.
+    let config = RepoWriteConfig {
+        root: Some(repo.0.clone()),
+        max_file_bytes: Some(4),
+        ..RepoWriteConfig::default()
+    };
+    let (tools, undo) = build(Arc::new(TestEnv(repo.0.clone())), config)
+        .await
+        .unwrap();
+    let delete = tools
+        .iter()
+        .find(|tool| tool.definition().name.as_str() == "repo.delete-file")
+        .unwrap();
+    delete
+        .call(json!({ "path": "crlf.txt" }), in_session(&session))
+        .await
+        .unwrap();
+    assert!(!repo.0.join("crlf.txt").exists());
+    assert!(undo.changes(&session).is_empty());
+}
+
+#[test]
+fn patch_paths_lists_old_and_new_names_of_renames() {
+    assert_eq!(
+        patch_paths("1\t1\tsrc/a.rs\u{0}0\t0\t\u{0}old.txt\u{0}new.txt\u{0}-\t-\tbin.png\u{0}"),
+        ["src/a.rs", "old.txt", "new.txt", "bin.png"]
+    );
+    assert!(patch_paths("").is_empty());
 }

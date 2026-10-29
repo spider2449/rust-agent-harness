@@ -35,22 +35,44 @@
 //! Configuration: `{ "root": ".", "cwd": "<sandbox-relative repository
 //! directory>", "git": "git", "max_file_bytes": 1048576, "timeout_ms": 30000 }`.
 //! `repo.patch` refuses to run unless Git's top level for `cwd` is `root`.
+//!
+//! The plugin also provides `file-undo` (ADR 0060): it keeps, in memory, the
+//! content of each file before and after every completed write call of a
+//! session (not `repo.commit`), and the user can undo the newest change
+//! through a frontend while every file is still what the change left. A
+//! `tool.after_invoke` handler that runs after the others reads the files
+//! again, so a formatter's rewrite is part of the change. A file larger than
+//! `max_file_bytes` or that is not a regular file leaves its call without an
+//! undo. The history is forgotten when the plugin stops or is reconfigured.
 
 mod fsops;
 mod locks;
+mod undo;
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
+    hooks::ToolAfterInvoke,
     sandbox::{ExecEnv, ExecError, OutputLimits, ProgramSpec, SANDBOX},
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
+    undo::{FILE_UNDO, FILE_UNDO_SERVICE},
 };
-use rah_protocol::{PermissionLevel, ToolContent, ToolDefinition, ToolName, ToolOutput};
+use rah_protocol::{
+    PermissionLevel, ToolContent, ToolDefinition, ToolEffect, ToolName, ToolOutput,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::fsops::Root;
+pub use crate::undo::RepoUndo;
+use crate::{
+    fsops::Root,
+    undo::{Call, FileState, read_state},
+};
+
+/// Runs after every other `tool.after_invoke` handler (`format-on-write` is
+/// -5, `lsp-diagnostics` -10), so the undo history sees the final files.
+const REFRESH_PRIORITY: i32 = -100;
 
 const MAX_EDITS: usize = 32;
 const MAX_PATCH_BYTES: usize = 1024 * 1024;
@@ -66,7 +88,7 @@ impl RepoWriteToolsPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
             manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
-                .provides([TOOLS_SERVICE])
+                .provides([TOOLS_SERVICE, FILE_UNDO_SERVICE])
                 .requires(["sandbox"]),
         }
     }
@@ -124,8 +146,28 @@ impl Plugin for RepoWriteToolsPlugin {
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let config: RepoWriteConfig = rah_api::config::parse(scope.config())?;
         let sandbox = scope.inject(SANDBOX)?;
-        provide_tools(scope, write_tools(sandbox, config).await?)?;
+        let (tools, undo) = build(sandbox, config).await?;
+        provide_tools(scope, tools)?;
+        scope.provide(FILE_UNDO, undo.clone())?;
+        scope.hook_waterfall::<ToolAfterInvoke, _, _>(REFRESH_PRIORITY, move |completion| {
+            let undo = undo.clone();
+            async move {
+                if completion.effect == ToolEffect::Completed {
+                    undo.refresh(&completion.request.call.id).await;
+                }
+                completion
+            }
+        });
         Ok(())
+    }
+}
+
+/// The call a tool's write belongs to, for the undo history.
+fn call<'a>(cx: &'a ToolContext, tool: &'static str) -> Call<'a> {
+    Call {
+        session: &cx.session,
+        id: &cx.call,
+        tool,
     }
 }
 
@@ -135,6 +177,14 @@ pub async fn write_tools(
     sandbox: Arc<dyn ExecEnv>,
     config: RepoWriteConfig,
 ) -> Result<Vec<Arc<dyn Tool>>, String> {
+    Ok(build(sandbox, config).await?.0)
+}
+
+/// Builds the tools and the `file-undo` service that undoes their changes.
+pub async fn build(
+    sandbox: Arc<dyn ExecEnv>,
+    config: RepoWriteConfig,
+) -> Result<(Vec<Arc<dyn Tool>>, Arc<RepoUndo>), String> {
     if let Some(author) = &config.commit {
         author.check()?;
     }
@@ -146,7 +196,9 @@ pub async fn write_tools(
         path: root,
         max_file_bytes: config.max_file_bytes.unwrap_or(1024 * 1024).max(1),
         locks: Default::default(),
+        history: Default::default(),
     });
+    let undo = Arc::new(RepoUndo(root.clone()));
     let git = Arc::new(Git {
         sandbox,
         program: config.git.unwrap_or_else(|| "git".into()),
@@ -165,7 +217,7 @@ pub async fn write_tools(
     if git.author.is_some() {
         tools.push(Arc::new(Commit(git)));
     }
-    Ok(tools)
+    Ok((tools, undo))
 }
 
 fn definition(name: &str, description: &str, input_schema: Value) -> ToolDefinition {
@@ -218,7 +270,7 @@ impl Tool for CreateFile {
         )
     }
 
-    async fn call(&self, input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, input: Value, cx: ToolContext) -> Result<ToolOutput, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -226,7 +278,9 @@ impl Tool for CreateFile {
             content: String,
         }
         let input: Input = parse(input)?;
-        self.0.create(&input.path, &input.content).await?;
+        self.0
+            .create(&call(&cx, "repo.create-file"), &input.path, &input.content)
+            .await?;
         Ok(done(format!(
             "created {} ({} bytes)",
             input.path,
@@ -270,7 +324,7 @@ impl Tool for EditFiles {
         )
     }
 
-    async fn call(&self, input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, input: Value, cx: ToolContext) -> Result<ToolOutput, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -282,7 +336,10 @@ impl Tool for EditFiles {
                 "between 1 and {MAX_EDITS} edits are allowed"
             )));
         }
-        let changed = self.0.edit(input.edits).await?;
+        let changed = self
+            .0
+            .edit(&call(&cx, "repo.edit-files"), input.edits)
+            .await?;
         Ok(done(format!("edited {}", changed.join(", "))))
     }
 }
@@ -295,8 +352,7 @@ impl Tool for DeleteFile {
         definition(
             "repo.delete-file",
             "Deletes one regular file at a repository-relative path. It does not delete \
-             directories or symbolic links. RAH keeps no copy; a file Git tracks can be restored \
-             from Git.",
+             directories or symbolic links.",
             json!({
                 "type": "object",
                 "properties": { "path": { "type": "string", "minLength": 1, "maxLength": 1024 } },
@@ -306,14 +362,16 @@ impl Tool for DeleteFile {
         )
     }
 
-    async fn call(&self, input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, input: Value, cx: ToolContext) -> Result<ToolOutput, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
             path: String,
         }
         let input: Input = parse(input)?;
-        self.0.delete(&input.path).await?;
+        self.0
+            .delete(&call(&cx, "repo.delete-file"), &input.path)
+            .await?;
         Ok(done(format!("deleted {}", input.path)))
     }
 }
@@ -340,7 +398,7 @@ impl Tool for MoveFile {
         )
     }
 
-    async fn call(&self, input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, input: Value, cx: ToolContext) -> Result<ToolOutput, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -348,7 +406,9 @@ impl Tool for MoveFile {
             to: String,
         }
         let input: Input = parse(input)?;
-        self.0.rename(&input.from, &input.to).await?;
+        self.0
+            .rename(&call(&cx, "repo.move-file"), &input.from, &input.to)
+            .await?;
         Ok(done(format!("moved {} to {}", input.from, input.to)))
     }
 }
@@ -494,6 +554,18 @@ impl Tool for Patch {
         {
             return Err(fsops::harness_state(name));
         }
+        // The files as they are, for undo; `None` when one cannot be kept.
+        let mut kept = Some(Vec::new());
+        for path in patch_paths(&listing) {
+            let state = match fsops::validate(&path) {
+                Ok(()) => read_state(&git.root.path.join(&path), git.root.max_file_bytes).await,
+                Err(_) => Err(()),
+            };
+            match (state, kept.as_mut()) {
+                (Ok(before), Some(files)) => files.push((path, before)),
+                _ => kept = None,
+            }
+        }
         let (code, _, stderr) = git
             .run(
                 vec!["apply".into(), "--check".into(), "--".into(), path.clone()],
@@ -513,8 +585,49 @@ impl Tool for Patch {
                 "git apply failed after a clean check: {stderr}"
             )));
         }
+        let mut files = Vec::new();
+        for (path, before) in kept.unwrap_or_default() {
+            let file = git.root.path.join(&path);
+            let Ok(after) = read_state(&file, git.root.max_file_bytes).await else {
+                // A file that grew too large: the patch has no undo.
+                files.clear();
+                break;
+            };
+            files.push(FileState {
+                path,
+                before,
+                after,
+            });
+        }
+        git.root.history.record(&call(&cx, "repo.patch"), files);
         Ok(done("patch applied".into()))
     }
+}
+
+/// The paths `git apply --numstat -z` lists: `added\tdeleted\tpath\0`, or
+/// for a rename `added\tdeleted\t\0old\0new\0`.
+fn patch_paths(listing: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut add = |path: &str| {
+        if !path.is_empty() && !paths.iter().any(|known| known == path) {
+            paths.push(path.to_owned());
+        }
+    };
+    let mut fields = listing.split('\0');
+    while let Some(record) = fields.next() {
+        let mut parts = record.splitn(3, '\t');
+        let (Some(_), Some(_), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if path.is_empty() {
+            for name in fields.by_ref().take(2) {
+                add(name);
+            }
+        } else {
+            add(path);
+        }
+    }
+    paths
 }
 
 pub struct Commit(Arc<Git>);

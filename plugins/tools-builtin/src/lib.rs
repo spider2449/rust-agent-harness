@@ -257,6 +257,7 @@ mod tests {
     fn cx() -> ToolContext {
         ToolContext {
             session: SessionId::new(),
+            call: rah_protocol::ToolCallId::new(),
             cancel: CancellationToken::new(),
         }
     }

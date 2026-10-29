@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rah_kernel::{KernelHandle, Scope, ScopeError, ServiceKey};
 use rah_protocol::{
-    IMAGE_MEDIA_TYPES, ImageContent, PermissionLevel, SessionId, ToolCall, ToolContent,
+    IMAGE_MEDIA_TYPES, ImageContent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent,
     ToolDefinition, ToolEffect, ToolName, ToolOutput,
 };
 use serde_json::Value;
@@ -34,6 +34,8 @@ pub trait Tool: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub session: SessionId,
+    /// The call's id, as in the `tool.after_invoke` completion (ADR 0060).
+    pub call: ToolCallId,
     pub cancel: CancellationToken,
 }
 
@@ -263,6 +265,7 @@ impl ToolInvoker {
         );
         let cx = ToolContext {
             session,
+            call: call.id.clone(),
             cancel: cancel.clone(),
         };
         let result = tokio::select! {

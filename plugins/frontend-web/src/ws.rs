@@ -14,6 +14,7 @@ use futures::StreamExt;
 use rah_api::{
     CancellationToken,
     agent_loop::{LOOP, TurnRequest, TurnStream},
+    undo,
 };
 use rah_protocol::{AgentEvent, SessionId};
 use serde::Deserialize;
@@ -144,7 +145,8 @@ fn handle(
             let cancel = shared.stop.child_token();
             let events = agent_loop.run_turn(TurnRequest {
                 session: session.clone(),
-                input,
+                // Tells the model about files the user undid (ADR 0060).
+                input: undo::with_notes(&shared.kernel, &session, input),
                 cancel: cancel.clone(),
             });
             *running = Some(Running {

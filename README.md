@@ -58,7 +58,9 @@ directory), `sandbox-process` and `tools-repo` (read-only `repo.status`,
 `repo.diff`, `repo.list` and `repo.search` over Git), `tools-repo-write`
 (`repo.create-file`, `repo.edit-files`, `repo.patch`, `repo.delete-file` and
 `repo.move-file`, each asking for approval; `repo.commit` too, once you set
-`commit = { name = "...", email = "..." }` for the plugin, ADR 0055), `context-default` (a
+`commit = { name = "...", email = "..." }` for the plugin, ADR 0055; `/undo` takes back
+the newest file change of the session while the files are still what it
+left, and `/changes` lists them, ADR 0060), `context-default` (a
 sliding history window and memory notes kept per workspace in
 `~/.rah/memory/<folder>-<hash>.md`, which the model can extend with
 `memory.remember` after you approve), `tool-input-repair` (converts arguments such as `"20"` for an

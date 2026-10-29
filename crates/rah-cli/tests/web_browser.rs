@@ -754,7 +754,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     assert_eq!(
         page.eval(&format!("{menu}.length")).await,
-        9,
+        10,
         "{}",
         page.eval(menu).await
     );
@@ -1508,6 +1508,54 @@ async fn a_workspace_of_several_folders_is_shown_in_the_browser() {
         "api('/preferences').then((p) => p.recent_workspaces?.[0]?.folders?.length === 2)",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_change_is_undone_from_the_session_header() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-undo").await;
+    let file = web.dir.workspace().join("undo.txt");
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-undo");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "the new session",
+        "sessionItems().length === 1 && !byId('input').disabled && !shown(byId('session-undo'))",
+    )
+    .await;
+    page.send_message(r#"/call repo.create-file {"path":"undo.txt","content":"u"}"#)
+        .await;
+    page.wait("the approval card", "shown(approval())").await;
+    page.eval("answer('Allow'); true").await;
+    page.wait(
+        "the Undo button",
+        "idle() && shown(byId('session-undo')) && byId('session-undo').title === 'Undo repo.create-file: undo.txt'",
+    )
+    .await;
+    assert!(file.exists());
+    page.screenshot("undo-button").await;
+    page.eval("byId('session-undo').click(); true").await;
+    page.wait(
+        "the undo",
+        "!shown(byId('session-undo')) && notices.some((n) => n.startsWith('undid `repo.create-file`: removed undo.txt'))",
+    )
+    .await;
+    assert!(!file.exists());
+    // `/undo` with nothing left says so.
+    page.send_message("/undo").await;
+    page.wait(
+        "the refusal",
+        "notices.includes('There is no file change to undo in this session.')",
+    )
+    .await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
 }
 
 /// Standard base64 (as DevTools returns screenshots), without a dependency.

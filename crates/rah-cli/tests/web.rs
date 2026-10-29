@@ -337,6 +337,55 @@ async fn always_allows_a_tool_for_that_session_only() {
 }
 
 #[tokio::test]
+async fn file_changes_are_undone_over_http_and_the_model_is_told() {
+    let web = start("web-undo", |distribution| {
+        distribution.set_config("policy-authority", "approve", json!(["repo.create-file"]));
+    })
+    .await;
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let changes = format!("/api/sessions/{session}/changes");
+    let undo = format!("/api/sessions/{session}/undo");
+    let file = web.dir.workspace().join("a.txt");
+    let mut socket = web.socket().await;
+    let create = r#"/call repo.create-file {"path":"a.txt","content":"a"}"#;
+    let (end, _) = run_turn(&mut socket, &session, create, None).await;
+    assert_eq!(end, "completed");
+    assert!(file.exists());
+
+    let listed = web.json(web.get(&changes)).await;
+    assert_eq!(listed["available"], true);
+    assert_eq!(listed["changes"][0]["tool"], "repo.create-file");
+    assert_eq!(listed["changes"][0]["files"], json!(["a.txt"]));
+    let done = web.json(web.post(&undo)).await;
+    assert_eq!(done["removed"], json!(["a.txt"]));
+    assert_eq!(done["remaining"], 0);
+    assert!(!file.exists());
+    let nothing = web.post(&undo).send().await.unwrap();
+    assert_eq!(nothing.status(), 404);
+
+    // The next turn's input starts with the note (the mock echoes it).
+    let (_, text) = run_turn(&mut socket, &session, "what now", None).await;
+    assert!(
+        text.contains("[RAH: the user undid your `repo.create-file` call (removed a.txt)."),
+        "{text}"
+    );
+    assert!(text.ends_with("what now"), "{text}");
+    let (_, text) = run_turn(&mut socket, &session, "again", None).await;
+    assert!(!text.contains("[RAH:"), "told once: {text}");
+
+    // A file changed since is not touched.
+    run_turn(&mut socket, &session, create, None).await;
+    std::fs::write(&file, "mine").unwrap();
+    let refused = web.post(&undo).send().await.unwrap();
+    assert_eq!(refused.status(), 409);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
+    assert_eq!(web.json(web.get(&changes)).await["changes"], json!([]));
+}
+
+#[tokio::test]
 async fn unmounting_the_frontend_closes_its_sockets() {
     let web = start("web-unmount", |_| {}).await;
     let mut socket = web.socket().await;

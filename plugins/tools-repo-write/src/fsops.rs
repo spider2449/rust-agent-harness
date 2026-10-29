@@ -5,10 +5,14 @@ use std::path::{Path, PathBuf};
 use rah_api::tools::ToolError;
 use serde::Deserialize;
 
+use crate::undo::{Call, FileState, History, read_state};
+
 pub(crate) struct Root {
     pub path: PathBuf,
     pub max_file_bytes: usize,
     pub locks: crate::locks::Locks,
+    /// What the write calls changed, for undo (ADR 0060).
+    pub history: History,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +112,12 @@ impl Root {
         Ok(resolved)
     }
 
-    pub async fn create(&self, path: &str, content: &str) -> Result<(), ToolError> {
+    pub async fn create(
+        &self,
+        call: &Call<'_>,
+        path: &str,
+        content: &str,
+    ) -> Result<(), ToolError> {
         validate(path)?;
         if content.len() > self.max_file_bytes {
             return Err(invalid(format!(
@@ -136,6 +145,38 @@ impl Root {
         }
         .await;
         written.map_err(|error| ToolError::Execution(format!("cannot write `{path}`: {error}")))?;
+        self.history.record(
+            call,
+            vec![FileState {
+                path: path.to_owned(),
+                before: None,
+                after: Some(content.as_bytes().to_vec()),
+            }],
+        );
+        Ok(())
+    }
+
+    /// Writes `content` back to `target` for an undo, through a temporary
+    /// file and a rename, creating missing directories above it.
+    pub async fn write_back(
+        &self,
+        target: &Path,
+        shown: &str,
+        content: &[u8],
+    ) -> Result<(), String> {
+        self.make_parents(target, shown)
+            .await
+            .map_err(|error| error.to_string())?;
+        let temporary = temporary_beside(target);
+        let result = async {
+            tokio::fs::write(&temporary, content).await?;
+            tokio::fs::rename(&temporary, target).await
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(format!("cannot write `{shown}`: {error}"));
+        }
         Ok(())
     }
 
@@ -182,21 +223,34 @@ impl Root {
     }
 
     /// Deletes one regular file.
-    pub async fn delete(&self, path: &str) -> Result<(), ToolError> {
+    pub async fn delete(&self, call: &Call<'_>, path: &str) -> Result<(), ToolError> {
         let resolved = self.plain_file(path).await?;
         let _writing = self.locks.files(std::slice::from_ref(&resolved)).await;
         // The file may have changed while the lock was awaited.
         if self.plain_file(path).await? != resolved {
             return Err(invalid(format!("`{path}` changed while it was locked")));
         }
+        // A file too large to keep is deleted without an undo.
+        let kept = read_state(&resolved, self.max_file_bytes).await;
         tokio::fs::remove_file(&resolved)
             .await
-            .map_err(|error| ToolError::NotStarted(format!("cannot delete `{path}`: {error}")))
+            .map_err(|error| ToolError::NotStarted(format!("cannot delete `{path}`: {error}")))?;
+        if let Ok(Some(content)) = kept {
+            self.history.record(
+                call,
+                vec![FileState {
+                    path: path.to_owned(),
+                    before: Some(content),
+                    after: None,
+                }],
+            );
+        }
+        Ok(())
     }
 
     /// Renames one regular file to a path that does not exist yet, creating
     /// the missing directories above it.
-    pub async fn rename(&self, from: &str, to: &str) -> Result<(), ToolError> {
+    pub async fn rename(&self, call: &Call<'_>, from: &str, to: &str) -> Result<(), ToolError> {
         let source = self.plain_file(from).await?;
         validate(to)?;
         if from == to {
@@ -211,13 +265,32 @@ impl Root {
             return Err(invalid(format!("`{to}` already exists")));
         }
         self.make_parents(&target, to).await?;
+        let kept = read_state(&source, self.max_file_bytes).await;
         tokio::fs::rename(&source, &target).await.map_err(|error| {
             ToolError::NotStarted(format!("cannot move `{from}` to `{to}`: {error}"))
-        })
+        })?;
+        if let Ok(Some(content)) = kept {
+            self.history.record(
+                call,
+                vec![
+                    FileState {
+                        path: from.to_owned(),
+                        before: Some(content.clone()),
+                        after: None,
+                    },
+                    FileState {
+                        path: to.to_owned(),
+                        before: None,
+                        after: Some(content),
+                    },
+                ],
+            );
+        }
+        Ok(())
     }
 
     /// Checks every edit, then writes every changed file. Returns the paths.
-    pub async fn edit(&self, edits: Vec<Edit>) -> Result<Vec<String>, ToolError> {
+    pub async fn edit(&self, call: &Call<'_>, edits: Vec<Edit>) -> Result<Vec<String>, ToolError> {
         // Resolve every file first, then hold their locks while they are read,
         // edited and written, so a concurrent edit is not overwritten.
         let mut resolved_paths: Vec<(String, PathBuf)> = Vec::new();
@@ -231,8 +304,10 @@ impl Root {
             .map(|(_, resolved)| resolved.clone())
             .collect();
         let _writing = self.locks.files(&locked).await;
-        // path -> (resolved, new content), in first-seen order.
+        // path -> (resolved, new content), in first-seen order, and the
+        // content before, for undo.
         let mut files: Vec<(String, PathBuf, String)> = Vec::new();
+        let mut originals: Vec<String> = Vec::new();
         for edit in edits {
             let index = match files.iter().position(|(path, ..)| *path == edit.path) {
                 Some(index) => index,
@@ -247,6 +322,7 @@ impl Root {
                         .map_err(|error| invalid(format!("`{}`: {error}", edit.path)))?;
                     let text = String::from_utf8(bytes)
                         .map_err(|_| invalid(format!("`{}` is not UTF-8 text", edit.path)))?;
+                    originals.push(text.clone());
                     files.push((edit.path.clone(), resolved, text));
                     files.len() - 1
                 }
@@ -262,14 +338,7 @@ impl Root {
             }
         }
         for (written, (path, resolved, text)) in files.iter().enumerate() {
-            let temporary = resolved.with_file_name(format!(
-                ".{}.rah-{}",
-                resolved
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file"),
-                uuid::Uuid::new_v4().simple()
-            ));
+            let temporary = temporary_beside(resolved);
             let result = async {
                 tokio::fs::write(&temporary, text.as_bytes()).await?;
                 tokio::fs::rename(&temporary, resolved).await
@@ -285,6 +354,24 @@ impl Root {
                 });
             }
         }
+        // A file too large to keep leaves the call without an undo.
+        if originals
+            .iter()
+            .all(|text| text.len() <= self.max_file_bytes)
+        {
+            self.history.record(
+                call,
+                files
+                    .iter()
+                    .zip(originals)
+                    .map(|((path, _, text), original)| FileState {
+                        path: path.clone(),
+                        before: Some(original.into_bytes()),
+                        after: Some(text.as_bytes().to_vec()),
+                    })
+                    .collect(),
+            );
+        }
         Ok(files.into_iter().map(|(path, ..)| path).collect())
     }
 
@@ -297,6 +384,15 @@ impl Root {
             .map_err(|error| ToolError::NotStarted(format!("cannot stage the patch: {error}")))?;
         Ok(Scratch(path))
     }
+}
+
+/// A new temporary file name in the directory of `file`.
+fn temporary_beside(file: &Path) -> PathBuf {
+    file.with_file_name(format!(
+        ".{}.rah-{}",
+        file.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 /// Replaces the single occurrence of `old`. Matches CRLF files when `old`

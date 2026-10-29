@@ -70,6 +70,10 @@
 - 現象：寫入工具改檔後沒有還原機制（未在測試中確認）。
 - 限制：不能暗示可以回滾外部效果（AGENTS.md）；只能還原 RAH 自己寫過、且內容仍與寫入結果一致的檔案。
 - 先決：先寫設計說明與 ADR，再決定是 plugin 還是 hook。
+- 結果（2026-10-29，完成，ADR 0060）：
+  - 設計：不能另做 plugin 掛在 `tool.before_invoke` 取「寫入前」的內容（那是 policy 的 bail 鏈，掛上去會讓 `is_guarded` 變真，且 policy 回 `Allow` 後後面的 handler 不會跑）；`tool.after_invoke` 又太晚。所以由 `tools-repo-write` 自己在檔案鎖內記錄每個寫入呼叫每個檔案的前後內容（缺檔記為缺檔），提供新服務 `file-undo`（`rah_api::undo`）。`ToolContext` 新增 `call`，讓同一 plugin 在 `tool.after_invoke`（優先序 -100，最後跑）依呼叫 id 重讀檔案，`format-on-write` 改寫的結果也算在這次變更裡。
+  - 行為：只有使用者能還原（CLI `/undo`、`/changes`；Web 的 Undo 按鈕、`/undo`、`GET/POST /api/sessions/{id}/changes|undo`），不是工具，模型叫不到。每次還原 session 最新的一筆，全部或全不：任何檔案與變更留下的不同就什麼都不寫、該筆移出紀錄（Web 409），較舊的仍可還原。下一輪的輸入前面會加一段給模型的說明，所以寫進 session log、replay 一致。紀錄在記憶體，每 session 50 筆、總共 64 MiB，重啟或重新設定就忘；`repo.commit` 與 `shell.exec` 等其他工具不涵蓋。
+  - 驗證：`tools-repo-write` 新增 6 個測試（各寫入工具依新到舊還原、被改過就拒絕且只丟該筆、formatter 改寫後仍可還原、patch 還原與過大檔案不記錄、numstat 解析、上限）；`rah-api` 2 個；`end_to_end.rs`（CLI）、`web.rs`（HTTP 與 WebSocket，含 404、409 與模型收到說明）、`web_browser.rs`（Edge 實測按鈕）各 1 個。用 llama.cpp 實測 CLI 與 `--web`：模型改檔、使用者還原、下一輪模型重讀並回報原內容，session log 的輸入前面有說明。
 
 ## 8. 補驗證（檢查時沒測到）
 
@@ -84,6 +88,13 @@
   - 環境因素（非缺陷）：沙箱清空環境變數，這台機器的 `rustup` 在 `F:\rust`（自訂 `RUSTUP_HOME`、`CARGO_HOME`），所以 `rustfmt` 卡住；要在沙箱設定 `inherit_env_extra`。README 已補說明。
   - `lsp` 的正向路徑沒能驗證：這台機器的 stable 工具鏈沒有安裝 `rust-analyzer` 元件（明確設定伺服器後看到 `Unknown binary 'rust-analyzer.exe'`）。錯誤處理本身正確。依 AGENTS.md 不替使用者安裝系統相依。
   - 還沒驗證：`plan`、`compact`、`telemetry` 的實際執行，`--web` 搭配 llama.cpp，`rah-desktop`，WASM，`sandbox-os`。
+- 結果（2026-10-29，完成；llama.cpp `ornith-1.5-35b`）：
+  - `plan`、`telemetry`：三輪對話答案正確；telemetry 寫出 3 筆 turn、10 筆 model request、1 筆 tool。觀察（非缺陷）：`loop-plan` 每一步都記一則 assistant 訊息，這個模型在每步都重複同一個答案，CLI 因此把第一題的答案印了四次；先記下，有需要再調整 loop-plan 的步驟輸出。
+  - `compact`：`trigger_chars = 1500` 時歷史沒超過門檻（約 1000 字元）所以沒觸發；改為 300 後在 `storage` 寫出兩份摘要，第三輪靠摘要正確答出使用者名字與第一個數值。
+  - `--web`：用 WebSocket 跑一輪改檔（核准由 socket 回答），再呼叫 undo 路由（200，然後 404），下一輪輸入帶到說明，模型重讀並引用原文。
+  - `sandbox-os`（Windows Low integrity）搭配 `shell.exec`：`git --version` 正常；`cmd /c echo` 寫在 root 內成功，寫到 root 外得到 `Access is denied.`，檔案沒有產生。
+  - `rah-desktop`：以 default 預設啟動，視窗標題 `RAH 0.45.0`，內嵌的 `frontend-web` 在 loopback 監聽，stderr 無錯誤；沒有在原生視窗裡實際跑一輪（它內嵌的就是上面驗證過的 Web UI）。
+  - WASM：樹內沒有現成的 `.wasm` 範例模組（host 的測試自行產生），沒做實機驗證；單元與整合測試涵蓋。
 
 ## 9. 預設格式化程式與語言伺服器的失敗看不見（新增，建議）
 
@@ -103,10 +114,10 @@
 | 2 輸出順序 | 實測缺口 | 否 | 完成 |
 | 3 非互動核准選項 | 實測缺口 | 是（0054） | 完成 |
 | 4 推理內容回送 | 文件缺口 | 是（若做） | 已量測，暫不實作（等實際失敗） |
-| 5 刪除、改名、commit | 已確認 | 是（0055） | 完成（未 commit） |
-| 6 session 內一律允許 | 已確認 | 是（0056） | 完成（未 commit） |
-| 7 檔案還原 | 推測 | 是 | 未開始（先設計） |
-| 8 補驗證 | 驗證 | 否 | 進行中（format、lsp 已驗證並修一個缺陷） |
-| 9 預設程式失敗看不見 | 建議 | 是（0057） | 完成（未 commit） |
+| 5 刪除、改名、commit | 已確認 | 是（0055） | 完成（v0.45.0） |
+| 6 session 內一律允許 | 已確認 | 是（0056） | 完成（v0.45.0） |
+| 7 檔案還原 | 推測 | 是（0060） | 完成 |
+| 8 補驗證 | 驗證 | 否 | 完成（WASM 無範例模組，未實機驗證；lsp 正向路徑缺 rust-analyzer） |
+| 9 預設程式失敗看不見 | 建議 | 是（0057） | 完成（v0.45.0） |
 
 建議順序：1、2 先做（小、可獨立測試、不碰架構）；8 可穿插進行；3、6 共用核准路徑，一起設計；4、5、7 等量測或決定後再動。

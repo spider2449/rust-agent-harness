@@ -499,3 +499,49 @@ async fn data_paths_resolve_against_the_data_home_also_for_admin_mounts() {
     );
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_cli_lists_and_undoes_the_file_changes_of_its_session() {
+    let dir = TempDir::new("cli-undo");
+    let mut distribution = headless(&dir);
+    distribution.set_config("policy-authority", "approve", json!(["repo.create-file"]));
+    let kernel = kernel(&distribution).await;
+    let typed = concat!(
+        "/call repo.create-file {\"path\":\"a.txt\",\"content\":\"a\"}\n",
+        "/changes\n/undo\n/undo\n/changes\nwhat now\n/quit\n"
+    );
+    let mut out = Vec::new();
+    let code = run_repl(
+        &kernel.handle(),
+        BufReader::new(typed.as_bytes()),
+        &mut out,
+        ReplOptions::default(),
+        None,
+        RunningTurn::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 0);
+    let shown = String::from_utf8(out).unwrap();
+    assert!(shown.contains("> repo.create-file a.txt\n"), "{shown}");
+    assert!(
+        shown.contains("undid `repo.create-file`: removed a.txt\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("error: there is no file change to undo in this session\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("no file changes to undo in this session\n"),
+        "{shown}"
+    );
+    assert!(!dir.workspace().join("a.txt").exists());
+    // The next turn tells the model (the mock echoes its input).
+    assert!(
+        shown.contains(
+            "echo returned: [RAH: the user undid your `repo.create-file` call (removed a.txt)."
+        ),
+        "{shown}"
+    );
+}
