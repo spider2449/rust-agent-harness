@@ -190,7 +190,9 @@ Implemented:
   runs in a fresh store with a fuel and memory budget. `rah` mounts them with
   `use = "wasm"`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
-  `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`). Every preset
+  `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`); a
+  `rah.toml` with `extends = "<preset>"` lists only its changes to that preset
+  (ADR 0058). Every preset
   except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
   when no `tool.before_invoke` handler is mounted, and aborts the boot when a
   configured `policy-authority` does not become active.

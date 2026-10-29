@@ -123,6 +123,9 @@ fn init_config(args: &Args) -> Result<PathBuf, String> {
          # Without --preset and --config, `rah` runs `rah.toml` in the data directory.\n\
          # Settings saved in the Web UI are kept in `storage` and replace a plugin's\n\
          # configuration from this file at the next start.\n\
+         # This file lists every plugin. To keep only your changes instead, replace\n\
+         # it with `extends = \"{preset}\"` and the plugins you change or add\n\
+         # (see `remove` and `replace` in the README).\n\
          # Opt-in features (see `rah --list-features`) go here, before the first plugin:\n\
          # features = [\"shell=git\", \"web-search\"]\n{text}"
     );

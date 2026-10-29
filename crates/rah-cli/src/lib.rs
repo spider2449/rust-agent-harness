@@ -5,11 +5,13 @@
 
 mod admin;
 mod data;
+mod extend;
 mod features;
 mod help;
 
 mod show;
 
+pub use extend::Extended;
 pub use features::{Applied, FEATURES, Feature, approved_tools, feature, list as list_features};
 pub use show::show_config;
 
@@ -341,11 +343,17 @@ pub struct Distribution {
     /// The features applied to this distribution, for `--show-config`.
     #[serde(skip)]
     pub applied: Vec<Applied>,
+    /// The preset this distribution extends and what the file changed in
+    /// it, when the file has `extends` (ADR 0058), for `--show-config`.
+    #[serde(skip)]
+    pub extended: Option<Extended>,
 }
 
 impl Distribution {
+    /// Parses a distribution file. With `extends = "<preset>"`, the file
+    /// lists only its changes to that preset (ADR 0058).
     pub fn parse(text: &str) -> Result<Self, BootError> {
-        toml::from_str(text).map_err(|error| BootError::Parse(error.to_string()))
+        extend::parse(text)
     }
 
     pub fn preset(name: &str) -> Result<Self, BootError> {

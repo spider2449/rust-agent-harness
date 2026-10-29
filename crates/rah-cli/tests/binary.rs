@@ -333,6 +333,38 @@ fn root_reaches_the_workspace_plugins_that_features_mount() {
 }
 
 #[test]
+fn a_user_file_that_extends_a_preset_runs_with_only_its_changes() {
+    let dir = TempDir::new("bin-extends");
+    let home = dir.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("rah.toml"),
+        "extends = \"dev\"\n\n[[plugin]]\nuse = \"model-mock\"\nconfig = { label = \"mine\" }\n",
+    )
+    .unwrap();
+    let output = rah(&dir)
+        .args(["--prompt", "hello", "--root"])
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("[mine] echo returned: hello"), "{stdout}");
+    // The preset's policy is still there, so the run is guarded.
+    assert!(!stderr.contains("UNGUARDED"), "{stderr}");
+
+    let output = rah(&dir).arg("--show-config").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("extends:   preset `dev`"), "{stdout}");
+    assert!(
+        stdout.contains("model-mock  <- changed by the file"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn show_config_prints_the_plugins_features_and_source() {
     let dir = TempDir::new("bin-show-config");
     let output = rah(&dir)

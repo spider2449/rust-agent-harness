@@ -13,6 +13,12 @@ const WEB_NAMESPACE: &str = "frontend-web";
 /// Describes `distribution`, read from `source`, with its data under `home`.
 pub fn show_config(distribution: &Distribution, source: &str, home: &Path) -> String {
     let mut text = format!("source:    {source}\ndata home: {}\n", home.display());
+    if let Some(extended) = &distribution.extended {
+        text.push_str(&format!("extends:   preset `{}`\n", extended.preset));
+        if !extended.removed.is_empty() {
+            text.push_str(&format!("removed:   {}\n", extended.removed.join(", ")));
+        }
+    }
     if distribution.applied.is_empty() {
         text.push_str("features:  none\n");
     } else {
@@ -31,12 +37,22 @@ pub fn show_config(distribution: &Distribution, source: &str, home: &Path) -> St
         } else {
             format!("{} ({id})", spec.kind)
         };
-        let origin = distribution
+        let feature = distribution
             .applied
             .iter()
             .find(|applied| applied.mounted.as_deref() == Some(spec.kind.as_str()))
-            .map(|applied| format!("  <- feature {}", applied.request))
-            .unwrap_or_default();
+            .map(|applied| format!("  <- feature {}", applied.request));
+        let file = distribution.extended.as_ref().and_then(|extended| {
+            let id = id.as_str().to_owned();
+            if extended.added.contains(&id) {
+                Some("  <- added by the file")
+            } else if extended.changed.contains(&id) {
+                Some("  <- changed by the file")
+            } else {
+                None
+            }
+        });
+        let origin = feature.or(file.map(str::to_owned)).unwrap_or_default();
         text.push_str(&format!("  {name}{origin}\n"));
         if !spec.config.is_null() {
             let mut config = spec.config.to_string();
@@ -94,5 +110,28 @@ mod tests {
             text.contains("settings-model") && !text.contains("preferences"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn shows_what_a_file_changed_in_its_preset() {
+        let distribution = Distribution::parse(
+            "extends = \"dev\"\nremove = [\"skills-fs\"]\n\
+             [[plugin]]\nuse = \"loop-react\"\nconfig = { max_rounds = 4 }\n\
+             [[plugin]]\nuse = \"telemetry-log\"\n",
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("rah-show-extends-{}", std::process::id()));
+        let text = show_config(&distribution, "`rah.toml`", &dir);
+        assert!(text.contains("extends:   preset `dev`"), "{text}");
+        assert!(text.contains("removed:   skills-fs"), "{text}");
+        assert!(
+            text.contains("loop-react  <- changed by the file"),
+            "{text}"
+        );
+        assert!(
+            text.contains("telemetry-log  <- added by the file"),
+            "{text}"
+        );
+        assert!(!text.contains("\n  skills-fs\n"), "{text}");
     }
 }

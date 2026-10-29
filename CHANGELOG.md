@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- A distribution file can extend a preset and list only what differs
+  (ADR 0058): `extends = "default"` at the top, `remove = ["<id>"]` to drop
+  preset plugins, and `[[plugin]]` entries that change a preset plugin in
+  place (its `config` tables merge key by key; `replace = true` starts it
+  over) or add a new one before the frontend. The file keeps following the
+  preset across releases. `rah --show-config` shows the preset, the removed
+  plugins, and which plugins the file changed or added, and `rah --init-config`
+  mentions the short form in its header. Mistakes, such as an unknown id in
+  `remove` or a changed plugin of another kind, are refused before anything
+  is mounted.
+
 - The Web UI supports workspaces of several folders, like a multi-root
   workspace in VS Code. The folder picker (**Open folder or workspace**) can
   open a folder alone, add it to the workspace, or name the workspace, and it

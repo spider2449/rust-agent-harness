@@ -540,7 +540,36 @@ The model plugins are tested against deterministic loopback fixtures.
 calls, reasoning and token usage); the live OpenAI, Anthropic and DeepSeek
 APIs have not been verified.
 
-Compose your own plugins with a distribution file:
+The shortest distribution file extends a preset and lists only what differs
+([ADR 0058](docs/adr/0058-distribution-file-extends-a-preset.md)):
+
+```toml
+# rah.toml
+extends = "default"            # a built-in preset
+remove = ["model-llamacpp"]    # drop preset plugins by instance id
+features = ["web-search"]
+
+[[plugin]]                     # not in the preset: added before the frontend
+use = "model-anthropic"
+config = { model = "claude-opus-5-5" }
+
+[[plugin]]                     # in the preset: changes it in place
+use = "loop-react"
+config = { max_rounds = 8 }
+
+[[plugin]]
+use = "policy-authority"       # tables merge, so the preset's tools stay
+config = { tools = { "shell.exec" = "execute" } }
+```
+
+A changed plugin keeps the preset's configuration except the keys you write:
+tables merge key by key, and a string, number or array replaces the preset's.
+Add `replace = true` to an entry to start that plugin's configuration over. To
+swap a plugin for another kind, `remove` it and add the new one. The file
+follows the preset when a release changes it, and `rah --show-config` shows
+the preset, what was removed, and which plugins the file changed or added.
+
+Or compose every plugin yourself, without `extends`:
 
 ```toml
 # rah.toml — run with: rah --config rah.toml, or save it as ~/.rah/rah.toml
