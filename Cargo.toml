@@ -9,6 +9,7 @@ members = [
     "crates/rah-protocol",
     "plugins/context-compact",
     "plugins/context-default",
+    "plugins/context-instructions",
     "plugins/format-on-write",
     "plugins/frontend-cli",
     "plugins/frontend-web",

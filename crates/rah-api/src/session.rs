@@ -6,6 +6,8 @@ use rah_protocol::{
     ContextItem, SessionEntry, SessionId, SessionInfo, SessionRecord, ToolContent, ToolOutput,
 };
 
+pub mod export;
+
 pub const SESSION: ServiceKey<dyn SessionLog> = ServiceKey::new("session");
 
 #[async_trait]

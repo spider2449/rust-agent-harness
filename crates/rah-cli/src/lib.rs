@@ -30,6 +30,7 @@ pub use data::{DATA_HOME_ENV, default_data_home, resolve_data_paths};
 use rah_api::{Kernel, MountOptions, Plugin, PluginId, PluginStatus, kernel::KernelError};
 use rah_plugin_context_compact::CompactPlugin;
 use rah_plugin_context_default::ContextPlugin;
+use rah_plugin_context_instructions::InstructionsPlugin;
 use rah_plugin_format_on_write::FormatOnWritePlugin;
 use rah_plugin_frontend_cli::CliFrontendPlugin;
 use rah_plugin_frontend_web::WebFrontendPlugin;
@@ -64,9 +65,12 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 31] = [
+    let entries: [(&'static str, Constructor); 32] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
+        ("context-instructions", |id| {
+            Arc::new(InstructionsPlugin::new(id))
+        }),
         ("format-on-write", |id| {
             Arc::new(FormatOnWritePlugin::new(id))
         }),
@@ -124,6 +128,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
     let example = match kind {
         "context-compact" => CompactPlugin::CONFIG_EXAMPLE,
         "context-default" => ContextPlugin::CONFIG_EXAMPLE,
+        "context-instructions" => InstructionsPlugin::CONFIG_EXAMPLE,
         "format-on-write" => FormatOnWritePlugin::CONFIG_EXAMPLE,
         "frontend-cli" => CliFrontendPlugin::CONFIG_EXAMPLE,
         "frontend-web" => WebFrontendPlugin::CONFIG_EXAMPLE,

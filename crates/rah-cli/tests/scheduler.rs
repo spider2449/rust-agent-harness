@@ -155,3 +155,73 @@ async fn jobs_run_in_the_background_and_can_be_cancelled() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_named_subagent_starts_from_its_instructions() {
+    let dir = TempDir::new("scheduler-agents");
+    std::fs::create_dir_all(dir.0.join("agents")).unwrap();
+    std::fs::write(
+        dir.0.join("agents/reviewer.md"),
+        "---\ndescription: Reviews a change.\n---\nCheck the tests first.\n",
+    )
+    .unwrap();
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let definition = rah_api::tools::ToolInvoker::new(handle.clone())
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name.as_str() == "agent.delegate")
+        .unwrap();
+    assert!(
+        definition
+            .description
+            .contains("\n- reviewer: Reviews a change."),
+        "{}",
+        definition.description
+    );
+    assert_eq!(
+        definition.input_schema["properties"]["agent"]["enum"],
+        json!(["reviewer"])
+    );
+
+    let session = new_session(&handle).await;
+    let text = reply(
+        &turn(
+            &handle,
+            &session,
+            r#"/call agent.delegate {"task":"look at main.rs","agent":"reviewer"}"#,
+        )
+        .await,
+    );
+    assert!(text.contains("agent.delegate returned"), "{text}");
+    let sessions = handle.get(rah_api::session::SESSION).unwrap();
+    let child = sessions
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|info| info.id != session)
+        .unwrap();
+    let records = sessions.read(&child.id).await.unwrap();
+    let rah_protocol::SessionEntry::TurnStarted { input, .. } = &records[0].entry else {
+        panic!("{records:?}")
+    };
+    assert_eq!(
+        input,
+        "You are the `reviewer` subagent. Follow these instructions:\n\n\
+         Check the tests first.\n\nYour task:\n\nlook at main.rs"
+    );
+
+    let text = reply(
+        &turn(
+            &handle,
+            &session,
+            r#"/call agent.delegate {"task":"x","agent":"nobody"}"#,
+        )
+        .await,
+    );
+    assert!(
+        text.contains("there is no agent `nobody`; use one of: reviewer"),
+        "{text}"
+    );
+}

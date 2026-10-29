@@ -11,14 +11,17 @@ pub const DATA_HOME_ENV: &str = "RAH_HOME";
 
 /// Data paths of catalog plugins: kind, configuration key and the default
 /// under the data home. A path without a default is opt-in: it is resolved
-/// when set and never added.
-const DATA_PATHS: [(&str, &str, Option<&str>); 6] = [
+/// when set and never added. A key may also hold a list of paths.
+const DATA_PATHS: [(&str, &str, Option<&str>); 9] = [
     ("storage-fs", "dir", Some("storage")),
     ("session-jsonl", "dir", Some("sessions")),
     ("skills-fs", "dir", Some("skills")),
+    ("scheduler-basic", "agents_dir", Some("agents")),
     ("telemetry-log", "dir", Some("telemetry")),
     ("context-default", "memory_dir", None),
     ("context-default", "memory_file", None),
+    ("context-default", "system_file", None),
+    ("context-instructions", "files", None),
 ];
 
 /// The default data home: `RAH_HOME` when set, otherwise `.rah` in the
@@ -35,16 +38,31 @@ pub fn default_data_home() -> Option<PathBuf> {
 
 /// Resolves the data paths of a `kind` plugin's configuration against
 /// `home`: a missing path with a default is added, a relative path is joined
-/// to `home` and an absolute path is kept. Values that are not strings are
-/// left for the plugin to reject.
+/// to `home` and an absolute path is kept, also in a list of paths. Values
+/// that are not strings are left for the plugin to reject.
 pub fn resolve_data_paths(kind: &str, config: &mut Value, home: &Path) {
+    let resolve = |path: &str| {
+        if Path::new(path).is_absolute() {
+            path.to_owned()
+        } else {
+            home.join(path).display().to_string()
+        }
+    };
     for (_, key, default) in DATA_PATHS.iter().filter(|(owner, ..)| *owner == kind) {
-        let path = match config.get(*key) {
-            Some(Value::String(path)) if Path::new(path).is_absolute() => continue,
-            Some(Value::String(path)) => home.join(path),
+        let value = match config.get(*key) {
+            Some(Value::String(path)) => Value::String(resolve(path)),
+            Some(Value::Array(paths)) => Value::Array(
+                paths
+                    .iter()
+                    .map(|path| match path {
+                        Value::String(path) => Value::String(resolve(path)),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            ),
             Some(_) => continue,
             None => match default {
-                Some(default) => home.join(default),
+                Some(default) => Value::String(home.join(default).display().to_string()),
                 None => continue,
             },
         };
@@ -52,7 +70,7 @@ pub fn resolve_data_paths(kind: &str, config: &mut Value, home: &Path) {
             *config = Value::Object(Map::new());
         }
         if let Value::Object(map) = config {
-            map.insert((*key).to_owned(), Value::String(path.display().to_string()));
+            map.insert((*key).to_owned(), value);
         }
     }
 }
@@ -107,6 +125,23 @@ mod tests {
         let mut config = json!({ "memory_dir": "memory" });
         resolve_data_paths("context-default", &mut config, &home());
         assert_eq!(config, json!({ "memory_dir": under_home("memory") }));
+    }
+
+    #[test]
+    fn a_list_of_paths_resolves_each_string() {
+        let absolute = json!(std::env::temp_dir().join("rules.md").display().to_string());
+        let mut config = json!({ "files": ["rules.md", absolute.clone(), 3] });
+        resolve_data_paths("context-instructions", &mut config, &home());
+        assert_eq!(
+            config,
+            json!({ "files": [under_home("rules.md"), absolute, 3] })
+        );
+        let mut config = json!({ "system_file": "harness/system.md" });
+        resolve_data_paths("context-default", &mut config, &home());
+        assert_eq!(
+            config,
+            json!({ "system_file": under_home("harness/system.md") })
+        );
     }
 
     #[test]

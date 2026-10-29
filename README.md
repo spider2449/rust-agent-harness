@@ -68,7 +68,9 @@ integer before the policy sees the call; it is a hook, so it also runs
 without policy in `minimal`), `skills-fs` (skills, shared by all
 workspaces, in
 `~/.rah/skills/<name>/SKILL.md`, listed to the model and loaded on demand with
-`skills.load`), `scheduler-basic` (background jobs, and `agent.delegate` to
+`skills.load`; a skill it has to skip or read differently, such as one with
+an unclosed front matter or a name another skill uses, is reported once on
+standard error or as a Web UI notice), `scheduler-basic` (background jobs, and `agent.delegate` to
 hand a task to a subagent in its own session), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
@@ -76,7 +78,17 @@ hand a task to a subagent in its own session), `model-mock`,
 stops a plugin and keeps its configuration, `/start <plugin>` mounts it again
 and `/restart <plugin>` restarts it. `/` or `/help` lists the commands, and
 Ctrl-C cancels a running turn (with no turn running, it exits). `--prompt <text>` runs one turn and exits, and
-`--session <id>` resumes a session. With `--prompt`, a policy question is
+`--session <id>` resumes a session. `--session <id> --export md|json|trace`
+writes that session to standard output and exits without running a turn;
+`trace` has one tagged line per record (`[USER]`, `[ASSISTANT]`, `[ACTION]`,
+`[OBSERVATION]`, `[OBSERVATION ERROR]`, `[ERROR]`, long text cut with a
+count), for tools that read agent runs. `--prompt <text> --summary <file>`
+also writes a JSON summary of the run, even when the turn fails: `outcome`
+(`completed`, `failed`, `cancelled` or `stopped`), `error`, `wall_ms`,
+`model_requests`, `model_retries`, `usage` (token counts summed over the
+provider's reports; a count no report carried is `null`, not 0) and `tools`
+(`calls`, `errors`, `uncertain` and `unrecorded`: calls with no recorded
+result). With `--prompt`, a policy question is
 answered from standard input (only `y` or `yes` approves, and end of input
 denies; `a` also allows that tool for the rest of the session, as the Web UI's
 "Allow for this session" does, but never a tool that needs `execute`, ADR
@@ -255,6 +267,24 @@ model request, and the session log is never changed:
 [[plugin]]
 use = "context-compact"
 config = { trigger_chars = 60000, keep_chars = 20000 }   # all optional
+```
+
+Instruction files: `--with instructions` mounts `context-instructions` (ADR
+0061), which gives the model the workspace root's `AGENTS.md` on every
+request, so a repository can say how to build and test it. Only the root is
+read, never a parent directory. `names` changes the file names looked for
+(the first that exists is read), and `files` adds your own files, such as
+standing rules or notes on the tools (relative paths are in the data
+directory). The text grants nothing: the policy still decides every tool
+call, and a repository you did not write can use the file to steer the model
+(`docs/SECURITY.md`). `context-default` can read its system prompt from a
+file with `system_file` instead of `system`, so a whole setup can be kept as
+files:
+
+```toml
+[[plugin]]
+use = "context-instructions"
+config = { names = ["AGENTS.md", "CLAUDE.md"], files = ["harness/rules.md"] }   # all optional
 ```
 
 When a provider answers that a request does not fit the model's context window

@@ -55,6 +55,16 @@ struct Args {
     /// Resume this session (frontend-cli).
     #[arg(long)]
     session: Option<String>,
+    /// Write the --session to standard output as `md`, `json` or `trace`
+    /// (one tagged line per record, for tools that read agent runs) and exit
+    /// without running a turn (frontend-cli).
+    #[arg(long, value_name = "FORMAT", requires = "session", conflicts_with_all = ["prompt", "web"])]
+    export: Option<String>,
+    /// With --prompt: write a JSON summary of the run to this file, even when
+    /// the turn fails: how it ended, wall time, model requests, summed token
+    /// usage and the turn's tool calls (frontend-cli).
+    #[arg(long, value_name = "FILE", requires = "prompt")]
+    summary: Option<PathBuf>,
     /// Data directory for sessions, storage, memory, skills and telemetry;
     /// relative data paths in the configuration resolve against it.
     /// Default: RAH_HOME, else `.rah` in the user's home directory.
@@ -93,7 +103,7 @@ struct Args {
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "export", "summary", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
     init_config: bool,
 }
 
@@ -162,6 +172,7 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         eprintln!("rah: using `{}`", path.display());
     }
     let session_dir = args.session_dir.as_deref().map(absolute).transpose()?;
+    let summary = args.summary.as_deref().map(absolute).transpose()?;
     if args.web {
         if args.prompt.is_some() || args.session.is_some() {
             return Err("--web cannot be combined with --prompt or --session".into());
@@ -182,6 +193,16 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
             "frontend-cli",
             "session",
             args.session.clone().map(Value::String),
+        ),
+        (
+            "frontend-cli",
+            "export",
+            args.export.clone().map(Value::String),
+        ),
+        (
+            "frontend-cli",
+            "summary",
+            summary.map(|p| Value::String(p.display().to_string())),
         ),
         (
             "session-jsonl",

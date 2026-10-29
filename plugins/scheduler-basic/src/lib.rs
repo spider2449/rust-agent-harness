@@ -11,13 +11,25 @@
 //!   subagent's own tool calls pass through the policy one by one and are
 //!   recorded, with their effects, in its session; the tool itself declares
 //!   `read`.
+//! - Named subagents: each `<agents_dir>/<name>.md` (front matter `name`,
+//!   `description`, then instructions, as a skill) is offered to the model in
+//!   the description of `agent.delegate`, which then takes an optional
+//!   `agent`. The subagent's session starts with those instructions followed
+//!   by the task. The directory is read when the plugin starts; a file that
+//!   cannot be used is told to the user once with a `HostNotice` (ADR 0057).
+//!   A named subagent has the same tools and the same policy as any other:
+//!   the file grants nothing and cannot narrow the tools.
 //!
 //! Configuration (all optional): `{ "max_depth": 2, "max_concurrent": 2,
-//! "delegate_timeout_secs": 600, "jobs": [{ "input": "...", "delay_secs": 0,
-//! "every_secs": 3600, "session": "<id>" }] }`.
+//! "delegate_timeout_secs": 600, "agents_dir": ".rah/agents", "jobs": [{
+//! "input": "...", "delay_secs": 0, "every_secs": 3600, "session": "<id>" }]
+//! }`.
+
+mod agents;
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -28,6 +40,7 @@ use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
     agent_loop::{LOOP, TurnRequest},
     async_trait,
+    host::NoticeOnce,
     kernel::Spawner,
     scheduler::{JobInfo, JobSpec, JobState, SCHEDULER, Scheduler, SchedulerError},
     session::SESSION,
@@ -70,6 +83,7 @@ struct Config {
     max_depth: Option<usize>,
     max_concurrent: Option<usize>,
     delegate_timeout_secs: Option<u64>,
+    agents_dir: Option<PathBuf>,
     #[serde(default)]
     jobs: Vec<ConfiguredJob>,
 }
@@ -110,8 +124,20 @@ impl Plugin for SchedulerPlugin {
                 .map_err(|error| error.to_string())?;
         }
         scope.provide(SCHEDULER, scheduler as Arc<dyn Scheduler>)?;
+        let agents = match &config.agents_dir {
+            Some(dir) => {
+                let (agents, problems) = agents::read_dir(dir).await;
+                let notices = NoticeOnce::new(scope.kernel(), scope.id().clone());
+                for problem in problems {
+                    notices.emit(&problem, &problem);
+                }
+                agents
+            }
+            None => Vec::new(),
+        };
         let delegate = Delegate {
             kernel: scope.kernel(),
+            agents,
             depths: Mutex::new(HashMap::new()),
             max_depth: config.max_depth.unwrap_or(2),
             timeout: Duration::from_secs(config.delegate_timeout_secs.unwrap_or(600).max(1)),
@@ -317,6 +343,8 @@ impl Scheduler for BasicScheduler {
 /// `agent.delegate {task}`: a subagent turn in a new session.
 struct Delegate {
     kernel: KernelHandle,
+    /// The named subagents, sorted by name.
+    agents: Vec<agents::Agent>,
     /// Delegation depth of the sessions this tool created.
     depths: Mutex<HashMap<SessionId, usize>>,
     max_depth: usize,
@@ -326,15 +354,31 @@ struct Delegate {
 #[async_trait]
 impl Tool for Delegate {
     fn definition(&self) -> ToolDefinition {
+        let mut description = String::from(
+            "Gives a self-contained task to a subagent, which works in its own new session \
+             with the same tools, and returns its final answer. Describe the task completely; \
+             the subagent does not see this conversation.",
+        );
+        let mut properties = json!({ "task": { "type": "string", "minLength": 1 } });
+        if !self.agents.is_empty() {
+            description
+                .push_str(" Set `agent` to start the subagent from one of these instructions:");
+            for agent in &self.agents {
+                description.push_str(&format!("\n- {}: {}", agent.name, agent.description));
+            }
+            let names: Vec<&str> = self
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect();
+            properties["agent"] = json!({ "type": "string", "enum": names });
+        }
         ToolDefinition {
             name: ToolName::new("agent.delegate"),
-            description: "Gives a self-contained task to a subagent, which works in its own new \
-                          session with the same tools, and returns its final answer. Describe \
-                          the task completely; the subagent does not see this conversation."
-                .into(),
+            description,
             input_schema: json!({
                 "type": "object",
-                "properties": { "task": { "type": "string", "minLength": 1 } },
+                "properties": properties,
                 "required": ["task"],
                 "additionalProperties": false
             }),
@@ -349,6 +393,36 @@ impl Tool for Delegate {
             .filter(|task| !task.trim().is_empty())
             .ok_or_else(|| ToolError::InvalidInput("expected a non-empty string `task`".into()))?
             .to_owned();
+        let task = match input.get("agent") {
+            None | Some(Value::Null) => task,
+            Some(Value::String(name)) => {
+                let agent = self
+                    .agents
+                    .iter()
+                    .find(|agent| agent.name == *name)
+                    .ok_or_else(|| {
+                        let known: Vec<&str> = self
+                            .agents
+                            .iter()
+                            .map(|agent| agent.name.as_str())
+                            .collect();
+                        ToolError::InvalidInput(if known.is_empty() {
+                            format!("there is no agent `{name}`; there are no named agents")
+                        } else {
+                            format!(
+                                "there is no agent `{name}`; use one of: {}",
+                                known.join(", ")
+                            )
+                        })
+                    })?;
+                agents::input(agent, &task)
+            }
+            Some(_) => {
+                return Err(ToolError::InvalidInput(
+                    "expected `agent` to be a string".into(),
+                ));
+            }
+        };
         let depth = self
             .depths
             .lock()
@@ -406,6 +480,7 @@ impl SchedulerPlugin {
   "max_depth": 2,
   "max_concurrent": 2,
   "delegate_timeout_secs": 600,
+  "agents_dir": "agents",
   "jobs": [
     {
       "input": "<prompt>",

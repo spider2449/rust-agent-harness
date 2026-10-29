@@ -17,6 +17,15 @@
 //! directory is read on every request, so edits apply immediately. Skills
 //! are text only: they grant no permission and define no executable tools.
 //!
+//! A skill that cannot be used as written is still skipped or read as well
+//! as it can, but the user is told once per problem with a
+//! [`HostNotice`](rah_api::host::HostNotice) (ADR 0057), at start and when a
+//! later read finds it: a directory name that is not a skill name, a
+//! `SKILL.md` that is too large or not UTF-8, front matter without its closing
+//! `---`, a declared name that is not a skill name, a name two skills use, a
+//! skill with no description, and skills beyond `max_skills`. The model is
+//! not told.
+//!
 //! Configuration: `{ "dir": ".rah/skills", "max_skills": 64,
 //! "max_skill_bytes": 65536 }`.
 
@@ -25,6 +34,7 @@ use std::{path::PathBuf, sync::Arc};
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::ModelBeforeRequest,
+    host::NoticeOnce,
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
 };
 use rah_protocol::{
@@ -73,11 +83,15 @@ impl Plugin for SkillsPlugin {
             max_skills: config.max_skills.unwrap_or(64).max(1),
             max_bytes: config.max_skill_bytes.unwrap_or(64 * 1024).max(1),
         });
+        let notices = Arc::new(NoticeOnce::new(scope.kernel(), scope.id().clone()));
+        let (checker, reporter) = (library.clone(), notices.clone());
+        scope.spawn(async move { report(&reporter, checker.scan().await.problems) });
         let lister = library.clone();
         scope.hook_waterfall::<ModelBeforeRequest, _, _>(0, move |mut request| {
-            let lister = lister.clone();
+            let (lister, notices) = (lister.clone(), notices.clone());
             async move {
-                let skills = lister.scan().await;
+                let Scan { skills, problems } = lister.scan().await;
+                report(&notices, problems);
                 if !skills.is_empty() {
                     let at = request
                         .items
@@ -96,6 +110,13 @@ impl Plugin for SkillsPlugin {
         });
         provide_tools(scope, vec![Arc::new(LoadSkill(library))])?;
         Ok(())
+    }
+}
+
+/// Tells the user about each problem once.
+fn report(notices: &NoticeOnce, problems: Vec<String>) {
+    for problem in problems {
+        notices.emit(&problem, &problem);
     }
 }
 
@@ -155,6 +176,21 @@ fn listing(skills: &[Skill]) -> String {
     text
 }
 
+/// Front matter opened by a `---` line and never closed.
+fn unclosed_front_matter(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.lines().next().map(str::trim) == Some("---")
+        && !text.lines().skip(1).any(|line| line.trim() == "---")
+}
+
+/// What one read of the skills directory found.
+#[derive(Debug, Default)]
+struct Scan {
+    skills: Vec<Skill>,
+    /// One line each, for the user.
+    problems: Vec<String>,
+}
+
 struct Library {
     dir: PathBuf,
     max_skills: usize,
@@ -165,33 +201,96 @@ impl Library {
     /// The text of `<dir>/<directory>/SKILL.md`, if it is a bounded regular
     /// file.
     async fn read(&self, directory: &str) -> Option<String> {
-        let path = self.dir.join(directory).join("SKILL.md");
-        let metadata = tokio::fs::metadata(&path).await.ok()?;
-        if !metadata.is_file() || metadata.len() > self.max_bytes {
-            return None;
-        }
-        String::from_utf8(tokio::fs::read(&path).await.ok()?).ok()
+        self.read_checked(directory).await.ok().flatten()
     }
 
-    /// Skills sorted by name; unreadable or invalid ones are skipped.
-    async fn scan(&self) -> Vec<Skill> {
-        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
-            return Vec::new();
+    /// Like [`Library::read`], but a file that exists and cannot be used is
+    /// an error saying why. A directory without `SKILL.md` is `Ok(None)`.
+    async fn read_checked(&self, directory: &str) -> Result<Option<String>, String> {
+        let path = self.dir.join(directory).join("SKILL.md");
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            return Ok(None);
         };
-        let mut skills = Vec::new();
+        let shown = path.display();
+        if !metadata.is_file() {
+            return Err(format!("skill `{shown}` is not a file; it is skipped"));
+        }
+        if metadata.len() > self.max_bytes {
+            return Err(format!(
+                "skill `{shown}` has {} bytes, more than `max_skill_bytes` ({}); \
+                 it is skipped. Shorten it or raise the limit",
+                metadata.len(),
+                self.max_bytes
+            ));
+        }
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("skill `{shown}` cannot be read: {error}"))?;
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| format!("skill `{shown}` is not UTF-8 text; it is skipped"))
+    }
+
+    /// Skills sorted by name, and what made the others unusable or changed
+    /// how they were read. Invalid skills are skipped.
+    async fn scan(&self) -> Scan {
+        let mut scan = Scan::default();
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+            return scan;
+        };
+        let mut directories = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
-            let Some(directory) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
+            match entry.file_name().to_str() {
+                Some(directory) => directories.push(directory.to_owned()),
+                None => scan.problems.push(format!(
+                    "skill directory `{}` has a name that is not UTF-8; it is skipped",
+                    entry.path().display()
+                )),
+            }
+        }
+        // Sorted, so which of two skills with one name wins does not depend
+        // on the file system's order.
+        directories.sort();
+        for directory in directories {
+            let path = self.dir.join(&directory);
+            let text = match self.read_checked(&directory).await {
+                Ok(Some(text)) => text,
+                Ok(None) => continue,
+                Err(problem) => {
+                    scan.problems.push(problem);
+                    continue;
+                }
             };
             if !valid_name(&directory) {
+                scan.problems.push(format!(
+                    "skill directory `{}` is not a skill name (1-64 of a-z, 0-9, `-` and \
+                     `_`); it is skipped. Rename it",
+                    path.display()
+                ));
                 continue;
             }
-            let Some(text) = self.read(&directory).await else {
-                continue;
+            let file = path.join("SKILL.md");
+            if unclosed_front_matter(&text) {
+                scan.problems.push(format!(
+                    "skill `{}` opens front matter with `---` but never closes it, so \
+                     its `name` and `description` are not read. Add the closing `---`",
+                    file.display()
+                ));
+            }
+            let (declared, description, body) = parse(&text);
+            let name = match declared {
+                Some(declared) if valid_name(&declared) => declared,
+                Some(declared) => {
+                    scan.problems.push(format!(
+                        "skill `{}` declares the name `{declared}`, which is not a skill name \
+                         (1-64 of a-z, 0-9, `-` and `_`); it is listed as `{directory}`",
+                        file.display()
+                    ));
+                    directory.clone()
+                }
+                None => directory.clone(),
             };
-            let (name, description, body) = parse(&text);
-            let name = name.filter(|name| valid_name(name)).unwrap_or(directory);
-            let description = description
+            let description: String = description
                 .or_else(|| {
                     body.lines()
                         .map(str::trim)
@@ -204,13 +303,39 @@ impl Library {
                 .chars()
                 .take(MAX_DESCRIPTION_CHARS)
                 .collect();
-            if !skills.iter().any(|skill: &Skill| skill.name == name) {
-                skills.push(Skill { name, description });
+            if description.is_empty() {
+                scan.problems.push(format!(
+                    "skill `{}` has no description, so the model cannot tell when to use \
+                     it. Add a `description` in its front matter",
+                    file.display()
+                ));
             }
+            if scan.skills.iter().any(|skill: &Skill| skill.name == name) {
+                scan.problems.push(format!(
+                    "skill `{}` is named `{name}`, like an earlier skill; it is skipped. \
+                     Give it another name",
+                    file.display()
+                ));
+                continue;
+            }
+            scan.skills.push(Skill { name, description });
         }
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills.truncate(self.max_skills);
-        skills
+        scan.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        if scan.skills.len() > self.max_skills {
+            let left_out: Vec<&str> = scan.skills[self.max_skills..]
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect();
+            scan.problems.push(format!(
+                "`{}` has {} skills, more than `max_skills` ({}); left out: {}",
+                self.dir.display(),
+                scan.skills.len(),
+                self.max_skills,
+                left_out.join(", ")
+            ));
+            scan.skills.truncate(self.max_skills);
+        }
+        scan
     }
 
     /// The body of the skill called `name` (by front matter or directory).

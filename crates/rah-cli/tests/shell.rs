@@ -244,7 +244,14 @@ fn list_features_names_every_feature() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    for name in ["shell", "web-search", "compact", "telemetry", "plan"] {
+    for name in [
+        "shell",
+        "web-search",
+        "compact",
+        "instructions",
+        "telemetry",
+        "plan",
+    ] {
         assert!(stdout.contains(name), "{stdout}");
     }
 }

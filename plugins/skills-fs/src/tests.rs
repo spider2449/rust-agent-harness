@@ -160,3 +160,69 @@ async fn a_missing_directory_adds_nothing() {
         .items;
     assert_eq!(items, request.items);
 }
+
+#[tokio::test]
+async fn skills_that_cannot_be_used_as_written_are_reported_once_each() {
+    use std::sync::Mutex;
+
+    use rah_api::host::HostNotice;
+
+    let dir = library("notices");
+    let skill = |directory: &str, text: &str| {
+        std::fs::create_dir_all(dir.0.join(directory)).unwrap();
+        std::fs::write(dir.0.join(directory).join("SKILL.md"), text).unwrap();
+    };
+    skill("open", "---\nname: open\ndescription: never closed\n");
+    skill("loud", "---\nname: Loud Name\ndescription: d\n---\nbody\n");
+    skill(
+        "twin",
+        "---\nname: commit-message\ndescription: d\n---\nbody\n",
+    );
+    skill("blank", "---\nname: blank\n---\n\n");
+    std::fs::create_dir_all(dir.0.join("binary")).unwrap();
+    std::fs::write(dir.0.join("binary").join("SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
+
+    let kernel = Kernel::new();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    let _guard = kernel
+        .handle()
+        .subscribe(move |notice: &HostNotice| sink.lock().unwrap().push(notice.message.clone()));
+    let config = json!({ "dir": dir.0, "max_skill_bytes": 100, "max_skills": 3 });
+    kernel
+        .mount(
+            Arc::new(SkillsPlugin::new("skills")),
+            MountOptions::with_config(config),
+        )
+        .await
+        .unwrap();
+    // The scan at start runs in the plugin's scope; a request scans again.
+    let request = ModelRequest {
+        items: vec![ContextItem::User { text: "hi".into() }],
+        ..ModelRequest::default()
+    };
+    for _ in 0..2 {
+        kernel
+            .handle()
+            .waterfall::<ModelBeforeRequest>(request.clone())
+            .await
+            .unwrap();
+    }
+
+    let seen = seen.lock().unwrap().clone();
+    let expected = [
+        "Bad Name` is not a skill name",
+        "has 200 bytes, more than `max_skill_bytes` (100)",
+        "is not UTF-8 text",
+        "never closes it",
+        "declares the name `Loud Name`",
+        "is named `commit-message`, like an earlier skill",
+        "has no description",
+        "more than `max_skills` (3); left out:",
+    ];
+    for part in expected {
+        let hits = seen.iter().filter(|message| message.contains(part)).count();
+        assert_eq!(hits, 1, "`{part}` in {seen:#?}");
+    }
+    assert_eq!(seen.len(), expected.len(), "{seen:#?}");
+}

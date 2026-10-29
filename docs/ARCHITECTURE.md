@@ -132,8 +132,13 @@ Implemented:
   memory notes through `model.before_request`, plus `memory.remember`; with
   `memory_dir` one file per workspace, chosen from the sandbox root on every
   request);
+  `context-instructions` (opt-in, ADR 0061: the workspace root's
+  `AGENTS.md` and configured instruction files, read on every request
+  through `model.before_request`; `context-default` can also read its system
+  prompt from `system_file`);
   `skills-fs` (skills listed through `model.before_request`, loaded with
-  `skills.load`); `sandbox-process` (supervised processes, not an OS
+  `skills.load`; problems with a skill are told to the user once as a
+  `HostNotice`); `sandbox-process` (supervised processes, not an OS
   sandbox); `sandbox-os` (opt-in: the same supervision plus, on Linux,
   landlock file confinement and a seccomp network filter, ADR 0042, and on
   Windows a Low integrity token with Low-labeled writable directories,

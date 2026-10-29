@@ -2585,6 +2585,7 @@ dependencies = [
  "rah-api",
  "rah-plugin-context-compact",
  "rah-plugin-context-default",
+ "rah-plugin-context-instructions",
  "rah-plugin-format-on-write",
  "rah-plugin-frontend-cli",
  "rah-plugin-frontend-web",
@@ -2664,6 +2665,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-context-default"
+version = "0.45.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-context-instructions"
 version = "0.45.0"
 dependencies = [
  "rah-api",

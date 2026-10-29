@@ -82,6 +82,106 @@ fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
 }
 
 #[test]
+fn export_writes_only_the_session_and_runs_no_turn() {
+    let dir = TempDir::new("bin-export");
+    let run = |args: &[&str]| {
+        let output = rah(&dir)
+            .args(["--preset", "dev"])
+            .args(args)
+            .arg("--session-dir")
+            .arg(dir.sessions())
+            .arg("--root")
+            .arg(dir.workspace())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, stdout, _) = run(&["--prompt", "hello"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let session = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .unwrap()
+        .to_owned();
+
+    let (code, trace, stderr) = run(&["--session", &session, "--export", "trace"]);
+    assert_eq!(code, Some(0), "{trace}\n{stderr}");
+    let lines: Vec<&str> = trace.lines().collect();
+    assert_eq!(lines.first(), Some(&"[USER] hello"), "{trace}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("[ACTION] echo(")),
+        "{trace}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("[OBSERVATION] ")),
+        "{trace}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("[ASSISTANT] ")),
+        "{trace}"
+    );
+
+    let (code, json, _) = run(&["--session", &session, "--export", "json"]);
+    assert_eq!(code, Some(0), "{json}");
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["session"]["id"], session.as_str());
+    // Exporting ran no turn: the records are those of the one prompt.
+    let (_, again, _) = run(&["--session", &session, "--export", "trace"]);
+    assert_eq!(again, trace);
+
+    let (code, _, stderr) = run(&["--session", &session, "--export", "pdf"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("unknown export format `pdf`"), "{stderr}");
+    let (code, _, stderr) = run(&["--export", "md"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("--session"), "{stderr}");
+}
+
+#[test]
+fn summary_describes_a_prompt_run() {
+    let dir = TempDir::new("bin-summary");
+    let summary = dir.0.join("summary.json");
+    let output = rah(&dir)
+        .args(["--preset", "dev", "--prompt", "hello", "--summary"])
+        .arg(&summary)
+        .arg("--session-dir")
+        .arg(dir.sessions())
+        .arg("--root")
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    let session = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .unwrap();
+    let text = std::fs::read_to_string(&summary).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["session"], session, "{text}");
+    assert_eq!(parsed["outcome"], "completed", "{text}");
+    assert!(parsed["error"].is_null(), "{text}");
+    assert!(parsed["model_requests"].as_u64().unwrap() >= 2, "{text}");
+    assert_eq!(parsed["tools"]["calls"], 1, "{text}");
+    assert_eq!(parsed["tools"]["errors"], 0, "{text}");
+    assert_eq!(parsed["tools"]["unrecorded"], 0, "{text}");
+    assert!(parsed["wall_ms"].is_u64(), "{text}");
+    assert!(parsed["usage"]["reports"].is_u64(), "{text}");
+
+    let output = rah(&dir)
+        .args(["--preset", "dev", "--summary"])
+        .arg(&summary)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--prompt"));
+}
+
+#[test]
 fn minimal_preset_warns_that_it_is_unguarded() {
     let dir = TempDir::new("bin-minimal");
     let output = rah(&dir)

@@ -39,6 +39,10 @@ pub fn fallback(kind: &str) -> Help {
         ],
         "context-default" => &[
             ("system", "System prompt, placed first in every request."),
+            (
+                "system_file",
+                "File holding the system prompt, instead of `system` (relative to the data directory; read at start).",
+            ),
             ("max_items", "Newest history items sent to the model (200)."),
             (
                 "max_chars",
@@ -57,9 +61,31 @@ pub fn fallback(kind: &str) -> Help {
                 "Largest memory read into a request (16384).",
             ),
         ],
+        "context-instructions" => &[
+            (
+                "names",
+                "Instruction file names looked for in the workspace root; the first that exists is read ([\"AGENTS.md\"]).",
+            ),
+            (
+                "files",
+                "More instruction files, such as standing rules (relative to the data directory).",
+            ),
+            (
+                "max_bytes",
+                "Largest part of each file sent to the model (32768).",
+            ),
+        ],
         "frontend-cli" => &[
             ("session", "Session id to resume."),
             ("prompt", "Run this one prompt, then exit."),
+            (
+                "export",
+                "Write `session` as md, json or trace to standard output, then exit.",
+            ),
+            (
+                "summary",
+                "With `prompt`: file for a JSON summary of the run (outcome, time, usage, tool calls).",
+            ),
         ],
         "frontend-web" => &[
             (
@@ -245,6 +271,10 @@ pub fn fallback(kind: &str) -> Help {
             (
                 "delegate_timeout_secs",
                 "Time limit of one `agent.delegate` call (600).",
+            ),
+            (
+                "agents_dir",
+                "Named subagents, one `<name>.md` each, offered by `agent.delegate` (agents, in the data directory; read at start).",
             ),
             (
                 "jobs",

@@ -4,8 +4,16 @@
 //! be swapped while the REPL keeps running. When the REPL ends it emits
 //! [`ExitRequested`](rah_api::host::ExitRequested).
 //!
-//! Configuration: `{ "session": "<id>", "prompt": "<text>" }`. With `session`
-//! the REPL resumes that session; with `prompt` it runs one turn and exits.
+//! Configuration: `{ "session": "<id>", "prompt": "<text>", "export":
+//! "md|json|trace" }`. With `session` the REPL resumes that session; with
+//! `prompt` it runs one turn and exits. `export` (with `session`, without
+//! `prompt`) writes that session to standard output in the format
+//! (see [`rah_api::session::export`]) and exits without running a turn.
+//! `summary` (with `prompt`) names a file the run's JSON summary is written
+//! to, even when the turn fails: how it ended, wall time, model requests and
+//! retries, summed token usage (a count no provider reported is `null`) and
+//! the turn's tool calls with how many failed, are `uncertain` or have no
+//! recorded result.
 //!
 //! The plugin answers `tool.approval`: while a turn runs, a policy `Ask` is
 //! shown on the terminal and approved only by an explicit `y` or `yes`. End
@@ -26,6 +34,7 @@ use std::{
     collections::BTreeSet,
     str::FromStr,
     sync::{Arc, Mutex, PoisonError},
+    time::Instant,
 };
 
 use futures::StreamExt;
@@ -38,12 +47,15 @@ use rah_api::{
     hooks::{ApprovalRequest, ToolApproval},
     host::{ExitRequested, Interrupt},
     kernel::PluginStatusChanged,
-    session::{SESSION, SessionLog},
+    session::{SESSION, SessionLog, export::ExportFormat},
     tools::describe_image,
     undo,
 };
-use rah_protocol::{AgentEvent, PermissionLevel, SessionEntry, SessionId, ToolContent, ToolOutput};
-use serde::Deserialize;
+use rah_protocol::{
+    AgentEvent, ModelUsage, PermissionLevel, SessionEntry, SessionId, SessionRecord, ToolContent,
+    ToolEffect, ToolOutput,
+};
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines},
     sync::{mpsc, oneshot},
@@ -129,6 +141,30 @@ pub struct ReplOptions {
     pub session: Option<String>,
     /// Run this single prompt and exit.
     pub prompt: Option<String>,
+    /// Write `session` in this format (`md`, `json` or `trace`) and exit.
+    pub export: Option<String>,
+    /// With `prompt`: write a JSON summary of the run to this file.
+    pub summary: Option<String>,
+}
+
+impl ReplOptions {
+    /// Checks the options against each other; returns the export format.
+    fn checked(&self) -> Result<Option<ExportFormat>, String> {
+        if self.summary.is_some() && self.prompt.is_none() {
+            return Err("`summary` needs a `prompt` to summarize".into());
+        }
+        let Some(name) = &self.export else {
+            return Ok(None);
+        };
+        let format = name.parse().map_err(|error| format!("{error}"))?;
+        if self.session.is_none() {
+            return Err("`export` needs the `session` to export".into());
+        }
+        if self.prompt.is_some() {
+            return Err("`export` cannot be combined with `prompt`".into());
+        }
+        Ok(Some(format))
+    }
 }
 
 #[async_trait]
@@ -138,12 +174,14 @@ impl Plugin for CliFrontendPlugin {
     }
 
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
-        rah_api::config::parse::<ReplOptions>(config)?;
+        let options = rah_api::config::parse::<ReplOptions>(config)?;
+        options.checked().map_err(PluginError::from)?;
         Ok(())
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let options: ReplOptions = rah_api::config::parse(scope.config())?;
+        options.checked().map_err(PluginError::from)?;
         let kernel = scope.kernel();
         let (prompts, approvals) = mpsc::channel::<ApprovalPrompt>(1);
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
@@ -272,6 +310,27 @@ where
             .await?;
         return Ok(1);
     };
+    match options.checked() {
+        Ok(None) => {}
+        Ok(Some(format)) => {
+            let id = options.session.as_deref().unwrap_or_default();
+            return match export(sessions.as_ref(), id, format).await {
+                Ok(text) => {
+                    out.write_all(text.as_bytes()).await?;
+                    out.flush().await?;
+                    Ok(0)
+                }
+                Err(message) => {
+                    line(&mut out, &format!("error: {message}")).await?;
+                    Ok(1)
+                }
+            };
+        }
+        Err(message) => {
+            line(&mut out, &format!("error: {message}")).await?;
+            return Ok(1);
+        }
+    }
     let mut current = match &options.session {
         Some(id) => match open(sessions.as_ref(), id).await {
             Ok(id) => id,
@@ -301,8 +360,27 @@ where
             approvals: &mut approvals,
             running: &running,
         };
-        let completed = turn(kernel, &current, prompt, &mut terminal).await?;
-        return Ok(if completed { 0 } else { 1 });
+        let before = match sessions.read(&current).await {
+            Ok(records) => records.last().map_or(0, |record| record.seq),
+            Err(_) => 0,
+        };
+        let started = Instant::now();
+        let mut stats = TurnStats::default();
+        let completed = turn(kernel, &current, prompt, &mut terminal, &mut stats).await?;
+        let mut code = if completed { 0 } else { 1 };
+        if let Some(path) = &options.summary {
+            let records = sessions.read(&current).await.unwrap_or_default();
+            let summary = RunSummary::new(&current, stats, started.elapsed(), &records, before);
+            if let Err(error) = summary.write(path).await {
+                line(
+                    &mut out,
+                    &format!("error: cannot write the summary `{path}`: {error}"),
+                )
+                .await?;
+                code = 1;
+            }
+        }
+        return Ok(code);
     }
 
     loop {
@@ -440,7 +518,14 @@ where
                     approvals: &mut approvals,
                     running: &running,
                 };
-                turn(kernel, &current, &text, &mut terminal).await?;
+                turn(
+                    kernel,
+                    &current,
+                    &text,
+                    &mut terminal,
+                    &mut TurnStats::default(),
+                )
+                .await?;
             }
         }
     }
@@ -474,6 +559,27 @@ async fn open(sessions: &dyn SessionLog, id: &str) -> Result<SessionId, String> 
         .await
         .map_err(|error| error.to_string())?;
     Ok(id)
+}
+
+/// Session `id` in `format`.
+async fn export(
+    sessions: &dyn SessionLog,
+    id: &str,
+    format: ExportFormat,
+) -> Result<String, String> {
+    let id = open(sessions, id).await?;
+    let records = sessions
+        .read(&id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let info = sessions
+        .list()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|info| info.id == id)
+        .ok_or_else(|| format!("session `{id}` is not listed"))?;
+    Ok(format.render(&info, &records))
 }
 
 async fn line<W: AsyncWrite + Unpin>(out: &mut W, text: &str) -> std::io::Result<()> {
@@ -551,18 +657,21 @@ where
     Ok(approved)
 }
 
-/// Runs one turn and renders its events. Returns whether it completed.
+/// Runs one turn and renders its events, counting them into `stats`.
+/// Returns whether it completed.
 async fn turn<R, W>(
     kernel: &KernelHandle,
     session: &SessionId,
     input: &str,
     terminal: &mut Terminal<'_, R, W>,
+    stats: &mut TurnStats,
 ) -> std::io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let Some(agent_loop) = kernel.get(LOOP) else {
+        stats.end("stopped", Some("no agent loop is mounted".into()));
         line(terminal.out, "error: no agent loop is mounted").await?;
         return Ok(false);
     };
@@ -597,6 +706,8 @@ where
                 out.flush().await?;
             }
             AgentEvent::ModelReasoningStarted { .. } => line(out, "[thinking]").await?,
+            AgentEvent::ModelRequestStarted { .. } => stats.model_requests += 1,
+            AgentEvent::ModelUsage { usage, .. } => stats.usage.add(&usage),
             AgentEvent::ModelRetrying {
                 attempt,
                 retries,
@@ -604,6 +715,7 @@ where
                 reason,
                 ..
             } => {
+                stats.model_retries += 1;
                 line(
                     out,
                     &format!(
@@ -625,26 +737,162 @@ where
                 line(out, &format!("[tool {label}] {}", render(&output))).await?;
             }
             AgentEvent::Completed { .. } => {
+                stats.end("completed", None);
                 line(out, "").await?;
                 return Ok(true);
             }
             AgentEvent::Failed { message, .. } => {
                 line(out, &format!("\n[error] {message}")).await?;
+                stats.end("failed", Some(message));
                 return Ok(false);
             }
             AgentEvent::Cancelled { .. } => {
+                stats.end("cancelled", None);
                 line(out, "\n[cancelled]").await?;
                 return Ok(false);
             }
             _ => {}
         }
     }
+    stats.end(
+        "stopped",
+        Some("the agent loop stopped before the turn ended".into()),
+    );
     line(
         terminal.out,
         "\n[error] the agent loop stopped before the turn ended",
     )
     .await?;
     Ok(false)
+}
+
+/// What a turn's events told: model requests, usage and how it ended.
+#[derive(Debug, Default)]
+struct TurnStats {
+    model_requests: u64,
+    model_retries: u64,
+    usage: UsageTotals,
+    outcome: &'static str,
+    error: Option<String>,
+}
+
+impl TurnStats {
+    fn end(&mut self, outcome: &'static str, error: Option<String>) {
+        self.outcome = outcome;
+        self.error = error;
+    }
+}
+
+/// Token counts summed over the usage reports. A count no report carried
+/// stays unknown (`null`), never 0.
+#[derive(Debug, Default, PartialEq, Serialize)]
+struct UsageTotals {
+    /// How many model requests reported usage at all.
+    reports: u64,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+}
+
+impl UsageTotals {
+    fn add(&mut self, usage: &ModelUsage) {
+        fn sum(total: &mut Option<u64>, count: Option<u64>) {
+            if let Some(count) = count {
+                *total = Some(total.unwrap_or(0).saturating_add(count));
+            }
+        }
+        self.reports += 1;
+        sum(&mut self.input_tokens, usage.input_tokens);
+        sum(&mut self.output_tokens, usage.output_tokens);
+        sum(&mut self.cached_input_tokens, usage.cached_input_tokens);
+    }
+}
+
+/// The tool calls a turn recorded in its session.
+#[derive(Debug, Default, PartialEq, Serialize)]
+struct ToolCounts {
+    calls: u64,
+    /// Results marked as errors, including denied and rejected calls.
+    errors: u64,
+    /// Results whose effect is `uncertain`: they may or may not have happened.
+    uncertain: u64,
+    /// Calls with no recorded result: their effect is unknown too.
+    unrecorded: u64,
+}
+
+impl ToolCounts {
+    /// Counts the records after sequence number `after`.
+    fn of(records: &[SessionRecord], after: u64) -> Self {
+        let mut counts = Self::default();
+        let mut open = BTreeSet::new();
+        for record in records.iter().filter(|record| record.seq > after) {
+            match &record.entry {
+                SessionEntry::ToolCall { call_id, .. } => {
+                    counts.calls += 1;
+                    open.insert(call_id.as_str());
+                }
+                SessionEntry::ToolResult {
+                    call_id,
+                    output,
+                    effect,
+                    ..
+                } => {
+                    open.remove(call_id.as_str());
+                    counts.errors += u64::from(output.is_error);
+                    counts.uncertain += u64::from(*effect == ToolEffect::Uncertain);
+                }
+                _ => {}
+            }
+        }
+        counts.unrecorded = open.len() as u64;
+        counts
+    }
+}
+
+/// The `summary` file of a `prompt` run.
+#[derive(Debug, Serialize)]
+struct RunSummary {
+    session: String,
+    /// `completed`, `failed`, `cancelled` or `stopped` (the loop ended the
+    /// stream without saying how the turn ended).
+    outcome: &'static str,
+    error: Option<String>,
+    wall_ms: u64,
+    model_requests: u64,
+    model_retries: u64,
+    usage: UsageTotals,
+    tools: ToolCounts,
+}
+
+impl RunSummary {
+    fn new(
+        session: &SessionId,
+        stats: TurnStats,
+        wall: std::time::Duration,
+        records: &[SessionRecord],
+        after: u64,
+    ) -> Self {
+        Self {
+            session: session.to_string(),
+            outcome: if stats.outcome.is_empty() {
+                "stopped"
+            } else {
+                stats.outcome
+            },
+            error: stats.error,
+            wall_ms: u64::try_from(wall.as_millis()).unwrap_or(u64::MAX),
+            model_requests: stats.model_requests,
+            model_retries: stats.model_retries,
+            usage: stats.usage,
+            tools: ToolCounts::of(records, after),
+        }
+    }
+
+    async fn write(&self, path: &str) -> std::io::Result<()> {
+        let mut text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        text.push('\n');
+        tokio::fs::write(path, text).await
+    }
 }
 
 fn render(output: &ToolOutput) -> String {
@@ -703,7 +951,9 @@ impl CliFrontendPlugin {
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
   "session": "<session id>",
-  "prompt": "<one prompt, then exit>"
+  "prompt": "<one prompt, then exit>",
+  "export": null,
+  "summary": null
 }"#;
 }
 
@@ -863,7 +1113,12 @@ mod tests {
             approvals: &mut approvals,
             running,
         };
-        assert!(turn(&handle, session, "go", &mut terminal).await.unwrap());
+        let mut stats = TurnStats::default();
+        assert!(
+            turn(&handle, session, "go", &mut terminal, &mut stats)
+                .await
+                .unwrap()
+        );
         let got = seen.lock().unwrap().clone();
         (String::from_utf8(out).unwrap(), got)
     }
@@ -916,6 +1171,101 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(*seen.lock().unwrap(), [false, true]);
+    }
+
+    #[test]
+    fn usage_sums_only_reported_counts_and_keeps_unknown_ones_null() {
+        let mut totals = UsageTotals::default();
+        totals.add(&ModelUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cached_input_tokens: None,
+        });
+        totals.add(&ModelUsage {
+            input_tokens: Some(50),
+            output_tokens: None,
+            cached_input_tokens: None,
+        });
+        assert_eq!(
+            totals,
+            UsageTotals {
+                reports: 2,
+                input_tokens: Some(150),
+                output_tokens: Some(20),
+                cached_input_tokens: None,
+            }
+        );
+        let json = serde_json::to_value(&totals).unwrap();
+        assert!(json["cached_input_tokens"].is_null(), "{json}");
+    }
+
+    #[test]
+    fn tool_counts_cover_only_the_new_records_and_every_unclear_effect() {
+        use rah_protocol::RequestId;
+        let turn = RequestId::new();
+        let tool_call = |id: &str| SessionEntry::ToolCall {
+            turn: turn.clone(),
+            call_id: id.into(),
+            tool_call_id: ToolCallId::new(),
+            name: ToolName::new("repo.read"),
+            arguments: serde_json::json!({}),
+        };
+        let result = |id: &str, is_error: bool, effect: ToolEffect| SessionEntry::ToolResult {
+            turn: turn.clone(),
+            call_id: id.into(),
+            output: ToolOutput {
+                content: Vec::new(),
+                is_error,
+            },
+            effect,
+        };
+        let records: Vec<SessionRecord> = [
+            // An earlier turn, not counted.
+            tool_call("old"),
+            result("old", true, ToolEffect::Uncertain),
+            tool_call("a"),
+            result("a", false, ToolEffect::Completed),
+            tool_call("b"),
+            result("b", true, ToolEffect::Uncertain),
+            tool_call("c"),
+            result("c", true, ToolEffect::None),
+            tool_call("d"),
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(entry, seq)| SessionRecord { seq, entry })
+        .collect();
+        assert_eq!(
+            ToolCounts::of(&records, 2),
+            ToolCounts {
+                calls: 4,
+                errors: 2,
+                uncertain: 1,
+                unrecorded: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn summary_and_export_need_the_options_they_work_on() {
+        let options =
+            |json: serde_json::Value| -> ReplOptions { serde_json::from_value(json).unwrap() };
+        let error = |json| options(json).checked().unwrap_err();
+        assert!(error(serde_json::json!({ "summary": "s.json" })).contains("`prompt`"));
+        assert!(error(serde_json::json!({ "export": "md" })).contains("`session`"));
+        assert!(
+            error(serde_json::json!({ "export": "md", "session": "x", "prompt": "p" }))
+                .contains("`prompt`")
+        );
+        assert!(error(serde_json::json!({ "export": "pdf", "session": "x" })).contains("`pdf`"));
+        assert_eq!(
+            options(serde_json::json!({ "export": "trace", "session": "x" })).checked(),
+            Ok(Some(ExportFormat::Trace))
+        );
+        assert_eq!(
+            options(serde_json::json!({ "prompt": "p", "summary": "s.json" })).checked(),
+            Ok(None)
+        );
     }
 
     const WRITE: PermissionLevel = PermissionLevel::Write;

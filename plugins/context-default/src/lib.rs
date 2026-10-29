@@ -1,7 +1,10 @@
 //! `context-default`: shapes every model request through
 //! `model.before_request`.
 //!
-//! - `system`: a system prompt, placed first.
+//! - `system`: a system prompt, placed first. Or `system_file`: a file
+//!   holding it, read when the plugin starts (restart the plugin to read it
+//!   again), so a whole setup can live in files under version control
+//!   (ADR 0061).
 //! - A sliding window over the history: the newest items within `max_items`
 //!   and `max_chars` are kept. The window only starts at a user message, so
 //!   a tool call is never separated from its result, and the current turn is
@@ -66,6 +69,7 @@ impl ContextPlugin {
 #[serde(deny_unknown_fields)]
 pub struct ContextConfig {
     pub system: Option<String>,
+    pub system_file: Option<PathBuf>,
     pub max_items: Option<usize>,
     pub max_chars: Option<usize>,
     pub memory_file: Option<PathBuf>,
@@ -74,6 +78,7 @@ pub struct ContextConfig {
 }
 
 const BOTH_MEMORY_LOCATIONS: &str = "set either `memory_file` or `memory_dir`, not both";
+const BOTH_SYSTEM_PROMPTS: &str = "set either `system` or `system_file`, not both";
 
 #[async_trait]
 impl Plugin for ContextPlugin {
@@ -85,6 +90,9 @@ impl Plugin for ContextPlugin {
         let config: ContextConfig = rah_api::config::parse(config)?;
         if config.memory_file.is_some() && config.memory_dir.is_some() {
             return Err(BOTH_MEMORY_LOCATIONS.into());
+        }
+        if config.system.is_some() && config.system_file.is_some() {
+            return Err(BOTH_SYSTEM_PROMPTS.into());
         }
         Ok(())
     }
@@ -113,7 +121,17 @@ impl Plugin for ContextPlugin {
                 write: Mutex::new(()),
             })
         });
-        let system = config.system.clone();
+        let system = match (&config.system, &config.system_file) {
+            (Some(_), Some(_)) => return Err(BOTH_SYSTEM_PROMPTS.into()),
+            (Some(system), None) => Some(system.clone()),
+            (None, Some(path)) => Some(tokio::fs::read_to_string(path).await.map_err(|error| {
+                format!(
+                    "cannot read the system prompt file `{}`: {error}",
+                    path.display()
+                )
+            })?),
+            (None, None) => None,
+        };
         let reader = memory.clone();
         scope.hook_waterfall::<ModelBeforeRequest, _, _>(0, move |request| {
             let system = system.clone();

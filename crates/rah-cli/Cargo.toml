@@ -15,6 +15,7 @@ rah-plugin-host-process = { path = "../rah-plugin-host-process" }
 rah-plugin-host-wasm = { path = "../rah-plugin-host-wasm" }
 rah-plugin-context-compact = { path = "../../plugins/context-compact" }
 rah-plugin-context-default = { path = "../../plugins/context-default" }
+rah-plugin-context-instructions = { path = "../../plugins/context-instructions" }
 rah-plugin-format-on-write = { path = "../../plugins/format-on-write" }
 rah-plugin-frontend-cli = { path = "../../plugins/frontend-cli" }
 rah-plugin-frontend-web = { path = "../../plugins/frontend-web" }

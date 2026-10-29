@@ -63,3 +63,18 @@ async fn skills_are_listed_and_loaded_through_the_presets() {
     let text = reply(&turn(&handle, &session, r#"/call skills.load {"name":"tea"}"#).await);
     assert_eq!(text, "[model-mock] skills.load returned: Boil water first.");
 }
+
+#[tokio::test]
+async fn the_instructions_feature_adds_the_workspace_file_on_every_request() {
+    let dir = TempDir::new("context-instructions");
+    let mut distribution = headless(&dir);
+    distribution.enable("instructions").unwrap();
+    let kernel = kernel(&distribution).await;
+    let handle = kernel.handle();
+    let text = reply(&turn(&handle, &new_session(&handle).await, "/notool hi").await);
+    assert_eq!(text, "[model-mock] you said: hi (0 earlier items)");
+    // Read on every request: a file written now counts at once.
+    std::fs::write(dir.workspace().join("AGENTS.md"), "Run the tests.").unwrap();
+    let text = reply(&turn(&handle, &new_session(&handle).await, "/notool hi").await);
+    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+}

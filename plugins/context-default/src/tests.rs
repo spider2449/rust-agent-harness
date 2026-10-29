@@ -413,3 +413,42 @@ async fn a_memory_file_and_a_memory_dir_are_exclusive() {
         "{status:?}"
     );
 }
+
+#[tokio::test]
+async fn the_system_prompt_can_come_from_a_file_read_at_start() {
+    let dir =
+        TempDir(std::env::temp_dir().join(format!("rah-context-system-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("system.md");
+    std::fs::write(&path, "You are careful.").unwrap();
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::with_config(json!({ "system_file": path })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(notes(&kernel).await, ["You are careful."]);
+
+    let plugin = ContextPlugin::new("context");
+    let error = plugin
+        .check_config(&json!({ "system": "a", "system_file": path }))
+        .unwrap_err();
+    assert!(error.to_string().contains("not both"), "{error}");
+
+    let missing = Kernel::new();
+    let mounted = missing
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::with_config(json!({ "system_file": dir.0.join("missing.md") })),
+        )
+        .await;
+    let status = mounted
+        .map(|status| format!("{status:?}"))
+        .unwrap_or_else(|e| e.to_string());
+    assert!(
+        status.contains("cannot read the system prompt file"),
+        "{status}"
+    );
+}

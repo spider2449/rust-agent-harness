@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- `rah --session <id> --export md|json|trace` writes a session to standard
+  output without running a turn. `trace` is one tagged line per record
+  (`[USER]`, `[ASSISTANT]`, `[ACTION]`, `[OBSERVATION]`,
+  `[OBSERVATION ERROR]`, `[ERROR]`), with long text cut and counted, an
+  uncertain effect marked and a call without a result shown as an error. The
+  Web API's export takes `format=trace` too. The formats moved to
+  `rah_api::session::export`.
+- `rah --prompt <text> --summary <file>` writes a JSON summary of the run,
+  also when the turn fails: outcome, error, wall time, model requests and
+  retries, summed token usage (`null` for counts no provider reported) and
+  the turn's tool calls with errors, uncertain effects and calls without a
+  recorded result.
+- `context-instructions` (ADR 0061, `--with instructions`): the workspace
+  root's `AGENTS.md` (or the first of `names` that exists) and the files in
+  `files`, given to the model on every request. Text only; the policy still
+  decides every tool call. `context-default` can read its system prompt from
+  `system_file`.
+- `skills-fs` tells the user once, on standard error or as a Web UI notice,
+  about a skill it skips or reads differently: an invalid directory or
+  declared name, a file that is too large or not UTF-8, unclosed front
+  matter, a duplicate name, no description, or more skills than
+  `max_skills`. Skills are now read in name order, so which of two skills
+  with one name wins no longer depends on the file system.
+- Named subagents: `scheduler-basic` reads `<agents_dir>/<name>.md` (default
+  `agents` in the data directory) at start and offers them in
+  `agent.delegate`, which takes an optional `agent`; the subagent's session
+  starts with the agent's instructions, then the task. Same tools and policy
+  as any subagent.
+- `docs/HARNESS2.md`: using RAH as an executor for harness2.
 - Undo for file changes (ADR 0060). `tools-repo-write` keeps, in memory,
   each file's content before and after every completed `repo.create-file`,
   `repo.edit-files`, `repo.patch`, `repo.delete-file` and `repo.move-file`

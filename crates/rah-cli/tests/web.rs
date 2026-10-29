@@ -807,6 +807,16 @@ async fn sessions_are_titled_renamed_exported_and_deleted_over_http() {
         .await;
     assert_eq!(json_export["session"]["title"], "Kyoto trip");
     assert_eq!(json_export["records"].as_array().unwrap().len(), 5);
+    let trace = web
+        .get(&format!("/api/sessions/{session}/export?format=trace"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        trace.headers()["content-disposition"],
+        format!("attachment; filename=\"rah-session-{session}.txt\"").as_str()
+    );
+    assert!(trace.text().await.unwrap().starts_with("[USER] hello\n"));
     assert_eq!(
         web.status(web.get(&format!("/api/sessions/{session}/export?format=pdf")))
             .await

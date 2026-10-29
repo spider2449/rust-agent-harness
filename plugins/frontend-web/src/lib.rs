@@ -64,8 +64,9 @@
 //!   `POST /api/sessions/delete {ids}` (several at once, such as a folder of
 //!   the session list: forks before the sessions they came from),
 //!   `POST /api/sessions/{id}/fork {at}`, `PUT /api/sessions/{id}/title
-//!   {title}` (`null` clears it) and `GET /api/sessions/{id}/export?format=md|json`
-//!   (a download).
+//!   {title}` (`null` clears it) and `GET
+//!   /api/sessions/{id}/export?format=md|json|trace` (a download; see
+//!   [`rah_api::session::export`]).
 //! - `GET /api/sessions/{id}/changes` (`{available, changes: [{tool, files,
 //!   at_ms}]}`, newest first) and `POST /api/sessions/{id}/undo` take back the
 //!   session's file changes through the `file-undo` service (ADR 0060; 404
@@ -90,7 +91,6 @@
 
 mod access;
 mod approvals;
-mod export;
 mod files;
 mod git;
 mod groups;
@@ -125,7 +125,7 @@ use rah_api::{
     Scope, async_trait,
     hooks::{ModelBeforeRequest, ToolApproval},
     host::{FrontendListening, HostNotice},
-    session::{SESSION, SessionError, SessionLog},
+    session::{SESSION, SessionError, SessionLog, export::ExportFormat},
     tools::ToolInvoker,
 };
 use rah_protocol::SessionId;
@@ -604,7 +604,7 @@ struct Export {
     format: Option<String>,
 }
 
-/// `GET /api/sessions/{id}/export?format=md|json`, as a download.
+/// `GET /api/sessions/{id}/export?format=md|json|trace`, as a download.
 async fn export_session(
     State(shared): State<AppState>,
     Path(id): Path<String>,
@@ -619,29 +619,21 @@ async fn export_session(
         .into_iter()
         .find(|info| info.id == id)
         .ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    let (body, content_type, extension) = match export.format.as_deref().unwrap_or("md") {
-        "md" | "markdown" => (
-            export::markdown(&info, &records),
-            "text/markdown; charset=utf-8",
-            "md",
-        ),
-        "json" => (
-            export::json(&info, &records),
-            "application/json; charset=utf-8",
-            "json",
-        ),
-        other => {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                format!("unknown export format `{other}`; use md or json"),
-            ));
-        }
-    };
+    let format: ExportFormat = export
+        .format
+        .as_deref()
+        .unwrap_or("md")
+        .parse()
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, format!("{error}")))?;
+    let body = format.render(&info, &records);
     // The file name uses only the session id, never the (untrusted) title.
-    let disposition = format!("attachment; filename=\"rah-session-{id}.{extension}\"");
+    let disposition = format!(
+        "attachment; filename=\"rah-session-{id}.{}\"",
+        format.extension()
+    );
     Ok((
         [
-            (header::CONTENT_TYPE, content_type.to_owned()),
+            (header::CONTENT_TYPE, format.content_type().to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CACHE_CONTROL, "no-store".to_owned()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),

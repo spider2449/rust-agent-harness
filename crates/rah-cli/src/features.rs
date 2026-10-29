@@ -55,7 +55,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah --list-features` shows them.
-pub const FEATURES: [Feature; 7] = [
+pub const FEATURES: [Feature; 8] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -115,6 +115,19 @@ pub const FEATURES: [Feature; 7] = [
         needs_any: &[],
         mount: Mount::Plugin {
             kind: "context-compact",
+            place: Place::BeforeLoop,
+        },
+        argument_key: None,
+        tools: &[],
+        decisions: &[],
+    },
+    Feature {
+        name: "instructions",
+        summary: "give the model the workspace's AGENTS.md (text only; it grants nothing)",
+        argument: None,
+        needs_any: &[],
+        mount: Mount::Plugin {
+            kind: "context-instructions",
             place: Place::BeforeLoop,
         },
         argument_key: None,
@@ -418,9 +431,9 @@ pub fn list() -> String {
         "Features (--with <name> on rah or rah-desktop, or features = [...] in rah.toml):\n",
     );
     for feature in &FEATURES {
-        text.push_str(&format!("  {:<11} {}\n", feature.name, feature.summary));
+        text.push_str(&format!("  {:<13} {}\n", feature.name, feature.summary));
         if let Some(argument) = feature.argument {
-            text.push_str(&format!("  {:<11} =<{argument}>\n", ""));
+            text.push_str(&format!("  {:<13} =<{argument}>\n", ""));
         }
     }
     text

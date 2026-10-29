@@ -237,6 +237,19 @@ no `model.before_request` hooks. With a `storage` provider, summaries of
 conversations are kept there in plain text (with `storage-fs`, under
 `storage/context-compact` in the data directory) until deleted.
 
+## `context-instructions`
+
+`context-instructions` (opt-in, `--with instructions`, ADR 0061) puts the
+workspace's instruction file (`AGENTS.md` by default) and the files listed in
+`files` into every model request. The workspace file is written by whoever
+controls the repository: a cloned repository can use it to steer the model
+(prompt injection), as it can with any file the model reads. It cannot
+change what the model may do: the text grants no permission, defines no tool,
+and every tool call still goes through `ToolInvoker` and the policy. Only the
+workspace root is read, never a parent directory, and each file is cut at
+`max_bytes`. Turn the feature on only for workspaces whose instruction file
+you are willing to have the model follow.
+
 ## `storage`
 
 The `storage` service (ADR 0041) holds plugin state. Namespaces separate
