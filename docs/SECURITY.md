@@ -70,7 +70,8 @@ The policy decides each call from its own configuration only:
   level; patterns and `*` are refused. It trusts the tool, not one call, so
   every argument the model sends to a listed tool is allowed.
 - An invalid configuration is refused before it is applied (ADR 0044): at
-  boot `rah` refuses to start instead of running unguarded, and a changed
+  boot `rah` checks every plugin's configuration before it mounts anything
+  and refuses to start instead of running unguarded (ADR 0059), and a changed
   configuration (Web UI Settings or the Plugins panel) that is refused
   leaves the running policy and its configuration in place.
 - `Ask` needs a `tool.approval` handler; without one it is a denial.

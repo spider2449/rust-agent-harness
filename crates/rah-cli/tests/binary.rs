@@ -365,6 +365,56 @@ fn a_user_file_that_extends_a_preset_runs_with_only_its_changes() {
 }
 
 #[test]
+fn check_config_reports_every_problem_and_starts_nothing() {
+    let dir = TempDir::new("bin-check-config");
+    let output = rah(&dir)
+        .args(["--preset", "dev", "--check-config"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("configuration ok: 15 plugins"), "{stdout}");
+
+    let config = dir.0.join("rah.toml");
+    std::fs::write(
+        &config,
+        r#"
+extends = "dev"
+
+[[plugin]]
+use = "loop-react"
+config = { max_roundz = 4 }
+
+[[plugin]]
+use = "process"
+config = { program = "rah-no-such-program-x7" }
+"#,
+    )
+    .unwrap();
+    let output = rah(&dir)
+        .arg("--config")
+        .arg(&config)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("nothing was mounted"), "{stderr}");
+    assert!(stderr.contains("loop-react: "), "{stderr}");
+    assert!(stderr.contains("max_roundz"), "{stderr}");
+    // The process plugin has no id; its program is never started.
+    assert!(stderr.contains("needs an `id`"), "{stderr}");
+    assert!(!stderr.contains("cannot start"), "{stderr}");
+
+    // A start with the same file stops at the same problems.
+    let output = rah(&dir).arg("--config").arg(&config).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("max_roundz"), "{stderr}");
+    assert!(stderr.contains("needs an `id`"), "{stderr}");
+}
+
+#[test]
 fn show_config_prints_the_plugins_features_and_source() {
     let dir = TempDir::new("bin-show-config");
     let output = rah(&dir)

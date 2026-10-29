@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `rah` checks every plugin's configuration before it mounts anything
+  (ADR 0059) and lists every mistake at once: unknown keys and values, an
+  unknown plugin, a process or WASM plugin without an `id`, an instance id
+  used twice. Before, the boot stopped at the first plugin it mounted with a
+  bad configuration, after the ones before it had mounted. New
+  `rah --check-config` runs only the check, with all options applied, and
+  starts no plugin and no program. A refused policy configuration is now
+  reported as `BootError::InvalidConfig` (still "refusing to run unguarded")
+  instead of `PolicyInactive`.
+
 - A distribution file can extend a preset and list only what differs
   (ADR 0058): `extends = "default"` at the top, `remove = ["<id>"]` to drop
   preset plugins, and `[[plugin]]` entries that change a preset plugin in

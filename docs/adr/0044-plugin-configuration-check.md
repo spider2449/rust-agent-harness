@@ -1,6 +1,7 @@
 # ADR 0044: Plugins Check a Configuration Before It Is Applied
 
-Status: Accepted
+Status: Accepted; item 6 amended by
+[ADR 0059](0059-check-every-configuration-before-boot.md)
 
 Date: 2026-10-15
 

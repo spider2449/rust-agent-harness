@@ -83,13 +83,17 @@ struct Args {
     /// features applied and the Web UI's stored overrides) and exit.
     #[arg(long)]
     show_config: bool,
+    /// Check every plugin's configuration as a start would, report every
+    /// problem and exit (2 when there is one). Starts no plugin or program.
+    #[arg(long)]
+    check_config: bool,
     /// List the opt-in features and exit.
     #[arg(long)]
     list_features: bool,
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "approve", "list_features", "show_config"])]
+    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
     init_config: bool,
 }
 
@@ -261,6 +265,26 @@ async fn run(args: Args) -> i32 {
                 2
             }
         };
+    }
+    if args.check_config {
+        let distribution = match distribution(&args) {
+            Ok(distribution) => distribution,
+            Err(message) => {
+                eprintln!("rah: {message}");
+                return 2;
+            }
+        };
+        let problems = rah_cli::check_distribution(&distribution);
+        if problems.is_empty() {
+            println!(
+                "configuration ok: {} plugins (keys, values and ids; API keys \
+                 and programs are found only at start)",
+                distribution.plugin.len()
+            );
+            return 0;
+        }
+        eprintln!("rah: {}", rah_cli::BootError::InvalidConfig(problems));
+        return 2;
     }
     if args.init_config {
         return match init_config(&args) {

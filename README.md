@@ -101,7 +101,11 @@ approves only an explicit `y`; end of input denies. If a configured policy
 plugin fails to start, `rah` refuses to run. The policy also runs at most
 `max_in_flight` tool calls at once (default 128) and refuses one over the
 limit. A plugin configuration with a typo is refused before it is applied, so
-a refused change at runtime leaves the running plugin as it was.
+a refused change at runtime leaves the running plugin as it was. At start,
+`rah` checks every plugin's configuration before it mounts any and lists every
+mistake at once; `rah --check-config` does only that, starting no plugin and
+no program ([ADR 0059](docs/adr/0059-check-every-configuration-before-boot.md)).
+A missing API key or a program that does not run is still found only at start.
 
 **Features** are the simple way to turn on what no preset mounts. Each one
 mounts its plugins and adds the policy entries they need, so nothing else is

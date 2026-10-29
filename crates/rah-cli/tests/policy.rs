@@ -105,15 +105,15 @@ async fn an_inactive_policy_aborts_the_boot_before_later_plugins_mount() {
     let kernel = Kernel::new();
     let error = boot(&kernel, &distribution).await.unwrap_err();
     assert!(
-        matches!(&error, BootError::PolicyInactive(id, _) if *id == PluginId::new("policy-authority")),
+        matches!(&error, BootError::InvalidConfig(problems)
+            if problems.len() == 1 && problems[0].id == PluginId::new("policy-authority")),
         "{error}"
     );
-    // The policy configuration was refused: only the distribution plugin
-    // was mounted.
-    let mounted: Vec<String> = kernel
-        .plugins()
-        .into_iter()
-        .map(|(id, _)| id.to_string())
-        .collect();
-    assert_eq!(mounted, ["distribution"]);
+    assert!(
+        error.to_string().contains("refusing to run unguarded"),
+        "{error}"
+    );
+    // The policy configuration was refused before the boot mounted anything
+    // (ADR 0059).
+    assert!(kernel.plugins().is_empty());
 }

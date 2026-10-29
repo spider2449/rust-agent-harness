@@ -4,6 +4,7 @@
 //! manage catalog plugins at runtime.
 
 mod admin;
+mod check;
 mod data;
 mod extend;
 mod features;
@@ -11,6 +12,7 @@ mod help;
 
 mod show;
 
+pub use check::{ConfigProblem, check_distribution};
 pub use extend::Extended;
 pub use features::{Applied, FEATURES, Feature, approved_tools, feature, list as list_features};
 pub use show::show_config;
@@ -297,8 +299,20 @@ pub enum BootError {
     Process(String),
     #[error("policy plugin `{0}` is not active ({1}); refusing to run unguarded")]
     PolicyInactive(PluginId, String),
+    /// Configurations the plugins would refuse; nothing was mounted.
+    #[error("{}", invalid_config_message(.0))]
+    InvalidConfig(Vec<ConfigProblem>),
     #[error(transparent)]
     Kernel(#[from] KernelError),
+}
+
+/// The message of [`BootError::InvalidConfig`]: one line per problem.
+fn invalid_config_message(problems: &[ConfigProblem]) -> String {
+    let mut text = "invalid plugin configuration, nothing was mounted:".to_owned();
+    for problem in problems {
+        text.push_str(&format!("\n  {problem}"));
+    }
+    text
 }
 
 /// One `[[plugin]]` entry of `rah.toml`.
@@ -487,8 +501,10 @@ pub const PROCESS_PLUGIN: &str = "process";
 /// component.
 pub const WASM_PLUGIN: &str = "wasm";
 
-/// Mounts the `distribution` plugin, then every plugin in order, and returns
-/// the resulting statuses. A configured `policy-authority` that does not
+/// Checks every plugin configuration first ([`check_distribution`]) and
+/// mounts nothing when one would be refused. Then mounts the `distribution`
+/// plugin and every plugin in order, and returns the resulting statuses. A
+/// configured `policy-authority` that does not
 /// become active aborts the boot before any later plugin (such as a
 /// frontend) is mounted. A process plugin is started once first to read its
 /// manifest.
@@ -496,6 +512,10 @@ pub async fn boot(
     kernel: &Kernel,
     distribution: &Distribution,
 ) -> Result<Vec<(PluginId, PluginStatus)>, BootError> {
+    let problems = check_distribution(distribution);
+    if !problems.is_empty() {
+        return Err(BootError::InvalidConfig(problems));
+    }
     let registry = Arc::new(Registry::default());
     kernel
         .mount(
