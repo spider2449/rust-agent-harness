@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.45.0 (2026-10-29)
 
 - The Web UI's page title and the `rah-desktop` window title show the
   version, such as `RAH 0.45.0`; a running turn shows `● RAH 0.45.0 —
