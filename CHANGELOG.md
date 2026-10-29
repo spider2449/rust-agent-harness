@@ -17,6 +17,10 @@
   `repo.commit` and other tools such as `shell.exec` are not covered.
 - `rah_api::undo` (the `file-undo` service) and `ToolContext.call`, the id of
   the call a tool runs for. Code that builds a `ToolContext` must set it.
+- Fixed: `rah --prompt` could deny a tool call that needs approval with
+  "no approver is available" when the turn reached the approval before
+  `frontend-cli` had finished starting (its hooks take effect only then). The
+  terminal now waits until the plugin is active before it runs anything.
 
 ## v0.45.0 (2026-10-29)
 

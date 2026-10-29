@@ -37,6 +37,7 @@ use rah_api::{
     async_trait,
     hooks::{ApprovalRequest, ToolApproval},
     host::{ExitRequested, Interrupt},
+    kernel::PluginStatusChanged,
     session::{SESSION, SessionLog},
     tools::describe_image,
     undo,
@@ -159,7 +160,11 @@ impl Plugin for CliFrontendPlugin {
             let handled = interrupts.interrupt();
             async move { handled.then_some(()) }
         });
+        let id = scope.id().clone();
         scope.spawn(async move {
+            // The hooks above take effect when `apply` returns. A `--prompt`
+            // turn started before that finds no approver and is denied.
+            until_active(&kernel, &id).await;
             let stdin = BufReader::new(tokio::io::stdin());
             let stdout = tokio::io::stdout();
             let repl = run_repl(&kernel, stdin, stdout, options, Some(approvals), running);
@@ -173,6 +178,19 @@ impl Plugin for CliFrontendPlugin {
             kernel.emit(&ExitRequested { code });
         });
         Ok(())
+    }
+}
+
+/// Waits until plugin `id` is active, so its hooks are registered. If it never
+/// gets there, its scope is disposed and the waiting task with it.
+async fn until_active(kernel: &KernelHandle, id: &PluginId) {
+    let changed = Arc::new(tokio::sync::Notify::new());
+    let waker = changed.clone();
+    // `notify_one` keeps a permit, so a change between the check and the wait
+    // is not missed.
+    let _subscription = kernel.subscribe(move |_: &PluginStatusChanged| waker.notify_one());
+    while kernel.status(id) != Some(PluginStatus::Active) {
+        changed.notified().await;
     }
 }
 
@@ -848,6 +866,56 @@ mod tests {
         assert!(turn(&handle, session, "go", &mut terminal).await.unwrap());
         let got = seen.lock().unwrap().clone();
         (String::from_utf8(out).unwrap(), got)
+    }
+
+    /// Spawns a task from `apply` that reports whether the plugin's approval
+    /// hook was registered when it started and after `until_active`.
+    struct Early(PluginManifest, Arc<Mutex<Vec<bool>>>);
+
+    #[async_trait]
+    impl Plugin for Early {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+
+        async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+            scope.hook_bail::<ToolApproval, _, _>(0, |_| async { Some(true) });
+            let (kernel, id, seen) = (scope.kernel(), scope.id().clone(), self.1.clone());
+            scope.spawn(async move {
+                seen.lock()
+                    .unwrap()
+                    .push(kernel.has_handlers::<ToolApproval>());
+                until_active(&kernel, &id).await;
+                seen.lock()
+                    .unwrap()
+                    .push(kernel.has_handlers::<ToolApproval>());
+            });
+            // The task runs while `apply` is still going.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_spawned_in_apply_waits_until_the_hooks_are_registered() {
+        let kernel = Kernel::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        kernel
+            .mount(
+                Arc::new(Early(PluginManifest::new("early", "1"), seen.clone())),
+                MountOptions::default(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..10 {
+            if seen.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*seen.lock().unwrap(), [false, true]);
     }
 
     const WRITE: PermissionLevel = PermissionLevel::Write;
