@@ -2311,16 +2311,18 @@ config = { left = ["sesions"] }
 
 #[tokio::test]
 async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
+    let telemetry = TempDir::new("ui-views-telemetry");
+    let dir = telemetry.0.display().to_string().replace('\\', "/");
     let web = start("ui-views", |distribution| {
-        distribution.plugin.push(toml_spec(
+        distribution.plugin.push(toml_spec(&format!(
             r#"
 [[plugin]]
 use = "telemetry-log"
-"#,
-        ));
+config = {{ dir = "{dir}" }}
+"#
+        )));
     })
     .await;
-    web.kernel.handle().get(rah_api::ui::UI_VIEWS).unwrap();
     assert_eq!(
         web.json(web.get("/api/ui")).await,
         json!({ "views": [{
