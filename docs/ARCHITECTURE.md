@@ -169,7 +169,8 @@ Implemented:
   its panels (`sessions`, `files`, `plugins`) in the left and right columns.
   Without a provider the page uses `Layout::standard()`, the layout it has
   always had; the conversation, header, approvals and status bar are never
-  panels, so no layout moves or hides them.
+  panels, so no layout moves or hides them. `ui-layout-config` provides it
+  from its configuration.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

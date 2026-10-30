@@ -57,6 +57,7 @@ use rah_plugin_tools_repo::RepoToolsPlugin;
 use rah_plugin_tools_repo_write::RepoWriteToolsPlugin;
 use rah_plugin_tools_shell::ShellToolsPlugin;
 use rah_plugin_tools_web_search::WebSearchPlugin;
+use rah_plugin_ui_layout_config::UiLayoutConfigPlugin;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -65,7 +66,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 32] = [
+    let entries: [(&'static str, Constructor); 33] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("context-instructions", |id| {
@@ -118,6 +119,9 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         }),
         ("tools-shell", |id| Arc::new(ShellToolsPlugin::new(id))),
         ("tools-web-search", |id| Arc::new(WebSearchPlugin::new(id))),
+        ("ui-layout-config", |id| {
+            Arc::new(UiLayoutConfigPlugin::new(id))
+        }),
     ];
     entries.into_iter().collect()
 }
@@ -158,6 +162,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "tools-repo-write" => RepoWriteToolsPlugin::CONFIG_EXAMPLE,
         "tools-shell" => ShellToolsPlugin::CONFIG_EXAMPLE,
         "tools-web-search" => WebSearchPlugin::CONFIG_EXAMPLE,
+        "ui-layout-config" => UiLayoutConfigPlugin::CONFIG_EXAMPLE,
         PROCESS_PLUGIN => rah_plugin_host_process::ProcessPlugin::CONFIG_EXAMPLE,
         WASM_PLUGIN => rah_plugin_host_wasm::WasmPlugin::CONFIG_EXAMPLE,
         _ => return None,

@@ -1,0 +1,12 @@
+[package]
+name = "rah-plugin-ui-layout-config"
+version.workspace = true
+edition.workspace = true
+description = "Places the Web UI's panels as its configuration says (ADR 0062)"
+
+[dependencies]
+rah-api = { path = "../../crates/rah-api" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

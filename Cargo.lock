@@ -2614,6 +2614,7 @@ dependencies = [
  "rah-plugin-tools-repo-write",
  "rah-plugin-tools-shell",
  "rah-plugin-tools-web-search",
+ "rah-plugin-ui-layout-config",
  "rah-protocol",
  "reqwest",
  "serde",
@@ -3022,6 +3023,15 @@ dependencies = [
  "rah-protocol",
  "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-ui-layout-config"
+version = "0.45.0"
+dependencies = [
+ "rah-api",
  "serde_json",
  "tokio",
 ]

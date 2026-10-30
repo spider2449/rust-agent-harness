@@ -415,6 +415,17 @@ pub fn fallback(kind: &str) -> Help {
                 "Longest page text `web.fetch` returns (20000).",
             ),
         ],
+        "ui-layout-config" => &[
+            (
+                "left",
+                "Panels of the Web UI's left column, as tabs in order: sessions, files, plugins.",
+            ),
+            ("right", "Panels of the right column, as tabs in order."),
+            (
+                "right_open",
+                "Whether the right column starts open, until the user chooses (wide windows).",
+            ),
+        ],
         PROCESS_PLUGIN => &[
             (
                 "program",

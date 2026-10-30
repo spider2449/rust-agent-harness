@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The Web UI's layout is a service (ADR 0062). `GET /api/layout` names the
+  panels (`sessions`, `files`, `plugins`) of the left and right column, from
+  the mounted `ui-layout` provider or else the standard layout, which is the
+  page as it was. The new `ui-layout-config` plugin takes the layout as its
+  configuration (`left`, `right`, `right_open`); a misspelt panel stops the
+  start. The browser and `rah-desktop` share it.
 - `rah --session <id> --export md|json|trace` writes a session to standard
   output without running a turn. `trace` is one tagged line per record
   (`[USER]`, `[ASSISTANT]`, `[ACTION]`, `[OBSERVATION]`,

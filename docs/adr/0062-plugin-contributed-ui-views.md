@@ -126,8 +126,11 @@ XSS in all. B is worth having only once A cannot express a needed view.
      both without code in the shell. A mode naming a layout `instance` to
      switch to, as it switches plugins, is a later step.
 
-   The layout is implemented first, as this ADR's first step; the
-   `ui-views` contract of decisions 1 to 6 follows as its own task.
+   The layout is implemented first, as this ADR's first step, with
+   `ui-layout-config`, a plugin whose configuration is the layout (its
+   check refuses ids that are neither built-in panels nor `instance/view`,
+   so a misspelling stops the start). The `ui-views` contract of decisions
+   1 to 6 follows as its own task.
 
 8. **Static plugins first.** Process plugins (protocol 3) can provide only
    `tools`, hooks and events (ADR 0039). Providing `ui-views` from a process

@@ -440,6 +440,21 @@ ids; policy and frontend plugins cannot be listed. `instructions` is added to
 every model request after the system prompt. `workspace = false` hides the
 files, Git state and folder in the UI.
 
+**Layout**: the panels (`sessions`, `files`, `plugins`) sit in a left and a
+right column, as tabs. Without configuration the sessions are on the left
+and the workspace and plugins on the right. `ui-layout-config` moves them, in
+the browser and in `rah-desktop` alike
+([ADR 0062](docs/adr/0062-plugin-contributed-ui-views.md)):
+
+```toml
+[[plugin]]
+use = "ui-layout-config"
+config = { left = ["sessions", "plugins"], right = ["files"], right_open = true }
+```
+
+The conversation, the header, approvals and the status bar always stay. A
+misspelt panel stops the start; leave a panel out to hide it.
+
 **API groups**: every `tools-http` instance is one internal API with its
 endpoints declared in configuration. In daily work an "Internal API" selector
 above the message box lists `Off` and one choice per instance; picking one

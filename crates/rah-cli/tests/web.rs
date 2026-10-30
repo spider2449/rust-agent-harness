@@ -2271,3 +2271,40 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
     web.kernel.unmount(&id).await.unwrap();
     assert_eq!(web.json(web.get("/api/layout")).await, standard);
 }
+
+#[tokio::test]
+async fn a_layout_written_in_the_distribution_is_served_and_a_misspelt_panel_stops_the_start() {
+    let web = start("layout-config", |distribution| {
+        distribution.plugin.push(toml_spec(
+            r#"
+[[plugin]]
+use = "ui-layout-config"
+config = { left = ["sessions", "plugins"], right = ["files"], right_open = true }
+"#,
+        ));
+    })
+    .await;
+    assert_eq!(
+        web.json(web.get("/api/layout")).await,
+        json!({
+            "layout": {"left": ["sessions", "plugins"], "right": ["files"], "right_open": true},
+            "source": "ui-layout",
+            "problems": [],
+        })
+    );
+
+    let dir = TempDir::new("layout-config-misspelt");
+    let mut distribution = headless(&dir);
+    distribution.plugin.push(toml_spec(
+        r#"
+[[plugin]]
+use = "ui-layout-config"
+config = { left = ["sesions"] }
+"#,
+    ));
+    let Err(error) = boot(&Kernel::new(), &distribution).await else {
+        panic!("a misspelt panel stops the start");
+    };
+    let error = error.to_string();
+    assert!(error.contains("unknown panel `sesions`"), "{error}");
+}
