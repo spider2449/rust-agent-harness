@@ -1054,8 +1054,7 @@ function onEvent(session, event) {
       refreshStatus();
       reloadFiles().catch(report);
       loadChanges().catch(report);
-      // The telemetry writes its records just after the turn ends.
-      setTimeout(refreshViews, 300);
+      refreshViews();
       loadSessions()
         .then(() => {
           if (event.type === "completed") awaitTitle();
@@ -1311,6 +1310,18 @@ async function renderView(id) {
 // Shown views follow the turns: a turn may change what they show.
 function refreshViews() {
   for (const id of views.keys()) if (panelShown(id)) renderView(id);
+}
+
+// A provider said a view changed (`{type: "ui"}` on the socket). A shown
+// view renders again once the changes pause; a hidden one renders when shown.
+const viewTimers = new Map();
+function viewChanged(id) {
+  if (!views.has(id) || !panelShown(id)) return;
+  clearTimeout(viewTimers.get(id));
+  viewTimers.set(id, setTimeout(() => {
+    viewTimers.delete(id);
+    renderView(id);
+  }, 150));
 }
 
 async function runAction(entry, action, input, controls) {
@@ -2502,6 +2513,8 @@ function connect() {
       if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
     } else if (data.type === "groups") {
       loadGroups();
+    } else if (data.type === "ui") {
+      viewChanged(`${data.instance}/${data.view}`);
     } else if (data.type === "host_notice") {
       // A plugin skipped something quietly that the user can act on.
       showTransientNotice(`${data.plugin}: ${data.message}`, 20000);

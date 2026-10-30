@@ -166,7 +166,7 @@ XSS in all. B is worth having only once A cannot express a needed view.
 
 ## Implementation status
 
-Done, in three steps:
+Done, in four steps:
 
 1. The layout (decision 7): `ui-layout`, `Layout::standard()`,
    `GET /api/layout` and the page built from it.
@@ -183,12 +183,19 @@ Done, in three steps:
      enforces 2000 nodes and 256 KiB; a provider has 10 seconds to render or
      act.
    - The page renders a view when its tab is shown, on its reload button,
-     after an action that asks for it, and shortly after every turn ends.
+     after an action that asks for it, and when a turn of the open session
+     ends.
    - The first provider is `telemetry-log`: a `usage` view of the turns,
      model requests, tokens and tool calls this process recorded, with a
      Reset button.
+4. `UiChanged { instance, view }` (decision 4), an event in `rah_api::ui`.
+   `frontend-web` forwards it to every window as `{type: "ui", instance,
+   view}`, dropping one whose view is not a valid id; a window renders the
+   view again 150 ms after the last change if it is shown. `telemetry-log`
+   emits it once its queued records are written, so the usage view follows
+   turns of every session.
 
 Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
-`Progress` node, the `UiChanged` event (decision 4), modes listing `views`
+`Progress` node, modes listing `views`
 (decision 6), views from process plugins (decision 8) and in
 `frontend-cli` (decision 9).

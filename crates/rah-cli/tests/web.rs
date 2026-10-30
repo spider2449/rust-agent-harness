@@ -2401,3 +2401,30 @@ config = {{ dir = "{dir}" }}
     );
     assert_eq!(placed["problems"], json!([]));
 }
+
+#[tokio::test]
+async fn a_changed_view_is_announced_to_every_window() {
+    use rah_api::ui::UiChanged;
+    let web = start("ui-changed", |_| {}).await;
+    let mut socket = web.socket().await;
+    let handle = web.kernel.handle();
+    // Not a view id: not forwarded.
+    handle.emit(&UiChanged {
+        instance: "telemetry-log".into(),
+        view: "Not/A View".into(),
+    });
+    handle.emit(&UiChanged {
+        instance: "telemetry-log".into(),
+        view: "usage".into(),
+    });
+    let message = loop {
+        let message = next_json(&mut socket).await;
+        if message["type"] == "ui" {
+            break message;
+        }
+    };
+    assert_eq!(
+        message,
+        json!({ "type": "ui", "instance": "telemetry-log", "view": "usage" })
+    );
+}

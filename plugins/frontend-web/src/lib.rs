@@ -48,7 +48,9 @@
 //!   the standard layout (ADR 0062; see [`layout`]).
 //! - `GET /api/ui`, `GET /api/ui/{instance}/{view}` and `POST
 //!   /api/ui/{instance}/{view}/actions/{action} {input, session}`: views
-//!   other plugins contribute through `ui-views` (see [`views`]).
+//!   other plugins contribute through `ui-views` (see [`views`]). A
+//!   provider's `UiChanged` event reaches every window as `{type: "ui",
+//!   instance, view}`.
 //! - `GET /api/modes`, `PUT /api/mode {mode}`: the modes (daily work,
 //!   coding, ...) and the active one, shared by every frontend of this plugin
 //!   (see [`modes`]).
@@ -81,7 +83,7 @@
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
 //!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve, always}`.
 //!   Server messages: `{type: "event", session, event}`, `approval_required`,
-//!   `approval_resolved`, `error`.
+//!   `approval_resolved`, `ui`, `error`.
 //!
 //! The plugin answers `tool.approval` through connected browsers: with none
 //! connected it does not answer (a denial), and an unanswered request is
@@ -135,6 +137,7 @@ use rah_api::{
     host::{FrontendListening, HostNotice},
     session::{SESSION, SessionError, SessionLog, export::ExportFormat},
     tools::ToolInvoker,
+    ui::{MAX_PANEL_ID_BYTES, UiChanged, ViewSpec},
 };
 use rah_protocol::SessionId;
 use serde::Deserialize;
@@ -265,6 +268,17 @@ impl Plugin for WebFrontendPlugin {
                 "plugin": notice.plugin.to_string(),
                 "message": notice.message,
             }));
+        });
+        // A view changed: windows showing it render it again (ADR 0062).
+        let changes = shared.clone();
+        scope.on::<UiChanged>(move |changed| {
+            if changed.instance.len() <= MAX_PANEL_ID_BYTES && ViewSpec::valid_id(&changed.view) {
+                changes.approvals.notify(serde_json::json!({
+                    "type": "ui",
+                    "instance": changed.instance,
+                    "view": changed.view,
+                }));
+            }
         });
         let asker = shared.clone();
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {

@@ -19,7 +19,8 @@
 //! failed write drops that record.
 //!
 //! The plugin also provides `ui-views` with a `usage` view (ADR 0062): the
-//! sums of the records this process wrote, shown by the Web UI as a panel.
+//! sums of the records this process wrote, shown by the Web UI as a panel
+//! and announced with `UiChanged` whenever the queued records are written.
 //!
 //! Configuration (all optional): `{ "dir": ".rah/telemetry",
 //! "max_file_bytes": 10485760, "keep_days": 14, "include_arguments": false }`.
@@ -35,7 +36,7 @@ use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope,
     agent_loop::TurnEvent,
     async_trait,
-    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiViews},
+    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiChanged, UiViews},
 };
 use rah_protocol::{AgentErrorCode, AgentEvent, ModelRequestId, ModelUsage, SessionId, ToolCallId};
 use serde::Serialize;
@@ -98,6 +99,8 @@ impl Plugin for TelemetryPlugin {
         let totals = Arc::new(Mutex::new(usage::Totals::new()));
         let views: Arc<dyn UiViews> = Arc::new(usage::UsageViews(totals.clone()));
         scope.provide(UI_VIEWS, views)?;
+        let kernel = scope.kernel();
+        let instance = scope.id().to_string();
         scope.spawn(async move {
             while let Some(record) = queue.recv().await {
                 totals
@@ -105,6 +108,13 @@ impl Plugin for TelemetryPlugin {
                     .unwrap_or_else(PoisonError::into_inner)
                     .add(&record);
                 writer.write(&record).await;
+                // Once the queue is drained, open windows show the new sums.
+                if queue.is_empty() {
+                    kernel.emit(&UiChanged {
+                        instance: instance.clone(),
+                        view: usage::VIEW.to_owned(),
+                    });
+                }
             }
         });
         let tracker = Mutex::new(Tracker::new(

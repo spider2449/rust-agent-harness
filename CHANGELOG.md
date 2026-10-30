@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `UiChanged { instance, view }` (ADR 0062): a `ui-views` provider announces
+  that a view changed; `frontend-web` tells every window (`{type: "ui"}` on
+  the WebSocket), and a window showing the view renders it again.
+  `telemetry-log` announces its usage view after writing records, so it
+  follows turns of every session.
 - Plugin views (ADR 0062): a plugin providing `ui-views` adds panels to the
   Web UI, named `<instance>/<view>`, as data the page renders as text
   (headings, text, Markdown, values, tables, lists, buttons and forms whose

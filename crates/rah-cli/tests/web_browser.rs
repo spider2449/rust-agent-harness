@@ -2023,6 +2023,16 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
         ),
     )
     .await;
+    // A turn this window does not follow: only the provider's `UiChanged`
+    // tells the page.
+    let handle = web._kernel.handle();
+    let other = common::new_session(&handle).await;
+    common::turn(&handle, &other, "elsewhere").await;
+    page.wait(
+        "the pushed change",
+        &format!("{TURNS} === '1 (1 completed, 0 failed, 0 cancelled)'"),
+    )
+    .await;
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

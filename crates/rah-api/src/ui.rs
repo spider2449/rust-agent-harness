@@ -155,6 +155,16 @@ impl ViewSpec {
     }
 }
 
+/// Emitted on the event bus by a `ui-views` provider when what a view shows
+/// has changed; frontends render it again where it is shown. `instance` is
+/// the provider's service instance: its plugin id, unless it provides a
+/// named instance. Emitting is cheap and may be frequent; frontends coalesce.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiChanged {
+    pub instance: String,
+    pub view: String,
+}
+
 /// What a view is rendered or acted on for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ViewContext {

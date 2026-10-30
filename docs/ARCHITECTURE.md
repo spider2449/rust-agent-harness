@@ -175,7 +175,8 @@ Implemented:
   panels (`<instance>/<view>`), as data from a fixed vocabulary that
   `frontend-web` renders as text, with buttons and forms that call the
   provider on the user's click. Not a tool, so the model cannot reach it.
-  `telemetry-log` offers a `usage` view.
+  A provider emits `UiChanged` when a view changed, and windows showing it
+  render it again. `telemetry-log` offers a `usage` view.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

@@ -515,3 +515,43 @@ async fn the_plugin_shows_usage_as_a_view_and_resets_it() {
         Err(UiError::UnknownView("other".into()))
     );
 }
+
+#[tokio::test]
+async fn written_records_announce_that_the_usage_view_changed() {
+    use rah_api::ui::UiChanged;
+    let dir = TempDir::new("usage-changed");
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(TelemetryPlugin::new("telemetry")),
+            MountOptions::with_config(json!({ "dir": dir.0 })),
+        )
+        .await
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = {
+        let seen = seen.clone();
+        kernel
+            .handle()
+            .subscribe(move |changed: &UiChanged| seen.lock().unwrap().push(changed.clone()))
+    };
+    let session = SessionId::new();
+    for event in turn_events(&session) {
+        kernel.handle().emit(&TurnEvent { event });
+    }
+    for _ in 0..200 {
+        if !seen.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty());
+    // Coalesced: at most one per record, usually one per drained queue.
+    assert!(seen.len() <= 7, "{seen:?}");
+    assert!(seen.iter().all(|changed| *changed
+        == UiChanged {
+            instance: "telemetry".into(),
+            view: "usage".into(),
+        }));
+}

@@ -458,7 +458,7 @@ misspelt panel stops the start; leave a panel out to hide it.
 Plugins can add their own panels (views), named `<plugin id>/<view>`. A view
 the layout does not name joins the right column. `telemetry-log` adds
 `telemetry-log/usage`: turns, model requests, tokens and tool calls of this
-process, with a Reset button. Put it on the left with
+process, with a Reset button; it updates as turns of any session end. Put it on the left with
 `left = ["sessions", "telemetry-log/usage"]`.
 
 **API groups**: every `tools-http` instance is one internal API with its
