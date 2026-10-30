@@ -2096,6 +2096,63 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shown_view_follows_the_session_that_is_opened() {
+    use rah_api::tools::{Invocation, ToolInvoker};
+    use rah_protocol::{ToolCall, ToolCallId, ToolInput, ToolName};
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start_with("web-browser-view-session", |distribution, _| {
+        distribution.enable("todo").unwrap();
+    })
+    .await;
+    let handle = web._kernel.handle();
+    let planned = common::new_session(&handle).await;
+    let empty = common::new_session(&handle).await;
+    let outcome = ToolInvoker::new(handle.clone())
+        .invoke(
+            Invocation {
+                session: planned.clone(),
+                call: ToolCall {
+                    id: ToolCallId::new(),
+                    name: ToolName::new("todo.write"),
+                    input: ToolInput(
+                        json!({ "todos": [{ "content": "fix", "status": "in_progress" }] }),
+                    ),
+                },
+                cancel: rah_api::CancellationToken::new(),
+            },
+            || {},
+        )
+        .await;
+    assert!(!outcome.output.is_error, "{:?}", outcome.output);
+
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-view-session");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("showPanel('todo/list'); true").await;
+    const BODY: &str = "views.get('todo/list').body.textContent";
+    // Each switch renders the view for the session just opened.
+    for (session, shown) in [
+        (&planned, "[>] fix"),
+        (&empty, "No to-do items"),
+        (&planned, "[>] fix"),
+    ] {
+        page.eval(&format!("openSession('{session}'); true")).await;
+        page.wait(
+            "the view of the opened session",
+            &format!("state.current === '{session}' && {BODY}.includes('{shown}')"),
+        )
+        .await;
+    }
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
 /// A Python 3 interpreter on PATH, if any.
 fn python() -> Option<&'static str> {
     ["python3", "python"].into_iter().find(|program| {

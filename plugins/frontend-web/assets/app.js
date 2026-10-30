@@ -396,6 +396,7 @@ function editTitle(host, info) {
 function closeSession() {
   state.current = null;
   renderUsage();
+  refreshViews();
   $("transcript").replaceChildren();
   $("activity").replaceChildren();
   $("input").disabled = true;
@@ -480,6 +481,8 @@ function awaitTitle() {
 async function openSession(id) {
   state.current = id;
   renderUsage();
+  // Views are rendered for the open session.
+  refreshViews();
   setRunning(false);
   await ensureWorkspace(state.sessions.find((info) => info.id === id));
   await loadSessions();
@@ -1332,11 +1335,15 @@ function viewPath(entry) {
 async function renderView(id) {
   const entry = views.get(id);
   if (!entry) return;
-  const session = state.current ? `?session=${encodeURIComponent(state.current)}` : "";
+  const current = state.current;
+  const session = current ? `?session=${encodeURIComponent(current)}` : "";
   try {
     const content = await api(`${viewPath(entry)}${session}`);
+    // Another session was opened meanwhile; its own render shows it.
+    if (current !== state.current) return;
     entry.body.replaceChildren(...(content.nodes || []).map((node) => viewNode(entry, node)).filter(Boolean));
   } catch (error) {
+    if (current !== state.current) return;
     entry.body.replaceChildren(el("p", "note", error.message));
   }
 }
