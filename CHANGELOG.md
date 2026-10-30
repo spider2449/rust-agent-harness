@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The Web UI follows plugin changes without a reload: when mounting,
+  removing, restarting or configuring a plugin alters the layout or the
+  panels (such as `ui-layout-config` or a plugin with views), every window
+  hears `{type: "layout"}` and applies the new layout in place.
 - `GET /api/layout` also returns `panels`: every panel id a layout can place
   (built-in and plugin views), with its title and current column. Adding or
   configuring `ui-layout-config` in the Plugins panel lists them under

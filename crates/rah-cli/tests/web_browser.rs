@@ -1948,8 +1948,12 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         json!({ "left": ["sessions", "plugins"], "right": ["files"] }),
     )
     .await;
-    page.call("Page.reload", json!({})).await;
-    page.wait("the page to connect", "connected()").await;
+    // The page applies the new layout by itself, without a reload.
+    page.wait(
+        "the pushed layout",
+        "byId('plugins-panel').parentElement.id === 'left'",
+    )
+    .await;
     assert_eq!(
         page.eval(PLACES).await,
         json!({
@@ -1968,6 +1972,38 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
     )
     .await;
     page.screenshot("layout-plugins-left").await;
+
+    // Removing the plugin brings the standard layout back, without a reload.
+    web._kernel.unmount(&id).await.unwrap();
+    page.wait(
+        "the standard layout",
+        "byId('plugins-panel').parentElement.id === 'side' && byId('left-tabs').hidden",
+    )
+    .await;
+
+    // Adding and configuring `ui-layout-config` as the Plugins panel does:
+    // each change applies in every window at once.
+    page.eval(
+        "api('/plugins', { method: 'POST', body: JSON.stringify({ kind: 'ui-layout-config', \
+         config: { left: ['plugins'], right: ['sessions', 'files'] } }) }); true",
+    )
+    .await;
+    page.wait(
+        "the added layout plugin",
+        "byId('plugins-panel').parentElement.id === 'left' && byId('sessions-panel').parentElement.id === 'side'",
+    )
+    .await;
+    page.eval(
+        "api('/plugins/ui-layout-config/config', { method: 'PUT', body: JSON.stringify({ \
+         config: { left: ['files', 'sessions'], right: ['plugins'] } }) }); true",
+    )
+    .await;
+    page.wait(
+        "the configured layout",
+        "byId('files-view').parentElement.id === 'left' && byId('sessions-panel').parentElement.id === 'left' \
+         && byId('plugins-panel').parentElement.id === 'side'",
+    )
+    .await;
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

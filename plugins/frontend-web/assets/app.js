@@ -1254,6 +1254,21 @@ async function loadLayout() {
   applyLayout(given);
 }
 
+// A plugin change altered the layout (`{type: "layout"}` on the socket):
+// applies it in place, keeping the panels shown where they still can be.
+async function reloadLayout() {
+  const open = !$("side").hidden;
+  const right = regionView("right");
+  const left = regionView("left");
+  await loadLayout();
+  applyPanelRules();
+  if (left && layout.left.includes(left) && panelAllowed(left)) showPanel(left);
+  if (open) {
+    const view = layout.right.includes(right) && panelAllowed(right) ? right : preferredSideView();
+    if (view) showPanel(view);
+  }
+}
+
 function sideView() {
   return regionView("right");
 }
@@ -2532,6 +2547,8 @@ function connect() {
       if (state.running) setBusyPhase(`Running ${busy.tool || "a tool"}…`);
     } else if (data.type === "groups") {
       loadGroups();
+    } else if (data.type === "layout") {
+      reloadLayout().catch(report);
     } else if (data.type === "ui") {
       viewChanged(`${data.instance}/${data.view}`);
     } else if (data.type === "host_notice") {

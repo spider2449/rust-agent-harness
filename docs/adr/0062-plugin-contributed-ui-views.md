@@ -122,8 +122,10 @@ XSS in all. B is worth having only once A cannot express a needed view.
      Plugins panel shows when a `ui-layout-config` is added or configured.
    - Panel sizes, the open or closed right column and its shown panel stay
      per-user `preferences`, as today; `right_open` applies only until the
-     user chooses. The layout is read at page load; a newly mounted
-     provider applies at the next load.
+     user chooses. When a plugin change (mount, unmount, restart,
+     configure) alters the layout or the panels, `frontend-web` sends
+     `{type: "layout"}` to every window, which applies it without a
+     reload.
    - **The browser and the desktop share it.** `rah-desktop` is a shell over
      `frontend-web` (ADR 0046), so the same layout, views and modes apply to
      both without code in the shell. A mode naming a layout `instance` to

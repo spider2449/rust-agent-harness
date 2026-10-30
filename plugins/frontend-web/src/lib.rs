@@ -46,7 +46,8 @@
 //! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
 //!   problems, panels}`, the panels of each column from the `ui-layout` service, else
 //!   the standard layout, and every panel id a layout can place (ADR 0062;
-//!   see [`layout`]).
+//!   see [`layout`]). A plugin change that alters it reaches every window
+//!   as `{type: "layout"}`.
 //! - `GET /api/ui`, `GET /api/ui/{instance}/{view}` and `POST
 //!   /api/ui/{instance}/{view}/actions/{action} {input, session}`: views
 //!   other plugins contribute through `ui-views` (see [`views`]). A
@@ -281,6 +282,8 @@ impl Plugin for WebFrontendPlugin {
                 }));
             }
         });
+        // A plugin change that alters the layout reaches every window.
+        layout::watch(scope, shared.clone());
         let asker = shared.clone();
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
             let asker = asker.clone();

@@ -2487,3 +2487,35 @@ views = {views}
     let error = error.to_string();
     assert!(error.contains("`usage` is not a view"), "{error}");
 }
+
+/// The next `{type: "layout"}` message, skipping others.
+async fn next_layout(socket: &mut Socket) -> Value {
+    loop {
+        let message = next_json(socket).await;
+        if message["type"] == "layout" {
+            return message;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_plugin_change_that_alters_the_layout_reaches_every_window() {
+    let web = start("layout-push", |_| {}).await;
+    let mut socket = web.socket().await;
+    let id = PluginId::new("my-layout");
+    common::mount_layout(
+        &web.kernel,
+        &id,
+        json!({ "left": ["plugins"], "right": ["sessions", "files"] }),
+    )
+    .await;
+    assert_eq!(next_layout(&mut socket).await, json!({ "type": "layout" }));
+    assert_eq!(
+        web.json(web.get("/api/layout")).await["layout"]["left"],
+        json!(["plugins"])
+    );
+
+    web.kernel.unmount(&id).await.unwrap();
+    assert_eq!(next_layout(&mut socket).await, json!({ "type": "layout" }));
+    assert_eq!(web.json(web.get("/api/layout")).await["source"], "standard");
+}
