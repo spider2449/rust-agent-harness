@@ -158,3 +158,91 @@ async fn process_plugins_need_an_id_and_a_startable_program() {
     let error = boot(&Kernel::new(), &distribution).await.unwrap_err();
     assert!(error.to_string().contains("needs an `id`"), "{error}");
 }
+
+fn todo_distribution(dir: &TempDir, program: &str) -> Distribution {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/process-plugins/todo_board.py");
+    Distribution::parse(&format!(
+        r#"
+[[plugin]]
+use = "storage-fs"
+config = {{ dir = "{storage}" }}
+
+[[plugin]]
+use = "process"
+id = "todo"
+config = {{ program = "{program}", args = ["{script}"] }}
+"#,
+        storage = forward(&dir.storage()),
+        script = forward(&script),
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_python_todo_board_is_a_view_kept_in_storage() {
+    use rah_api::ui::{UI_VIEWS, UiChanged, UiError, ViewContext};
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python 3 interpreter on PATH");
+        return;
+    };
+    let dir = TempDir::new("process-python-todo");
+    let kernel = Kernel::new();
+    boot(&kernel, &todo_distribution(&dir, python))
+        .await
+        .unwrap();
+    let changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _subscription = {
+        let changes = changes.clone();
+        kernel.handle().subscribe(move |changed: &UiChanged| {
+            changes.lock().unwrap().push(changed.view.clone())
+        })
+    };
+    let all = kernel.handle().get_all(UI_VIEWS);
+    let (instance, views) = &all[0];
+    assert_eq!(instance, "todo");
+    assert_eq!(views.views()[0].title, "To-do");
+    let cx = ViewContext::default();
+    let text = |view: &rah_api::ui::View| serde_json::to_string(view).unwrap();
+
+    assert!(text(&views.render("board", &cx).await.unwrap()).contains("0 item(s)."));
+    let added = views
+        .act(
+            "board",
+            "add",
+            serde_json::json!({ "item": "write the ADR" }),
+            &cx,
+        )
+        .await
+        .unwrap();
+    assert!(added.rerender);
+    assert!(text(&views.render("board", &cx).await.unwrap()).contains("write the ADR"));
+    assert!(matches!(
+        views
+            .act("board", "add", serde_json::json!({ "item": " " }), &cx)
+            .await,
+        Err(UiError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        views
+            .act("board", "nope", serde_json::Value::Null, &cx)
+            .await,
+        Err(UiError::UnknownAction(_))
+    ));
+    for _ in 0..100 {
+        if !changes.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*changes.lock().unwrap(), ["board"]);
+    kernel.shutdown().await.unwrap();
+
+    // The items are in `storage`, so a new start shows them.
+    let kernel = Kernel::new();
+    boot(&kernel, &todo_distribution(&dir, python))
+        .await
+        .unwrap();
+    let views = kernel.handle().get_all(UI_VIEWS).remove(0).1;
+    assert!(text(&views.render("board", &cx).await.unwrap()).contains("write the ADR"));
+}

@@ -374,12 +374,15 @@ config = { formatters = { zig = { command = ["zig", "fmt", "$FILE"], extensions 
 ```
 
 Plugins can also be separate processes in any language, speaking JSON-RPC 2.0
-on stdio ([protocol v3](docs/PROCESS_PLUGINS.md)). The Python example
+on stdio ([protocol v4](docs/PROCESS_PLUGINS.md)). The Python example
 [`word_tools.py`](examples/process-plugins/word_tools.py) provides two tools
 and reads the session log through the host, which allows only the services
 the plugin lists in `requires`.
 [`tool_guard.py`](examples/process-plugins/tool_guard.py) has no tools; it
-attaches to the tool hooks to deny and redact. Mounting `word_tools.py`:
+attaches to the tool hooks to deny and redact.
+[`todo_board.py`](examples/process-plugins/todo_board.py) adds a to-do panel
+(`todo/board`) to the Web UI, with a form and a button, and keeps its items
+in `storage`. Mounting `word_tools.py`:
 
 ```toml
 [[plugin]]

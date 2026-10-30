@@ -1,13 +1,13 @@
-//! Process plugin host, protocol v3: plugins as child processes speaking
+//! Process plugin host, protocol v4: plugins as child processes speaking
 //! newline-delimited JSON-RPC 2.0 on stdin and stdout (stderr is kept as a
 //! bounded diagnostic tail).
 //!
 //! Host to plugin:
 //!
 //! - `initialize {protocol, kernel_api, plugin_id, config}` returns the
-//!   manifest `{protocol: 3, version, provides, requires, optional, tools,
-//!   hooks, events}`. A manifest answering protocol 2 is accepted without
-//!   `hooks` and `events`.
+//!   manifest `{protocol: 4, version, provides, requires, optional, tools,
+//!   hooks, events, views}`. Manifests answering protocol 3 (without
+//!   `views`) and 2 (also without `hooks` and `events`) are accepted.
 //! - `tools/call {name, arguments, session}` returns
 //!   `{content: [{type: "text", text} | {type: "json", json}], is_error}`. An
 //!   error whose `data.kind` is `invalid_input` or `not_started` means nothing
@@ -15,6 +15,8 @@
 //! - `hooks/call {hook, input}` for `tool.before_invoke`,
 //!   `tool.after_invoke` and `model.before_request` (see [`hooks`]).
 //! - `event {event, data}` (notification) for `session.appended`.
+//! - `views/render {view, session}` and `views/act {view, action, input,
+//!   session}` for a plugin that provides `ui-views` (see [`views`]).
 //! - `$/cancel {id}` (notification) and `shutdown`.
 //!
 //! Plugin to host:
@@ -24,9 +26,10 @@
 //!   `session` with `list` and `read {session}`; `storage` with `get {key}`,
 //!   `put {key, value}`, `delete {key}` and `list {prefix?}`, always in the
 //!   namespace of the plugin's id ([`rah_api::storage::call_json`]).
+//! - `ui/changed {view}` (notification): the host emits `UiChanged`.
 //!
-//! A process plugin may provide `tools` only; other services are not
-//! available over the protocol yet. `rah` learns the manifest by running
+//! A process plugin may provide `tools` and `ui-views`; other services are
+//! not available over the protocol yet. `rah` learns the manifest by running
 //! the plugin once at boot ([`ProcessPlugin::describe`]); every start then
 //! checks that the manifest is unchanged. The child gets a cleared
 //! environment (refilled from `inherit_env` and `env`), runs while its plugin
@@ -36,6 +39,7 @@
 
 pub mod hooks;
 mod peer;
+pub mod views;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -53,6 +57,7 @@ use rah_api::{
     session::{SESSION, SessionLog},
     storage::{self, KvStore, STORAGE, StorageError},
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, image, provide_tools},
+    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiViews, ViewSpec},
 };
 use rah_protocol::{SessionId, ToolContent, ToolDefinition, ToolOutput};
 use serde::Deserialize;
@@ -60,13 +65,15 @@ use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
 use crate::hooks::{EVENTS, HOOKABLE, HookSpec};
-pub use crate::peer::{Inbound, Peer, PeerError, RpcFault};
+pub use crate::peer::{Inbound, Notified, Peer, PeerError, RpcFault};
 
-pub const PROTOCOL_VERSION: u64 = 3;
+pub const PROTOCOL_VERSION: u64 = 4;
+/// Hooks and events without views (ADR 0039), still accepted from plugins.
+pub const PROTOCOL_V3: u64 = 3;
 /// The tools-only protocol, still accepted from plugins.
 pub const PROTOCOL_V2: u64 = 2;
 /// Services a process plugin may provide.
-pub const PROVIDABLE_SERVICES: [&str; 1] = [TOOLS_SERVICE];
+pub const PROVIDABLE_SERVICES: [&str; 2] = [TOOLS_SERVICE, UI_VIEWS_SERVICE];
 /// Host services a process plugin may require and call.
 pub const CALLABLE_SERVICES: [&str; 2] = ["session", "storage"];
 /// JSON-RPC error code for a service outside the plugin's `requires`.
@@ -98,6 +105,7 @@ pub struct ProcessConfig {
     pub startup_timeout_ms: Option<u64>,
     pub call_timeout_ms: Option<u64>,
     pub hook_timeout_ms: Option<u64>,
+    pub view_timeout_ms: Option<u64>,
     pub max_message_bytes: Option<usize>,
 }
 
@@ -112,6 +120,10 @@ impl ProcessConfig {
 
     fn hook_timeout(&self) -> Duration {
         Duration::from_millis(self.hook_timeout_ms.unwrap_or(5_000).max(1))
+    }
+
+    fn view_timeout(&self) -> Duration {
+        Duration::from_millis(self.view_timeout_ms.unwrap_or(5_000).max(1))
     }
 
     fn max_message(&self) -> usize {
@@ -158,6 +170,7 @@ pub struct Described {
     pub tools: Vec<ToolDefinition>,
     pub hooks: Vec<HookSpec>,
     pub events: Vec<String>,
+    pub views: Vec<ViewSpec>,
 }
 
 type Shape<'a> = (
@@ -166,10 +179,12 @@ type Shape<'a> = (
     BTreeSet<&'a String>,
     BTreeSet<&'a HookSpec>,
     BTreeSet<&'a String>,
+    BTreeSet<&'a String>,
 );
 
 impl Described {
-    /// What must not change between starts: services, hooks and events.
+    /// What must not change between starts: services, hooks, events and
+    /// view ids.
     fn shape(&self) -> Shape<'_> {
         (
             self.provides.iter().collect(),
@@ -177,6 +192,7 @@ impl Described {
             self.optional.iter().collect(),
             self.hooks.iter().collect(),
             self.events.iter().collect(),
+            self.views.iter().map(|view| &view.id).collect(),
         )
     }
 }
@@ -198,19 +214,22 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         hooks: Vec<HookSpec>,
         #[serde(default)]
         events: Vec<String>,
+        #[serde(default)]
+        views: Vec<ViewSpec>,
     }
     let reply: Reply = serde_json::from_value(result)
         .map_err(|error| format!("invalid initialize result: {error}"))?;
-    if reply.protocol != PROTOCOL_VERSION && reply.protocol != PROTOCOL_V2 {
+    if ![PROTOCOL_V2, PROTOCOL_V3, PROTOCOL_VERSION].contains(&reply.protocol) {
         return Err(format!(
-            "the plugin speaks protocol {}, the host speaks {PROTOCOL_V2} or {PROTOCOL_VERSION}",
+            "the plugin speaks protocol {}, the host speaks {PROTOCOL_V2} to {PROTOCOL_VERSION}",
             reply.protocol
         ));
     }
+    if reply.protocol < PROTOCOL_VERSION && !reply.views.is_empty() {
+        return Err(format!("`views` need protocol {PROTOCOL_VERSION}"));
+    }
     if reply.protocol == PROTOCOL_V2 && !(reply.hooks.is_empty() && reply.events.is_empty()) {
-        return Err(format!(
-            "`hooks` and `events` need protocol {PROTOCOL_VERSION}"
-        ));
+        return Err(format!("`hooks` and `events` need protocol {PROTOCOL_V3}"));
     }
     let mut hooks = BTreeSet::new();
     for spec in &reply.hooks {
@@ -243,7 +262,8 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         .find(|s| !PROVIDABLE_SERVICES.contains(&s.as_str()))
     {
         return Err(format!(
-            "a process plugin cannot provide `{service}`; only: tools"
+            "a process plugin cannot provide `{service}`; only: {}",
+            PROVIDABLE_SERVICES.join(", ")
         ));
     }
     if let Some(service) = reply
@@ -261,6 +281,11 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
     if provides_tools == reply.tools.is_empty() {
         return Err("a plugin lists tools exactly when it provides `tools`".into());
     }
+    let provides_views = reply.provides.iter().any(|s| s == UI_VIEWS_SERVICE);
+    if provides_views == reply.views.is_empty() {
+        return Err("a plugin lists views exactly when it provides `ui-views`".into());
+    }
+    views::check(&reply.views)?;
     if reply.tools.len() > MAX_TOOLS {
         return Err(format!("more than {MAX_TOOLS} tools"));
     }
@@ -282,6 +307,7 @@ fn parse_initialize(result: Value) -> Result<Described, String> {
         tools: reply.tools,
         hooks: reply.hooks,
         events: reply.events,
+        views: reply.views,
     })
 }
 
@@ -401,8 +427,17 @@ impl Plugin for ProcessPlugin {
             namespace: scope.id().to_string(),
         };
         let child = launch.spawn()?;
-        let (peer, connection) =
-            Peer::connect(child, host_services(services), launch.max_message())?;
+        let notified = views::notified(
+            scope.kernel(),
+            scope.id().to_string(),
+            &self.described.views,
+        );
+        let (peer, connection) = Peer::connect_with_notifications(
+            child,
+            host_services(services),
+            notified,
+            launch.max_message(),
+        )?;
         if !scope.spawn(connection) {
             return Err("the plugin scope is already disposed".into());
         }
@@ -425,6 +460,14 @@ impl Plugin for ProcessPlugin {
                 })
                 .collect();
             provide_tools(scope, tools)?;
+        }
+        if !described.views.is_empty() {
+            let provider: Arc<dyn UiViews> = Arc::new(views::ProcessViews {
+                peer: peer.clone(),
+                views: described.views,
+                timeout: launch.view_timeout(),
+            });
+            scope.provide(UI_VIEWS, provider)?;
         }
         hooks::attach(
             scope,

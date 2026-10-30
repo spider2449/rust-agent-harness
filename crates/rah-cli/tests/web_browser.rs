@@ -2036,3 +2036,102 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }
+
+/// A Python 3 interpreter on PATH, if any.
+fn python() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|program| {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).starts_with("Python 3")
+            })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_view_takes_a_form_and_a_button_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let Some(python) = python() else {
+        eprintln!("skipped: no Python 3 interpreter on PATH");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-python-view").await;
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/process-plugins/todo_board.py");
+    let config = json!({ "program": python, "args": [script.display().to_string()] });
+    let plugin =
+        rah_plugin_host_process::ProcessPlugin::describe(rah_api::PluginId::new("todo"), &config)
+            .await
+            .unwrap();
+    web._kernel
+        .mount(Arc::new(plugin), rah_api::MountOptions::with_config(config))
+        .await
+        .unwrap();
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-python-view");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("showPanel('todo/board'); true").await;
+    const BOARD: &str = "document.querySelector('[aria-label=\"To-do\"]')";
+    page.wait(
+        "the board",
+        &format!("{BOARD}.querySelector('.view-body p')?.textContent === '0 item(s).'"),
+    )
+    .await;
+    // An empty item is refused by the plugin and the message says why.
+    page.eval(&format!(
+        "{BOARD}.querySelector('.view-form button').click(); true"
+    ))
+    .await;
+    page.wait(
+        "the refusal",
+        &format!(
+            "{BOARD}.querySelector('.view-message.bad')?.textContent.includes('type an item first')"
+        ),
+    )
+    .await;
+    page.eval(&format!(
+        "{BOARD}.querySelector('.view-form input').value = 'water the plants'; \
+         {BOARD}.querySelector('.view-form button').click(); true"
+    ))
+    .await;
+    page.wait(
+        "the added item",
+        &format!(
+            "[...{BOARD}.querySelectorAll('.view-list li')].map((li) => li.textContent).join() === 'water the plants' \
+             && {BOARD}.querySelector('.view-message').textContent === 'Added “water the plants”.'"
+        ),
+    )
+    .await;
+    page.screenshot("python-view").await;
+    page.eval(&format!(
+        "[...{BOARD}.querySelectorAll('button')].find((b) => b.textContent === 'Clear').click(); true"
+    ))
+    .await;
+    page.wait(
+        "the cleared board",
+        &format!("{BOARD}.querySelector('.view-body p')?.textContent === '0 item(s).'"),
+    )
+    .await;
+    // The refused empty item is a 400, which the browser logs; nothing else.
+    let errors: Vec<_> = page
+        .errors()
+        .into_iter()
+        .filter(|error| {
+            let entry = &error["params"]["entry"];
+            !(entry["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/actions/add"))
+                && entry["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("400")))
+        })
+        .collect();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}

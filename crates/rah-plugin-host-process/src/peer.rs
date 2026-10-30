@@ -80,6 +80,9 @@ impl std::fmt::Display for PeerError {
 pub type Inbound =
     Arc<dyn Fn(String, Value) -> BoxFuture<'static, Result<Value, RpcFault>> + Send + Sync>;
 
+/// Receives notifications the plugin sends to the host (`method`, `params`).
+pub type Notified = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
 type Reply = oneshot::Sender<Result<Value, PeerError>>;
 
 enum Command {
@@ -128,8 +131,19 @@ impl Peer {
     /// Wraps a spawned child with piped stdin, stdout and stderr. The
     /// returned future is the connection; the caller must drive it.
     pub fn connect(
+        child: Child,
+        inbound: Inbound,
+        max_message: usize,
+    ) -> Result<(Self, BoxFuture<'static, ()>), String> {
+        Self::connect_with_notifications(child, inbound, Arc::new(|_, _| {}), max_message)
+    }
+
+    /// Like [`Peer::connect`], and passes the plugin's notifications to
+    /// `notified`, in order, on the connection's task.
+    pub fn connect_with_notifications(
         mut child: Child,
         inbound: Inbound,
+        notified: Notified,
         max_message: usize,
     ) -> Result<(Self, BoxFuture<'static, ()>), String> {
         let (Some(stdin), Some(stdout), Some(stderr)) =
@@ -151,7 +165,10 @@ impl Peer {
             stderr: Box::new(stderr),
             tail,
         };
-        Ok((peer, actor(io, receiver, inbound, max_message).boxed()))
+        Ok((
+            peer,
+            actor(io, receiver, inbound, notified, max_message).boxed(),
+        ))
     }
 
     pub async fn request(
@@ -243,6 +260,7 @@ async fn actor(
     mut io: Io,
     mut commands: mpsc::UnboundedReceiver<Command>,
     inbound: Inbound,
+    notified: Notified,
     max: usize,
 ) {
     let mut pending: HashMap<u64, Reply> = HashMap::new();
@@ -284,8 +302,9 @@ async fn actor(
                                 }
                             }.boxed());
                         }
-                        // Notifications from the plugin are not used yet.
-                        (Some(_), None) => {}
+                        (Some(method), None) => {
+                            notified(method, message.get("params").cloned().unwrap_or(Value::Null));
+                        }
                         (None, Some(id)) => {
                             // Answers to requests already given up on are ignored.
                             if let Some(reply) = id.as_u64().and_then(|id| pending.remove(&id)) {

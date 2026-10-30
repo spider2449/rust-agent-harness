@@ -197,5 +197,5 @@ Done, in four steps:
 
 Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
 `Progress` node, modes listing `views`
-(decision 6), views from process plugins (decision 8) and in
-`frontend-cli` (decision 9).
+(decision 6) and views in `frontend-cli` (decision 9). Views from process
+plugins (decision 8) are protocol 4, ADR 0063.

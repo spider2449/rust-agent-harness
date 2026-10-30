@@ -23,7 +23,8 @@ fn config(args: &[&str], plugin: Value) -> Value {
         "args": args,
         "plugin": plugin,
         "call_timeout_ms": 500,
-        "hook_timeout_ms": 300
+        "hook_timeout_ms": 300,
+        "view_timeout_ms": 300
     })
 }
 
@@ -604,4 +605,145 @@ async fn session_appended_events_reach_subscribed_plugins_only() {
             assert_eq!(event["data"]["entry"]["input"], "hello");
         }
     }
+}
+
+async fn describe_error(args: &[&str]) -> String {
+    ProcessPlugin::describe(PluginId::new("fixture"), &config(args, Value::Null))
+        .await
+        .err()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn views_need_protocol_4_and_valid_unique_ids() {
+    let plugin = ProcessPlugin::describe(
+        PluginId::new("fixture"),
+        &config(&["--view", "board", "--view", "queue_2"], Value::Null),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        plugin.manifest().provides,
+        ["tools".into(), "ui-views".into()]
+    );
+    let ids: Vec<&str> = plugin
+        .described()
+        .views
+        .iter()
+        .map(|view| view.id.as_str())
+        .collect();
+    assert_eq!(ids, ["board", "queue_2"]);
+
+    for (args, expected) in [
+        (
+            &["--mode", "v3", "--view", "board"][..],
+            "`views` need protocol 4",
+        ),
+        (&["--view", "Board"][..], "invalid view id `Board`"),
+        (&["--view", "a", "--view", "a"][..], "duplicate view `a`"),
+    ] {
+        let error = describe_error(args).await;
+        assert!(error.contains(expected), "{args:?}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn views_render_act_and_announce_changes_through_the_plugin() {
+    use rah_api::ui::{UI_VIEWS, UiChanged, UiError, ViewContext};
+    let kernel = Kernel::new();
+    let status = mount_process(
+        &kernel,
+        config(&["--view", "board", "--view", "malformed"], Value::Null),
+    )
+    .await;
+    assert_eq!(status, PluginStatus::Active);
+    let changes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _subscription = {
+        let changes = changes.clone();
+        kernel
+            .handle()
+            .subscribe(move |changed: &UiChanged| changes.lock().unwrap().push(changed.clone()))
+    };
+    let all = kernel.handle().get_all(UI_VIEWS);
+    assert_eq!(all.len(), 1);
+    let (instance, views) = &all[0];
+    assert_eq!(instance, "fixture");
+    assert_eq!(views.views()[0].title, "Fixture board");
+
+    let session = SessionId::new();
+    let cx = ViewContext {
+        session: Some(session.clone()),
+    };
+    let values = |view: &rah_api::ui::View| -> Value {
+        serde_json::to_value(&view.nodes[1]).unwrap()["items"].clone()
+    };
+    let view = views.render("board", &cx).await.unwrap();
+    assert_eq!(
+        values(&view),
+        json!([{"key": "clicks", "value": "0"}, {"key": "session", "value": session.to_string()}])
+    );
+
+    let outcome = views.act("board", "bump", Value::Null, &cx).await.unwrap();
+    assert_eq!(outcome.message.as_deref(), Some("clicked 1"));
+    assert!(outcome.rerender);
+    let view = views
+        .render("board", &ViewContext::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        values(&view),
+        json!([{"key": "clicks", "value": "1"}, {"key": "session", "value": "none"}])
+    );
+    // `ui/changed` for a view in the manifest only; `ghost` is ignored.
+    for _ in 0..100 {
+        if !changes.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        *changes.lock().unwrap(),
+        [UiChanged {
+            instance: "fixture".into(),
+            view: "board".into(),
+        }]
+    );
+
+    let echoed = views
+        .act("board", "echo", json!({"n": 2}), &cx)
+        .await
+        .unwrap();
+    assert_eq!(echoed.message.as_deref(), Some(r#"{"n":2}"#));
+    assert!(matches!(
+        views.act("board", "invalid", Value::Null, &cx).await,
+        Err(UiError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        views.act("board", "unknown", Value::Null, &cx).await,
+        Err(UiError::UnknownAction(_))
+    ));
+    let late = views.act("board", "hang", Value::Null, &cx).await;
+    assert!(
+        matches!(&late, Err(UiError::Failed(message)) if message.contains("in time")),
+        "{late:?}"
+    );
+    let bad = views.act("board", "other", Value::Null, &cx).await;
+    assert!(
+        matches!(&bad, Err(UiError::Failed(message)) if message.contains("malformed action")),
+        "{bad:?}"
+    );
+    let malformed = views.render("malformed", &cx).await;
+    assert!(
+        matches!(&malformed, Err(UiError::Failed(message)) if message.contains("malformed view")),
+        "{malformed:?}"
+    );
+    assert_eq!(
+        views.render("nope", &cx).await,
+        Err(UiError::UnknownView("nope".into()))
+    );
+    // A request that timed out is not repeated, and the plugin still works.
+    assert!(views.render("board", &cx).await.is_ok());
+
+    kernel.unmount(&PluginId::new("fixture")).await.unwrap();
+    assert!(kernel.handle().get_all(UI_VIEWS).is_empty());
 }

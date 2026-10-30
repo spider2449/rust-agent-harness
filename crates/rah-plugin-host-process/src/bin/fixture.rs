@@ -1,8 +1,10 @@
-//! A process plugin used by the host's tests (protocol v3).
+//! A process plugin used by the host's tests (protocol v3, or v4 with
+//! views).
 //!
-//! Arguments: `--requires <service>`, `--hook <name>[:<priority>]` and
-//! `--event <name>` (all repeatable), and `--mode <mode>`, where mode is
-//! `normal`, `v2` (answers protocol 2), `old-protocol` or `provides-model`.
+//! Arguments: `--requires <service>`, `--hook <name>[:<priority>]`,
+//! `--event <name>` and `--view <id>` (all repeatable), and `--mode <mode>`,
+//! where mode is `normal`, `v2` (answers protocol 2), `v3` (answers protocol
+//! 3 even with views), `old-protocol` or `provides-model`.
 //! With `initialize.config.flip_file`, the first start creates that file and
 //! the next start reports a different manifest.
 //!
@@ -11,6 +13,11 @@
 //! `tool.after_invoke` rewrites `fixture.echo` output (`hang-after` does not
 //! answer) and `model.before_request` adds a system item unless the last
 //! user text is `hang` or `bad-image`.
+//!
+//! Views show `clicks` and the session; view `malformed` returns a node the
+//! host does not know. Actions: `bump` counts a click and sends `ui/changed`
+//! for the view and for `ghost`, `invalid` and `unknown` fail with that
+//! kind, `hang` does not answer and `echo` returns the input as the message.
 
 use std::{
     collections::VecDeque,
@@ -93,6 +100,11 @@ fn main() {
         })
         .collect();
     let events = flag("--event");
+    let views: Vec<Value> = flag("--view")
+        .iter()
+        .map(|id| json!({ "id": id, "title": format!("Fixture {id}") }))
+        .collect();
+    let mut clicks = 0_u64;
     eprintln!("fixture started in mode {mode}");
     let mut plugin = Plugin {
         lines: std::io::stdin().lock().lines(),
@@ -113,20 +125,26 @@ fn main() {
                         std::fs::write(flip, "started").unwrap();
                     }
                 }
-                let provides = if mode == "provides-model" {
+                let mut provides = vec![if mode == "provides-model" {
                     "model"
                 } else {
                     "tools"
-                };
+                }];
+                if !views.is_empty() {
+                    provides.push("ui-views");
+                }
                 let protocol = match mode.as_str() {
                     "old-protocol" => 1,
                     "v2" => 2,
-                    _ => 3,
+                    "v3" => 3,
+                    _ if views.is_empty() => 3,
+                    _ => 4,
                 };
                 json!({
                     "protocol": protocol,
                     "version": "0.1.0",
-                    "provides": [provides],
+                    "provides": provides,
+                    "views": views,
                     "requires": requires,
                     "hooks": hooks,
                     "events": events,
@@ -174,6 +192,51 @@ fn main() {
                         "content": [{ "type": "json", "json": plugin.events }]
                     }),
                     _ => std::process::exit(3),
+                }
+            }
+            Some("views/render") => {
+                let view = params["view"].as_str().unwrap_or_default();
+                if view == "malformed" {
+                    json!({ "nodes": [{ "type": "html", "text": "<b>" }] })
+                } else {
+                    json!({ "nodes": [
+                        { "type": "heading", "text": format!("view {view}") },
+                        { "type": "key_value", "items": [
+                            { "key": "clicks", "value": clicks.to_string() },
+                            { "key": "session", "value": params["session"].as_str().unwrap_or("none") }
+                        ] },
+                        { "type": "button", "action": "bump", "label": "Bump" }
+                    ] })
+                }
+            }
+            Some("views/act") => {
+                let view = params["view"].clone();
+                match params["action"].as_str().unwrap_or_default() {
+                    "bump" => {
+                        clicks += 1;
+                        for changed in [view, json!("ghost")] {
+                            send(
+                                &json!({ "jsonrpc": "2.0", "method": "ui/changed", "params": { "view": changed } }),
+                            );
+                        }
+                        json!({ "message": format!("clicked {clicks}"), "rerender": true })
+                    }
+                    "echo" => json!({ "message": params["input"].to_string() }),
+                    "hang" => continue,
+                    kind @ ("invalid" | "unknown") => {
+                        let kind = if kind == "invalid" {
+                            "invalid_input"
+                        } else {
+                            "unknown_action"
+                        };
+                        send(&json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "fixture refuses", "data": { "kind": kind } }
+                        }));
+                        continue;
+                    }
+                    _ => json!({ "rerender": "yes" }),
                 }
             }
             Some("hooks/call") => match hook(&params) {

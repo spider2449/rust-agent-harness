@@ -23,7 +23,7 @@ plugins/*                            depend only on rah-api and rah-protocol
    session-jsonl, storage-fs, sandbox-process
    policy-authority, context-default, skills-fs, scheduler-basic
    frontend-cli, frontend-web
-rah-plugin-host-process              process plugin protocol v3 (JSON-RPC over stdio)
+rah-plugin-host-process              process plugin protocol v4 (JSON-RPC over stdio)
 rah-plugin-host-wasm                 WASM components (wasmtime, WIT world rah:plugin), no WASI
 rah (bin)                            distribution: reads rah.toml, mounts plugins
 ```
@@ -195,9 +195,10 @@ Implemented:
   call (the loop is a service, so loops compose). `frontend-web` exposes jobs
   at `/api/jobs`.
 - `rah-plugin-host-process`: out-of-process plugins over JSON-RPC 2.0 on
-  stdio ([protocol v3](PROCESS_PLUGINS.md)). They may provide `tools`,
+  stdio ([protocol v4](PROCESS_PLUGINS.md)). They may provide `tools`,
   attach to `tool.before_invoke`, `tool.after_invoke` and
-  `model.before_request`, follow `session.appended` events (ADR 0039), and
+  `model.before_request`, follow `session.appended` events (ADR 0039),
+  provide `ui-views` and announce changes with `ui/changed` (ADR 0063), and
   call the host's `session` and `storage` services only if they are in
   their `requires` (`storage` always in the namespace of their id). `rah` mounts
   them with `use = "process"`.

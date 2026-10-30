@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Process plugin protocol 4 (ADR 0063): a process plugin can provide
+  `ui-views`. It lists `views` in its manifest, answers `views/render` and
+  `views/act` (bounded by `view_timeout_ms`, default 5000, never retried) and
+  sends `ui/changed {view}` to have windows render a view again. Protocols 3
+  and 2 are still accepted. The Python example `todo_board.py` adds a to-do
+  panel kept in `storage`.
 - `UiChanged { instance, view }` (ADR 0062): a `ui-views` provider announces
   that a view changed; `frontend-web` tells every window (`{type: "ui"}` on
   the WebSocket), and a window showing the view renders it again.
