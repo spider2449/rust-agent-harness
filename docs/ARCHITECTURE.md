@@ -171,6 +171,11 @@ Implemented:
   always had; the conversation, header, approvals and status bar are never
   panels, so no layout moves or hides them. `ui-layout-config` provides it
   from its configuration.
+- `ui-views` service (`rah-api::ui`, ADR 0062): views plugins contribute as
+  panels (`<instance>/<view>`), as data from a fixed vocabulary that
+  `frontend-web` renders as text, with buttons and forms that call the
+  provider on the user's click. Not a tool, so the model cannot reach it.
+  `telemetry-log` offers a `usage` view.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

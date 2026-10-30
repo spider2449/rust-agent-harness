@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Plugin views (ADR 0062): a plugin providing `ui-views` adds panels to the
+  Web UI, named `<instance>/<view>`, as data the page renders as text
+  (headings, text, Markdown, values, tables, lists, buttons and forms whose
+  actions call the plugin on the user's click). `/api/ui` lists, renders and
+  acts on them; a view no layout names joins the right column.
+  `telemetry-log` offers the first one, `usage`: turns, model requests,
+  tokens and tool calls of this process, with a Reset button.
 - The Web UI's layout is a service (ADR 0062). `GET /api/layout` names the
   panels (`sessions`, `files`, `plugins`) of the left and right column, from
   the mounted `ui-layout` provider or else the standard layout, which is the

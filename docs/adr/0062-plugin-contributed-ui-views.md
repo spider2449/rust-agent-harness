@@ -163,3 +163,32 @@ XSS in all. B is worth having only once A cannot express a needed view.
   in a real browser the standard page is unchanged and a provider's layout
   moves the panels.
 - `rah-api` grows by one module; the architecture tests are unchanged.
+
+## Implementation status
+
+Done, in three steps:
+
+1. The layout (decision 7): `ui-layout`, `Layout::standard()`,
+   `GET /api/layout` and the page built from it.
+2. `ui-layout-config`, the layout as plugin configuration.
+3. `ui-views` (decisions 1 to 5), as follows:
+   - `ViewSpec` is `id` and `title`. Every view is a panel with the id
+     `<instance>/<view>`, which a layout places like a built-in panel; a
+     view no column names joins the right column, and a placed view of a
+     provider that is not mounted is left out without a problem. To hide a
+     view, unmount its plugin.
+   - `ViewContext` carries the session open in the window.
+   - Nodes: `heading`, `text`, `markdown`, `key_value`, `table`, `list`,
+     `button` and `form` (text, number, boolean and choice fields). `View::check`
+     enforces 2000 nodes and 256 KiB; a provider has 10 seconds to render or
+     act.
+   - The page renders a view when its tab is shown, on its reload button,
+     after an action that asks for it, and shortly after every turn ends.
+   - The first provider is `telemetry-log`: a `usage` view of the turns,
+     model requests, tokens and tool calls this process recorded, with a
+     Reset button.
+
+Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
+`Progress` node, the `UiChanged` event (decision 4), modes listing `views`
+(decision 6), views from process plugins (decision 8) and in
+`frontend-cli` (decision 9).

@@ -18,18 +18,24 @@
 //! scope; records still queued when the plugin stops are dropped, and a
 //! failed write drops that record.
 //!
+//! The plugin also provides `ui-views` with a `usage` view (ADR 0062): the
+//! sums of the records this process wrote, shown by the Web UI as a panel.
+//!
 //! Configuration (all optional): `{ "dir": ".rah/telemetry",
 //! "max_file_bytes": 10485760, "keep_days": 14, "include_arguments": false }`.
 
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rah_api::{
-    Plugin, PluginError, PluginId, PluginManifest, Scope, agent_loop::TurnEvent, async_trait,
+    Plugin, PluginError, PluginId, PluginManifest, Scope,
+    agent_loop::TurnEvent,
+    async_trait,
+    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiViews},
 };
 use rah_protocol::{AgentErrorCode, AgentEvent, ModelRequestId, ModelUsage, SessionId, ToolCallId};
 use serde::Serialize;
@@ -49,10 +55,13 @@ pub struct TelemetryPlugin {
 impl TelemetryPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .provides([UI_VIEWS_SERVICE]),
         }
     }
 }
+
+mod usage;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,8 +95,15 @@ impl Plugin for TelemetryPlugin {
             keep_days: config.keep_days.unwrap_or(DEFAULT_KEEP_DAYS).max(1),
             open: None,
         };
+        let totals = Arc::new(Mutex::new(usage::Totals::new()));
+        let views: Arc<dyn UiViews> = Arc::new(usage::UsageViews(totals.clone()));
+        scope.provide(UI_VIEWS, views)?;
         scope.spawn(async move {
             while let Some(record) = queue.recv().await {
+                totals
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .add(&record);
                 writer.write(&record).await;
             }
         });
@@ -127,6 +143,15 @@ impl Tokens {
         sum(&mut self.input_tokens, usage.input_tokens);
         sum(&mut self.output_tokens, usage.output_tokens);
         sum(&mut self.cached_input_tokens, usage.cached_input_tokens);
+    }
+
+    /// Adds `other`'s counts.
+    fn sum(&mut self, other: &Tokens) {
+        self.add(&ModelUsage {
+            input_tokens: other.input_tokens,
+            output_tokens: other.output_tokens,
+            cached_input_tokens: other.cached_input_tokens,
+        });
     }
 }
 

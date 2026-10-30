@@ -372,6 +372,16 @@ Behind the same token and checks, and likewise unreachable from tools:
   is a list of known panel ids per column and carries no markup or code;
   unknown ids are dropped. The header with the guard badge, the approvals
   and the status bar are not panels, so no layout can hide them.
+- `/api/ui` lists, renders and acts on the views plugins contribute through
+  `ui-views` (ADR 0062). A view is data from a fixed vocabulary (headings,
+  text, Markdown, values, tables, lists, buttons, forms) that the page builds
+  with text content only, as it does the model's replies: no markup, script,
+  style or URL the page loads. Views bigger than 2000 nodes or 256 KiB are
+  refused. An action runs the plugin's code on the user's click; the model
+  cannot reach views or actions, since they are not tools. A provider is
+  mounted code and trusted like any plugin, so an action may do whatever its
+  plugin can. The `usage` view of `telemetry-log` shows counts only, never
+  message text, tool output or arguments.
 - Successful changes through `/api/plugins` are stored in `storage` (key
   `plugins`, at most 256 plugin ids) and applied again when `frontend-web`
   starts, after the Settings forms: mounted or configured (rolled back when

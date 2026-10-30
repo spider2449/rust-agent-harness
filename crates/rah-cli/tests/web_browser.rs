@@ -1964,3 +1964,65 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-views").await;
+    web._kernel
+        .mount(
+            rah_cli::catalog()["telemetry-log"](rah_api::PluginId::new("telemetry-log")),
+            rah_api::MountOptions::with_config(json!({ "dir": web.dir.0.join("telemetry") })),
+        )
+        .await
+        .unwrap();
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-views");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    assert_eq!(
+        page.eval(
+            "[...byId('side-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent)"
+        )
+        .await,
+        json!(["Workspace", "Plugins", "Usage"])
+    );
+    const TURNS: &str = "[...document.querySelectorAll('.view-values dd')][0]?.textContent";
+    page.eval("showPanel('telemetry-log/usage'); true").await;
+    page.wait(
+        "the usage view",
+        &format!("{TURNS} === '0 (0 completed, 0 failed, 0 cancelled)'"),
+    )
+    .await;
+
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "the new session",
+        "sessionItems().length === 1 && !byId('input').disabled",
+    )
+    .await;
+    page.send_message("hello").await;
+    page.wait(
+        "the view to follow the turn",
+        &format!("idle() && {TURNS} === '1 (1 completed, 0 failed, 0 cancelled)'"),
+    )
+    .await;
+    page.screenshot("usage-view").await;
+
+    page.eval("[...document.querySelectorAll('.view-panel button')].find((b) => b.textContent === 'Reset').click(); true")
+        .await;
+    page.wait(
+        "the reset",
+        &format!(
+            "{TURNS} === '0 (0 completed, 0 failed, 0 cancelled)' && \
+             document.querySelector('.view-message').textContent === 'Usage sums start again from now.'"
+        ),
+    )
+    .await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}

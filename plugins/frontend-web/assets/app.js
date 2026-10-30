@@ -1054,6 +1054,8 @@ function onEvent(session, event) {
       refreshStatus();
       reloadFiles().catch(report);
       loadChanges().catch(report);
+      // The telemetry writes its records just after the turn ends.
+      setTimeout(refreshViews, 300);
       loadSessions()
         .then(() => {
           if (event.type === "completed") awaitTitle();
@@ -1220,6 +1222,11 @@ function selectTab(region, view) {
 async function loadLayout() {
   let given = STANDARD_LAYOUT;
   try {
+    for (const view of (await api("/ui")).views) addViewPanel(view);
+  } catch {
+    // Older servers have no views.
+  }
+  try {
     const reply = await api("/layout");
     given = reply.layout;
     if (reply.problems?.length) showNotice(`Layout: ${reply.problems.join("; ")}`);
@@ -1252,6 +1259,169 @@ function showPanel(view) {
   if (view === "files" && !files.dirs.has("")) loadDir("").catch(treeError);
   if (view === "files" && !git.loaded) loadGit();
   if (view === "plugins") loadPlugins().catch(report);
+  if (views.has(view)) renderView(view);
+}
+
+// ---- Plugin views -------------------------------------------------------------
+
+// Views other plugins contribute (`GET /api/ui`, ADR 0062), each a panel with
+// the id `instance/view`. A view is data from a fixed vocabulary, built here
+// with text content only, as the model's replies are; buttons and forms run
+// the plugin's actions on the user's click.
+const views = new Map();
+
+function addViewPanel(view) {
+  if (PANELS[view.id]) return;
+  const node = el("div", "view-panel");
+  node.setAttribute("role", "tabpanel");
+  node.setAttribute("aria-label", view.title);
+  node.hidden = true;
+  const head = el("div", "panel-head");
+  const reload = el("button", "ghost icon", "⟳");
+  reload.type = "button";
+  reload.title = "Reload the view";
+  reload.setAttribute("aria-label", "Reload the view");
+  reload.addEventListener("click", () => renderView(view.id));
+  head.append(el("h2", "", view.title), reload);
+  const message = el("div", "view-message");
+  message.hidden = true;
+  const body = el("div", "view-body");
+  node.append(head, message, body);
+  $("unplaced").append(node);
+  views.set(view.id, { ...view, node, body, message });
+  PANELS[view.id] = { label: view.title, node: () => node };
+}
+
+function viewPath(entry) {
+  return `/ui/${encodeURIComponent(entry.instance)}/${encodeURIComponent(entry.view)}`;
+}
+
+async function renderView(id) {
+  const entry = views.get(id);
+  if (!entry) return;
+  const session = state.current ? `?session=${encodeURIComponent(state.current)}` : "";
+  try {
+    const content = await api(`${viewPath(entry)}${session}`);
+    entry.body.replaceChildren(...(content.nodes || []).map((node) => viewNode(entry, node)).filter(Boolean));
+  } catch (error) {
+    entry.body.replaceChildren(el("p", "note", error.message));
+  }
+}
+
+// Shown views follow the turns: a turn may change what they show.
+function refreshViews() {
+  for (const id of views.keys()) if (panelShown(id)) renderView(id);
+}
+
+async function runAction(entry, action, input, controls) {
+  for (const control of controls) control.disabled = true;
+  try {
+    const outcome = await api(`${viewPath(entry)}/actions/${encodeURIComponent(action)}`, {
+      method: "POST",
+      body: JSON.stringify({ input, session: state.current || null }),
+    });
+    entry.message.textContent = outcome.message || "";
+    entry.message.hidden = !outcome.message;
+    entry.message.classList.remove("bad");
+    if (outcome.rerender) await renderView(entry.id);
+  } catch (error) {
+    entry.message.textContent = error.message;
+    entry.message.hidden = false;
+    entry.message.classList.add("bad");
+  } finally {
+    for (const control of controls) control.disabled = false;
+  }
+}
+
+function viewNode(entry, node) {
+  const text = (value) => String(value ?? "");
+  switch (node.type) {
+    case "heading":
+      return el("h3", "", text(node.text));
+    case "text":
+      return el("p", "", text(node.text));
+    case "markdown": {
+      const box = el("div", "markdown");
+      box.append(Markdown.render(text(node.text)));
+      return box;
+    }
+    case "key_value": {
+      const list = el("dl", "view-values");
+      for (const item of node.items || []) list.append(el("dt", "", text(item.key)), el("dd", "", text(item.value)));
+      return list;
+    }
+    case "table": {
+      const table = el("table", "view-table");
+      const head = el("tr");
+      for (const column of node.columns || []) head.append(el("th", "", text(column)));
+      const thead = el("thead");
+      thead.append(head);
+      const tbody = el("tbody");
+      for (const row of node.rows || []) {
+        const line = el("tr");
+        for (const cell of row) line.append(el("td", "", text(cell)));
+        tbody.append(line);
+      }
+      table.append(thead, tbody);
+      return table;
+    }
+    case "list": {
+      const list = el("ul", "view-list");
+      for (const item of node.items || []) list.append(el("li", "", text(item)));
+      return list;
+    }
+    case "button": {
+      const button = el("button", "ghost", text(node.label));
+      button.type = "button";
+      button.addEventListener("click", () => runAction(entry, text(node.action), null, [button]));
+      return button;
+    }
+    case "form":
+      return viewForm(entry, node);
+    default:
+      return null;
+  }
+}
+
+function viewForm(entry, node) {
+  const form = el("form", "view-form");
+  const inputs = [];
+  for (const field of node.fields || []) {
+    const label = el("label", "", String(field.label ?? field.name));
+    let input;
+    if (field.kind === "choice") {
+      input = el("select");
+      for (const option of field.options || []) {
+        const choice = el("option", "", String(option));
+        choice.value = String(option);
+        input.append(choice);
+      }
+      input.value = String(field.value ?? "");
+    } else {
+      input = el("input");
+      input.type = field.kind === "boolean" ? "checkbox" : field.kind === "number" ? "number" : "text";
+      if (field.kind === "boolean") input.checked = field.value === "true";
+      else input.value = String(field.value ?? "");
+    }
+    input.name = String(field.name);
+    label.append(input);
+    form.append(label);
+    inputs.push([field, input]);
+  }
+  const submit = el("button", "", String(node.submit || "Submit"));
+  submit.type = "submit";
+  form.append(submit);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const values = {};
+    for (const [field, input] of inputs) {
+      if (field.kind === "boolean") values[field.name] = input.checked;
+      else if (field.kind === "number") values[field.name] = input.value === "" ? null : Number(input.value);
+      else values[field.name] = input.value;
+    }
+    runAction(entry, String(node.action), values, [submit]);
+  });
+  return form;
 }
 
 function hideSide() {

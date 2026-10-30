@@ -2308,3 +2308,94 @@ config = { left = ["sesions"] }
     let error = error.to_string();
     assert!(error.contains("unknown panel `sesions`"), "{error}");
 }
+
+#[tokio::test]
+async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
+    let web = start("ui-views", |distribution| {
+        distribution.plugin.push(toml_spec(
+            r#"
+[[plugin]]
+use = "telemetry-log"
+"#,
+        ));
+    })
+    .await;
+    web.kernel.handle().get(rah_api::ui::UI_VIEWS).unwrap();
+    assert_eq!(
+        web.json(web.get("/api/ui")).await,
+        json!({ "views": [{
+            "id": "telemetry-log/usage", "instance": "telemetry-log", "view": "usage", "title": "Usage",
+        }] })
+    );
+    // A view no layout names joins the right column.
+    assert_eq!(
+        web.json(web.get("/api/layout")).await["layout"],
+        json!({ "left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage"] })
+    );
+
+    let handle = web.kernel.handle();
+    let session = common::new_session(&handle).await;
+    common::turn(&handle, &session, "hello").await;
+    let turns = |view: &Value| {
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["type"] == "key_value")
+            .unwrap()["items"][0]["value"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let path = format!("/api/ui/telemetry-log/usage?session={session}");
+    let mut shown = String::new();
+    for _ in 0..200 {
+        shown = turns(&web.json(web.get(&path)).await);
+        if shown.starts_with('1') {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(shown, "1 (1 completed, 0 failed, 0 cancelled)");
+
+    let reset = web
+        .json(
+            web.post("/api/ui/telemetry-log/usage/actions/reset")
+                .json(&json!({})),
+        )
+        .await;
+    assert_eq!(reset["rerender"], true, "{reset}");
+    assert!(turns(&web.json(web.get(&path)).await).starts_with('0'));
+
+    let missing = web.get("/api/ui/telemetry-log/nope").send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let action = web
+        .post("/api/ui/telemetry-log/usage/actions/nope")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(action.status(), 400);
+    let bad_session = web
+        .get("/api/ui/telemetry-log/usage?session=x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_session.status(), 400);
+
+    // A layout places the view; a view of a plugin that is not mounted is
+    // left out without a problem.
+    let id = PluginId::new("my-layout");
+    common::mount_layout(
+        &web.kernel,
+        &id,
+        json!({ "left": ["telemetry-log/usage", "sessions", "gone/view"], "right": ["files"] }),
+    )
+    .await;
+    let placed = web.json(web.get("/api/layout")).await;
+    assert_eq!(
+        placed["layout"],
+        json!({ "left": ["telemetry-log/usage", "sessions"], "right": ["files"] })
+    );
+    assert_eq!(placed["problems"], json!([]));
+}

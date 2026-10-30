@@ -393,3 +393,125 @@ async fn the_plugin_records_turn_events_from_the_bus() {
     assert_eq!(records[6]["kind"], "turn");
     assert_eq!(records[6]["session"], json!(session));
 }
+
+/// The labelled values and the tool table of a usage view.
+fn usage_of(view: &rah_api::ui::View) -> (Vec<(String, String)>, Vec<Vec<String>>) {
+    use rah_api::ui::Node;
+    let mut values = Vec::new();
+    let mut rows = Vec::new();
+    for node in &view.nodes {
+        match node {
+            Node::KeyValue { items } => {
+                values.extend(items.iter().map(|kv| (kv.key.clone(), kv.value.clone())));
+            }
+            Node::Table { rows: table, .. } => rows.clone_from(table),
+            _ => {}
+        }
+    }
+    (values, rows)
+}
+
+fn value<'a>(values: &'a [(String, String)], key: &str) -> &'a str {
+    &values.iter().find(|(k, _)| k == key).unwrap().1
+}
+
+#[test]
+fn usage_sums_the_records_of_a_turn() {
+    let session = SessionId::new();
+    let mut totals = usage::Totals::new();
+    for record in track(true, &turn_events(&session)) {
+        totals.add(&record);
+    }
+    let views = usage::UsageViews(Arc::new(Mutex::new(totals)));
+    let view = futures_render(&views);
+    assert!(view.check().is_ok());
+    let (values, rows) = usage_of(&view);
+    assert_eq!(
+        value(&values, "Turns"),
+        "1 (1 completed, 0 failed, 0 cancelled)"
+    );
+    assert_eq!(value(&values, "Model requests"), "2 (0 retries)");
+    assert_eq!(value(&values, "Input tokens"), "250");
+    assert_eq!(value(&values, "Cached input tokens"), "40");
+    assert_eq!(value(&values, "Output tokens"), "30");
+    assert_eq!(value(&values, "Tool calls"), "4");
+    let row = |cells: [&str; 4]| cells.map(str::to_owned).to_vec();
+    assert_eq!(
+        rows,
+        [
+            row(["fs.read", "1", "0", "0"]),
+            row(["repo.create-file", "1", "1", "1"]),
+            row(["repo.patch", "1", "0", "0"]),
+            row(["shell.exec", "1", "1", "1"]),
+        ]
+    );
+    // No argument, message or output text reaches the view.
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(
+        !text.contains("secret.txt") && !text.contains("private answer"),
+        "{text}"
+    );
+}
+
+fn futures_render(views: &usage::UsageViews) -> rah_api::ui::View {
+    use rah_api::ui::{UiViews, ViewContext};
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(views.render(usage::VIEW, &ViewContext::default()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_plugin_shows_usage_as_a_view_and_resets_it() {
+    use rah_api::ui::{UI_VIEWS, UiError, ViewContext, ViewSpec};
+    let dir = TempDir::new("usage-view");
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(TelemetryPlugin::new("telemetry")),
+            MountOptions::with_config(json!({ "dir": dir.0 })),
+        )
+        .await
+        .unwrap();
+    let all = kernel.handle().get_all(UI_VIEWS);
+    assert_eq!(all.len(), 1);
+    let (instance, views) = &all[0];
+    assert_eq!(instance, "telemetry");
+    assert_eq!(views.views(), [ViewSpec::new("usage", "Usage")]);
+
+    let session = SessionId::new();
+    for event in turn_events(&session) {
+        kernel.handle().emit(&TurnEvent { event });
+    }
+    let cx = ViewContext::default();
+    let mut turns = String::new();
+    for _ in 0..200 {
+        let view = views.render("usage", &cx).await.unwrap();
+        turns = value(&usage_of(&view).0, "Turns").to_owned();
+        if turns.starts_with('1') {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(turns, "1 (1 completed, 0 failed, 0 cancelled)");
+
+    let outcome = views.act("usage", "reset", Value::Null, &cx).await.unwrap();
+    assert!(outcome.rerender);
+    let view = views.render("usage", &cx).await.unwrap();
+    let (values, rows) = usage_of(&view);
+    assert_eq!(
+        value(&values, "Turns"),
+        "0 (0 completed, 0 failed, 0 cancelled)"
+    );
+    assert_eq!(value(&values, "Input tokens"), "not reported");
+    assert!(rows.is_empty());
+    assert_eq!(
+        views.act("usage", "nope", Value::Null, &cx).await,
+        Err(UiError::UnknownAction("nope".into()))
+    );
+    assert_eq!(
+        views.render("other", &cx).await,
+        Err(UiError::UnknownView("other".into()))
+    );
+}

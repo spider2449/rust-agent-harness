@@ -46,6 +46,9 @@
 //! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
 //!   problems}`, the panels of each column from the `ui-layout` service, else
 //!   the standard layout (ADR 0062; see [`layout`]).
+//! - `GET /api/ui`, `GET /api/ui/{instance}/{view}` and `POST
+//!   /api/ui/{instance}/{view}/actions/{action} {input, session}`: views
+//!   other plugins contribute through `ui-views` (see [`views`]).
 //! - `GET /api/modes`, `PUT /api/mode {mode}`: the modes (daily work,
 //!   coding, ...) and the active one, shared by every frontend of this plugin
 //!   (see [`modes`]).
@@ -105,6 +108,7 @@ mod panel;
 mod settings;
 mod status;
 mod undo;
+mod views;
 mod web_search;
 mod workspace;
 mod ws;
@@ -311,6 +315,9 @@ fn router(shared: AppState) -> Router {
             get(settings::preferences).put(settings::set_preferences),
         )
         .route("/layout", get(layout::get))
+        .route("/ui", get(views::list))
+        .route("/ui/{instance}/{view}", get(views::render))
+        .route("/ui/{instance}/{view}/actions/{action}", post(views::act))
         .route("/modes", get(modes::list))
         .route("/mode", put(modes::set))
         .route("/groups", get(groups::list))

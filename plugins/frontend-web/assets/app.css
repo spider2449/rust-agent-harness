@@ -502,6 +502,23 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .plugins { flex: 1; padding: 12px; overflow-y: auto; font-size: 13px; }
 .plugins h2 { font-size: 13px; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; }
+/* A view another plugin contributes (see `viewNode`). */
+.view-panel { flex: 1; padding: 12px; overflow-y: auto; font-size: 13px; min-height: 0; }
+.view-panel h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.view-panel h3 { font-size: 13px; margin: 12px 0 4px; }
+.view-panel .panel-head button.icon { border: none; color: var(--muted); }
+.view-message { margin: 4px 0 8px; color: var(--good); }
+.view-message.bad { color: var(--bad); }
+.view-values { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; }
+.view-values dt { color: var(--muted); }
+.view-values dd { margin: 0; }
+.view-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.view-table td, .view-table th { text-align: left; padding: 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.view-list { margin: 8px 0; padding-left: 18px; }
+.view-form { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.view-form label { display: flex; flex-direction: column; gap: 2px; }
+.view-form input[type="checkbox"] { align-self: flex-start; }
+.view-form button[type="submit"] { align-self: flex-start; }
 .plugins table { width: 100%; border-collapse: collapse; }
 .plugins td, .plugins th { text-align: left; padding: 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .state-active { color: var(--good); }
