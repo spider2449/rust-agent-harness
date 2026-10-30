@@ -125,7 +125,7 @@ A missing API key or a program that does not run is still found only at start.
 **Features** are the simple way to turn on what no preset mounts. Each one
 mounts its plugins and adds the policy entries they need, so nothing else is
 edited by hand: `rah --list-features` lists them (`shell`, `web-search`, `format`, `lsp`,
-`compact`, `telemetry`, `plan`), `rah --preset deepseek --with web-search
+`compact`, `telemetry`, `todo`, `plan`), `rah --preset deepseek --with web-search
 --with shell=git,cargo` turns some on for one run (`rah-desktop` takes
 `--with` too), and `features = ["shell=git", "web-search"]` at the top of
 `rah.toml`, before the first `[[plugin]]`, keeps them. A policy entry you wrote
@@ -478,7 +478,9 @@ the layout does not name joins the right column. `telemetry-log`, in every
 preset, adds
 `telemetry-log/usage`: turns, model requests, tokens and tool calls of this
 process, with a Reset button; it updates as turns of any session end. Put it on the left with
-`left = ["sessions", "telemetry-log/usage"]`.
+`left = ["sessions", "telemetry-log/usage"]`. The `todo` feature adds
+`todo/list`: the to-do list the model keeps for the open session with
+`todo.write` (read-only; it is rebuilt from the session log after a restart).
 
 **API groups**: every `tools-http` instance is one internal API with its
 endpoints declared in configuration. In daily work an "Internal API" selector

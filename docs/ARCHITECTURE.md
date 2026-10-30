@@ -113,6 +113,9 @@ Implemented:
   `telemetry-log` (mounted by every preset: JSONL records of turns, model
   requests and tools with durations, policy decisions and token usage, and
   the Web UI's `usage` view);
+  `todo` (opt-in feature `todo`: `todo.write` and `todo.read`, permission
+  `none`, keep a to-do list per session in memory, rebuilt from the session
+  log when unknown, and its `list` view shows the open session's list);
   `tool-input-repair` (mounted by every preset: converts arguments that are
   one unambiguous step from valid for the tool's schema, such as `"20"` for
   an integer, before the policy sees the call; ADR 0049);
@@ -177,7 +180,7 @@ Implemented:
   `frontend-web` renders as text, with buttons and forms that call the
   provider on the user's click. Not a tool, so the model cannot reach it.
   A provider emits `UiChanged` when a view changed, and windows showing it
-  render it again. `telemetry-log` offers a `usage` view.
+  render it again. `telemetry-log` offers a `usage` view, `todo` a `list` view.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

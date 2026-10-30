@@ -49,6 +49,7 @@ use rah_plugin_session_titles::SessionTitlesPlugin;
 use rah_plugin_skills_fs::SkillsPlugin;
 use rah_plugin_storage_fs::StorageFsPlugin;
 use rah_plugin_telemetry_log::TelemetryPlugin;
+use rah_plugin_todo::TodoPlugin;
 use rah_plugin_tool_input_repair::ToolInputRepairPlugin;
 use rah_plugin_tools_builtin::BuiltinToolsPlugin;
 use rah_plugin_tools_http::HttpToolsPlugin;
@@ -66,7 +67,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 33] = [
+    let entries: [(&'static str, Constructor); 34] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("context-instructions", |id| {
@@ -106,6 +107,7 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("skills-fs", |id| Arc::new(SkillsPlugin::new(id))),
         ("storage-fs", |id| Arc::new(StorageFsPlugin::new(id))),
         ("telemetry-log", |id| Arc::new(TelemetryPlugin::new(id))),
+        ("todo", |id| Arc::new(TodoPlugin::new(id))),
         ("tool-input-repair", |id| {
             Arc::new(ToolInputRepairPlugin::new(id))
         }),
@@ -153,6 +155,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "skills-fs" => SkillsPlugin::CONFIG_EXAMPLE,
         "storage-fs" => StorageFsPlugin::CONFIG_EXAMPLE,
         "telemetry-log" => TelemetryPlugin::CONFIG_EXAMPLE,
+        "todo" => TodoPlugin::CONFIG_EXAMPLE,
         "tool-input-repair" => ToolInputRepairPlugin::CONFIG_EXAMPLE,
         "tools-builtin" => BuiltinToolsPlugin::CONFIG_EXAMPLE,
         "tools-http" => HttpToolsPlugin::CONFIG_EXAMPLE,

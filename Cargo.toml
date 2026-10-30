@@ -28,6 +28,7 @@ members = [
     "plugins/skills-fs",
     "plugins/storage-fs",
     "plugins/telemetry-log",
+    "plugins/todo",
     "plugins/tool-input-repair",
     "plugins/tools-builtin",
     "plugins/tools-http",

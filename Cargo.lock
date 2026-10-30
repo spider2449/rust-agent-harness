@@ -2606,6 +2606,7 @@ dependencies = [
  "rah-plugin-skills-fs",
  "rah-plugin-storage-fs",
  "rah-plugin-telemetry-log",
+ "rah-plugin-todo",
  "rah-plugin-tool-input-repair",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-http",
@@ -2924,6 +2925,17 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-telemetry-log"
+version = "0.45.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-todo"
 version = "0.45.0"
 dependencies = [
  "rah-api",
