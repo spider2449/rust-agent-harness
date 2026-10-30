@@ -185,13 +185,15 @@ pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px
 .api-state.connected { color: var(--good); }
 /* A mode without the workspace hides its controls (see `applyMode`). */
 body.no-workspace #toggle-side,
-body.no-workspace #side-tabs [data-view="files"],
+body.no-workspace .side-tabs [data-view="files"],
 body.no-workspace #status-root,
 body.no-workspace #status-git { display: none; }
 
 .layout { flex: 1; display: flex; min-height: 0; }
-.sidebar { flex: none; width: var(--sessions-width, 240px); padding: 12px; border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.sidebar input[type="search"], .sidebar select {
+/* The left column; its panels are placed by the layout (see `applyLayout`). */
+.sidebar { flex: none; width: var(--sessions-width, 240px); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.sessions-panel { flex: 1; min-height: 0; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.sessions-panel input[type="search"], .sessions-panel select {
   font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text);
 }

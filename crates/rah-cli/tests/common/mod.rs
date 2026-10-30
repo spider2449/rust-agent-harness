@@ -152,3 +152,53 @@ pub async fn entries(kernel: &KernelHandle, session: &SessionId) -> Vec<&'static
         })
         .collect()
 }
+
+/// Provides a fixed `ui-layout` (ADR 0062).
+struct FixedLayout {
+    manifest: rah_api::PluginManifest,
+    layout: rah_api::ui::Layout,
+}
+
+#[rah_api::async_trait]
+impl rah_api::ui::UiLayout for FixedLayout {
+    async fn layout(&self) -> rah_api::ui::Layout {
+        self.layout.clone()
+    }
+}
+
+#[rah_api::async_trait]
+impl rah_api::Plugin for FixedLayout {
+    fn manifest(&self) -> &rah_api::PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
+        let provider: std::sync::Arc<dyn rah_api::ui::UiLayout> =
+            std::sync::Arc::new(FixedLayout {
+                manifest: self.manifest.clone(),
+                layout: self.layout.clone(),
+            });
+        scope.provide(rah_api::ui::UI_LAYOUT, provider)?;
+        Ok(())
+    }
+}
+
+/// Mounts a `ui-layout` provider `id` that answers `layout` (its JSON form).
+pub async fn mount_layout(
+    kernel: &rah_api::Kernel,
+    id: &rah_api::PluginId,
+    layout: serde_json::Value,
+) {
+    let plugin = FixedLayout {
+        manifest: rah_api::PluginManifest::new(id.clone(), "0")
+            .provides([rah_api::ui::UI_LAYOUT_SERVICE]),
+        layout: serde_json::from_value(layout).unwrap(),
+    };
+    kernel
+        .mount(
+            std::sync::Arc::new(plugin),
+            rah_api::MountOptions::default(),
+        )
+        .await
+        .unwrap();
+}

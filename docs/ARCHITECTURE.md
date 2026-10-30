@@ -165,6 +165,11 @@ Implemented:
   `model.before_request`. `rah-desktop` is not a plugin: it boots the same
   distribution and shows that Web UI in a native window, so every behavior
   is defined once (ADR 0046).
+- `ui-layout` service (`rah-api::ui`, ADR 0062): where `frontend-web` places
+  its panels (`sessions`, `files`, `plugins`) in the left and right columns.
+  Without a provider the page uses `Layout::standard()`, the layout it has
+  always had; the conversation, header, approvals and status bar are never
+  panels, so no layout moves or hides them.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

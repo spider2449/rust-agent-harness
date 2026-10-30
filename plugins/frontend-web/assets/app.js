@@ -948,7 +948,7 @@ async function runSlash(input) {
         await newSession();
         break;
       case "/plugins":
-        showSide("plugins");
+        showPanel("plugins");
         break;
       case "/stop": {
         const plugin = (slash.plugins || []).find((p) => p.id === argument);
@@ -1119,21 +1119,136 @@ function saveSidePrefs(change) {
   savePrefs();
 }
 
-function sideView() {
-  return $("plugins-panel").hidden ? "files" : "plugins";
+// ---- Layout -----------------------------------------------------------------
+
+// Where the panels sit (ADR 0062): `GET /api/layout` names the panels of the
+// left and the right column, in order; each column shows them as tabs. The
+// conversation, the header, the approvals and the status bar are not panels.
+// Without an answer (an older server) the page keeps its standard layout.
+const STANDARD_LAYOUT = { left: ["sessions"], right: ["files", "plugins"] };
+const PANELS = {
+  sessions: { label: "Sessions", node: () => $("sessions-panel") },
+  files: { label: "Workspace", node: () => $("files-view"), button: "toggle-side" },
+  plugins: { label: "Plugins", node: () => $("plugins-panel"), button: "toggle-plugins" },
+};
+const layout = { left: [], right: [], rightOpen: null };
+const REGIONS = {
+  left: { box: () => $("left"), tabs: () => $("left-tabs") },
+  right: { box: () => $("side"), tabs: () => $("side-tabs") },
+};
+
+function panelRegion(id) {
+  if (layout.left.includes(id)) return "left";
+  if (layout.right.includes(id)) return "right";
+  return null;
 }
 
-function showSide(view) {
-  if (view === "files" && !workspaceShown()) return;
-  $("side").hidden = false;
-  $("files-view").hidden = view !== "files";
-  $("plugins-panel").hidden = view !== "plugins";
-  for (const tab of $("side-tabs").querySelectorAll("[data-view]")) {
+// Whether a panel can be shown: the workspace only in a mode that has it.
+function panelAllowed(id) {
+  return id !== "files" || workspaceShown();
+}
+
+function regionOpen(region) {
+  return region !== null && !REGIONS[region].box().hidden;
+}
+
+// The panel a column shows, or null.
+function regionView(region) {
+  return layout[region].find((id) => !PANELS[id].node().hidden) || null;
+}
+
+function panelShown(id) {
+  const region = panelRegion(id);
+  return regionOpen(region) && regionView(region) === id;
+}
+
+// Places every panel the page knows; panels the layout does not name wait,
+// hidden, outside both columns, so the code that fills them keeps working.
+function applyLayout(given) {
+  const known = (list) => (Array.isArray(list) ? list : []).filter((id) => PANELS[id]);
+  layout.left = [...new Set(known(given.left))];
+  layout.right = [...new Set(known(given.right))].filter((id) => !layout.left.includes(id));
+  layout.rightOpen = typeof given.right_open === "boolean" ? given.right_open : null;
+  for (const [region, { box, tabs }] of Object.entries(REGIONS)) {
+    const bar = tabs();
+    for (const tab of bar.querySelectorAll("[data-view]")) tab.remove();
+    const before = bar.querySelector(".spacer");
+    for (const id of layout[region]) {
+      const tab = el("button", "", PANELS[id].label);
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.dataset.view = id;
+      tab.addEventListener("click", () => showPanel(id));
+      bar.insertBefore(tab, before);
+      PANELS[id].node().hidden = true;
+      box().append(PANELS[id].node());
+    }
+  }
+  for (const [id, panel] of Object.entries(PANELS)) {
+    if (!panelRegion(id)) {
+      panel.node().hidden = true;
+      $("unplaced").append(panel.node());
+    }
+    if (panel.button) $(panel.button).hidden = panelRegion(id) !== "right";
+  }
+  // One left panel needs no tabs; an empty left column is not shown.
+  $("left-tabs").hidden = layout.left.length < 2;
+  $("left").hidden = layout.left.length === 0;
+  $("sessions-splitter").hidden = layout.left.length === 0;
+  if (layout.right.length === 0) $("side").hidden = true;
+  selectLeft();
+}
+
+// Shows the first left panel that can be shown, unless the shown one can.
+function selectLeft() {
+  const shown = regionView("left");
+  if (shown && panelAllowed(shown)) return;
+  const first = layout.left.find(panelAllowed);
+  if (first) selectTab("left", first);
+  else if (shown) PANELS[shown].node().hidden = true;
+}
+
+function selectTab(region, view) {
+  for (const id of layout[region]) PANELS[id].node().hidden = id !== view;
+  for (const tab of REGIONS[region].tabs().querySelectorAll("[data-view]")) {
     const current = tab.dataset.view === view;
     tab.classList.toggle("current", current);
     tab.setAttribute("aria-selected", String(current));
   }
-  saveSidePrefs({ open: true, view });
+}
+
+async function loadLayout() {
+  let given = STANDARD_LAYOUT;
+  try {
+    const reply = await api("/layout");
+    given = reply.layout;
+    if (reply.problems?.length) showNotice(`Layout: ${reply.problems.join("; ")}`);
+  } catch {
+    // Older servers have no layout.
+  }
+  applyLayout(given);
+}
+
+function sideView() {
+  return regionView("right");
+}
+
+// The right panel to open: the one shown last, else the first that can be.
+function preferredSideView() {
+  const view = sidePrefs().view;
+  if (layout.right.includes(view) && panelAllowed(view)) return view;
+  return layout.right.find(panelAllowed) || null;
+}
+
+function showPanel(view) {
+  if (!panelAllowed(view)) return;
+  const region = panelRegion(view);
+  if (!region) return;
+  if (region === "right") {
+    $("side").hidden = false;
+    saveSidePrefs({ open: true, view });
+  }
+  selectTab(region, view);
   if (view === "files" && !files.dirs.has("")) loadDir("").catch(treeError);
   if (view === "files" && !git.loaded) loadGit();
   if (view === "plugins") loadPlugins().catch(report);
@@ -1233,7 +1348,7 @@ function renderApiGroups() {
 
 // A mode or group switch starts and stops plugins: show it in the plugin list.
 function refreshPluginList() {
-  if (!$("side").hidden && sideView() === "plugins") loadPlugins().catch(report);
+  if (panelShown("plugins")) loadPlugins().catch(report);
 }
 
 // Applies the active mode to this window. The side panel's own preference
@@ -1244,8 +1359,10 @@ function applyMode() {
   const shown = workspaceShown();
   document.body.classList.toggle("no-workspace", !shown);
   if (!shown && !$("side").hidden && sideView() === "files") $("side").hidden = true;
+  selectLeft();
   if (shown && $("side").hidden && sidePrefs().open) {
-    showSide(sidePrefs().view === "plugins" ? "plugins" : "files");
+    const view = preferredSideView();
+    if (view) showPanel(view);
   }
 }
 
@@ -1304,8 +1421,8 @@ async function switchMode(id) {
 
 // The header buttons open their view, or close the panel when it shows it.
 function toggleSide(view) {
-  if (!$("side").hidden && sideView() === view) hideSide();
-  else showSide(view);
+  if (panelRegion(view) === "right" && panelShown(view)) hideSide();
+  else showPanel(view);
 }
 
 function treeError(error) {
@@ -1373,7 +1490,7 @@ function resetFiles() {
   git.loaded = false;
   git.collapsed.clear();
   renderGit();
-  if (!$("side").hidden && sideView() === "files") {
+  if (panelShown("files")) {
     loadDir("").catch(treeError);
     loadGit();
   }
@@ -1540,7 +1657,7 @@ async function openTab(kind, path, label, extra = {}) {
     await readFile(file);
   }
   files.current = key;
-  if ($("side").hidden || sideView() !== "files") showSide("files");
+  if (!panelShown("files")) showPanel("files");
   renderFile();
   renderTree();
   renderGit();
@@ -1963,7 +2080,7 @@ function gitSignature(state) {
   if (signature !== git.signature) {
     const known = git.signature !== null;
     git.signature = signature;
-    if (known && git.loaded && !$("side").hidden) loadGit();
+    if (known && git.loaded && regionOpen(panelRegion("files"))) loadGit();
   }
 }
 
@@ -2897,9 +3014,6 @@ async function start() {
   }
   $("toggle-plugins").addEventListener("click", () => toggleSide("plugins"));
   $("toggle-side").addEventListener("click", () => toggleSide("files"));
-  for (const tab of $("side-tabs").querySelectorAll("[data-view]")) {
-    tab.addEventListener("click", () => showSide(tab.dataset.view));
-  }
   $("side-close").addEventListener("click", hideSide);
   $("notice-close").addEventListener("click", () => showNotice(""));
   $("tree-refresh").addEventListener("click", () => reloadFiles().catch(report));
@@ -2930,10 +3044,11 @@ async function start() {
     if (!document.hidden) refreshStatus();
   });
   $("mode").addEventListener("change", () => switchMode($("mode").value));
+  await loadLayout();
   await loadModes();
   await loadGroups();
-  const side = sidePrefs();
-  if (side.open ?? window.innerWidth >= 1100) showSide(side.view === "plugins" ? "plugins" : "files");
+  const view = preferredSideView();
+  if (view && (sidePrefs().open ?? layout.rightOpen ?? window.innerWidth >= 1100)) showPanel(view);
   try {
     await loadCatalog();
     await loadPlugins();

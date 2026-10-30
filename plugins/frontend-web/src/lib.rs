@@ -43,6 +43,9 @@
 //!   applies them again at the next start (see [`settings`]).
 //!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
 //!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's preferences the same way, for every browser.
+//! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
+//!   problems}`, the panels of each column from the `ui-layout` service, else
+//!   the standard layout (ADR 0062; see [`layout`]).
 //! - `GET /api/modes`, `PUT /api/mode {mode}`: the modes (daily work,
 //!   coding, ...) and the active one, shared by every frontend of this plugin
 //!   (see [`modes`]).
@@ -95,6 +98,7 @@ mod files;
 mod git;
 mod groups;
 mod jobs;
+mod layout;
 mod manage;
 mod modes;
 mod panel;
@@ -306,6 +310,7 @@ fn router(shared: AppState) -> Router {
             "/preferences",
             get(settings::preferences).put(settings::set_preferences),
         )
+        .route("/layout", get(layout::get))
         .route("/modes", get(modes::list))
         .route("/mode", put(modes::set))
         .route("/groups", get(groups::list))

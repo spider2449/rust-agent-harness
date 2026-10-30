@@ -367,6 +367,11 @@ Behind the same token and checks, and likewise unreachable from tools:
   picked; at most 8), the folders open in the session list (at most 1000)
   and the side panel layout. They change only how the page looks and what
   the folder picker suggests.
+- `GET /api/layout` returns where the page places its panels: the mounted
+  `ui-layout` provider's layout (ADR 0062), else the standard one. A layout
+  is a list of known panel ids per column and carries no markup or code;
+  unknown ids are dropped. The header with the guard badge, the approvals
+  and the status bar are not panels, so no layout can hide them.
 - Successful changes through `/api/plugins` are stored in `storage` (key
   `plugins`, at most 256 plugin ids) and applied again when `frontend-web`
   starts, after the Settings forms: mounted or configured (rolled back when

@@ -22,10 +22,13 @@
   <div id="approvals" class="approvals" aria-live="assertive"></div>
 
   <main class="layout">
-    <nav class="sidebar" aria-label="Sessions">
-      <button id="new-session" type="button">New session</button>
-      <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
-      <ul id="sessions" class="sessions"></ul>
+    <nav id="left" class="sidebar" aria-label="Sessions">
+      <div id="left-tabs" class="tabs side-tabs" role="tablist" hidden></div>
+      <div id="sessions-panel" class="sessions-panel" role="tabpanel" aria-label="Sessions">
+        <button id="new-session" type="button">New session</button>
+        <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
+        <ul id="sessions" class="sessions"></ul>
+      </div>
     </nav>
     <div id="sessions-splitter" class="vsplit" role="separator" aria-orientation="vertical" aria-label="Resize the session list" tabindex="0" title="Drag to resize"></div>
 
@@ -69,8 +72,6 @@
     <aside id="side" class="side" aria-label="Workspace and plugins" hidden>
       <div id="side-resizer" class="resizer" title="Drag to resize" aria-hidden="true"></div>
       <div id="side-tabs" class="tabs side-tabs" role="tablist">
-        <button type="button" role="tab" data-view="files">Workspace</button>
-        <button type="button" role="tab" data-view="plugins">Plugins</button>
         <span class="spacer"></span>
         <button id="side-close" type="button" class="ghost icon" title="Hide the panel" aria-label="Hide the panel">✕</button>
       </div>
@@ -145,6 +146,7 @@
       </div>
     </aside>
   </main>
+  <div id="unplaced" hidden></div>
   <footer id="status" class="status" aria-label="Status">
     <button id="status-root" type="button" class="item path link" title="Change the workspace folder"></button>
     <button id="status-git" type="button" class="item link" aria-haspopup="listbox"></button>

@@ -1384,7 +1384,7 @@ async fn several_repositories_get_a_section_each_in_the_browser() {
          !byId('branch-menu').textContent.includes('trunk')",
     )
     .await;
-    page.eval("closeBranchMenu(); showSide('files'); true")
+    page.eval("closeBranchMenu(); showPanel('files'); true")
         .await;
     page.wait(
         "a section per repository",
@@ -1466,7 +1466,7 @@ async fn a_workspace_of_several_folders_is_shown_in_the_browser() {
     )
     .await;
     // The active folder did not move; both folders head the tree.
-    page.eval("showSide('files'); true").await;
+    page.eval("showPanel('files'); true").await;
     page.wait(
         "both folders in the tree",
         "[...document.querySelectorAll('#tree .folder-name')].map((n) => n.textContent).join() === 'workspace,other' && \
@@ -1899,4 +1899,68 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         })
         .collect();
     assert!(unexpected.is_empty(), "page errors: {unexpected:#?}");
+}
+
+/// Which column holds each panel, and the tab labels of both columns.
+const PLACES: &str = r#"({
+  sessions: byId('sessions-panel').parentElement.id,
+  files: byId('files-view').parentElement.id,
+  plugins: byId('plugins-panel').parentElement.id,
+  left: [...byId('left-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
+  right: [...byId('side-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
+  leftTabs: shown(byId('left-tabs')),
+  pluginsButton: shown(byId('toggle-plugins')),
+})"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without_one() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-layout").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-layout");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    assert_eq!(
+        page.eval(PLACES).await,
+        json!({
+            "sessions": "left", "files": "side", "plugins": "side",
+            "left": ["Sessions"], "right": ["Workspace", "Plugins"],
+            "leftTabs": false, "pluginsButton": true,
+        })
+    );
+    assert_eq!(page.eval("shown(byId('sessions-panel'))").await, true);
+
+    let id = rah_api::PluginId::new("my-layout");
+    common::mount_layout(
+        &web._kernel,
+        &id,
+        json!({ "left": ["sessions", "plugins"], "right": ["files"] }),
+    )
+    .await;
+    page.call("Page.reload", json!({})).await;
+    page.wait("the page to connect", "connected()").await;
+    assert_eq!(
+        page.eval(PLACES).await,
+        json!({
+            "sessions": "left", "files": "side", "plugins": "left",
+            "left": ["Sessions", "Plugins"], "right": ["Workspace"],
+            "leftTabs": true, "pluginsButton": false,
+        })
+    );
+    // The left column starts on its first panel; its Plugins tab lists them.
+    assert_eq!(page.eval("shown(byId('sessions-panel'))").await, true);
+    page.eval("[...byId('left-tabs').querySelectorAll('[data-view]')][1].click(); true")
+        .await;
+    page.wait(
+        "the plugins in the left column",
+        "shown(byId('plugins-panel')) && !shown(byId('sessions-panel')) && byId('plugins').rows.length > 0",
+    )
+    .await;
+    page.screenshot("layout-plugins-left").await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

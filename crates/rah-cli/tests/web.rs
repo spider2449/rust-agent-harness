@@ -2232,3 +2232,42 @@ async fn a_host_notice_reaches_the_browser() {
         "{notice}"
     );
 }
+
+#[tokio::test]
+async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
+    let web = start("layout", |_| {}).await;
+    let standard = web.json(web.get("/api/layout")).await;
+    assert_eq!(
+        standard,
+        json!({
+            "layout": {"left": ["sessions"], "right": ["files", "plugins"]},
+            "source": "standard",
+            "problems": [],
+        })
+    );
+
+    let id = PluginId::new("my-layout");
+    common::mount_layout(
+        &web.kernel,
+        &id,
+        json!({
+            "left": ["files", "sessions", "chart"],
+            "right": ["plugins", "files"],
+            "right_open": true,
+        }),
+    )
+    .await;
+    let replaced = web.json(web.get("/api/layout")).await;
+    assert_eq!(replaced["source"], "ui-layout", "{replaced}");
+    assert_eq!(
+        replaced["layout"],
+        json!({"left": ["files", "sessions"], "right": ["plugins"], "right_open": true})
+    );
+    assert_eq!(
+        replaced["problems"],
+        json!(["unknown panel `chart`", "panel `files` is placed twice"])
+    );
+
+    web.kernel.unmount(&id).await.unwrap();
+    assert_eq!(web.json(web.get("/api/layout")).await, standard);
+}

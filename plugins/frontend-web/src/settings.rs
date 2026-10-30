@@ -24,6 +24,7 @@ use rah_api::{
     PluginId, PluginStatus,
     admin::{ADMIN, AdminError, MountRequest, PluginAdmin},
     storage::STORAGE,
+    ui::panels,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -266,7 +267,7 @@ pub(crate) struct Preferences {
 struct SidePanel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     open: Option<bool>,
-    /// `files` or `plugins`.
+    /// The panel shown in the right column: a built-in panel id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<String>,
     /// Width in CSS pixels.
@@ -354,8 +355,8 @@ impl Preferences {
         }) {
             return bad("a recent workspace has no folders, too many or a long name");
         }
-        if matches!(&self.side.view, Some(view) if view != "files" && view != "plugins") {
-            return bad("`side.view` must be `files` or `plugins`");
+        if matches!(&self.side.view, Some(view) if !panels::BUILT_IN.contains(&view.as_str())) {
+            return bad("`side.view` must be a panel: `sessions`, `files` or `plugins`");
         }
         let finite = |value: Option<f64>| value.is_none_or(f64::is_finite);
         if !finite(self.side.width) || !finite(self.side.tree_ratio) {
