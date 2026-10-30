@@ -1144,9 +1144,28 @@ function panelRegion(id) {
   return null;
 }
 
-// Whether a panel can be shown: the workspace only in a mode that has it.
+// Whether a panel can be shown: the workspace only in a mode that has it,
+// and a plugin view only in a mode that lists it (or lists no views).
 function panelAllowed(id) {
-  return id !== "files" || workspaceShown();
+  if (id === "files") return workspaceShown();
+  if (!views.has(id)) return true;
+  const listed = activeMode()?.views;
+  return !Array.isArray(listed) || listed.includes(id);
+}
+
+// Hides the tabs of panels the active mode does not show, and moves a
+// column off such a panel.
+function applyPanelRules() {
+  for (const { tabs } of Object.values(REGIONS)) {
+    for (const tab of tabs().querySelectorAll("[data-view]")) tab.hidden = !panelAllowed(tab.dataset.view);
+  }
+  const right = regionView("right");
+  if (right && !panelAllowed(right)) {
+    const next = layout.right.find(panelAllowed);
+    if (next && !$("side").hidden) showPanel(next);
+    else if (!next) $("side").hidden = true;
+  }
+  selectLeft();
 }
 
 function regionOpen(region) {
@@ -1540,7 +1559,7 @@ function applyMode() {
   const shown = workspaceShown();
   document.body.classList.toggle("no-workspace", !shown);
   if (!shown && !$("side").hidden && sideView() === "files") $("side").hidden = true;
-  selectLeft();
+  applyPanelRules();
   if (shown && $("side").hidden && sidePrefs().open) {
     const view = preferredSideView();
     if (view) showPanel(view);

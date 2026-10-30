@@ -166,7 +166,7 @@ XSS in all. B is worth having only once A cannot express a needed view.
 
 ## Implementation status
 
-Done, in four steps:
+Done, in five steps:
 
 1. The layout (decision 7): `ui-layout`, `Layout::standard()`,
    `GET /api/layout` and the page built from it.
@@ -194,8 +194,12 @@ Done, in four steps:
    view again 150 ms after the last change if it is shown. `telemetry-log`
    emits it once its queued records are written, so the usage view follows
    turns of every session.
+5. Modes choose views (decision 6): a mode's `views` lists the view ids it
+   shows; `[]` hides every view, and without the key every view shows. A
+   sub-mode inherits its parent's list. The configuration check refuses an
+   entry that is not `instance/view`. A hidden view's tab is hidden, and a
+   column showing it moves to another panel; the plugin keeps running.
 
 Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
-`Progress` node, modes listing `views`
-(decision 6) and views in `frontend-cli` (decision 9). Views from process
+`Progress` node and views in `frontend-cli` (decision 9). Views from process
 plugins (decision 8) are protocol 4, ADR 0063.

@@ -14,6 +14,8 @@
 //!   changes what guards tool calls.
 //! - `instructions`: added as a system item to every model request.
 //! - `workspace`: whether the UI shows the workspace (files, Git, folder).
+//! - `views`: which plugin views (`instance/view`, ADR 0062) the UI shows;
+//!   without it, every view.
 //!
 //! One mode is active for the whole `rah`, not per window: plugins are
 //! shared, so every connected UI is told about a switch
@@ -31,6 +33,7 @@ use rah_api::{
     PluginError, PluginId, PluginStatus,
     admin::{AdminError, MountRequest, PluginAdmin},
     storage::STORAGE,
+    ui::{MAX_PANEL_ID_BYTES, ViewSpec},
 };
 use rah_protocol::{ContextItem, ModelRequest};
 use serde::{Deserialize, Serialize};
@@ -69,6 +72,11 @@ pub(crate) struct Mode {
     /// (default: the parent's, else not).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub groups: bool,
+    /// The plugin views (`instance/view`) the UI shows; the others are
+    /// hidden (default: the parent's, else every view). Presentation only:
+    /// the plugins keep running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub views: Option<Vec<String>>,
 }
 
 /// The modes used when the configuration names none.
@@ -91,6 +99,7 @@ pub(crate) fn builtin() -> Vec<Mode> {
             ]),
             workspace: Some(false),
             groups: true,
+            views: None,
         },
         Mode {
             id: "coding".into(),
@@ -107,12 +116,23 @@ pub(crate) fn builtin() -> Vec<Mode> {
             plugins: BTreeMap::from([("tools-repo-write".into(), true)]),
             workspace: Some(true),
             groups: false,
+            views: None,
         },
     ]
 }
 
 /// The most modes one configuration may define.
 const MAX_MODES: usize = 32;
+/// The most views one mode may list.
+const MAX_VIEWS: usize = 64;
+
+/// Whether `id` names a plugin view: `<instance>/<view>`.
+fn view_id(id: &str) -> bool {
+    id.len() <= MAX_PANEL_ID_BYTES
+        && id
+            .split_once('/')
+            .is_some_and(|(instance, view)| !instance.is_empty() && ViewSpec::valid_id(view))
+}
 
 /// Checks configured modes: unique ids, and no kind a mode may not switch.
 pub(crate) fn check(modes: &[Mode]) -> Result<(), PluginError> {
@@ -133,6 +153,19 @@ pub(crate) fn check(modes: &[Mode]) -> Result<(), PluginError> {
                 mode.id
             )
             .into());
+        }
+        if let Some(views) = &mode.views {
+            if views.len() > MAX_VIEWS {
+                return Err(format!("mode `{}` lists more than {MAX_VIEWS} views", mode.id).into());
+            }
+            if let Some(bad) = views.iter().find(|id| !view_id(id)) {
+                return Err(format!(
+                    "mode `{}`: `{bad}` is not a view; views are `instance/view`, such as \
+                     `telemetry-log/usage`",
+                    mode.id
+                )
+                .into());
+            }
         }
         if let Some(parent) = &mode.extends {
             match modes.iter().find(|other| &other.id == parent) {
@@ -178,6 +211,9 @@ fn resolve(modes: Vec<Mode>) -> Vec<Mode> {
             };
             mode.workspace = mode.workspace.or(parent.workspace);
             mode.groups |= parent.groups;
+            if mode.views.is_none() {
+                mode.views.clone_from(&parent.views);
+            }
             mode
         })
         .collect()
@@ -456,6 +492,28 @@ mod tests {
             plugins: plugins.iter().map(|(k, v)| ((*k).into(), *v)).collect(),
             workspace: None,
             groups: false,
+            views: None,
+        }
+    }
+
+    #[test]
+    fn a_mode_lists_plugin_views_and_a_sub_mode_inherits_them() {
+        let mut parent = group("daily", None, "x", &[]);
+        parent.views = Some(vec!["todo/board".into()]);
+        let own = group("ddt", Some("daily"), "y", &[]);
+        let mut explicit = group("other", Some("daily"), "z", &[]);
+        explicit.views = Some(Vec::new());
+        let modes = vec![parent, own, explicit];
+        assert!(check(&modes).is_ok());
+        let resolved = resolve(modes);
+        assert_eq!(resolved[1].views, Some(vec!["todo/board".to_owned()]));
+        assert_eq!(resolved[2].views, Some(Vec::new()));
+
+        for bad in ["sessions", "todo/Board", "/board", "todo/"] {
+            let mut mode = group("daily", None, "x", &[]);
+            mode.views = Some(vec![bad.into()]);
+            let error = check(&[mode]).unwrap_err().to_string();
+            assert!(error.contains("is not a view"), "{bad}: {error}");
         }
     }
 

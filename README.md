@@ -441,7 +441,10 @@ plugins = { "tools-repo-write" = false }
 `plugins` runs (`true`) or stops (`false`) plugin kinds or single instance
 ids; policy and frontend plugins cannot be listed. `instructions` is added to
 every model request after the system prompt. `workspace = false` hides the
-files, Git state and folder in the UI.
+files, Git state and folder in the UI. `views` lists the plugin views
+(`instance/view`, see Layout below) the mode shows, such as
+`views = ["telemetry-log/usage"]`; `views = []` hides them all, and without
+the key every view shows. A sub-mode inherits its parent's.
 
 **Layout**: the panels (`sessions`, `files`, `plugins`) sit in a left and a
 right column, as tabs. Without configuration the sessions are on the left

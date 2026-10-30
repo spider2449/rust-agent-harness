@@ -333,6 +333,12 @@ struct Web {
 }
 
 async fn start(name: &str) -> Web {
+    start_with(name, |_, _| {}).await
+}
+
+/// Like [`start`]; `adjust` changes the distribution first (it gets the
+/// test's directory too).
+async fn start_with(name: &str, adjust: impl FnOnce(&mut Distribution, &TempDir)) -> Web {
     let dir = TempDir::new(name);
     let mut distribution = headless(&dir);
     distribution.plugin.push(
@@ -347,6 +353,7 @@ config = { bind = "127.0.0.1:0" }
         .plugin
         .remove(0),
     );
+    adjust(&mut distribution, &dir);
     let kernel = Kernel::new();
     let url = Arc::new(Mutex::new(None));
     let seen = url.clone();
@@ -2133,5 +2140,96 @@ async fn a_python_view_takes_a_form_and_a_button_in_the_browser() {
                     .is_some_and(|text| text.contains("400")))
         })
         .collect();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mode_shows_only_the_views_it_lists() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start_with("web-browser-mode-views", |distribution, dir| {
+        let telemetry = dir
+            .0
+            .join("telemetry")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        distribution
+            .plugin
+            .retain(|spec| spec.kind != "frontend-web");
+        distribution.plugin.extend(
+            Distribution::parse(&format!(
+                r#"
+[[plugin]]
+use = "telemetry-log"
+config = {{ dir = "{telemetry}" }}
+
+[[plugin]]
+use = "frontend-web"
+
+[plugin.config]
+bind = "127.0.0.1:0"
+mode = "plain"
+
+[[plugin.config.modes]]
+id = "plain"
+label = "Plain"
+views = []
+
+[[plugin.config.modes]]
+id = "stats"
+label = "Stats"
+views = ["telemetry-log/usage"]
+"#
+            ))
+            .unwrap()
+            .plugin,
+        );
+    })
+    .await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-mode-views");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    const USAGE_TAB: &str = "[...byId('side-tabs').querySelectorAll('[data-view]')].find((b) => b.dataset.view === 'telemetry-log/usage')";
+    page.wait(
+        "the plain mode",
+        &format!("state.modes.active === 'plain' && {USAGE_TAB} && !shown({USAGE_TAB})"),
+    )
+    .await;
+
+    // In a mode that lists the view, its tab shows.
+    page.eval(
+        "byId('mode').value = 'stats'; byId('mode').dispatchEvent(new Event('change')); true",
+    )
+    .await;
+    page.wait(
+        "the stats mode",
+        &format!("state.modes.active === 'stats' && shown({USAGE_TAB})"),
+    )
+    .await;
+    page.eval("showPanel('telemetry-log/usage'); true").await;
+    page.wait(
+        "the usage view",
+        "shown(document.querySelector('[aria-label=\"Usage\"] .view-values'))",
+    )
+    .await;
+
+    // Leaving it moves the column off the hidden view.
+    page.eval(
+        "byId('mode').value = 'plain'; byId('mode').dispatchEvent(new Event('change')); true",
+    )
+    .await;
+    page.wait(
+        "the plain mode again",
+        &format!(
+            "state.modes.active === 'plain' && !shown({USAGE_TAB}) && sideView() !== 'telemetry-log/usage'"
+        ),
+    )
+    .await;
+    let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

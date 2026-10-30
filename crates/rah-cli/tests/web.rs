@@ -2428,3 +2428,47 @@ async fn a_changed_view_is_announced_to_every_window() {
         json!({ "type": "ui", "instance": "telemetry-log", "view": "usage" })
     );
 }
+
+#[tokio::test]
+async fn modes_list_the_views_they_show_and_a_bad_view_stops_the_start() {
+    let config = |views: &str| {
+        toml_spec(&format!(
+            r#"
+[[plugin]]
+use = "frontend-web"
+
+[plugin.config]
+bind = "127.0.0.1:0"
+
+[[plugin.config.modes]]
+id = "plain"
+label = "Plain"
+views = {views}
+"#
+        ))
+    };
+    let web = start("modes-views", |distribution| {
+        distribution
+            .plugin
+            .retain(|spec| spec.kind != "frontend-web");
+        distribution
+            .plugin
+            .push(config(r#"["telemetry-log/usage"]"#));
+    })
+    .await;
+    let state = web.json(web.get("/api/modes")).await;
+    assert_eq!(
+        state["modes"][0]["views"],
+        json!(["telemetry-log/usage"]),
+        "{state}"
+    );
+
+    let dir = TempDir::new("modes-views-bad");
+    let mut distribution = headless(&dir);
+    distribution.plugin.push(config(r#"["usage"]"#));
+    let Err(error) = boot(&Kernel::new(), &distribution).await else {
+        panic!("a mode listing a non-view stops the start");
+    };
+    let error = error.to_string();
+    assert!(error.contains("`usage` is not a view"), "{error}");
+}

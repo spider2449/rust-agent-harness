@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Modes choose plugin views (ADR 0062): a mode's `views` lists the views
+  (`instance/view`) the Web UI shows while it is active; `[]` hides them
+  all, and without the key every view shows. Sub-modes inherit the list.
+  Hiding is presentation only.
 - Process plugin protocol 4 (ADR 0063): a process plugin can provide
   `ui-views`. It lists `views` in its manifest, answers `views/render` and
   `views/act` (bounded by `view_timeout_ms`, default 5000, never retried) and

@@ -100,7 +100,10 @@ pub fn fallback(kind: &str) -> Help {
                 "mode",
                 "Mode to enter at start, such as `daily` or `coding`.",
             ),
-            ("modes", "Your own modes; replaces the built-in ones."),
+            (
+                "modes",
+                "Your own modes; replaces the built-in ones. Each may list `views` (instance/view) to show.",
+            ),
         ],
         "format-on-write" => &[
             (
