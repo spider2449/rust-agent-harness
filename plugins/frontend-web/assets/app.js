@@ -2606,6 +2606,32 @@ function showConfigHelp() {
     el("dt", "", key),
     el("dd", "", help),
   ]));
+  if (editorKind() === "ui-layout-config") showLayoutPanels();
+}
+
+// For a layout plugin: every panel id it can place (`panels` of
+// `GET /api/layout`), with where each is now.
+let panelsShown = 0;
+async function showLayoutPanels() {
+  const asked = ++panelsShown;
+  let panels;
+  try {
+    panels = (await api("/layout")).panels || [];
+  } catch {
+    return;
+  }
+  // A later call, or another kind, replaced the help meanwhile.
+  if (asked !== panelsShown || editorKind() !== "ui-layout-config") return;
+  const list = el("dd", "panel-ids");
+  for (const panel of panels) {
+    const where = panel.column ? `now ${panel.column}` : "not shown";
+    const from = panel.kind === "view" ? `view of ${panel.plugin}` : "built-in";
+    const line = el("div");
+    line.append(el("code", "", panel.id), ` ${panel.title} (${from}; ${where})`);
+    list.append(line);
+  }
+  $("editor-help").hidden = false;
+  $("editor-help-list").append(el("dt", "", "Panels you can place"), list);
 }
 
 // Copies the example into the editor to start from.

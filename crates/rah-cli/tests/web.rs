@@ -2243,6 +2243,11 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
             "layout": {"left": ["sessions"], "right": ["files", "plugins"]},
             "source": "standard",
             "problems": [],
+            "panels": [
+                {"id": "sessions", "title": "Sessions", "kind": "built-in", "column": "left"},
+                {"id": "files", "title": "Workspace", "kind": "built-in", "column": "right"},
+                {"id": "plugins", "title": "Plugins", "kind": "built-in", "column": "right"},
+            ],
         })
     );
 
@@ -2284,14 +2289,13 @@ config = { left = ["sessions", "plugins"], right = ["files"], right_open = true 
         ));
     })
     .await;
+    let served = web.json(web.get("/api/layout")).await;
     assert_eq!(
-        web.json(web.get("/api/layout")).await,
-        json!({
-            "layout": {"left": ["sessions", "plugins"], "right": ["files"], "right_open": true},
-            "source": "ui-layout",
-            "problems": [],
-        })
+        served["layout"],
+        json!({"left": ["sessions", "plugins"], "right": ["files"], "right_open": true})
     );
+    assert_eq!(served["source"], "ui-layout");
+    assert_eq!(served["problems"], json!([]));
 
     let dir = TempDir::new("layout-config-misspelt");
     let mut distribution = headless(&dir);
@@ -2400,6 +2404,17 @@ config = {{ dir = "{dir}" }}
         json!({ "left": ["telemetry-log/usage", "sessions"], "right": ["files"] })
     );
     assert_eq!(placed["problems"], json!([]));
+    // Every panel a layout can place, and where it is now.
+    assert_eq!(
+        placed["panels"],
+        json!([
+            {"id": "sessions", "title": "Sessions", "kind": "built-in", "column": "left"},
+            {"id": "files", "title": "Workspace", "kind": "built-in", "column": "right"},
+            {"id": "plugins", "title": "Plugins", "kind": "built-in", "column": null},
+            {"id": "telemetry-log/usage", "title": "Usage", "kind": "view",
+             "plugin": "telemetry-log", "column": "left"},
+        ])
+    );
 }
 
 #[tokio::test]

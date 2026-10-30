@@ -44,8 +44,9 @@
 //!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
 //!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's preferences the same way, for every browser.
 //! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
-//!   problems}`, the panels of each column from the `ui-layout` service, else
-//!   the standard layout (ADR 0062; see [`layout`]).
+//!   problems, panels}`, the panels of each column from the `ui-layout` service, else
+//!   the standard layout, and every panel id a layout can place (ADR 0062;
+//!   see [`layout`]).
 //! - `GET /api/ui`, `GET /api/ui/{instance}/{view}` and `POST
 //!   /api/ui/{instance}/{view}/actions/{action} {input, session}`: views
 //!   other plugins contribute through `ui-views` (see [`views`]). A

@@ -117,6 +117,9 @@ XSS in all. B is worth having only once A cannot express a needed view.
      empty, overlong and twice-placed ids and panels past 32 are dropped,
      each with a line in `problems`, which the page shows as a notice. A
      panel no column names is not shown, and its header button is hidden.
+   - The reply also lists `panels`: every id a layout can place (built-in
+     and mounted views) with its title and current column, which the
+     Plugins panel shows when a `ui-layout-config` is added or configured.
    - Panel sizes, the open or closed right column and its shown panel stay
      per-user `preferences`, as today; `right_open` applies only until the
      user chooses. The layout is read at page load; a newly mounted

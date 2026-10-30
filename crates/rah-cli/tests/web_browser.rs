@@ -2040,6 +2040,28 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
         &format!("{TURNS} === '1 (1 completed, 0 failed, 0 cancelled)'"),
     )
     .await;
+
+    // Adding a layout plugin lists every panel it can place.
+    page.eval(
+        "showPanel('plugins'); byId('add-plugin').click();          byId('editor-kind').value = 'ui-layout-config';          byId('editor-kind').dispatchEvent(new Event('change')); true",
+    )
+    .await;
+    let panels = page
+        .wait(
+            "the panels you can place",
+            "(() => { const lines = [...document.querySelectorAll('.panel-ids div')].map((line) => line.textContent);              return lines.length ? lines : null; })()",
+        )
+        .await;
+    assert_eq!(
+        panels,
+        json!([
+            "sessions Sessions (built-in; now left)",
+            "files Workspace (built-in; now right)",
+            "plugins Plugins (built-in; now right)",
+            "telemetry-log/usage Usage (view of telemetry-log; now right)",
+        ])
+    );
+    page.screenshot("layout-panels").await;
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

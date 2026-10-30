@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `GET /api/layout` also returns `panels`: every panel id a layout can place
+  (built-in and plugin views), with its title and current column. Adding or
+  configuring `ui-layout-config` in the Plugins panel lists them under
+  "Panels you can place".
 - Modes choose plugin views (ADR 0062): a mode's `views` lists the views
   (`instance/view`) the Web UI shows while it is active; `[]` hides them
   all, and without the key every view shows. Sub-modes inherit the list.

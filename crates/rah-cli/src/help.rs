@@ -421,7 +421,7 @@ pub fn fallback(kind: &str) -> Help {
         "ui-layout-config" => &[
             (
                 "left",
-                "Panels of the Web UI's left column, as tabs in order: sessions, files, plugins, or a plugin view as instance/view (such as telemetry-log/usage).",
+                "Panels of the Web UI's left column, as tabs in order: sessions, files, plugins, or a plugin view as instance/view; the Web UI lists them under Panels you can place.",
             ),
             ("right", "Panels of the right column, as tabs in order."),
             (

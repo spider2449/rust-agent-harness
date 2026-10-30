@@ -459,7 +459,10 @@ config = { left = ["sessions", "plugins"], right = ["files"], right_open = true 
 ```
 
 The conversation, the header, approvals and the status bar always stay. A
-misspelt panel stops the start; leave a panel out to hide it.
+misspelt panel stops the start; leave a panel out to hide it. To see which
+panel ids exist, add or configure `ui-layout-config` in the Plugins panel:
+its help lists **Panels you can place**, built-in and plugin views, with the
+column each is in now (`GET /api/layout` returns the same as `panels`).
 
 Plugins can add their own panels (views), named `<plugin id>/<view>`. A view
 the layout does not name joins the right column. `telemetry-log` adds
