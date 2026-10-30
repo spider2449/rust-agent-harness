@@ -271,7 +271,9 @@ characters) and token counts, never message text or tool output. Tool
 arguments, which can contain paths or secrets the model passed, are
 recorded only with `include_arguments = true`. Files are plain text in
 `dir`, deleted after `keep_days`. Token counts are provider metadata: they
-are shown and recorded, never used for a decision.
+are shown and recorded, never used for a decision. Every built-in preset
+mounts it, writing to `telemetry` in the data directory; a distribution
+file can `remove` it.
 
 ## `tool-input-repair`
 

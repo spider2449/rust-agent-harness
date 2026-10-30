@@ -71,7 +71,8 @@ workspaces, in
 `skills.load`; a skill it has to skip or read differently, such as one with
 an unclosed front matter or a name another skill uses, is reported once on
 standard error or as a Web UI notice), `scheduler-basic` (background jobs, and `agent.delegate` to
-hand a task to a subagent in its own session), `model-mock`,
+hand a task to a subagent in its own session), `telemetry-log` (turn
+records under `~/.rah/telemetry` and the Web UI's Usage view), `model-mock`,
 `loop-react` and `frontend-cli`. Type text to run a turn. Try
 `read README.md` or `/call repo.status {}`, or use `/history`, `/fork <seq>`,
 `/sessions`, `/resume <id>`, `/rename [title]` and `/plugins`. `/stop <plugin>`
@@ -321,18 +322,24 @@ entries under its own id, one file per entry in `~/.rah/storage`
 that list `storage` in `requires` can keep state between calls and
 restarts.
 
-Diagnostics: the opt-in `telemetry-log` plugin writes one JSON line per
+Diagnostics: the `telemetry-log` plugin, mounted by every preset, writes one JSON line per
 turn, model request and tool call to `~/.rah/telemetry/<date>.jsonl`, with
 durations, the policy decision of each tool call and the token usage
 providers report (ADR 0040). It sees every turn, including background and
 subagent turns, and never records message text or tool output. The Web UI
 status bar shows the tokens reported for the open session since the page
-was loaded.
+was loaded, and the **Usage** panel sums turns, tokens and tool calls of the
+process. To change its settings, or turn it off, in a file that extends a
+preset:
 
 ```toml
+extends = "default"
+
 [[plugin]]
 use = "telemetry-log"
 config = { dir = "telemetry", keep_days = 14, include_arguments = false }   # all optional
+
+# or: remove = ["telemetry-log"]
 ```
 
 Diagnostics from the compiler: the opt-in `lsp-diagnostics` plugin (`--with
@@ -467,7 +474,8 @@ Adding, configuring, restarting or removing a layout or view plugin applies
 in every open window at once; no reload is needed.
 
 Plugins can add their own panels (views), named `<plugin id>/<view>`. A view
-the layout does not name joins the right column. `telemetry-log` adds
+the layout does not name joins the right column. `telemetry-log`, in every
+preset, adds
 `telemetry-log/usage`: turns, model requests, tokens and tool calls of this
 process, with a Reset button; it updates as turns of any session end. Put it on the left with
 `left = ["sessions", "telemetry-log/usage"]`.

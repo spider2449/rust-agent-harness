@@ -1935,7 +1935,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         page.eval(PLACES).await,
         json!({
             "sessions": "left", "files": "side", "plugins": "side",
-            "left": ["Sessions"], "right": ["Workspace", "Plugins"],
+            "left": ["Sessions"], "right": ["Workspace", "Plugins", "Usage"],
             "leftTabs": false, "pluginsButton": true,
         })
     );
@@ -1958,7 +1958,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         page.eval(PLACES).await,
         json!({
             "sessions": "left", "files": "side", "plugins": "left",
-            "left": ["Sessions", "Plugins"], "right": ["Workspace"],
+            "left": ["Sessions", "Plugins"], "right": ["Workspace", "Usage"],
             "leftTabs": true, "pluginsButton": false,
         })
     );
@@ -2015,14 +2015,8 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
         return;
     };
     let _one = ONE_BROWSER.lock().await;
+    // Every preset mounts `telemetry-log`, and with it its usage view.
     let web = start("web-browser-views").await;
-    web._kernel
-        .mount(
-            rah_cli::catalog()["telemetry-log"](rah_api::PluginId::new("telemetry-log")),
-            rah_api::MountOptions::with_config(json!({ "dir": web.dir.0.join("telemetry") })),
-        )
-        .await
-        .unwrap();
     let browser = Browser::launch(PathBuf::from(program), "web-browser-views");
     let mut page = browser.page().await;
     page.call("Page.navigate", json!({ "url": web.url })).await;
@@ -2208,23 +2202,13 @@ async fn a_mode_shows_only_the_views_it_lists() {
         return;
     };
     let _one = ONE_BROWSER.lock().await;
-    let web = start_with("web-browser-mode-views", |distribution, dir| {
-        let telemetry = dir
-            .0
-            .join("telemetry")
-            .display()
-            .to_string()
-            .replace('\\', "/");
+    let web = start_with("web-browser-mode-views", |distribution, _| {
         distribution
             .plugin
             .retain(|spec| spec.kind != "frontend-web");
         distribution.plugin.extend(
-            Distribution::parse(&format!(
+            Distribution::parse(
                 r#"
-[[plugin]]
-use = "telemetry-log"
-config = {{ dir = "{telemetry}" }}
-
 [[plugin]]
 use = "frontend-web"
 
@@ -2241,8 +2225,8 @@ views = []
 id = "stats"
 label = "Stats"
 views = ["telemetry-log/usage"]
-"#
-            ))
+"#,
+            )
             .unwrap()
             .plugin,
         );

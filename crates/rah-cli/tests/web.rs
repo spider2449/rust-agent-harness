@@ -146,7 +146,8 @@ async fn run_turn_with(
                 )
                 .await;
             }
-            "approval_resolved" => {}
+            // Pushed to every window; a turn's own messages follow.
+            "approval_resolved" | "ui" | "layout" => {}
             "event" => {
                 let event = &message["event"];
                 match event["type"].as_str().unwrap() {
@@ -281,7 +282,14 @@ async fn sessions_turns_and_forks_work_over_http_and_the_socket() {
         json!({ "type": "turn", "session": "nope", "input": "x" }),
     )
     .await;
-    assert_eq!(next_json(&mut socket).await["type"], "error");
+    // A view update pushed after the earlier turns may come first.
+    let reply = loop {
+        let message = next_json(&mut socket).await;
+        if !matches!(message["type"].as_str(), Some("ui" | "layout")) {
+            break message;
+        }
+    };
+    assert_eq!(reply["type"], "error", "{reply}");
 }
 
 #[tokio::test]
@@ -2240,13 +2248,16 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
     assert_eq!(
         standard,
         json!({
-            "layout": {"left": ["sessions"], "right": ["files", "plugins"]},
+            // Every preset mounts `telemetry-log`; its view joins the right column.
+            "layout": {"left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage"]},
             "source": "standard",
             "problems": [],
             "panels": [
                 {"id": "sessions", "title": "Sessions", "kind": "built-in", "column": "left"},
                 {"id": "files", "title": "Workspace", "kind": "built-in", "column": "right"},
                 {"id": "plugins", "title": "Plugins", "kind": "built-in", "column": "right"},
+                {"id": "telemetry-log/usage", "title": "Usage", "kind": "view",
+                 "plugin": "telemetry-log", "column": "right"},
             ],
         })
     );
@@ -2266,7 +2277,11 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
     assert_eq!(replaced["source"], "ui-layout", "{replaced}");
     assert_eq!(
         replaced["layout"],
-        json!({"left": ["files", "sessions"], "right": ["plugins"], "right_open": true})
+        json!({
+            "left": ["files", "sessions"],
+            "right": ["plugins", "telemetry-log/usage"],
+            "right_open": true,
+        })
     );
     assert_eq!(
         replaced["problems"],
@@ -2292,7 +2307,11 @@ config = { left = ["sessions", "plugins"], right = ["files"], right_open = true 
     let served = web.json(web.get("/api/layout")).await;
     assert_eq!(
         served["layout"],
-        json!({"left": ["sessions", "plugins"], "right": ["files"], "right_open": true})
+        json!({
+            "left": ["sessions", "plugins"],
+            "right": ["files", "telemetry-log/usage"],
+            "right_open": true,
+        })
     );
     assert_eq!(served["source"], "ui-layout");
     assert_eq!(served["problems"], json!([]));
@@ -2315,18 +2334,8 @@ config = { left = ["sesions"] }
 
 #[tokio::test]
 async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
-    let telemetry = TempDir::new("ui-views-telemetry");
-    let dir = telemetry.0.display().to_string().replace('\\', "/");
-    let web = start("ui-views", |distribution| {
-        distribution.plugin.push(toml_spec(&format!(
-            r#"
-[[plugin]]
-use = "telemetry-log"
-config = {{ dir = "{dir}" }}
-"#
-        )));
-    })
-    .await;
+    // Every preset mounts `telemetry-log`, and with it its usage view.
+    let web = start("ui-views", |_| {}).await;
     assert_eq!(
         web.json(web.get("/api/ui")).await,
         json!({ "views": [{

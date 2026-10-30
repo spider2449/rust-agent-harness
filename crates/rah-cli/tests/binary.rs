@@ -473,7 +473,7 @@ fn check_config_reports_every_problem_and_starts_nothing() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("configuration ok: 15 plugins"), "{stdout}");
+    assert!(stdout.contains("configuration ok: 16 plugins"), "{stdout}");
 
     let config = dir.0.join("rah.toml");
     std::fs::write(

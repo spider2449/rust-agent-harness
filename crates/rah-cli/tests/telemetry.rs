@@ -6,7 +6,6 @@ mod common;
 use std::time::Duration;
 
 use common::{TempDir, headless, kernel, new_session, turn};
-use rah_cli::PluginSpec;
 use serde_json::{Value, json};
 
 fn records(dir: &std::path::Path) -> Vec<Value> {
@@ -28,13 +27,8 @@ fn records(dir: &std::path::Path) -> Vec<Value> {
 async fn turns_are_recorded_with_usage_and_tool_decisions() {
     let dir = TempDir::new("telemetry");
     let telemetry = dir.0.join("telemetry");
-    let mut distribution = headless(&dir);
-    distribution.plugin.push(PluginSpec {
-        kind: "telemetry-log".into(),
-        id: None,
-        config: json!({ "dir": telemetry.display().to_string() }),
-        bind: Default::default(),
-    });
+    // Every preset mounts `telemetry-log`; `headless` keeps it in `dir`.
+    let distribution = headless(&dir);
     let kernel = kernel(&distribution).await;
     let handle = kernel.handle();
     let session = new_session(&handle).await;

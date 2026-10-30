@@ -117,7 +117,7 @@ mod tests {
         let distribution = Distribution::parse(
             "extends = \"dev\"\nremove = [\"skills-fs\"]\n\
              [[plugin]]\nuse = \"loop-react\"\nconfig = { max_rounds = 4 }\n\
-             [[plugin]]\nuse = \"telemetry-log\"\n",
+             [[plugin]]\nuse = \"context-compact\"\n",
         )
         .unwrap();
         let dir = std::env::temp_dir().join(format!("rah-show-extends-{}", std::process::id()));
@@ -129,7 +129,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("telemetry-log  <- added by the file"),
+            text.contains("context-compact  <- added by the file"),
             "{text}"
         );
         assert!(!text.contains("\n  skills-fs\n"), "{text}");

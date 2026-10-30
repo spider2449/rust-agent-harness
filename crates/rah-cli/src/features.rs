@@ -136,7 +136,7 @@ pub const FEATURES: [Feature; 8] = [
     },
     Feature {
         name: "telemetry",
-        summary: "write one JSON line per turn, model request and tool call",
+        summary: "write one JSON line per turn, model request and tool call (every preset mounts it)",
         argument: None,
         needs_any: &[],
         mount: Mount::Plugin {

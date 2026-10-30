@@ -474,10 +474,12 @@ async fn data_paths_resolve_against_the_data_home_also_for_admin_mounts() {
         .config;
     assert_eq!(context["memory_dir"], under_home("memory"));
 
-    // Mounted at runtime without a path: the default under the home.
+    // Mounted at runtime without a path: the default under the home. (Every
+    // preset mounts one already, so this one gets its own id.)
     let (id, status) = admin
         .mount(rah_api::admin::MountRequest {
             kind: "telemetry-log".into(),
+            id: Some("telemetry-extra".into()),
             ..Default::default()
         })
         .await

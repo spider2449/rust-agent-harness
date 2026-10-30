@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Every built-in preset mounts `telemetry-log`, before the loop: turn
+  records go to `telemetry` in the data directory (14 days, no message text
+  or tool output), and the Web UI and `rah-desktop` show the Usage tab
+  without configuration. `--with telemetry` is accepted and changes
+  nothing; a distribution file can `remove = ["telemetry-log"]`.
 - The Web UI follows plugin changes without a reload: when mounting,
   removing, restarting or configuring a plugin alters the layout or the
   panels (such as `ui-layout-config` or a plugin with views), every window

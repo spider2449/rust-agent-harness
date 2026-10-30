@@ -59,6 +59,11 @@ pub fn headless(dir: &TempDir) -> Distribution {
     );
     distribution.set_config("storage-fs", "dir", json!(path(&dir.storage())));
     distribution.set_config(
+        "telemetry-log",
+        "dir",
+        json!(path(&dir.0.join("telemetry"))),
+    );
+    distribution.set_config(
         "context-default",
         "memory_dir",
         json!(path(&dir.0.join("memory"))),

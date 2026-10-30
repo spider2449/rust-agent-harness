@@ -205,6 +205,10 @@ Done, in five steps:
    entry that is not `instance/view`. A hidden view's tab is hidden, and a
    column showing it moves to another panel; the plugin keeps running.
 
+Every built-in preset mounts `telemetry-log` (2026-10-30, while RAH has
+no users to keep the old default for), so the standard page shows the Usage
+tab at the end of the right column; `Layout::standard()` is unchanged.
+
 Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
 `Progress` node and views in `frontend-cli` (decision 9). Views from process
 plugins (decision 8) are protocol 4, ADR 0063.

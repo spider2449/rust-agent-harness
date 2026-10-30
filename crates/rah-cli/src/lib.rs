@@ -198,7 +198,8 @@ pub struct Preset {
 /// Built-in presets. All share `storage-fs`, built-in tools, read-only repository tools
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
 /// and memory notes per workspace), `skills-fs`, `scheduler-basic`
-/// (background jobs and `agent.delegate`), the default loop and the terminal
+/// (background jobs and `agent.delegate`), `telemetry-log` (turn records and
+/// the Web UI's Usage view), the default loop and the terminal
 /// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
 /// None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
@@ -286,6 +287,9 @@ use = "tool-input-repair"
 
 [[plugin]]
 use = "{MODEL}"{MODEL_CONFIG}
+
+[[plugin]]
+use = "telemetry-log"
 
 [[plugin]]
 use = "loop-react"

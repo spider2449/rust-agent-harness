@@ -110,8 +110,9 @@ Implemented:
   workspace-bounded `fs.read`, `fs.list`, `fs.glob` and
   `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (asks the
   model for a title after a session's first turn); `policy-authority`;
-  `telemetry-log` (opt-in: JSONL records of turns, model requests and tools
-  with durations, policy decisions and token usage);
+  `telemetry-log` (mounted by every preset: JSONL records of turns, model
+  requests and tools with durations, policy decisions and token usage, and
+  the Web UI's `usage` view);
   `tool-input-repair` (mounted by every preset: converts arguments that are
   one unambiguous step from valid for the tool's schema, such as `"20"` for
   an integer, before the policy sees the call; ADR 0049);
