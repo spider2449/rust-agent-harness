@@ -450,23 +450,63 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
     assert_eq!(manifest["version"], json!("0.2.0"));
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
 
+    // The view lists the plugins; the details show on a plugin's button.
     let nodes = render(&kernel).await.nodes;
     assert!(matches!(
         &nodes[1],
         Node::Table { rows, .. } if rows == &[vec![
             "greeter".to_owned(),
             "python".to_owned(),
-            "greeter.hello".to_owned(),
             "Greets people by name.".to_owned(),
         ]]
     ));
     assert_eq!(
         nodes[2],
-        Node::Heading {
-            text: "greeter".into()
+        Node::Button {
+            action: "details:greeter".into(),
+            label: "Details: greeter".into(),
         }
     );
-    assert!(matches!(&nodes[3], Node::Markdown { text } if text.contains("id = \"greeter\"")));
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| matches!(node, Node::Markdown { .. }))
+    );
+    let shown = act(&kernel, "details:greeter", Value::Null).await.unwrap();
+    assert!(shown.rerender);
+    let nodes = render(&kernel).await.nodes;
+    assert_eq!(
+        nodes[1..3],
+        [
+            Node::Button {
+                action: LIST_ACTION.into(),
+                label: "Back to the list".into(),
+            },
+            Node::Heading {
+                text: "greeter".into()
+            },
+        ]
+    );
+    assert!(matches!(
+        &nodes[3],
+        Node::KeyValue { items } if items[1] == KeyValue::new("Tools", "greeter.hello")
+    ));
+    assert!(matches!(&nodes[4], Node::Markdown { text } if text.contains("id = \"greeter\"")));
+    assert!(!nodes.iter().any(|node| matches!(node, Node::Form { .. })));
+    assert!(matches!(
+        act(&kernel, "details:../x", Value::Null).await,
+        Err(UiError::InvalidInput(_))
+    ));
+    assert!(
+        act(&kernel, LIST_ACTION, Value::Null)
+            .await
+            .unwrap()
+            .rerender
+    );
+    assert!(matches!(
+        &render(&kernel).await.nodes[1],
+        Node::Table { .. }
+    ));
 
     assert!(
         invoke(&kernel, READ_TOOL, json!({ "name": "missing" }))

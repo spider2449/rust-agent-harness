@@ -414,7 +414,8 @@ configuration to choose one, and `mount.toml` warns when none is found. Saving
 asks first and never mounts or runs anything: read the files, then follow
 `mount.toml`.
 `plugins.list` and `plugins.read` let the model revise a saved plugin, and the
-`plugin-builder/plugins` panel lists them with their `mount.toml`. The entry
+`plugin-builder/plugins` panel lists them; a plugin's Details button shows its
+tools, directory and `mount.toml`. The entry
 carries `personal = true`, so the Plugins panel lists a mounted personal plugin
 in its own "Personal plugins" group, tagged and in its own color. The panel's
 Export form writes the plugins you tick to one bundle file (it never

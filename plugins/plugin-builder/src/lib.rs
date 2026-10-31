@@ -16,8 +16,10 @@
 //!   into place, so it is replaced whole or not at all.
 //! - `plugins.list` and `plugins.read` (`read`) return the saved plugins, and
 //!   one plugin in the form `plugins.save` takes, to change it.
-//! - The `plugins` view (ADR 0062) lists the saved plugins with their
-//!   `mount.toml`, and is announced with `UiChanged` after each save. Its
+//! - The `plugins` view (ADR 0062) lists the saved plugins, and is announced
+//!   with `UiChanged` after each save. A plugin's `details:<name>` button
+//!   shows its tools, directory and `mount.toml` instead of the list, until
+//!   the `list` button goes back. Its
 //!   `export` form writes the ticked plugins to one bundle file
 //!   (`{"format": "rah-personal-plugins", "version": 1, "plugins": [...]}`,
 //!   each entry in the form `plugins.save` takes) and never overwrites a
@@ -53,7 +55,7 @@ mod store;
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use rah_api::{
@@ -61,8 +63,8 @@ use rah_api::{
     hooks::ModelBeforeRequest,
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
     ui::{
-        ActionOutcome, Field, FieldKind, Node, UI_VIEWS, UI_VIEWS_SERVICE, UiChanged, UiError,
-        UiViews, View, ViewContext, ViewSpec,
+        ActionOutcome, Field, FieldKind, KeyValue, Node, UI_VIEWS, UI_VIEWS_SERVICE, UiChanged,
+        UiError, UiViews, View, ViewContext, ViewSpec,
     },
 };
 use rah_protocol::{
@@ -93,6 +95,11 @@ pub const IMPORT_ACTION: &str = "import";
 /// The name prefix of the export form's check boxes; the rest is a plugin
 /// name.
 const EXPORT_PREFIX: &str = "plugin:";
+/// The view action that goes back from a plugin's details to the list.
+pub const LIST_ACTION: &str = "list";
+/// The prefix of the view action that shows a plugin's details; the rest is a
+/// plugin name.
+pub const DETAILS_PREFIX: &str = "details:";
 /// The longest plugin description, in characters.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 const GUIDE: &str = include_str!("guide.md");
@@ -249,7 +256,10 @@ impl Plugin for PluginBuilderPlugin {
                 Arc::new(ReadTool(builder.clone())),
             ],
         )?;
-        let views: Arc<dyn UiViews> = Arc::new(BuilderViews(builder));
+        let views: Arc<dyn UiViews> = Arc::new(BuilderViews {
+            builder,
+            shown: Mutex::new(None),
+        });
         scope.provide(UI_VIEWS, views)?;
         Ok(())
     }
@@ -616,7 +626,12 @@ impl Tool for ReadTool {
     }
 }
 
-struct BuilderViews(Arc<Builder>);
+/// The view lists the saved plugins; a plugin's details show on its button.
+struct BuilderViews {
+    builder: Arc<Builder>,
+    /// The plugin whose details are shown instead of the list.
+    shown: Mutex<Option<String>>,
+}
 
 #[async_trait]
 impl UiViews for BuilderViews {
@@ -628,7 +643,7 @@ impl UiViews for BuilderViews {
         if view != VIEW {
             return Err(UiError::UnknownView(view.to_owned()));
         }
-        let store = &self.0.store;
+        let store = &self.builder.store;
         let saved = store.list().await;
         let mut nodes = vec![Node::Text {
             text: format!(
@@ -645,39 +660,55 @@ impl UiViews for BuilderViews {
             nodes.extend(import_form());
             return Ok(View { nodes });
         }
+        let shown = self.shown();
+        if let Some(plugin) = shown.and_then(|name| saved.iter().find(|p| p.about.name == name)) {
+            let tools: Vec<&str> = plugin
+                .manifest
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
+            nodes.push(Node::Button {
+                action: LIST_ACTION.to_owned(),
+                label: "Back to the list".to_owned(),
+            });
+            nodes.push(Node::Heading {
+                text: plugin.about.name.clone(),
+            });
+            nodes.push(Node::KeyValue {
+                items: vec![
+                    KeyValue::new("Runtime", plugin.about.runtime.label()),
+                    KeyValue::new("Tools", tools.join(", ")),
+                    KeyValue::new("Description", plugin.about.description.clone()),
+                    KeyValue::new("Directory", plugin.dir.display().to_string()),
+                ],
+            });
+            if let Ok(mount) = tokio::fs::read_to_string(plugin.dir.join(MOUNT_FILE)).await {
+                nodes.push(Node::Markdown {
+                    text: format!("````toml\n{}\n````", mount.trim_end()),
+                });
+            }
+            return Ok(View { nodes });
+        }
         nodes.push(Node::Table {
-            columns: ["Plugin", "Runtime", "Tools", "Description"]
+            columns: ["Plugin", "Runtime", "Description"]
                 .map(str::to_owned)
                 .to_vec(),
             rows: saved
                 .iter()
                 .map(|plugin| {
-                    let tools: Vec<&str> = plugin
-                        .manifest
-                        .tools
-                        .iter()
-                        .map(|t| t.name.as_str())
-                        .collect();
                     vec![
                         plugin.about.name.clone(),
                         plugin.about.runtime.label().to_owned(),
-                        tools.join(", "),
                         plugin.about.description.clone(),
                     ]
                 })
                 .collect(),
         });
-        for plugin in &saved {
-            let Ok(mount) = tokio::fs::read_to_string(plugin.dir.join(MOUNT_FILE)).await else {
-                continue;
-            };
-            nodes.push(Node::Heading {
-                text: plugin.about.name.clone(),
-            });
-            nodes.push(Node::Markdown {
-                text: format!("````toml\n{}\n````", mount.trim_end()),
-            });
-        }
+        nodes.extend(saved.iter().map(|plugin| Node::Button {
+            action: format!("{DETAILS_PREFIX}{}", plugin.about.name),
+            label: format!("Details: {}", plugin.about.name),
+        }));
         nodes.push(Node::Heading {
             text: "Export".to_owned(),
         });
@@ -727,6 +758,21 @@ impl UiViews for BuilderViews {
         if view != VIEW {
             return Err(UiError::UnknownView(view.to_owned()));
         }
+        if action == LIST_ACTION {
+            self.show(None);
+            return Ok(ActionOutcome {
+                message: None,
+                rerender: true,
+            });
+        }
+        if let Some(name) = action.strip_prefix(DETAILS_PREFIX) {
+            manifest::check_name(name).map_err(UiError::InvalidInput)?;
+            self.show(Some(name.to_owned()));
+            return Ok(ActionOutcome {
+                message: None,
+                rerender: true,
+            });
+        }
         let Value::Object(input) = input else {
             return Err(UiError::InvalidInput("the form sends an object".to_owned()));
         };
@@ -754,6 +800,18 @@ impl UiViews for BuilderViews {
 }
 
 impl BuilderViews {
+    /// The plugin whose details the view shows, if any.
+    fn shown(&self) -> Option<String> {
+        self.shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn show(&self, name: Option<String>) {
+        *self.shown.lock().unwrap_or_else(PoisonError::into_inner) = name;
+    }
+
     /// Writes the plugins `names` to a new bundle file.
     async fn export(&self, names: &[&str], file: &str) -> Result<ActionOutcome, UiError> {
         if names.is_empty() {
@@ -761,7 +819,7 @@ impl BuilderViews {
                 "tick at least one plugin to export".to_owned(),
             ));
         }
-        let store = &self.0.store;
+        let store = &self.builder.store;
         let mut entries = Vec::new();
         let mut left_out = Vec::new();
         for name in names {
@@ -798,7 +856,7 @@ impl BuilderViews {
         if file.trim().is_empty() {
             return Err(UiError::InvalidInput("name the bundle file".to_owned()));
         }
-        let builder = &self.0;
+        let builder = &self.builder;
         let path = builder.store.bundle_path(file);
         let entries = Store::read_bundle(&path)
             .await
