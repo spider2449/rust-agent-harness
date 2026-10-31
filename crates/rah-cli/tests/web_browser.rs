@@ -1935,7 +1935,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         page.eval(PLACES).await,
         json!({
             "sessions": "left", "files": "side", "plugins": "side",
-            "left": ["Sessions"], "right": ["Workspace", "Plugins", "Usage"],
+            "left": ["Sessions"], "right": ["Workspace", "Plugins", "Usage", "My plugins"],
             "leftTabs": false, "pluginsButton": true,
         })
     );
@@ -1958,7 +1958,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         page.eval(PLACES).await,
         json!({
             "sessions": "left", "files": "side", "plugins": "left",
-            "left": ["Sessions", "Plugins"], "right": ["Workspace", "Usage"],
+            "left": ["Sessions", "Plugins"], "right": ["Workspace", "Usage", "My plugins"],
             "leftTabs": true, "pluginsButton": false,
         })
     );
@@ -2015,7 +2015,7 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
         return;
     };
     let _one = ONE_BROWSER.lock().await;
-    // Every preset mounts `telemetry-log`, and with it its usage view.
+    // Every preset mounts `telemetry-log` and `plugin-builder`, with their views.
     let web = start("web-browser-views").await;
     let browser = Browser::launch(PathBuf::from(program), "web-browser-views");
     let mut page = browser.page().await;
@@ -2026,7 +2026,7 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
             "[...byId('side-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent)"
         )
         .await,
-        json!(["Workspace", "Plugins", "Usage"])
+        json!(["Workspace", "Plugins", "Usage", "My plugins"])
     );
     const TURNS: &str = "[...document.querySelectorAll('.view-values dd')][0]?.textContent";
     page.eval("showPanel('telemetry-log/usage'); true").await;
@@ -2089,6 +2089,7 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
             "files Workspace (built-in; now right)",
             "plugins Plugins (built-in; now right)",
             "telemetry-log/usage Usage (view of telemetry-log; now right)",
+            "plugin-builder/plugins My plugins (view of plugin-builder; now right)",
         ])
     );
     page.screenshot("layout-panels").await;
@@ -2329,6 +2330,179 @@ views = ["telemetry-log/usage"]
         ),
     )
     .await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_plugins_are_listed_apart_in_their_own_color() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let node_found = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !node_found {
+        eprintln!("skipped: no Node.js on PATH");
+        return;
+    }
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-personal").await;
+    // A personal plugin as `plugin-builder` saves it, mounted the way
+    // `mount.toml` says, through the admin service like the Plugins panel.
+    let plugin_dir = web.dir.0.join("greeter");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/plugin-builder/src/runtime/rah_plugin.mjs");
+    std::fs::copy(runtime, plugin_dir.join("rah_plugin.mjs")).unwrap();
+    std::fs::write(
+        plugin_dir.join("manifest.json"),
+        json!({
+            "version": "0.1.0",
+            "provides": ["tools"],
+            "tools": [{
+                "name": "greeter.hello",
+                "description": "Greets.",
+                "input_schema": { "type": "object" },
+                "permission": "none"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.mjs"),
+        "import { Plugin } from \"./rah_plugin.mjs\";\n\
+         const plugin = new Plugin(import.meta.url);\n\
+         plugin.tool(\"greeter.hello\", async () => \"hello\");\n\
+         plugin.run();\n",
+    )
+    .unwrap();
+    let admin = web._kernel.handle().get(rah_api::admin::ADMIN).unwrap();
+    admin
+        .mount(rah_api::admin::MountRequest {
+            kind: "process".into(),
+            id: Some("greeter".into()),
+            config: json!({
+                "program": "node",
+                "args": [plugin_dir.join("plugin.mjs").display().to_string()],
+                "cwd": plugin_dir.display().to_string(),
+                "personal": true
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-personal");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("byId('toggle-plugins').click(); true").await;
+    page.wait(
+        "the personal plugin",
+        "shown(byId('plugins-panel')) && !!rowOf('greeter')",
+    )
+    .await;
+    // The distribution's plugins come first, then the personal group.
+    let layout = page
+        .eval(
+            "(() => { const rows = [...document.querySelectorAll('#plugins tr')]; \
+             const group = (label) => rows.findIndex((row) => row.classList.contains('group') && row.textContent === label); \
+             return [group('RAH plugins'), group('Personal plugins'), rows.indexOf(rowOf('policy-authority')), rows.indexOf(rowOf('greeter')), rows.length - 1].join(); })()",
+        )
+        .await;
+    let indices: Vec<i64> = layout
+        .as_str()
+        .unwrap()
+        .split(',')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    let [builtin, personal, policy, greeter, last] = indices[..] else {
+        panic!("{layout}");
+    };
+    assert_eq!(builtin, 0, "{layout}");
+    assert!(
+        policy > builtin && personal > policy && greeter > personal,
+        "{layout}"
+    );
+    assert_eq!(greeter, last, "{layout}");
+    // Tagged, and in the theme's personal color; RAH's own rows are not.
+    assert_eq!(
+        page.eval("rowOf('greeter').querySelector('.personal-tag').textContent")
+            .await,
+        "Personal"
+    );
+    let colors = page
+        .eval(
+            "(() => { const personal = getComputedStyle(document.documentElement).getPropertyValue('--personal').trim(); \
+             const probe = document.createElement('span'); probe.style.color = personal; document.body.append(probe); \
+             const expected = getComputedStyle(probe).color; probe.remove(); \
+             return [expected, getComputedStyle(rowOf('greeter').cells[0]).color, getComputedStyle(rowOf('policy-authority').cells[0]).color].join('|'); })()",
+        )
+        .await;
+    let colors: Vec<&str> = colors.as_str().unwrap().split('|').collect();
+    assert_eq!(colors[0], colors[1], "{colors:?}");
+    assert_ne!(colors[0], colors[2], "{colors:?}");
+    assert!(
+        page.eval("!rowOf('policy-authority').querySelector('.personal-tag')")
+            .await
+            == true
+    );
+    page.screenshot("personal-plugins").await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_with_large_input_keeps_its_buttons_in_view() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-large-approval").await;
+    let file = web.dir.workspace().join("large.txt");
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-large-approval");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "the new session",
+        "sessionItems().length === 1 && !byId('input').disabled",
+    )
+    .await;
+    // Far more input than the window is tall, like a whole plugin.
+    let content: String = (0..400).map(|n| format!("line {n}\n")).collect();
+    let call = format!(
+        "/call repo.create-file {}",
+        json!({ "path": "large.txt", "content": content })
+    );
+    page.send_message(&call).await;
+    page.wait("the approval card", "shown(approval())").await;
+    // Every button is inside the window and is what a click there hits.
+    let reachable = page
+        .eval(
+            "[...approval().querySelectorAll('.buttons button')].every((button) => { \
+               const box = button.getBoundingClientRect(); \
+               return box.bottom <= innerHeight && box.right <= innerWidth && box.top >= 0 \
+                 && document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button; })",
+        )
+        .await;
+    assert_eq!(reachable, true);
+    // The input scrolls inside the card.
+    assert_eq!(
+        page.eval("(() => { const pre = approval().querySelector('pre'); return pre.scrollHeight > pre.clientHeight; })()")
+            .await,
+        true
+    );
+    page.screenshot("large-approval").await;
+    page.eval("answer('Allow'); true").await;
+    page.wait("the written file", "idle() && !approval()").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
 }

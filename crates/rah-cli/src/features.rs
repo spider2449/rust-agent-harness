@@ -55,7 +55,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah --list-features` shows them.
-pub const FEATURES: [Feature; 9] = [
+pub const FEATURES: [Feature; 10] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -158,6 +158,24 @@ pub const FEATURES: [Feature; 9] = [
         },
         argument_key: None,
         tools: &[("todo.*", "none")],
+        decisions: &[],
+    },
+    Feature {
+        name: "plugin-builder",
+        summary: "describe a plugin and the model writes it (`plugins.*`); saving asks first, mounting is yours (every preset mounts it)",
+        argument: None,
+        needs_any: &[],
+        mount: Mount::Plugin {
+            kind: "plugin-builder",
+            place: Place::BeforeLoop,
+        },
+        argument_key: None,
+        tools: &[
+            ("plugins.guide", "none"),
+            ("plugins.list", "read"),
+            ("plugins.read", "read"),
+            ("plugins.save", "write"),
+        ],
         decisions: &[],
     },
     Feature {

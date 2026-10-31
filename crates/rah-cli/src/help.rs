@@ -245,6 +245,25 @@ pub fn fallback(kind: &str) -> Help {
                 "Official endpoint or a loopback URL only; credentials never go elsewhere.",
             ),
         ],
+        "plugin-builder" => &[
+            (
+                "dir",
+                "Where personal plugins are saved, one directory each (plugins, in the data directory).",
+            ),
+            (
+                "python",
+                "Python that mount.toml starts plugins with. Default: python (python3 off Windows) looked up on PATH, else the newest uv-managed Python; a name or path you set is used as given. Written as a full path when found.",
+            ),
+            (
+                "node",
+                "Node.js that mount.toml starts plugins with (node), looked up on PATH and written as a full path when found.",
+            ),
+            (
+                "max_files",
+                "Most files the model sends for one plugin (16).",
+            ),
+            ("max_file_bytes", "Largest file the model sends (131072)."),
+        ],
         "policy-authority" => &[
             (
                 "allow",

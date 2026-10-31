@@ -58,6 +58,7 @@ pub fn headless(dir: &TempDir) -> Distribution {
         json!(path(&dir.0.join("agents"))),
     );
     distribution.set_config("storage-fs", "dir", json!(path(&dir.storage())));
+    distribution.set_config("plugin-builder", "dir", json!(path(&dir.0.join("plugins"))));
     distribution.set_config(
         "telemetry-log",
         "dir",

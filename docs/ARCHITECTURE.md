@@ -116,6 +116,16 @@ Implemented:
   `todo` (opt-in feature `todo`: `todo.write` and `todo.read`, permission
   `none`, keep a to-do list per session in memory, rebuilt from the session
   log when unknown, and its `list` view shows the open session's list);
+  `plugin-builder` (mounted by every preset: the model writes the
+  user's personal process plugins; `plugins.guide` returns the rules,
+  `plugins.save` (`write`) checks the manifest against the process host's
+  rules plus its own, then writes the files, `manifest.json`, a Python or
+  Node.js runtime library and `mount.toml` into `plugins/<name>/` by a staged
+  rename, `plugins.list` and `plugins.read` return saved plugins, and its
+  `plugins` view lists them and exports ticked plugins to a bundle file or
+  imports one on the user's click; it never mounts or runs a plugin, and
+  marks its `mount.toml` entry `personal = true`, which the Web UI lists
+  apart);
   `tool-input-repair` (mounted by every preset: converts arguments that are
   one unambiguous step from valid for the tool's schema, such as `"20"` for
   an integer, before the policy sees the call; ADR 0049);

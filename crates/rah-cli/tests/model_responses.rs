@@ -154,9 +154,9 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
         "{tools:?}"
     );
     let second = bodies[3]["input"].as_array().unwrap();
-    assert_eq!(second[1]["type"], "function_call");
+    assert_eq!(second[2]["type"], "function_call");
     assert_eq!(
-        second[2],
+        second[3],
         json!({"type":"function_call_output","call_id":"call_1","output":"hello"})
     );
 }

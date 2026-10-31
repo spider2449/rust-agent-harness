@@ -41,6 +41,7 @@ use rah_plugin_model_anthropic::AnthropicPlugin;
 use rah_plugin_model_chat_completions::ChatCompletionsPlugin;
 use rah_plugin_model_mock::MockModelPlugin;
 use rah_plugin_model_responses::{LlamaCppPlugin, OpenAiResponsesPlugin};
+use rah_plugin_plugin_builder::PluginBuilderPlugin;
 use rah_plugin_policy_authority::PolicyAuthorityPlugin;
 use rah_plugin_sandbox_process::{SandboxOsPlugin, SandboxProcessPlugin};
 use rah_plugin_scheduler_basic::SchedulerPlugin;
@@ -67,7 +68,7 @@ pub type Constructor = fn(PluginId) -> Arc<dyn Plugin>;
 
 /// Plugins compiled into this distribution, by `use` name.
 pub fn catalog() -> BTreeMap<&'static str, Constructor> {
-    let entries: [(&'static str, Constructor); 34] = [
+    let entries: [(&'static str, Constructor); 35] = [
         ("context-compact", |id| Arc::new(CompactPlugin::new(id))),
         ("context-default", |id| Arc::new(ContextPlugin::new(id))),
         ("context-instructions", |id| {
@@ -91,6 +92,9 @@ pub fn catalog() -> BTreeMap<&'static str, Constructor> {
         ("model-mock", |id| Arc::new(MockModelPlugin::new(id))),
         ("model-openai", |id| {
             Arc::new(OpenAiResponsesPlugin::new(id))
+        }),
+        ("plugin-builder", |id| {
+            Arc::new(PluginBuilderPlugin::new(id))
         }),
         ("policy-authority", |id| {
             Arc::new(PolicyAuthorityPlugin::new(id))
@@ -146,6 +150,7 @@ pub fn config_example(kind: &str) -> Option<&'static str> {
         "model-llamacpp" => LlamaCppPlugin::CONFIG_EXAMPLE,
         "model-mock" => MockModelPlugin::CONFIG_EXAMPLE,
         "model-openai" => OpenAiResponsesPlugin::CONFIG_EXAMPLE,
+        "plugin-builder" => PluginBuilderPlugin::CONFIG_EXAMPLE,
         "policy-authority" => PolicyAuthorityPlugin::CONFIG_EXAMPLE,
         "sandbox-os" => SandboxOsPlugin::CONFIG_EXAMPLE,
         "sandbox-process" => SandboxProcessPlugin::CONFIG_EXAMPLE,
@@ -202,7 +207,8 @@ pub struct Preset {
 /// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
 /// and memory notes per workspace), `skills-fs`, `scheduler-basic`
 /// (background jobs and `agent.delegate`), `telemetry-log` (turn records and
-/// the Web UI's Usage view), the default loop and the terminal
+/// the Web UI's Usage view), `plugin-builder` (the model writes personal
+/// plugins; saving asks), the default loop and the terminal
 /// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
 /// None mounts `tools-shell`. Every preset except `minimal` mounts
 /// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
@@ -250,7 +256,7 @@ pub const PRESETS: [Preset; 6] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read", "plugins.guide" = "none", "plugins.list" = "read", "plugins.read" = "read", "plugins.save" = "write" } }
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -293,6 +299,9 @@ use = "{MODEL}"{MODEL_CONFIG}
 
 [[plugin]]
 use = "telemetry-log"
+
+[[plugin]]
+use = "plugin-builder"
 
 [[plugin]]
 use = "loop-react"

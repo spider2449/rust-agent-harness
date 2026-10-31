@@ -20,6 +20,7 @@ members = [
     "plugins/model-chat-completions",
     "plugins/model-mock",
     "plugins/model-responses",
+    "plugins/plugin-builder",
     "plugins/policy-authority",
     "plugins/sandbox-process",
     "plugins/scheduler-basic",

@@ -2598,6 +2598,7 @@ dependencies = [
  "rah-plugin-model-chat-completions",
  "rah-plugin-model-mock",
  "rah-plugin-model-responses",
+ "rah-plugin-plugin-builder",
  "rah-plugin-policy-authority",
  "rah-plugin-sandbox-process",
  "rah-plugin-scheduler-basic",
@@ -2840,6 +2841,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rah-plugin-plugin-builder"
+version = "0.45.0"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

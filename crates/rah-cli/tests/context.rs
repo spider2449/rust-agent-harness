@@ -19,7 +19,7 @@ async fn the_window_limits_the_model_context_but_not_the_log() {
     // The mock reports how many items precede the newest one: just the
     // omission note.
     let text = reply(&turn(&handle, &session, "/notool again").await);
-    assert_eq!(text, "[model-mock] you said: again (1 earlier items)");
+    assert_eq!(text, "[model-mock] you said: again (2 earlier items)");
     assert_eq!(entries(&handle, &session).await.len(), 8);
 }
 
@@ -38,7 +38,7 @@ async fn memory_notes_are_part_of_every_request() {
     let handle = kernel.handle();
     let session = new_session(&handle).await;
     let text = reply(&turn(&handle, &session, "/notool hi").await);
-    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (2 earlier items)");
     // Without an approver, saving a note (`write`, Ask under the preset
     // policy) is denied.
     let text = reply(&turn(&handle, &session, r#"/call memory.remember {"note":"x"}"#).await);
@@ -59,7 +59,7 @@ async fn skills_are_listed_and_loaded_through_the_presets() {
     let session = new_session(&handle).await;
     // The listing is one system item before the user message.
     let text = reply(&turn(&handle, &session, "/notool hi").await);
-    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (2 earlier items)");
     let text = reply(&turn(&handle, &session, r#"/call skills.load {"name":"tea"}"#).await);
     assert_eq!(text, "[model-mock] skills.load returned: Boil water first.");
 }
@@ -72,9 +72,9 @@ async fn the_instructions_feature_adds_the_workspace_file_on_every_request() {
     let kernel = kernel(&distribution).await;
     let handle = kernel.handle();
     let text = reply(&turn(&handle, &new_session(&handle).await, "/notool hi").await);
-    assert_eq!(text, "[model-mock] you said: hi (0 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
     // Read on every request: a file written now counts at once.
     std::fs::write(dir.workspace().join("AGENTS.md"), "Run the tests.").unwrap();
     let text = reply(&turn(&handle, &new_session(&handle).await, "/notool hi").await);
-    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (2 earlier items)");
 }

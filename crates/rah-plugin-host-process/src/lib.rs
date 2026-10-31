@@ -107,6 +107,11 @@ pub struct ProcessConfig {
     pub hook_timeout_ms: Option<u64>,
     pub view_timeout_ms: Option<u64>,
     pub max_message_bytes: Option<usize>,
+    /// Marks a plugin the user wrote, or had written, for themselves (such
+    /// as one saved by `plugin-builder`). Frontends show it apart from the
+    /// distribution's plugins; it changes nothing about how it runs.
+    #[serde(default)]
+    pub personal: bool,
 }
 
 impl ProcessConfig {

@@ -2762,9 +2762,29 @@ This is the Web UI you are using; it will stop responding.`)) return;
   manage(`/plugins/${encodeURIComponent(plugin.id)}/stop`, "POST").catch(report);
 }
 
+// A process plugin the user wrote, or had written, for themselves
+// (`personal = true`, as `plugin-builder` writes it in `mount.toml`).
+function isPersonal(plugin) {
+  return plugin.kind === "process" && plugin.config?.personal === true;
+}
+
+function pluginGroup(label, className) {
+  const row = el("tr", `group ${className}`);
+  const cell = el("th", "", label);
+  cell.colSpan = 2;
+  row.append(cell);
+  return row;
+}
+
 function pluginRow(plugin) {
-  const row = el("tr");
+  const personal = isPersonal(plugin);
+  const row = el("tr", personal ? "personal" : "");
   const name = el("td", "", plugin.id);
+  if (personal) {
+    const tag = el("span", "personal-tag", "Personal");
+    tag.title = "A plugin you wrote, or had written, for yourself";
+    name.append(tag);
+  }
   if (plugin.kind && plugin.kind !== plugin.id) name.append(el("span", "kind", plugin.kind));
   const cell = el("td", `state-${plugin.state}`, plugin.state);
   if (plugin.detail) cell.title = plugin.detail;
@@ -2811,7 +2831,14 @@ async function loadCatalog() {
 
 async function loadPlugins() {
   const [plugins, info] = await Promise.all([api("/plugins"), api("/info")]);
-  $("plugins").replaceChildren(...plugins.map(pluginRow));
+  // Personal plugins are listed apart, after the distribution's own.
+  const personal = plugins.filter(isPersonal);
+  const rows = plugins.filter((plugin) => !isPersonal(plugin)).map(pluginRow);
+  if (personal.length > 0) {
+    rows.unshift(pluginGroup("RAH plugins", "builtin"));
+    rows.push(pluginGroup("Personal plugins", "personal"), ...personal.map(pluginRow));
+  }
+  $("plugins").replaceChildren(...rows);
   $("tools").replaceChildren(...info.tools.map((tool) => el("li", "", `${tool.name} (${tool.permission})`)));
   const guard = $("guard");
   guard.hidden = false;

@@ -12,6 +12,7 @@
   --warn-bg: #fff4e0;
   --bad: #b3261e;
   --good: #1f7a3d;
+  --personal: #8a3fb8;
   --tok-comment: #6a737d;
   --tok-string: #0a7a3e;
   --tok-keyword: #a626a4;
@@ -42,6 +43,7 @@
     --warn-bg: #3a2a10;
     --bad: #ff8a80;
     --good: #7ed69a;
+    --personal: #c79bf2;
     --tok-comment: #7f848e;
     --tok-string: #98c379;
     --tok-keyword: #c678dd;
@@ -68,6 +70,7 @@
   --warn-bg: #3a2a10;
   --bad: #ff8a80;
   --good: #7ed69a;
+  --personal: #c79bf2;
   --tok-comment: #7f848e;
   --tok-string: #98c379;
   --tok-keyword: #c678dd;
@@ -93,6 +96,7 @@
   --warn-bg: #f9e5bd;
   --bad: #a62a1f;
   --good: #2e6b2e;
+  --personal: #7a3f8f;
   --tok-comment: #85785f;
   --tok-string: #4d7a1f;
   --tok-keyword: #9c3d7a;
@@ -118,6 +122,7 @@
   --warn-bg: #3a2f12;
   --bad: #ff8f8f;
   --good: #7fdca0;
+  --personal: #c4a0ff;
   --tok-comment: #7885a3;
   --tok-string: #9ad48b;
   --tok-keyword: #c3a0ff;
@@ -143,6 +148,7 @@
   --warn-bg: #332b00;
   --bad: #ff6b6b;
   --good: #5cff8a;
+  --personal: #ff8cff;
   --tok-comment: #b8b8b8;
   --tok-string: #7dff9b;
   --tok-keyword: #ff9cf2;
@@ -528,8 +534,10 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .tools { list-style: none; padding: 0; margin: 0; }
 .tools li { padding: 3px 0; }
 
-.approvals { position: fixed; top: 52px; right: 16px; width: min(420px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
-.approval { background: var(--panel); border: 2px solid var(--warn); border-radius: 8px; padding: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2); }
+.approvals { position: fixed; top: 52px; right: 16px; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 68px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+.approval { background: var(--panel); border: 2px solid var(--warn); border-radius: 8px; padding: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2); flex: none; }
+/* Large input (a whole plugin, say) scrolls inside the card, so the buttons stay in view. */
+.approval pre { max-height: 45vh; overflow: auto; }
 .approval .buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 
 @media (max-width: 760px) {
@@ -540,6 +548,10 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 }
 
 .plugins .kind { display: block; color: var(--muted); font-size: 12px; }
+.plugins tr.personal td:first-child { border-left: 3px solid var(--personal); color: var(--personal); }
+.plugins .personal-tag { margin-left: 6px; font-size: 11px; color: var(--personal); border: 1px solid var(--personal); border-radius: 999px; padding: 0 6px; }
+.plugins tr.group th { padding-top: 10px; text-align: left; font-size: 12px; color: var(--muted); }
+.plugins tr.group.personal th { color: var(--personal); }
 .plugins .row-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .plugins .row-actions button { font-size: 12px; padding: 0 6px; }
 .editor { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 6px; }

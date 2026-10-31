@@ -43,6 +43,7 @@ config = { program = "python", args = ["examples/process-plugins/word_tools.py"]
 | `hook_timeout_ms` | 5000 | Limit for each `hooks/call`. |
 | `view_timeout_ms` | 5000 | Limit for each `views/render` and `views/act`. |
 | `max_message_bytes` | 4 MiB | Limit for one message in either direction. |
+| `personal` | `false` | A plugin you wrote, or had written, for yourself (`plugin-builder` sets it). The Web UI lists it apart, in its own color; it changes nothing about how it runs. |
 
 At boot `rah` starts the plugin once to read its manifest, then shuts it down.
 Each later start (mount, restart after a dependency returns, configuration

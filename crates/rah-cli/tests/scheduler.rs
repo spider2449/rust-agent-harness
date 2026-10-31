@@ -95,7 +95,7 @@ async fn jobs_run_in_the_background_and_can_be_cancelled() {
     assert_eq!(
         configured.state,
         JobState::Done {
-            answer: "[model-mock] you said: from configuration (0 earlier items)".into()
+            answer: "[model-mock] you said: from configuration (1 earlier items)".into()
         }
     );
     assert!(configured.last_session.is_some());

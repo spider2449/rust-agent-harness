@@ -36,7 +36,7 @@ async fn loop_plan_plans_then_executes_with_tools() {
     let events = turn(&handle, &session, "hello").await;
     // The plan request offers no tools, so the mock answers in text.
     assert!(
-        reply(&events).starts_with("[model-mock] you said: hello (1 earlier items)"),
+        reply(&events).starts_with("[model-mock] you said: hello (2 earlier items)"),
         "{}",
         reply(&events)
     );
@@ -94,7 +94,7 @@ async fn the_loop_can_be_swapped_at_runtime_on_the_same_session() {
     let events = turn(&handle, &session, "/notool second").await;
     // Planning sees the earlier turn plus its instruction.
     assert!(
-        reply(&events).contains("(5 earlier items)"),
+        reply(&events).contains("(6 earlier items)"),
         "{}",
         reply(&events)
     );

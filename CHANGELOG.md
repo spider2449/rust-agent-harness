@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Web UI: an approval card with large input (such as a whole plugin for
+  `plugins.save`) no longer pushes its buttons off the window. The input
+  scrolls inside the card (at most 45% of the window height), and the stack
+  of cards scrolls within the window.
+
+- `plugin-builder` plugin, mounted by every preset (before the loop; a
+  distribution file can `remove = ["plugin-builder"]`): the user
+  describes a plugin and the model writes it as a process plugin in Python
+  or Node.js. `plugins.guide` (`none`) returns the plugin rules;
+  `plugins.save` (`write`) checks the manifest and files and writes them to
+  `plugins/<name>/` in the data directory with a runtime library
+  (`rah_plugin.py` / `rah_plugin.mjs`) and a `mount.toml` holding the
+  `[[plugin]]` entry and the policy assignments; `plugins.list` and
+  `plugins.read` (`read`) return saved plugins for revision; the `plugins`
+  view lists them. It never mounts or runs a plugin. `mount.toml` names the
+  interpreter by its full path, looked up on `PATH` (and, for a Python the
+  configuration does not name, among uv's installs) without running
+  anything; when none is found it warns there and in the reply. Its steps
+  mark the policy assignments as required. The view's Export form
+  writes the ticked plugins to one bundle file
+  (`format = "rah-personal-plugins"`, version 1), never overwriting a file;
+  its Import form saves a bundle's plugins after every one passed the checks.
+- Process plugin entries take `personal = true` (`plugin-builder` writes it
+  in `mount.toml`). The Web UI's Plugins panel lists such plugins in a
+  separate "Personal plugins" group, with a Personal tag and a color of
+  their own in every theme; it changes nothing about how they run.
+
 - Every built-in preset mounts `telemetry-log`, before the loop: turn
   records go to `telemetry` in the data directory (14 days, no message text
   or tool output), and the Web UI and `rah-desktop` show the Usage tab

@@ -12,10 +12,11 @@ pub const DATA_HOME_ENV: &str = "RAH_HOME";
 /// Data paths of catalog plugins: kind, configuration key and the default
 /// under the data home. A path without a default is opt-in: it is resolved
 /// when set and never added. A key may also hold a list of paths.
-const DATA_PATHS: [(&str, &str, Option<&str>); 9] = [
+const DATA_PATHS: [(&str, &str, Option<&str>); 10] = [
     ("storage-fs", "dir", Some("storage")),
     ("session-jsonl", "dir", Some("sessions")),
     ("skills-fs", "dir", Some("skills")),
+    ("plugin-builder", "dir", Some("plugins")),
     ("scheduler-basic", "agents_dir", Some("agents")),
     ("telemetry-log", "dir", Some("telemetry")),
     ("context-default", "memory_dir", None),

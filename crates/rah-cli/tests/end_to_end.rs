@@ -96,7 +96,7 @@ async fn sessions_resume_after_restart_and_forks_diverge() {
     let events = turn(&handle, &session, "/notool again").await;
     assert_eq!(
         reply(&events),
-        "[model-mock] you said: again (4 earlier items)"
+        "[model-mock] you said: again (5 earlier items)"
     );
 
     // Fork after the first turn (records 1-5) and diverge.
@@ -105,7 +105,7 @@ async fn sessions_resume_after_restart_and_forks_diverge() {
     let events = turn(&handle, &fork.id, "/notool forked").await;
     assert_eq!(
         reply(&events),
-        "[model-mock] you said: forked (4 earlier items)"
+        "[model-mock] you said: forked (5 earlier items)"
     );
     assert_eq!(sessions.read(&session).await.unwrap().len(), 8);
     let forked = sessions.read(&fork.id).await.unwrap();
@@ -151,12 +151,12 @@ async fn model_plugins_hot_swap_while_the_loop_keeps_running() {
 
     mount_model("model-a", "A").await.unwrap();
     let events = turn(&handle, &session, "/notool two").await;
-    assert_eq!(reply(&events), "[A] you said: two (1 earlier items)");
+    assert_eq!(reply(&events), "[A] you said: two (2 earlier items)");
 
     kernel.unmount(&PluginId::new("model-a")).await.unwrap();
     mount_model("model-b", "B").await.unwrap();
     let events = turn(&handle, &session, "/notool three").await;
-    assert_eq!(reply(&events), "[B] you said: three (3 earlier items)");
+    assert_eq!(reply(&events), "[B] you said: three (4 earlier items)");
 
     assert_eq!(
         kernel.status(&PluginId::new("loop-react")),
@@ -216,7 +216,7 @@ async fn the_loop_plugin_can_be_replaced_without_losing_sessions() {
     let events = turn(&handle, &session, "/notool back").await;
     assert_eq!(
         reply(&events),
-        "[model-mock] you said: back (0 earlier items)"
+        "[model-mock] you said: back (1 earlier items)"
     );
 }
 
@@ -425,7 +425,7 @@ async fn a_stopped_plugin_keeps_its_configuration_and_its_dependents_wait() {
     let session = new_session(&handle).await;
     assert_eq!(
         reply(&turn(&handle, &session, "/notool x").await),
-        "[L] you said: x (0 earlier items)"
+        "[L] you said: x (1 earlier items)"
     );
 
     // Policy plugins and the distribution itself cannot be stopped.

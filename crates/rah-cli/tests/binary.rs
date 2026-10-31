@@ -75,7 +75,7 @@ fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("you said: again (4 earlier items)"),
+        stdout.contains("you said: again (5 earlier items)"),
         "{stdout}"
     );
     assert_eq!(jsonl_files(&dir.sessions()), 1);
@@ -473,7 +473,7 @@ fn check_config_reports_every_problem_and_starts_nothing() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("configuration ok: 16 plugins"), "{stdout}");
+    assert!(stdout.contains("configuration ok: 17 plugins"), "{stdout}");
 
     let config = dir.0.join("rah.toml");
     std::fs::write(

@@ -471,6 +471,38 @@ the policy. A hook that times out, disconnects or answers malformed fails
 closed: the call is denied, the output becomes an error, or the model
 request fails. Hook calls are never retried.
 
+## `plugin-builder`
+
+The plugin source it writes is model output, so it is untrusted until the
+user mounts it, and mounting stays the user's act:
+
+- `plugins.save` is a `write` tool (the default policy asks). It writes only
+  under its `dir`, into `<dir>/<name>/`: file paths are relative, at most
+  four parts of `[A-Za-z0-9._-]`, never starting with `.` or naming a
+  Windows device, unique without regard to case, within a file count and
+  size limit. A directory it did not write (no `plugin-builder.json`) is
+  never replaced. A plugin is written to a staging directory and renamed
+  into place, so it is replaced whole or not at all.
+- It never mounts, starts or runs a plugin, and never edits `rah.toml` or the
+  policy. `mount.toml` shows the entry and the permission assignments for the
+  user to copy after reading the files.
+- The manifest passes the process host's `initialize` checks before it is
+  saved, plus rules for model-written plugins: tool names must be
+  `<plugin name>.<tool>`, and names of RAH's own namespaces (`fs`, `repo`,
+  `shell`, `web`, ...) are refused, so a personal tool cannot fall under a
+  policy entry the user wrote for a built-in one; a `tool.before_invoke`
+  hook needs a priority below the policy's, so it can only add denials.
+- The host checks the running plugin again when it is mounted; the static
+  checks are not a substitute for reading the code.
+- Export and import are view actions, so they run only on the user's click;
+  the model cannot reach them. Export creates a new bundle file and never
+  overwrites one. Import reads at most 32 MiB and 64 plugins, puts every
+  plugin through the checks of `plugins.save` before writing any, skips a
+  name already taken unless the user ticks "replace", and mounts nothing. A
+  bundle from someone else is untrusted code until its files are read.
+- `personal = true` on a process entry only changes how the Web UI lists the
+  plugin; it grants nothing and changes nothing about how it runs.
+
 ## `scheduler-basic`
 
 Background jobs and subagents run ordinary turns: every tool call they make

@@ -26,6 +26,7 @@ rah-plugin-model-anthropic = { path = "../../plugins/model-anthropic" }
 rah-plugin-model-chat-completions = { path = "../../plugins/model-chat-completions" }
 rah-plugin-model-mock = { path = "../../plugins/model-mock" }
 rah-plugin-model-responses = { path = "../../plugins/model-responses" }
+rah-plugin-plugin-builder = { path = "../../plugins/plugin-builder" }
 rah-plugin-policy-authority = { path = "../../plugins/policy-authority" }
 rah-plugin-sandbox-process = { path = "../../plugins/sandbox-process" }
 rah-plugin-scheduler-basic = { path = "../../plugins/scheduler-basic" }

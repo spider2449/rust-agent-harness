@@ -607,7 +607,7 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     );
     let (_, text) = run_turn(&mut socket, &session, "/notool three", None).await;
     // Two earlier turns of four context items each: the history survived.
-    assert_eq!(text, "[B] you said: three (8 earlier items)");
+    assert_eq!(text, "[B] you said: three (9 earlier items)");
 
     let (status, _) = web
         .status(
@@ -979,7 +979,7 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
         .unwrap()
         .to_owned();
     let (_, text) = run_turn(&mut socket, &fresh, "/notool hi", None).await;
-    assert_eq!(text, "[model-mock] you said: hi (1 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (2 earlier items)");
 
     let status_line = web.json(web.get("/api/status")).await;
     assert!(
@@ -2248,8 +2248,9 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
     assert_eq!(
         standard,
         json!({
-            // Every preset mounts `telemetry-log`; its view joins the right column.
-            "layout": {"left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage"]},
+            // Every preset mounts `telemetry-log` and `plugin-builder`; their views
+            // join the right column.
+            "layout": {"left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage", "plugin-builder/plugins"]},
             "source": "standard",
             "problems": [],
             "panels": [
@@ -2258,6 +2259,8 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
                 {"id": "plugins", "title": "Plugins", "kind": "built-in", "column": "right"},
                 {"id": "telemetry-log/usage", "title": "Usage", "kind": "view",
                  "plugin": "telemetry-log", "column": "right"},
+                {"id": "plugin-builder/plugins", "title": "My plugins", "kind": "view",
+                 "plugin": "plugin-builder", "column": "right"},
             ],
         })
     );
@@ -2279,7 +2282,7 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
         replaced["layout"],
         json!({
             "left": ["files", "sessions"],
-            "right": ["plugins", "telemetry-log/usage"],
+            "right": ["plugins", "telemetry-log/usage", "plugin-builder/plugins"],
             "right_open": true,
         })
     );
@@ -2309,7 +2312,7 @@ config = { left = ["sessions", "plugins"], right = ["files"], right_open = true 
         served["layout"],
         json!({
             "left": ["sessions", "plugins"],
-            "right": ["files", "telemetry-log/usage"],
+            "right": ["files", "telemetry-log/usage", "plugin-builder/plugins"],
             "right_open": true,
         })
     );
@@ -2334,18 +2337,22 @@ config = { left = ["sesions"] }
 
 #[tokio::test]
 async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
-    // Every preset mounts `telemetry-log`, and with it its usage view.
+    // Every preset mounts `telemetry-log` and `plugin-builder`, and with them
+    // their views.
     let web = start("ui-views", |_| {}).await;
     assert_eq!(
         web.json(web.get("/api/ui")).await,
         json!({ "views": [{
             "id": "telemetry-log/usage", "instance": "telemetry-log", "view": "usage", "title": "Usage",
+        }, {
+            "id": "plugin-builder/plugins", "instance": "plugin-builder", "view": "plugins",
+            "title": "My plugins",
         }] })
     );
     // A view no layout names joins the right column.
     assert_eq!(
         web.json(web.get("/api/layout")).await["layout"],
-        json!({ "left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage"] })
+        json!({ "left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage", "plugin-builder/plugins"] })
     );
 
     let handle = web.kernel.handle();
@@ -2410,7 +2417,7 @@ async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
     let placed = web.json(web.get("/api/layout")).await;
     assert_eq!(
         placed["layout"],
-        json!({ "left": ["telemetry-log/usage", "sessions"], "right": ["files"] })
+        json!({ "left": ["telemetry-log/usage", "sessions"], "right": ["files", "plugin-builder/plugins"] })
     );
     assert_eq!(placed["problems"], json!([]));
     // Every panel a layout can place, and where it is now.
@@ -2422,6 +2429,8 @@ async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
             {"id": "plugins", "title": "Plugins", "kind": "built-in", "column": null},
             {"id": "telemetry-log/usage", "title": "Usage", "kind": "view",
              "plugin": "telemetry-log", "column": "left"},
+            {"id": "plugin-builder/plugins", "title": "My plugins", "kind": "view",
+             "plugin": "plugin-builder", "column": "right"},
         ])
     );
 }
