@@ -554,6 +554,11 @@ impl Tool for Patch {
         {
             return Err(fsops::harness_state(name));
         }
+        for path in patch_paths(&listing) {
+            git.root
+                .check_parents(&git.root.path.join(&path), &path)
+                .await?;
+        }
         // The files as they are, for undo; `None` when one cannot be kept.
         let mut kept = Some(Vec::new());
         for path in patch_paths(&listing) {
@@ -682,8 +687,10 @@ impl Tool for Commit {
         let mut paths: Vec<String> = Vec::new();
         for path in input.paths {
             fsops::validate(&path)?;
+            let target = git.root.path.join(&path);
+            git.root.check_parents(&target, &path).await?;
             // Files only: a directory would commit everything under it.
-            let on_disk = tokio::fs::symlink_metadata(git.root.path.join(&path)).await;
+            let on_disk = tokio::fs::symlink_metadata(&target).await;
             if on_disk.is_ok_and(|metadata| metadata.is_dir()) {
                 return Err(ToolError::InvalidInput(format!(
                     "`{path}` is a directory; name the files to commit"

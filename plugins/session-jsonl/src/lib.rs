@@ -152,8 +152,8 @@ impl JsonlSessions {
 
     async fn parse(&self, session: &SessionId) -> Result<Parsed, SessionError> {
         let path = self.path(session);
-        let text = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => text,
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(SessionError::NotFound(session.clone()));
             }
@@ -163,9 +163,16 @@ impl JsonlSessions {
             session: session.clone(),
             detail,
         };
-        let complete = text.rfind('\n').map_or(0, |i| i + 1);
-        let torn_at = (complete < text.len()).then_some(complete as u64);
-        let mut lines = text[..complete].lines().filter(|l| !l.trim().is_empty());
+        // A crash can tear the last line inside a multi-byte character, so
+        // only the complete lines are decoded.
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |i| i + 1);
+        let torn_at = (complete < bytes.len()).then_some(complete as u64);
+        let text = std::str::from_utf8(&bytes[..complete])
+            .map_err(|_| corrupt("a complete line is not UTF-8".into()))?;
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
         let header = lines
             .next()
             .ok_or_else(|| corrupt("missing header".into()))?;
@@ -366,8 +373,10 @@ impl SessionLog for JsonlSessions {
 
     async fn append(&self, session: &SessionId, entry: SessionEntry) -> Result<u64, SessionError> {
         let mut next = self.next_seq.lock().await;
-        let seq = match next.get(session) {
-            Some(seq) => *seq,
+        // Forgotten until the line is written: after a failed or dropped write
+        // the next append reads the log again and removes any torn tail.
+        let seq = match next.remove(session) {
+            Some(seq) => seq,
             None => {
                 let parsed = self.repair(session).await?;
                 let last = parsed
@@ -450,8 +459,9 @@ impl SessionLog for JsonlSessions {
             Some(title) => Some(normalize_title(&title).ok_or(SessionError::InvalidTitle)?),
             None => None,
         };
-        let _guard = self.next_seq.lock().await;
+        let mut next = self.next_seq.lock().await;
         self.repair(session).await?;
+        next.remove(session);
         self.write_line(session, &Line::Title { title }).await?;
         self.described(session).await
     }
@@ -462,10 +472,11 @@ impl SessionLog for JsonlSessions {
         title: String,
     ) -> Result<bool, SessionError> {
         let title = normalize_title(&title).ok_or(SessionError::InvalidTitle)?;
-        let _guard = self.next_seq.lock().await;
+        let mut next = self.next_seq.lock().await;
         if self.repair(session).await?.info.title.is_some() {
             return Ok(false);
         }
+        next.remove(session);
         self.write_line(session, &Line::Title { title: Some(title) })
             .await?;
         Ok(true)
@@ -641,6 +652,79 @@ mod tests {
         assert_eq!(reopened.append(&info.id, started("b")).await.unwrap(), 2);
         assert_eq!(
             inputs(&reopened.read(&info.id).await.unwrap()),
+            [(1, "a".into()), (2, "b".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tail_torn_inside_a_character_is_ignored_and_repaired() {
+        let dir = TempDir::new("torn-char");
+        let log = JsonlSessions::new(dir.0.clone());
+        let info = log.create().await.unwrap();
+        log.append(&info.id, started("繁體")).await.unwrap();
+        let path = dir.0.join(format!("{}.jsonl", info.id));
+        let line = "{\"type\":\"record\",\"seq\":2,\"text\":\"繁";
+        let torn = &line.as_bytes()[..line.len() - 1];
+        assert!(std::str::from_utf8(torn).is_err());
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, torn).unwrap();
+        drop(file);
+
+        let reopened = JsonlSessions::new(dir.0.clone());
+        assert_eq!(reopened.read(&info.id).await.unwrap().len(), 1);
+        assert_eq!(reopened.list().await.unwrap().len(), 1);
+        assert_eq!(reopened.append(&info.id, started("b")).await.unwrap(), 2);
+        assert_eq!(
+            inputs(&reopened.read(&info.id).await.unwrap()),
+            [(1, "繁體".into()), (2, "b".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_in_a_complete_line_is_reported_as_corrupt() {
+        let dir = TempDir::new("bad-utf8");
+        let log = JsonlSessions::new(dir.0.clone());
+        let info = log.create().await.unwrap();
+        let path = dir.0.join(format!("{}.jsonl", info.id));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"\xff\n").unwrap();
+        drop(file);
+        assert!(matches!(
+            log.read(&info.id).await,
+            Err(SessionError::Corrupt { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_append_repairs_the_log_before_the_next_line() {
+        let dir = TempDir::new("interrupted");
+        let log = JsonlSessions::new(dir.0.clone());
+        let info = log.create().await.unwrap();
+        log.append(&info.id, started("a")).await.unwrap();
+        // Polled once and dropped, as when a turn's task is cancelled.
+        tokio::select! {
+            biased;
+            _ = log.append(&info.id, started("lost")) => panic!("the append should still wait"),
+            () = std::future::ready(()) => {}
+        }
+        // What such a write can leave behind.
+        let path = dir.0.join(format!("{}.jsonl", info.id));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{\"type\":\"record\",\"seq\":2,\"en").unwrap();
+        drop(file);
+
+        assert_eq!(log.append(&info.id, started("b")).await.unwrap(), 2);
+        assert_eq!(
+            inputs(&log.read(&info.id).await.unwrap()),
             [(1, "a".into()), (2, "b".into())]
         );
     }

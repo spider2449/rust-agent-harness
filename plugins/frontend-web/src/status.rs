@@ -153,14 +153,16 @@ async fn git_status(
 ) -> Result<String, String> {
     let mut spec = ProgramSpec::new(
         "git",
-        [
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v2",
-            "--branch",
-        ]
-        .map(String::from)
-        .to_vec(),
+        crate::git::NO_FSMONITOR
+            .into_iter()
+            .chain([
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+            ])
+            .map(String::from)
+            .collect(),
         GIT_TIMEOUT,
     );
     spec.cwd = cwd;

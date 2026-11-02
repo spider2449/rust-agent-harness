@@ -897,6 +897,42 @@ async fn the_status_line_reports_the_workspace_git_state_and_providers() {
     assert_eq!(git_state["untracked"], 1, "{git_state}");
     assert_eq!(git_state["changed"], 0);
     assert_eq!(git_state["upstream"], Value::Null);
+
+    // A repository's own configuration cannot start a program through the
+    // views, which run without the user asking.
+    let marker = web.dir.0.join("fsmonitor-ran");
+    let hook = web.dir.0.join("fsmonitor.sh");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho ran > '{}'\n",
+            marker.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&[
+        "config",
+        "core.fsmonitor",
+        &hook.display().to_string().replace('\\', "/"),
+    ]);
+    // The hook works: Git on its own starts it.
+    git(&["--no-optional-locks", "status"]);
+    assert!(marker.exists(), "the test's hook did not run");
+    std::fs::remove_file(&marker).unwrap();
+
+    let git_state = web.json(web.get("/api/status")).await["workspace"]["git"].clone();
+    assert_eq!(git_state["branch"], "trunk", "{git_state}");
+    web.json(web.get("/api/git/changes")).await;
+    web.json(web.get("/api/git/branches")).await;
+    assert!(
+        !marker.exists(),
+        "a view started the configured fsmonitor program"
+    );
 }
 
 #[tokio::test]

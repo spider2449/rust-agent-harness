@@ -437,8 +437,19 @@ Behind the same token and checks, and likewise unreachable from tools:
   (no index writes), `--literal-pathspecs` (no pathspec magic), and for
   diffs `--no-ext-diff` and `--no-textconv` (no configured diff programs).
   A path must pass the file browser's checks and is passed after `--`, so
-  it cannot become an option. Output is bounded (512 KiB per diff). There
-  is no write action: staging, committing and pushing stay outside the UI.
+  it cannot become an option. Output is bounded (512 KiB per diff).
+  Staging, committing and pushing stay outside the UI.
+- Every Git run of these views passes `-c core.fsmonitor=false`, because the
+  page runs them without the user asking, also in repositories found below
+  the workspace, and a repository's `.git/config` could otherwise name a
+  program for `git status` to start. The user's global configuration stays
+  in effect. This is not full isolation: a filter driver configured in a
+  repository (`filter.<name>.clean` with a matching `.gitattributes`) can
+  still run during `status` or `diff`, so do not open a folder holding a
+  `.git` directory you do not trust, such as one unpacked from an archive.
+- `POST /api/git/checkout` is the one Git write the UI makes: on the user's
+  click it switches to a branch that `/api/git/branches` lists. It can run
+  the repository's `post-checkout` hook, as `git switch` does.
 
 Any local process that can read the printed URL can use the API with the
 user's authority; the token protects against other users' browsers and
@@ -543,7 +554,11 @@ push. Git reads no system or global configuration, and paths are literal (a
 directory or a pattern is refused), so a name cannot widen the commit. The
 repository's hooks run, through the `sandbox` service; that is code the
 repository defines, which is why the call asks at `execute`. The path tools
-refuse anything under `.git`, so they cannot plant a hook.
+refuse anything under `.git`, so they cannot plant a hook: `.git` and `.rah`
+are checked both as written (also with trailing dots or spaces) and where the
+path really resolves, so a link or a Windows short name such as `git~1` does
+not get around them. A path's missing tail is only checked as written, and
+another process can change the tree between the check and the write.
 
 The undo history (ADR 0060) keeps the content of the files each write call
 changed, per session and in memory only (at most 50 changes per session and

@@ -42,7 +42,7 @@ pub(crate) fn validate(path: &str) -> Result<(), ToolError> {
             !component.is_empty()
                 && component != "."
                 && component != ".."
-                && !component.eq_ignore_ascii_case(".git")
+                && !names(component, ".git")
         });
     if valid {
         Ok(())
@@ -61,7 +61,15 @@ pub(crate) fn validate(path: &str) -> Result<(), ToolError> {
 pub(crate) fn is_harness_state(path: &str) -> bool {
     path.split(['/', '\\'])
         .find(|component| !component.is_empty() && *component != ".")
-        .is_some_and(|first| first.eq_ignore_ascii_case(".rah"))
+        .is_some_and(|first| names(first, ".rah"))
+}
+
+/// Whether a path component names `protected`, also as Windows may read it:
+/// without regard to case and with trailing dots and spaces ignored.
+fn names(component: &str, protected: &str) -> bool {
+    component
+        .trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case(protected)
 }
 
 pub(crate) fn harness_state(path: &str) -> ToolError {
@@ -86,14 +94,28 @@ impl Drop for Scratch {
 }
 
 impl Root {
+    /// Checks where a canonical path really is. [`validate`] only sees the
+    /// spelling, and a link or a Windows short name (`git~1`) can spell
+    /// `.git` or `.rah` differently, so the same rules apply here again.
     fn inside(&self, resolved: &Path, shown: &str) -> Result<(), ToolError> {
-        if resolved.starts_with(&self.path) {
-            Ok(())
-        } else {
-            Err(invalid(format!(
+        let Ok(relative) = resolved.strip_prefix(&self.path) else {
+            return Err(invalid(format!(
                 "`{shown}` resolves outside the repository root"
-            )))
+            )));
+        };
+        let parts: Vec<_> = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect();
+        if parts.first().is_some_and(|first| names(first, ".rah")) {
+            return Err(harness_state(shown));
         }
+        if parts.iter().any(|part| names(part, ".git")) {
+            return Err(invalid(format!(
+                "`{shown}` resolves into `.git`; the repository tools do not write there"
+            )));
+        }
+        Ok(())
     }
 
     /// The canonical path of an existing regular file.
@@ -180,10 +202,22 @@ impl Root {
         Ok(())
     }
 
-    /// Creates the missing directories above `target`. The deepest existing
-    /// ancestor must be inside the root, so creating them cannot follow a
-    /// link out of it.
+    /// Creates the missing directories above `target`, after
+    /// [`Root::check_parents`].
     async fn make_parents(&self, target: &Path, shown: &str) -> Result<(), ToolError> {
+        self.check_parents(target, shown).await?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                ToolError::Execution(format!("cannot create the directory: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Checks the deepest existing ancestor of `target` with
+    /// [`Root::inside`], so a write there cannot follow a link or a short
+    /// name out of the root or into `.git` or `.rah`.
+    pub async fn check_parents(&self, target: &Path, shown: &str) -> Result<(), ToolError> {
         let mut ancestor = target.parent().map(Path::to_path_buf).unwrap_or_default();
         while tokio::fs::symlink_metadata(&ancestor).await.is_err() {
             match ancestor.parent() {
@@ -194,13 +228,7 @@ impl Root {
         let resolved = tokio::fs::canonicalize(&ancestor)
             .await
             .map_err(|error| invalid(format!("`{shown}`: {error}")))?;
-        self.inside(&resolved, shown)?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                ToolError::Execution(format!("cannot create the directory: {error}"))
-            })?;
-        }
-        Ok(())
+        self.inside(&resolved, shown)
     }
 
     /// The canonical path of a regular file that is not a symbolic link: the

@@ -10,7 +10,9 @@
 //! repository's folder: a fixed argument vector, never a shell, with
 //! `--no-optional-locks` (no index writes), `--literal-pathspecs` (a path is
 //! only a path), `--no-ext-diff` and `--no-textconv` (no configured diff
-//! programs). Paths are checked like the file browser's.
+//! programs). [`NO_FSMONITOR`] keeps a repository's configuration from
+//! starting a program on these unattended runs. Paths are checked like the
+//! file browser's.
 
 use std::{
     collections::VecDeque,
@@ -42,6 +44,14 @@ const MAX_REPOS: usize = 32;
 /// Hidden folders (a leading `.`) are skipped as well.
 const SKIPPED: &[&str] = &["node_modules", "target"];
 
+/// Arguments before the subcommand of every `git` run here. The page runs Git
+/// without the user asking, also in folders below the workspace, and
+/// `core.fsmonitor` in a repository's own `.git/config` names a program that
+/// `git status` would start. The user's global configuration stays in effect:
+/// `safe.directory`, `core.autocrlf` and `core.excludesFile` decide what the
+/// views show.
+pub(crate) const NO_FSMONITOR: [&str; 2] = ["-c", "core.fsmonitor=false"];
+
 /// One finished `git` run: its output, and whether it was cut at the limit.
 struct GitOutput {
     stdout: String,
@@ -61,7 +71,8 @@ async fn git(
             "no workspace folder is set (no `sandbox` service)".into(),
         )
     })?;
-    let mut argv = vec!["--no-optional-locks", "--literal-pathspecs"];
+    let mut argv = NO_FSMONITOR.to_vec();
+    argv.extend_from_slice(&["--no-optional-locks", "--literal-pathspecs"]);
     argv.extend_from_slice(args);
     let mut spec = ProgramSpec::new(
         "git",

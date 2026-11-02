@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Security: the repository write tools check `.git` and `.rah` where a path
+  really resolves, not only as written. A link or a Windows short name
+  (`git~1/hooks/pre-commit`, `rah~1/storage/...`) could reach them after a
+  `write` approval, which let a model plant a Git hook or change saved
+  settings. `repo.patch` and `repo.commit` make the same check, and trailing
+  dots and spaces no longer hide either name.
+- Security: the Web UI's Git views pass `-c core.fsmonitor=false`. They run
+  without the user asking, so a `core.fsmonitor` program in a repository's
+  `.git/config` would have been started by the status line. Filter drivers
+  configured in a repository can still run; see `docs/SECURITY.md`.
+- `session-jsonl`: a crash that tore the last line inside a multi-byte
+  character (likely with Chinese text) made the whole session unreadable and
+  hid it from the session list. Only complete lines are decoded now, and the
+  torn tail is removed as for any other tear. An append that failed or was
+  dropped mid-write now also repairs the log before the next line.
+
 - Web UI: an approval card with large input (such as a whole plugin for
   `plugins.save`) no longer pushes its buttons off the window. The input
   scrolls inside the card (at most 45% of the window height), and the stack

@@ -397,6 +397,163 @@ async fn delete_file_removes_one_regular_file_inside_the_root() {
     assert!(repo.0.join("src").is_dir());
 }
 
+/// Makes `link` in the repository a link to the directory `target` in it: a
+/// symbolic link, or on Windows a junction, which needs no privilege.
+fn link_dir(repo: &Repo, target: &str, link: &str) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, repo.0.join(link)).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J", link, target])
+            .current_dir(&repo.0)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+/// Every file tool refuses to act on `existing` or to write `new_path`.
+async fn assert_writes_refused(
+    tools: &BTreeMap<String, Arc<dyn Tool>>,
+    existing: &str,
+    new_path: &str,
+) {
+    let refused = |result: Result<ToolOutput, ToolError>, what: &str| {
+        assert!(invalid(result), "{what}");
+    };
+    refused(
+        tools["repo.create-file"]
+            .call(json!({ "path": new_path, "content": "x" }), cx())
+            .await,
+        "create",
+    );
+    refused(
+        tools["repo.edit-files"]
+            .call(
+                json!({ "edits": [{ "path": existing, "old": "keep", "new": "x" }] }),
+                cx(),
+            )
+            .await,
+        "edit",
+    );
+    refused(
+        tools["repo.delete-file"]
+            .call(json!({ "path": existing }), cx())
+            .await,
+        "delete",
+    );
+    refused(
+        tools["repo.move-file"]
+            .call(json!({ "from": "src/lib.rs", "to": new_path }), cx())
+            .await,
+        "move into",
+    );
+    refused(
+        tools["repo.move-file"]
+            .call(json!({ "from": existing, "to": "moved.txt" }), cx())
+            .await,
+        "move out of",
+    );
+}
+
+#[tokio::test]
+async fn a_link_cannot_lead_a_write_into_git_or_harness_state() {
+    let repo = Repo::new("protected-links");
+    std::fs::create_dir_all(repo.0.join(".rah/storage")).unwrap();
+    std::fs::write(repo.0.join(".rah/storage/kept"), "keep").unwrap();
+    std::fs::write(repo.0.join(".git/hooks/kept"), "keep").unwrap();
+    link_dir(&repo, ".git", "to-git");
+    link_dir(&repo, ".rah", "to-rah");
+    let tools = repo.tools(author()).await;
+
+    assert_writes_refused(&tools, "to-git/hooks/kept", "to-git/hooks/pre-commit").await;
+    assert_writes_refused(&tools, "to-rah/storage/kept", "to-rah/storage/settings").await;
+
+    assert!(!repo.0.join(".git/hooks/pre-commit").exists());
+    assert!(!repo.0.join(".rah/storage/settings").exists());
+    assert_eq!(repo.read(".git/hooks/kept"), "keep");
+    assert_eq!(repo.read(".rah/storage/kept"), "keep");
+    assert!(repo.0.join("src/lib.rs").exists());
+
+    // A patch and a commit are held to the same place.
+    let diff = "--- /dev/null\n+++ b/to-rah/storage/settings\n@@ -0,0 +1 @@\n+x\n";
+    let error = tools["repo.patch"]
+        .call(json!({ "patch": diff }), cx())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("`.rah/`"), "{error}");
+    assert!(!repo.0.join(".rah/storage/settings").exists());
+    assert!(invalid(
+        tools["repo.commit"]
+            .call(
+                json!({ "message": "m", "paths": ["to-rah/storage/kept"] }),
+                cx()
+            )
+            .await
+    ));
+
+    // A link to an ordinary directory still works.
+    link_dir(&repo, "src", "to-src");
+    tools["repo.create-file"]
+        .call(json!({ "path": "to-src/new.rs", "content": "x" }), cx())
+        .await
+        .unwrap();
+    assert_eq!(repo.read("src/new.rs"), "x");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_short_name_cannot_lead_a_write_into_git_or_harness_state() {
+    let repo = Repo::new("protected-short");
+    std::fs::create_dir_all(repo.0.join(".rah/storage")).unwrap();
+    std::fs::write(repo.0.join(".rah/storage/kept"), "keep").unwrap();
+    std::fs::write(repo.0.join(".git/hooks/kept"), "keep").unwrap();
+    // A volume can have short names turned off; then there is nothing to test.
+    if !repo.0.join("git~1").exists() || !repo.0.join("rah~1").exists() {
+        return;
+    }
+    let tools = repo.tools(json!({})).await;
+
+    assert_writes_refused(&tools, "git~1/hooks/kept", "git~1/hooks/pre-commit").await;
+    assert_writes_refused(&tools, "rah~1/storage/kept", "rah~1/storage/settings").await;
+
+    assert!(!repo.0.join(".git/hooks/pre-commit").exists());
+    assert!(!repo.0.join(".rah/storage/settings").exists());
+    assert_eq!(repo.read(".git/hooks/kept"), "keep");
+    assert_eq!(repo.read(".rah/storage/kept"), "keep");
+    let diff = "--- /dev/null\n+++ b/rah~1/storage/settings\n@@ -0,0 +1 @@\n+x\n";
+    assert!(
+        tools["repo.patch"]
+            .call(json!({ "patch": diff }), cx())
+            .await
+            .is_err()
+    );
+    assert!(!repo.0.join(".rah/storage/settings").exists());
+}
+
+#[tokio::test]
+async fn trailing_dots_and_spaces_do_not_hide_a_protected_name() {
+    let repo = Repo::new("protected-spelling");
+    let tools = repo.tools(json!({})).await;
+    for path in [".git./x", ".git /x", ".GIT../x", ".rah./x", ".rah /x"] {
+        assert!(
+            invalid(
+                tools["repo.create-file"]
+                    .call(json!({ "path": path, "content": "x" }), cx())
+                    .await
+            ),
+            "{path}"
+        );
+    }
+    // A name that only starts like one is an ordinary name.
+    tools["repo.create-file"]
+        .call(json!({ "path": ".github/x", "content": "x" }), cx())
+        .await
+        .unwrap();
+    assert_eq!(repo.read(".github/x"), "x");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn delete_and_move_do_not_touch_symbolic_links() {
