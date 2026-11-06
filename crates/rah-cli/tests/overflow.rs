@@ -75,6 +75,9 @@ impl Plugin for SmallWindowPlugin {
 async fn setup(name: &str, with_compact: bool) -> (rah_api::Kernel, TempDir, Arc<SmallWindow>) {
     let dir = TempDir::new(name);
     let mut distribution = headless(&dir);
+    // The window sizes below count only the conversation.
+    distribution.set_config("context-default", "system", json!(""));
+    distribution.set_config("context-default", "environment", json!(false));
     if with_compact {
         distribution.enable("compact").unwrap();
         distribution.set_config("context-compact", "trigger_chars", json!(1_000_000));

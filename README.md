@@ -286,7 +286,13 @@ read, never a parent directory. `names` changes the file names looked for
 standing rules or notes on the tools (relative paths are in the data
 directory). The text grants nothing: the policy still decides every tool
 call, and a repository you did not write can use the file to steer the model
-(`docs/SECURITY.md`). `context-default` can read its system prompt from a
+(`docs/SECURITY.md`). Without `system` or `system_file`, `context-default`
+sends a built-in agent prompt (act with the tools, investigate, keep going
+until done), and it appends the operating system, the workspace, today's
+date and how `shell.exec` runs programs to the system prompt on every request
+([ADR 0065](docs/adr/0065-built-in-agent-prompt-and-environment.md));
+`system = ""` sends no prompt and `environment = false` leaves the facts out.
+`context-default` can read its system prompt from a
 file with `system_file` instead of `system`, so a whole setup can be kept as
 files:
 

@@ -38,7 +38,14 @@ pub fn fallback(kind: &str) -> Help {
             ),
         ],
         "context-default" => &[
-            ("system", "System prompt, placed first in every request."),
+            (
+                "system",
+                "System prompt, placed first in every request; a built-in agent prompt when unset, none when empty.",
+            ),
+            (
+                "environment",
+                "Append the OS, workspace, date and how `shell.exec` runs programs to the system prompt (true).",
+            ),
             (
                 "system_file",
                 "File holding the system prompt, instead of `system` (relative to the data directory; read at start).",

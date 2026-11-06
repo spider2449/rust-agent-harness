@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `context-default`: without `system` or `system_file` it sends a built-in
+  agent prompt (act with the tools, investigate what a request names, keep
+  going until done, ask only when blocked), and on every request it appends
+  the operating system, the workspace, today's date and, when `shell.exec` is
+  offered, how it runs programs (on Windows, through `powershell -Command` or
+  `cmd /c` for built-ins). Before, a model got no prompt and did not know it
+  ran on Windows. `system = ""` and `environment = false` turn them off
+  (ADR 0065).
 - Presets: every preset except `minimal` mounts `tools-shell`, and the
   policy assigns `shell.exec = "execute"`, so the model can run programs
   (such as `netstat` to find what listens on a port) after the user approves

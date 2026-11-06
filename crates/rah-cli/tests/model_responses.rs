@@ -105,6 +105,9 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
     .await;
     let dir = TempDir::new("llamacpp-e2e");
     let mut distribution = headless(&dir);
+    // The request bodies below are checked by position, without a prompt.
+    distribution.set_config("context-default", "system", json!(""));
+    distribution.set_config("context-default", "environment", json!(false));
     for spec in &mut distribution.plugin {
         if spec.kind == "model-mock" {
             spec.kind = "model-llamacpp".into();

@@ -75,7 +75,7 @@ fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("you said: again (5 earlier items)"),
+        stdout.contains("you said: again (6 earlier items)"),
         "{stdout}"
     );
     assert_eq!(jsonl_files(&dir.sessions()), 1);

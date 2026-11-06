@@ -607,7 +607,7 @@ async fn plugins_are_managed_and_the_model_and_loop_switch_without_a_restart() {
     );
     let (_, text) = run_turn(&mut socket, &session, "/notool three", None).await;
     // Two earlier turns of four context items each: the history survived.
-    assert_eq!(text, "[B] you said: three (9 earlier items)");
+    assert_eq!(text, "[B] you said: three (10 earlier items)");
 
     let (status, _) = web
         .status(
@@ -1015,7 +1015,7 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
         .unwrap()
         .to_owned();
     let (_, text) = run_turn(&mut socket, &fresh, "/notool hi", None).await;
-    assert_eq!(text, "[model-mock] you said: hi (2 earlier items)");
+    assert_eq!(text, "[model-mock] you said: hi (3 earlier items)");
 
     let status_line = web.json(web.get("/api/status")).await;
     assert!(

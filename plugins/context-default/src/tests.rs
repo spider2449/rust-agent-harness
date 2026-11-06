@@ -207,7 +207,12 @@ async fn remembered_notes_reach_later_requests() {
     let dir = TempDir(std::env::temp_dir().join(format!("rah-context-{}", std::process::id())));
     let file = dir.0.join("nested/memory.md");
     let kernel = Kernel::new();
-    let config = json!({ "system": "Be brief.", "memory_file": file, "max_memory_bytes": 40 });
+    let config = json!({
+        "system": "Be brief.",
+        "environment": false,
+        "memory_file": file,
+        "max_memory_bytes": 40
+    });
     kernel
         .mount(
             Arc::new(ContextPlugin::new("context")),
@@ -368,7 +373,11 @@ async fn each_workspace_keeps_its_own_memory() {
     kernel
         .mount(
             Arc::new(ContextPlugin::new("context")),
-            MountOptions::with_config(json!({ "memory_dir": dir.0.join("memory") })),
+            MountOptions::with_config(json!({
+                "system": "",
+                "environment": false,
+                "memory_dir": dir.0.join("memory")
+            })),
         )
         .await
         .unwrap();
@@ -425,7 +434,7 @@ async fn the_system_prompt_can_come_from_a_file_read_at_start() {
     kernel
         .mount(
             Arc::new(ContextPlugin::new("context")),
-            MountOptions::with_config(json!({ "system_file": path })),
+            MountOptions::with_config(json!({ "system_file": path, "environment": false })),
         )
         .await
         .unwrap();
@@ -451,4 +460,115 @@ async fn the_system_prompt_can_come_from_a_file_read_at_start() {
         status.contains("cannot read the system prompt file"),
         "{status}"
     );
+}
+
+fn at(secs: u64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+#[test]
+fn utc_dates_follow_the_calendar() {
+    assert_eq!(utc_date(UNIX_EPOCH), "1970-01-01");
+    assert_eq!(utc_date(at(946_598_400 + 86_399)), "1999-12-31");
+    assert_eq!(utc_date(at(951_868_800)), "2000-03-01");
+    assert_eq!(utc_date(at(1_709_164_800)), "2024-02-29");
+    assert_eq!(utc_date(at(1_793_923_200)), "2026-11-06");
+}
+
+#[test]
+fn the_environment_follows_the_prompt_and_describes_the_shell_when_offered() {
+    let root = PathBuf::from(r"D:\work\alpha");
+    let mut facts = Environment {
+        os: "windows",
+        workspace: Some(&root),
+        date: "2026-11-06".into(),
+        shell: false,
+    };
+    let text = with_environment(Some("Be brief.\n"), &facts).unwrap();
+    assert!(text.starts_with("Be brief.\n\nEnvironment:\n"), "{text}");
+    assert!(text.contains("- Operating system: Windows"), "{text}");
+    assert!(text.contains(r"D:\work\alpha"), "{text}");
+    assert!(text.contains("- Today's date: 2026-11-06 (UTC)"), "{text}");
+    assert!(!text.contains("shell.exec"), "{text}");
+
+    facts.shell = true;
+    let text = with_environment(Some(""), &facts).unwrap();
+    assert!(text.starts_with("Environment:\n"), "{text}");
+    assert!(text.contains("`shell.exec` runs one program"), "{text}");
+    assert!(text.contains("\"-NoProfile\", \"-Command\""), "{text}");
+
+    facts.os = "linux";
+    facts.workspace = None;
+    let text = with_environment(None, &facts).unwrap();
+    assert!(text.contains("- Operating system: Linux"), "{text}");
+    assert!(text.contains("`shell.exec` runs one program"), "{text}");
+    assert!(
+        !text.contains("powershell") && !text.contains("Workspace"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn without_a_system_prompt_the_built_in_one_and_the_environment_are_sent() {
+    let root = Arc::new(MovableRoot(std::sync::Mutex::new(PathBuf::from(
+        r"D:\work\alpha",
+    ))));
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(SandboxPlugin(
+                PluginManifest::new("sandbox", "1").provides(["sandbox"]),
+                root.clone(),
+            )),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let mut with_shell = request(vec![user("look at localhost:7820")]);
+    with_shell.tools.push(ToolDefinition {
+        name: ToolName::new("shell.exec"),
+        description: String::new(),
+        input_schema: json!({}),
+        permission: PermissionLevel::Execute,
+    });
+    let items = kernel
+        .handle()
+        .waterfall::<ModelBeforeRequest>(with_shell)
+        .await
+        .unwrap()
+        .items;
+    let ContextItem::System { text } = &items[0] else {
+        panic!("{items:?}");
+    };
+    assert!(text.starts_with(DEFAULT_SYSTEM), "{text}");
+    assert!(text.contains(r"D:\work\alpha"), "{text}");
+    assert!(text.contains("`shell.exec` runs one program"), "{text}");
+    assert_eq!(items[1], user("look at localhost:7820"));
+
+    // The workspace is read on every request.
+    *root.0.lock().unwrap() = PathBuf::from(r"D:\work\beta");
+    let texts = notes(&kernel).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].contains(r"D:\work\beta"), "{texts:?}");
+    assert!(!texts[0].contains("shell.exec"), "{texts:?}");
+}
+
+#[tokio::test]
+async fn an_empty_system_prompt_without_the_environment_sends_nothing() {
+    let kernel = Kernel::new();
+    kernel
+        .mount(
+            Arc::new(ContextPlugin::new("context")),
+            MountOptions::with_config(json!({ "system": "", "environment": false })),
+        )
+        .await
+        .unwrap();
+    assert!(notes(&kernel).await.is_empty());
 }
