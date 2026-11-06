@@ -90,7 +90,7 @@ The policy decides each call from its own configuration only:
   declares `execute` or that the policy treats as `execute`.
 - The Web UI's "Always allow this command", offered on a `shell.exec`
   approval, adds that call's exact program and arguments to the policy's
-  `commands` and stores the policy like a saved Tools form (ADR 0066). The
+  `commands` and keeps the policy like a saved Tools form (ADR 0066). The
   server derives the rule from the call it asked about, never from the
   browser, and offers none when an element is `*`. It persists across
   sessions and restarts, and is removed in **Settings → Tools**.
@@ -398,31 +398,28 @@ Behind the same token and checks, and likewise unreachable from tools:
   mounted code and trusted like any plugin, so an action may do whatever its
   plugin can. The `usage` view of `telemetry-log` shows counts only, never
   message text, tool output or arguments.
-- Successful changes through `/api/plugins` are stored in `storage` (key
-  `plugins`, at most 256 plugin ids) and applied again when `frontend-web`
-  starts, after the Settings forms: mounted or configured (rolled back when
-  the plugin does not start), stopped, or unmounted. Stopping or removing a
-  policy plugin is never stored or replayed, so a start never comes up
-  unguarded because of it; a stored policy configuration is applied with
-  the same rollback as the Settings form. Whoever can write the `storage`
-  directory can therefore choose the plugins of the next start, as with
-  `rah.toml`.
+- The Web UI writes `rah.toml` (ADR 0067). Successful changes through
+  `/api/plugins` (except stop and start), the web search switch, the
+  Settings forms and "Always allow this command" are kept there through the
+  `admin` service's `persist`, which only the local, token-holding user can
+  reach, as for every `admin` call. The distribution refuses to remove the
+  policy or the model from the file, checks that the edited file still
+  parses, and writes it atomically; it never writes a file that lists its
+  plugins, or one it was not started with. A start applies nothing from
+  `storage`: settings an earlier version stored there are reported and left
+  alone until `rah config migrate` moves them.
 - `PUT /api/web-search {enabled}` is the Web UI's web search switch. On,
   it first adds `decisions = { "web.*" = "ask" }` to every mounted
   `policy-authority` that does not already decide `web.*`, then mounts
   `tools-web-search`; off, it unmounts `tools-web-search` and leaves the
-  rule. The choice is stored in `storage` (namespace: the frontend's id,
-  key `web-search`) and applied again when `frontend-web` starts, so
-  whoever can write the `storage` directory can turn web search on, still behind
-  the ask rule.
+  rule. The choice is kept as the `web-search` feature, which mounts the
+  plugin and the same ask rule at the next start.
 - `PUT /api/settings/{slot} {id, kind, config}` saves the Settings forms
   (`model`, `assistant`, `tools`, `loop`): configure, replace or mount
   through `admin`, rolled back to the previous configuration when the
-  plugin does not start (a broken policy never stays failed), then stored
-  in `storage` (key `settings-<slot>`) and applied again at the next start,
-  the policy first. The stored `tools` settings are the whole
-  `policy-authority` configuration, so whoever can write the `storage`
-  directory controls the policy of the next start. The data directory
+  plugin does not start (a broken policy never stays failed), then kept in
+  `rah.toml`. Whoever can write `rah.toml` controls the plugins and the
+  policy of the next start. The data directory
   (`~/.rah` by default, or `--data-dir`/`RAH_HOME`) is outside the workspace
   unless the workspace contains it; the repository write tools also refuse
   paths under `.rah/` for this reason (see below). A data directory with
@@ -555,7 +552,7 @@ through a temporary file and a rename. `repo.patch` runs `git apply --check`
 then `git apply` through the `sandbox` service, only when Git's top level is
 the configured root; `git apply` rejects paths outside the work tree. None
 of them writes under `.rah/`, where RAH keeps sessions, memory, skills and
-`storage` (with the saved Web UI settings, the policy among them) when the
+`rah.toml` and `storage` (the policy among the settings) when the
 workspace contains the default data directory:
 `repo.patch` lists the patch's paths with `git apply --numstat` first,
 renames included. A failure after the first write is recorded as an

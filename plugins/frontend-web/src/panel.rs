@@ -1,116 +1,88 @@
 //! Plugins panel changes that survive a restart.
 //!
-//! Every change made through `/api/plugins` that succeeds (mount, configure,
-//! stop, start, unmount, replace) records the desired state of the plugin
-//! ids it touched in the `storage` service under this plugin's id (key
-//! `plugins`). At start, after the Settings forms and before the web search
-//! switch (see [`crate::settings::restore`]), the recorded states are applied
-//! again: a plugin is mounted or configured (a configuration that does not
-//! start is rolled back), stopped, or unmounted.
+//! Every change made through `/api/plugins` that succeeds is kept in the
+//! distribution's configuration file through the `admin` service's
+//! `persist` (ADR 0067): a mount, a configuration or a replacement as the
+//! plugin's configuration, an unmount as its removal. A change to the only
+//! model plugin is a change of the model the distribution runs. Stopping and
+//! starting a plugin is a runtime switch (modes do it too) and is not kept.
 //!
-//! A policy plugin is never recorded as stopped or removed, and never
-//! stopped or removed at start, so a restart does not come up unguarded.
-//! Saving a Settings form for a plugin drops its recorded panel change, so
-//! the later of the two wins.
-
-use std::collections::BTreeMap;
+//! The distribution refuses to remove a policy plugin or the model from the
+//! file, so a restart never comes up unguarded or without a model. When it
+//! cannot keep a change (no configuration file, or one that lists its
+//! plugins), the change still holds until the next start, and the user is
+//! told once per reason.
 
 use rah_api::{
-    PluginId, PluginStatus,
-    admin::{MountRequest, PluginAdmin},
-    storage::STORAGE,
+    PluginId,
+    admin::{ADMIN, ConfigChange, MountRequest, PluginAdmin},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::Shared;
+use crate::{Shared, settings::MODEL_KINDS};
 
-const KEY: &str = "plugins";
-/// The most plugin ids recorded; changes to further ids are not kept.
-const MAX_ENTRIES: usize = 256;
 const POLICY_KINDS: [&str; 1] = ["policy-authority"];
 
-/// The desired state of one plugin id.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
-pub(crate) enum Desired {
-    Mounted {
-        kind: String,
-        #[serde(default)]
-        config: Value,
-        #[serde(default)]
-        bind: BTreeMap<String, String>,
-    },
-    Stopped {
-        kind: String,
-        #[serde(default)]
-        config: Value,
-        #[serde(default)]
-        bind: BTreeMap<String, String>,
-    },
-    Removed,
-}
-
-type Entries = BTreeMap<String, Desired>;
-
-async fn load(shared: &Shared) -> Option<Entries> {
-    let storage = shared.kernel.get(STORAGE)?;
-    match storage.get(shared.id.as_str(), KEY).await {
-        Ok(Some(bytes)) => serde_json::from_slice(&bytes).ok(),
-        Ok(None) => Some(Entries::new()),
-        Err(_) => None,
-    }
-}
-
-async fn store(shared: &Shared, entries: &Entries) {
-    let (Some(storage), Ok(bytes)) = (shared.kernel.get(STORAGE), serde_json::to_vec(entries))
-    else {
+/// Keeps `change`; a refusal becomes a notice.
+async fn keep(shared: &Shared, change: ConfigChange) {
+    let Some(admin) = shared.kernel.get(ADMIN) else {
         return;
     };
-    let _ = storage.put(shared.id.as_str(), KEY, &bytes).await;
-}
-
-/// Changes the recorded entries under the panel lock, so concurrent
-/// requests do not lose each other's changes.
-async fn change(shared: &Shared, edit: impl FnOnce(&mut Entries)) {
-    let _guard = shared.panel.lock().await;
-    let Some(mut entries) = load(shared).await else {
-        return;
-    };
-    let before = entries.clone();
-    edit(&mut entries);
-    if entries.len() > MAX_ENTRIES {
-        return;
-    }
-    if entries != before {
-        store(shared, &entries).await;
+    if let Err(error) = admin.persist(change).await {
+        let reason = error.to_string();
+        shared.notices.emit(
+            &reason,
+            &format!("a Plugins panel change holds until rah restarts, but is not kept: {reason}"),
+        );
     }
 }
 
-/// The bind a recorded entry has for `id`, kept across configure, stop and
-/// start, which do not carry one.
-fn bind_of(entries: &Entries, id: &str) -> BTreeMap<String, String> {
-    match entries.get(id) {
-        Some(Desired::Mounted { bind, .. } | Desired::Stopped { bind, .. }) => bind.clone(),
-        _ => BTreeMap::new(),
+/// Whether `id` is the only model plugin mounted, so the model the
+/// distribution runs.
+fn sole_model(shared: &Shared, admin: &dyn PluginAdmin, id: &PluginId) -> bool {
+    let models: Vec<PluginId> = shared
+        .kernel
+        .plugins()
+        .into_iter()
+        .map(|(plugin, _)| plugin)
+        .filter(|plugin| {
+            admin
+                .instance(plugin)
+                .is_some_and(|instance| MODEL_KINDS.contains(&instance.kind.as_str()))
+        })
+        .collect();
+    models.len() == 1 && models[0] == *id
+}
+
+/// The change that keeps `id` running as `kind` with `config`.
+fn running(shared: &Shared, id: &PluginId, kind: &str, config: Value) -> ConfigChange {
+    let model = MODEL_KINDS.contains(&kind)
+        && shared
+            .kernel
+            .get(ADMIN)
+            .is_some_and(|admin| sole_model(shared, admin.as_ref(), id));
+    if model {
+        ConfigChange::Model {
+            kind: kind.to_owned(),
+            config,
+        }
+    } else {
+        ConfigChange::Plugin {
+            id: id.clone(),
+            kind: kind.to_owned(),
+            config,
+        }
     }
 }
 
-/// Records `id` as mounted with this kind, configuration and bind.
+/// Keeps `id` as mounted with this kind and configuration.
 pub(crate) async fn mounted(shared: &Shared, id: &PluginId, request: &MountRequest) {
-    let desired = Desired::Mounted {
-        kind: request.kind.clone(),
-        config: request.config.clone(),
-        bind: request.bind.clone(),
-    };
-    change(shared, |entries| {
-        entries.insert(id.as_str().to_owned(), desired);
-    })
-    .await;
+    let change = running(shared, id, &request.kind, request.config.clone());
+    keep(shared, change).await;
 }
 
-/// Records a new configuration (`stopped`: the plugin was stopped, not
-/// started) for `id` of `kind`.
+/// Keeps a new configuration for `id` of `kind`; a stopped plugin's is a
+/// runtime state and is not kept.
 pub(crate) async fn configured(
     shared: &Shared,
     id: &PluginId,
@@ -118,116 +90,34 @@ pub(crate) async fn configured(
     config: Value,
     stopped: bool,
 ) {
-    if stopped && POLICY_KINDS.contains(&kind) {
+    if stopped {
         return;
     }
-    change(shared, |entries| {
-        let bind = bind_of(entries, id.as_str());
-        let kind = kind.to_owned();
-        let desired = if stopped {
-            Desired::Stopped { kind, config, bind }
-        } else {
-            Desired::Mounted { kind, config, bind }
-        };
-        entries.insert(id.as_str().to_owned(), desired);
-    })
-    .await;
+    let change = running(shared, id, kind, config);
+    keep(shared, change).await;
 }
 
-/// Records `id` (of `kind`) as removed.
+/// Keeps `id` (of `kind`) as removed; never a policy.
 pub(crate) async fn removed(shared: &Shared, id: &PluginId, kind: Option<&str>) {
     if kind.is_some_and(|kind| POLICY_KINDS.contains(&kind)) {
-        // Forgotten instead: the distribution's policy comes back at start.
-        forget(shared, id).await;
         return;
     }
-    change(shared, |entries| {
-        entries.insert(id.as_str().to_owned(), Desired::Removed);
-    })
-    .await;
+    keep(shared, ConfigChange::Removed { id: id.clone() }).await;
 }
 
-/// Drops the recorded change of `id`.
-pub(crate) async fn forget(shared: &Shared, id: &PluginId) {
-    change(shared, |entries| {
-        entries.remove(id.as_str());
-    })
-    .await;
-}
-
-/// Applies the recorded changes again, at start.
-pub(crate) async fn restore(shared: &Shared, admin: &dyn PluginAdmin) {
-    let Some(entries) = load(shared).await else {
-        return;
-    };
-    for (id, desired) in entries {
-        let id = PluginId::new(id);
-        if id == shared.id {
-            continue;
-        }
-        let current = admin.instance(&id);
-        let policy = current
-            .as_ref()
-            .is_some_and(|instance| POLICY_KINDS.contains(&instance.kind.as_str()));
-        match desired {
-            Desired::Removed => {
-                if current.is_some() && !policy {
-                    let _ = admin.unmount(&id).await;
-                }
-            }
-            Desired::Mounted { kind, config, bind } => {
-                ensure(admin, &id, kind, config, bind).await;
-            }
-            Desired::Stopped { kind, config, bind } => {
-                if POLICY_KINDS.contains(&kind.as_str()) || policy {
-                    continue;
-                }
-                if ensure(admin, &id, kind, config, bind).await {
-                    let _ = admin.stop(&id).await;
-                }
-            }
-        }
-    }
-}
-
-/// Mounts `id`, or configures it when it is mounted with the same kind.
-/// A configuration that does not start is rolled back. Returns whether the
-/// plugin is mounted with the recorded kind afterwards.
-async fn ensure(
-    admin: &dyn PluginAdmin,
+/// Keeps `old` (of `old_kind`) replaced by `id`. A model replacing the model
+/// is one change of the model; anything else is a removal and a mount.
+pub(crate) async fn replaced(
+    shared: &Shared,
+    old: &PluginId,
+    old_kind: Option<&str>,
     id: &PluginId,
-    kind: String,
-    config: Value,
-    bind: BTreeMap<String, String>,
-) -> bool {
-    let request = MountRequest {
-        kind: kind.clone(),
-        id: Some(id.as_str().to_owned()),
-        config: config.clone(),
-        bind,
-    };
-    let Some(instance) = admin.instance(id) else {
-        return admin.mount(request).await.is_ok();
-    };
-    if instance.kind != kind {
-        // Another kind under this id now: the distribution changed. Left as
-        // it is, and never for a policy.
-        return false;
+    request: &MountRequest,
+) {
+    let models = old_kind.is_some_and(|kind| MODEL_KINDS.contains(&kind))
+        && MODEL_KINDS.contains(&request.kind.as_str());
+    if !models {
+        removed(shared, old, old_kind).await;
     }
-    if instance.stopped && admin.start(id).await.is_err() {
-        return false;
-    }
-    let Some(previous) = admin.instance(id).map(|instance| instance.config) else {
-        return false;
-    };
-    if previous == config {
-        return true;
-    }
-    match admin.configure(id, config).await {
-        Ok(PluginStatus::Active) => true,
-        _ => {
-            let _ = admin.configure(id, previous).await;
-            true
-        }
-    }
+    mounted(shared, id, request).await;
 }

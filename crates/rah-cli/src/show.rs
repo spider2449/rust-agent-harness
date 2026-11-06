@@ -12,8 +12,18 @@ use crate::{
 /// Longest configuration shown on one line.
 const MAX_CONFIG_CHARS: usize = 400;
 
-/// The Web UI's stored overrides live in this namespace of the storage dir.
+/// The Web UI's namespace of the storage dir.
 const WEB_NAMESPACE: &str = "frontend-web";
+
+/// What an earlier Web UI stored there as settings (see `rah config migrate`).
+const LEGACY_KEYS: [&str; 6] = [
+    "settings-tools",
+    "settings-model",
+    "settings-assistant",
+    "settings-loop",
+    "plugins",
+    "web-search",
+];
 
 /// Describes what `prepared` runs: the user-facing values and their origin,
 /// and with `plugins` every plugin with its configuration.
@@ -111,28 +121,25 @@ fn plugin_list(distribution: &Distribution) -> String {
     text
 }
 
-/// The entries the Web UI stored, which replace plugin configuration at start.
+/// Settings an earlier version of the Web UI stored, which no longer apply;
+/// empty when there are none. Other entries there are UI state.
 fn overrides(home: &Path) -> String {
     let dir = home.join("storage").join(WEB_NAMESPACE);
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.starts_with(".tmp-") && name != "preferences")
+    let names: Vec<&str> = LEGACY_KEYS
+        .iter()
+        .copied()
+        .filter(|name| dir.join(name).is_file())
         .collect();
-    names.sort();
     if names.is_empty() {
-        return "web ui overrides: none\n".to_owned();
+        return String::new();
     }
     format!(
-        "web ui overrides in {} (they replace the configuration above at start; \
-         delete a file to undo it):\n  {}\n",
+        "not applied:  settings of an earlier version in {} ({}); \
+         `rah config migrate` moves them into the file\n",
         dir.display(),
-        names.join("\n  ")
+        names.join(", ")
     )
 }
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -190,7 +197,9 @@ mod tests {
         assert!(text.contains("tools-shell  <- feature shell=git"), "{text}");
         assert!(text.contains("allow_programs"), "{text}");
         assert!(
-            text.contains("settings-model") && !text.contains("preferences"),
+            text.contains("not applied:")
+                && text.contains("settings-model")
+                && !text.contains("preferences"),
             "{text}"
         );
     }

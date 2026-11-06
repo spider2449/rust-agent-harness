@@ -5,24 +5,24 @@
 //! `web.*`), then mounts `tools-web-search`, so its tools are never
 //! reachable without that rule. Turning it off unmounts `tools-web-search`
 //! and leaves the policy rule, which then matches no tool. The choice is
-//! kept in the `storage` service, when one is mounted, under this plugin's
-//! id, and applied again when the plugin starts.
+//! kept in the distribution's configuration file as the `web-search`
+//! feature (ADR 0067), which mounts the same plugin and rule at start.
 
 use axum::{Json, extract::State};
 use rah_api::{
     PluginId, PluginStatus,
-    admin::{ADMIN, AdminError, MountRequest, PluginAdmin},
-    storage::STORAGE,
+    admin::{ADMIN, AdminError, ConfigChange, MountRequest, PluginAdmin},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ApiResult, AppState, Shared, manage::admin};
+use crate::{ApiResult, AppState, Shared, manage::admin, settings};
 
 pub(crate) const KIND: &str = "tools-web-search";
 const POLICY: &str = "policy-authority";
 const PATTERN: &str = "web.*";
-const KEY: &str = "web-search";
+/// The feature that mounts it with its policy rule.
+const FEATURE: &str = "web-search";
 
 /// `GET /api/web-search`.
 pub(crate) async fn get(State(shared): State<AppState>) -> ApiResult {
@@ -44,19 +44,15 @@ pub(crate) async fn set(State(shared): State<AppState>, Json(switch): Json<Switc
         disable(&shared, admin.as_ref()).await?;
     }
     let mut reply = state(&shared);
-    reply["remembered"] = json!(remember(&shared, switch.enabled).await);
-    Ok(Json(reply))
-}
-
-/// Turns web search on when "on" is stored, at start (see
-/// [`crate::settings::restore`]).
-pub(crate) async fn restore(shared: &Shared, admin: &dyn PluginAdmin) {
-    let Some(storage) = shared.kernel.get(STORAGE) else {
-        return;
+    let change = ConfigChange::Feature {
+        name: FEATURE.to_owned(),
+        enabled: switch.enabled,
     };
-    if matches!(storage.get(shared.id.as_str(), KEY).await, Ok(Some(value)) if value == b"on") {
-        let _ = enable(shared, admin).await;
-    }
+    settings::remembered(
+        &mut reply,
+        settings::persist(admin.as_ref(), vec![change]).await,
+    );
+    Ok(Json(reply))
 }
 
 /// Mounted (or stopped) plugins of `kind`, with their status; `None` for a
@@ -146,13 +142,4 @@ pub(crate) async fn disable(shared: &Shared, admin: &dyn PluginAdmin) -> Result<
         }
     }
     Ok(())
-}
-
-/// Stores the choice; returns whether it was stored.
-async fn remember(shared: &Shared, enabled: bool) -> bool {
-    let Some(storage) = shared.kernel.get(STORAGE) else {
-        return false;
-    };
-    let value: &[u8] = if enabled { b"on" } else { b"off" };
-    storage.put(shared.id.as_str(), KEY, value).await.is_ok()
 }

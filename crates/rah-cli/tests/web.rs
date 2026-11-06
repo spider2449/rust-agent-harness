@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{TempDir, headless};
+use common::{TempDir, config_file, from_file, headless};
 use futures::{SinkExt, StreamExt};
 use rah_api::{
     Kernel, PluginId,
@@ -22,9 +22,8 @@ struct Web {
     dir: TempDir,
 }
 
-async fn start(name: &str, adjust: impl FnOnce(&mut Distribution)) -> Web {
-    let dir = TempDir::new(name);
-    let mut distribution = headless(&dir);
+/// Boots `dir`'s configuration file with the Web UI on a free port.
+fn with_web(mut distribution: Distribution) -> Distribution {
     distribution.plugin.push(toml_spec(
         r#"
 [[plugin]]
@@ -32,6 +31,14 @@ use = "frontend-web"
 config = { bind = "127.0.0.1:0" }
 "#,
     ));
+    distribution
+}
+
+/// Starts the Web UI over a configuration file with user keys, where the
+/// settings it saves are kept (ADR 0067).
+async fn start(name: &str, adjust: impl FnOnce(&mut Distribution)) -> Web {
+    let dir = TempDir::new(name);
+    let mut distribution = with_web(from_file(&dir));
     adjust(&mut distribution);
     let kernel = Kernel::new();
     let url = Arc::new(Mutex::new(None));
@@ -418,27 +425,19 @@ async fn an_approved_command_can_be_allowed_from_now_on() {
     let (_, policy) = instance(&web.kernel, "policy-authority").unwrap();
     assert_eq!(policy["commands"], json!([["rustc", "--version"]]));
 
-    // The rule is stored like a saved Tools form, so a restart keeps it.
-    let path = find_file(&web.dir.0, "settings-tools").expect("settings-tools stored");
-    let stored: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(
-        stored["config"]["commands"],
-        json!([["rustc", "--version"]])
+    // The rule is kept in the configuration file, so a restart keeps it.
+    let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert!(
+        text.contains("commands = [[\"rustc\", \"--version\"]]"),
+        "{text}"
     );
-}
-
-fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file(&path, name) {
-                return Some(found);
-            }
-        } else if path.file_name().is_some_and(|file| file == name) {
-            return Some(path);
-        }
-    }
-    None
+    let restarted = from_file(&web.dir);
+    let policy = restarted
+        .plugin
+        .iter()
+        .find(|spec| spec.kind == "policy-authority")
+        .unwrap();
+    assert_eq!(policy.config["commands"], json!([["rustc", "--version"]]));
 }
 
 #[tokio::test]
@@ -1637,18 +1636,15 @@ async fn web_search_is_switched_on_asks_first_and_is_remembered() {
     assert!(asked);
     assert!(text.contains("denied: rejected by the user"), "{text}");
 
-    // A new start with the same storage turns it on again.
-    let mut distribution = headless(&web.dir);
-    distribution.plugin.push(toml_spec(
-        r#"
-[[plugin]]
-use = "frontend-web"
-config = { bind = "127.0.0.1:0" }
-"#,
-    ));
+    // It is the `web-search` feature in the file, so a new start has it.
+    let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert!(text.contains("features = [\"web-search\"]"), "{text}");
     let restarted = Kernel::new();
-    boot(&restarted, &distribution).await.unwrap();
+    boot(&restarted, &with_web(from_file(&web.dir)))
+        .await
+        .unwrap();
     assert!(wait_active(&restarted, "tools-web-search").await);
+    restarted.shutdown().await.unwrap();
 
     let (status, off) = web
         .status(
@@ -1664,9 +1660,9 @@ config = { bind = "127.0.0.1:0" }
             .iter()
             .any(|(id, _)| id.as_str() == "tools-web-search")
     );
-    // Off is remembered too.
+    // Off is kept too.
     let again = Kernel::new();
-    boot(&again, &distribution).await.unwrap();
+    boot(&again, &with_web(from_file(&web.dir))).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(
         !again
@@ -1903,29 +1899,20 @@ async fn settings_are_saved_rolled_back_when_invalid_and_restored_at_start() {
         .await;
     assert_eq!(status, 400);
 
-    // A new start with the same storage applies all three. Its policy has
-    // gained an assignment since the save, which the saved policy gets too;
-    // the saved assignments still win.
-    let mut distribution = headless(&web.dir);
-    distribution.set_config(
-        "policy-authority",
-        "tools",
-        json!({ "echo": "read", "later.tool": "read" }),
-    );
-    let changed = {
-        let mut restored = changed.clone();
-        restored["tools"]["later.tool"] = json!("read");
-        restored
-    };
-    distribution.plugin.push(toml_spec(
-        r#"
-[[plugin]]
-use = "frontend-web"
-config = { bind = "127.0.0.1:0" }
-"#,
-    ));
+    // The file keeps all three: the model as its key, the loop swapped and
+    // the policy as what differs from the base, so assignments a later
+    // release adds still reach it.
+    let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert!(text.starts_with("# written by the tests\n"), "{text}");
+    assert!(text.contains("[model_options]\nlabel = \"Z\""), "{text}");
+    assert!(text.contains("remove = [\"loop-react\"]"), "{text}");
+    assert!(text.contains("decisions = { echo = \"deny\" }"), "{text}");
+    assert!(!text.contains("repo.create-file"), "{text}");
+    // A new start reads them from the file.
     let restarted = Kernel::new();
-    boot(&restarted, &distribution).await.unwrap();
+    boot(&restarted, &with_web(from_file(&web.dir)))
+        .await
+        .unwrap();
     let plan = wait_kind(&restarted, "loop-plan").await.expect("loop-plan");
     assert_eq!(
         instance(&restarted, &plan).unwrap().1,
@@ -2041,7 +2028,7 @@ async fn plugins_panel_changes_are_applied_again_at_the_next_start() {
     let ok = |(status, body): (u16, Value)| assert_eq!(status, 200, "{body}");
 
     // Mount a second model, configure one from the distribution, stop one
-    // and remove one.
+    // (a runtime switch, not kept) and remove one.
     ok(web
         .status(web.request(Method::POST, "/api/plugins").json(
             &json!({ "kind": "model-mock", "id": "model-extra", "config": { "label": "X" } }),
@@ -2065,23 +2052,18 @@ async fn plugins_panel_changes_are_applied_again_at_the_next_start() {
         .await);
     web.kernel.shutdown().await.unwrap();
 
-    let mut distribution = headless(&web.dir);
-    distribution.plugin.push(toml_spec(
-        r#"
-[[plugin]]
-use = "frontend-web"
-config = { bind = "127.0.0.1:0" }
-"#,
-    ));
     let restarted = Kernel::new();
-    boot(&restarted, &distribution).await.unwrap();
+    boot(&restarted, &with_web(from_file(&web.dir)))
+        .await
+        .unwrap();
     let admin = restarted.handle().get(rah_api::admin::ADMIN).unwrap();
     let mut applied = false;
     for _ in 0..200 {
         applied = instance(&restarted, "model-extra").map(|(_, c)| c)
             == Some(json!({ "label": "X" }))
             && instance(&restarted, "model-mock").map(|(_, c)| c) == Some(json!({ "label": "Y" }))
-            && admin.stopped() == [PluginId::new("scheduler-basic")]
+            && admin.stopped().is_empty()
+            && instance(&restarted, "scheduler-basic").is_some()
             && instance(&restarted, "session-titles").is_none();
         if applied {
             break;
@@ -2093,6 +2075,37 @@ config = { bind = "127.0.0.1:0" }
     restarted.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn settings_an_earlier_version_stored_are_reported_not_applied() {
+    let dir = TempDir::new("web-legacy");
+    let stored = dir.storage().join("frontend-web");
+    std::fs::create_dir_all(&stored).unwrap();
+    std::fs::write(
+        stored.join("settings-model"),
+        r#"{"kind":"model-mock","config":{"label":"OLD"}}"#,
+    )
+    .unwrap();
+    let kernel = Kernel::new();
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let seen = notices.clone();
+    let _subscription = kernel.handle().subscribe(move |notice: &HostNotice| {
+        seen.lock().unwrap().push(notice.message.clone());
+    });
+    boot(&kernel, &with_web(from_file(&dir))).await.unwrap();
+    let mut reported = false;
+    for _ in 0..200 {
+        reported = notices.lock().unwrap().iter().any(|message| {
+            message.contains("rah config migrate") && message.contains("settings-model")
+        });
+        if reported {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(reported, "{:?}", notices.lock().unwrap());
+    assert_eq!(instance(&kernel, "model-mock").unwrap().1, Value::Null);
+    kernel.shutdown().await.unwrap();
+}
 #[tokio::test]
 async fn several_sessions_are_deleted_at_once_forks_first() {
     let web = start("web-delete-many", |_| {}).await;

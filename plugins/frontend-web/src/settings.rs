@@ -1,19 +1,15 @@
-//! Web UI settings that survive a restart: `PUT /api/settings/{slot}
-//! {id, kind, config}` for the slots `model`, `assistant`, `tools` and
-//! `loop`.
+//! Web UI settings forms: `PUT /api/settings/{slot} {id, kind, config}` for
+//! the slots `model`, `assistant`, `tools` and `loop`.
 //!
 //! A save applies the change through the `admin` service (configure when
 //! the slot's plugin keeps its kind, replace when the kind changes, mount
-//! when the slot is empty) and, once the plugin is active, stores the kind
-//! and the whole configuration in the `storage` service under this plugin's
-//! id (key `settings-<slot>`). A configuration that does not start is rolled
-//! back, so a bad policy never leaves tool calls unguarded. At start the
-//! stored settings are applied again (the policy first), then the web search
-//! switch. A stored setting replaces the distribution's configuration of
-//! that plugin as a whole, except that a stored policy gains the
-//! distribution's permission assignments it lacks (see
-//! [`with_new_assignments`]). Changes made in the Plugins panel are applied
-//! after them (see [`crate::panel`]).
+//! when the slot is empty) and, once the plugin is active, asks the
+//! distribution to keep it in its configuration file (`persist`, ADR 0067),
+//! so the next start runs it. A configuration that does not start is rolled
+//! back, so a bad policy never leaves tool calls unguarded. Nothing is
+//! applied from `storage` at start any more: the configuration file is the
+//! one source. Settings an earlier version stored there are reported once
+//! (`rah config migrate` moves them into the file).
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -24,7 +20,8 @@ use axum::{
 };
 use rah_api::{
     PluginId, PluginStatus,
-    admin::{ADMIN, AdminError, MountRequest, PluginAdmin},
+    admin::{ADMIN, AdminError, ConfigChange, MountRequest, PluginAdmin},
+    host::HostNotice,
     storage::STORAGE,
     ui::{MAX_PANEL_ID_BYTES, ViewSpec, panels},
 };
@@ -32,28 +29,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ApiError, ApiResult, AppState, Shared, groups, manage::admin, modes, panel, status_json,
-    web_search, workspace,
+    ApiError, ApiResult, AppState, Shared, groups, manage::admin, modes, status_json, web_search,
+    workspace,
 };
 
-/// Slots and the plugin kinds each may hold, in the order they are restored.
+/// The model plugin kinds.
+pub(crate) const MODEL_KINDS: &[&str] = &[
+    "model-llamacpp",
+    "model-openai",
+    "model-anthropic",
+    "model-chat-completions",
+    "model-mock",
+];
+
+/// Slots and the plugin kinds each may hold.
 const SLOTS: [(&str, &[&str]); 4] = [
     ("tools", &["policy-authority"]),
-    (
-        "model",
-        &[
-            "model-llamacpp",
-            "model-openai",
-            "model-anthropic",
-            "model-chat-completions",
-            "model-mock",
-        ],
-    ),
+    ("model", MODEL_KINDS),
     ("assistant", &["context-default"]),
     ("loop", &["loop-react", "loop-plan"]),
 ];
 
-#[derive(Deserialize, Serialize, PartialEq)]
+/// Keys under which an earlier version kept settings in `storage`; they
+/// are no longer applied (see [`restore`]).
+pub(crate) const LEGACY_KEYS: [&str; 6] = [
+    "settings-tools",
+    "settings-model",
+    "settings-assistant",
+    "settings-loop",
+    "plugins",
+    "web-search",
+];
+
 struct Saved {
     kind: String,
     config: Value,
@@ -97,25 +104,76 @@ pub(crate) async fn save(
                 .is_some_and(|instance| kinds.contains(&instance.kind.as_str()))
         })
         .or_else(|| current(&shared, admin.as_ref(), kinds));
+    let previous_kind = current
+        .as_ref()
+        .and_then(|id| admin.instance(id))
+        .map(|instance| instance.kind);
     let saved = Saved {
         kind: save.kind,
         config: save.config,
     };
     let (id, status) = apply(admin.as_ref(), current.clone(), &saved).await?;
-    let remembered = status == PluginStatus::Active && remember(&shared, &slot, &saved).await;
-    if remembered {
-        // The form now decides this plugin, not an earlier panel change.
-        for id in current.iter().chain([&id]) {
-            panel::forget(&shared, id).await;
-        }
-    }
     let mut reply = status_json(&status);
     reply["id"] = json!(id.as_str());
-    reply["remembered"] = json!(remembered);
+    if status == PluginStatus::Active {
+        let mut changes = Vec::new();
+        // Another kind took over the slot (but the model is one key in the
+        // file, whatever its kind).
+        if let (Some(old), Some(old_kind)) = (&current, &previous_kind)
+            && *old_kind != saved.kind
+            && slot != "model"
+        {
+            changes.push(ConfigChange::Removed { id: old.clone() });
+        }
+        changes.push(if slot == "model" {
+            ConfigChange::Model {
+                kind: saved.kind.clone(),
+                config: saved.config.clone(),
+            }
+        } else {
+            ConfigChange::Plugin {
+                id: id.clone(),
+                kind: saved.kind.clone(),
+                config: saved.config.clone(),
+            }
+        });
+        remembered(&mut reply, persist(admin.as_ref(), changes).await);
+    } else {
+        remembered(&mut reply, Err("the plugin is not active".into()));
+    }
     Ok(Json(reply))
 }
 
-/// Applies the stored settings once this plugin is active.
+/// Asks the distribution to keep `changes`, in order; the first refusal
+/// stops it.
+pub(crate) async fn persist(
+    admin: &dyn PluginAdmin,
+    changes: Vec<ConfigChange>,
+) -> Result<(), String> {
+    for change in changes {
+        admin
+            .persist(change)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Says in `reply` whether the change is kept for the next start, and why
+/// not.
+pub(crate) fn remembered(reply: &mut Value, result: Result<(), String>) {
+    match result {
+        Ok(()) => reply["remembered"] = json!(true),
+        Err(reason) => {
+            reply["remembered"] = json!(false);
+            reply["remember_error"] = json!(reason);
+        }
+    }
+}
+
+/// Runs once this plugin is active: reports settings an earlier version
+/// stored, then restores the UI state that is not configuration (the mode
+/// and the connected API group).
 pub(crate) async fn restore(shared: Arc<Shared>) {
     // Mounting from inside this plugin's own start would race the boot.
     let mut active = false;
@@ -136,68 +194,33 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
     let (true, Some(admin)) = (active, shared.kernel.get(ADMIN)) else {
         return;
     };
-    if let Some(storage) = shared.kernel.get(STORAGE) {
-        for (slot, kinds) in SLOTS {
-            let stored = storage.get(shared.id.as_str(), &key(slot)).await;
-            let Some(saved) = stored
-                .ok()
-                .flatten()
-                .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
-                .filter(|saved| kinds.contains(&saved.kind.as_str()))
-            else {
-                continue;
-            };
-            let current = current(&shared, admin.as_ref(), kinds);
-            let saved = match current.as_ref().and_then(|id| admin.instance(id)) {
-                Some(instance) if slot == "tools" && instance.kind == saved.kind => Saved {
-                    config: with_new_assignments(&saved.config, &instance.config),
-                    kind: saved.kind,
-                },
-                _ => saved,
-            };
-            let unchanged = current
-                .as_ref()
-                .and_then(|id| admin.instance(id))
-                .is_some_and(|instance| {
-                    instance.kind == saved.kind && instance.config == saved.config
-                });
-            if !unchanged {
-                let _ = apply(admin.as_ref(), current, &saved).await;
-            }
-        }
-    }
-    panel::restore(&shared, admin.as_ref()).await;
-    web_search::restore(&shared, admin.as_ref()).await;
+    report_legacy(&shared).await;
     modes::restore(&shared, admin.as_ref(), shared.start_mode.clone()).await;
     groups::restore(&shared, admin.as_ref()).await;
 }
 
-/// The saved policy configuration plus the distribution's permission
-/// assignments (`tools`) it does not have. A saved policy is a snapshot: a
-/// tool the distribution assigned later (such as `shell.exec` when a preset
-/// starts to mount the shell) would otherwise have no assignment and be
-/// denied. An assignment the saved policy has always wins, and nothing else
-/// (`allow`, `ask`, `decisions`, `commands`) is taken from the distribution.
-fn with_new_assignments(saved: &Value, distribution: &Value) -> Value {
-    let Some(defaults) = distribution.get("tools").and_then(Value::as_object) else {
-        return saved.clone();
+/// Tells the user, once per start, that settings an earlier version kept in
+/// `storage` no longer apply.
+async fn report_legacy(shared: &Shared) {
+    let Some(storage) = shared.kernel.get(STORAGE) else {
+        return;
     };
-    let mut merged = saved.clone();
-    let Some(config) = merged.as_object_mut() else {
-        return merged;
-    };
-    let tools = config
-        .entry("tools")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    // A malformed saved `tools` is left for the policy to refuse.
-    if let Some(tools) = tools.as_object_mut() {
-        for (pattern, level) in defaults {
-            tools
-                .entry(pattern.clone())
-                .or_insert_with(|| level.clone());
+    let mut found = Vec::new();
+    for key in LEGACY_KEYS {
+        if matches!(storage.get(shared.id.as_str(), key).await, Ok(Some(_))) {
+            found.push(key);
         }
     }
-    merged
+    if !found.is_empty() {
+        shared.kernel.emit(&HostNotice {
+            plugin: shared.id.clone(),
+            message: format!(
+                "settings saved by an earlier version ({}) are no longer applied; \
+                 `rah config migrate` moves them into the configuration file",
+                found.join(", ")
+            ),
+        });
+    }
 }
 
 /// The policy configuration with `rule` added to its `commands` (ADR 0050);
@@ -224,10 +247,11 @@ fn with_command(config: &Value, rule: &[String]) -> Option<Value> {
     Some(config)
 }
 
-/// Adds `rule` to the mounted policy's `commands` and stores the policy like
-/// a saved **Tools** form, so the exact command runs without asking from now
-/// on, also after a restart (ADR 0066). The user chose it at the approval
-/// prompt; the rule comes from the call the user saw.
+/// Adds `rule` to the mounted policy's `commands` and keeps the policy in
+/// the configuration file like a saved **Tools** form, so the exact command
+/// runs without asking from now on, also after a restart (ADR 0066). The
+/// user chose it at the approval prompt; the rule comes from the call the
+/// user saw.
 pub(crate) async fn allow_command(shared: &Shared, rule: Vec<String>) -> Result<(), String> {
     let kinds = SLOTS[0].1;
     let admin = shared
@@ -251,15 +275,16 @@ pub(crate) async fn allow_command(shared: &Shared, rule: Vec<String>) -> Result<
     if status != PluginStatus::Active {
         return Err(format!("`{id}` is not active"));
     }
-    if !remember(shared, SLOTS[0].0, &saved).await {
-        return Err("the policy was changed until the next start, but could not be stored".into());
-    }
-    panel::forget(shared, &id).await;
-    Ok(())
-}
-
-fn key(slot: &str) -> String {
-    format!("settings-{slot}")
+    let change = ConfigChange::Plugin {
+        id,
+        kind: saved.kind,
+        config: saved.config,
+    };
+    persist(admin.as_ref(), vec![change])
+        .await
+        .map_err(|reason| {
+            format!("the policy was changed until the next start, but not kept: {reason}")
+        })
 }
 
 /// The active plugin holding a slot, else any mounted one.
@@ -311,18 +336,6 @@ async fn apply(
         "`{id}` did not start with the new settings ({detail}); the previous settings were kept"
     )))
 }
-
-/// Stores a slot's settings; returns whether they were stored.
-async fn remember(shared: &Shared, slot: &str, saved: &Saved) -> bool {
-    let (Some(storage), Ok(bytes)) = (shared.kernel.get(STORAGE), serde_json::to_vec(saved)) else {
-        return false;
-    };
-    storage
-        .put(shared.id.as_str(), &key(slot), &bytes)
-        .await
-        .is_ok()
-}
-
 /// Preferences of the Web UI, shared by every browser on this `rah`
 /// (`GET|PUT /api/preferences`), stored under the key `preferences`: kept
 /// with the rest of the user's data instead of one browser's storage.
@@ -523,7 +536,7 @@ pub(crate) async fn set_preferences(
 mod tests {
     use serde_json::json;
 
-    use super::{with_command, with_new_assignments};
+    use super::{remembered, with_command};
 
     #[test]
     fn a_command_rule_is_added_once() {
@@ -546,42 +559,15 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_policy_gains_new_assignments_and_keeps_its_own() {
-        let saved = json!({
-            "ask": ["write"],
-            "decisions": { "echo": "deny" },
-            "tools": { "fs.*": "read", "repo.commit": "write" }
-        });
-        let distribution = json!({
-            "ask": ["write", "execute"],
-            "decisions": { "web.*": "ask" },
-            "commands": [["git", "status"]],
-            "tools": { "fs.*": "none", "repo.commit": "execute", "shell.exec": "execute" }
-        });
+    fn a_reply_says_whether_and_why_not_a_change_is_kept() {
+        let mut reply = json!({});
+        remembered(&mut reply, Ok(()));
+        assert_eq!(reply, json!({ "remembered": true }));
+        let mut reply = json!({});
+        remembered(&mut reply, Err("no file".into()));
         assert_eq!(
-            with_new_assignments(&saved, &distribution),
-            json!({
-                "ask": ["write"],
-                "decisions": { "echo": "deny" },
-                "tools": { "fs.*": "read", "repo.commit": "write", "shell.exec": "execute" }
-            })
+            reply,
+            json!({ "remembered": false, "remember_error": "no file" })
         );
-    }
-
-    #[test]
-    fn missing_or_malformed_tools_are_handled() {
-        let distribution = json!({ "tools": { "shell.exec": "execute" } });
-        assert_eq!(
-            with_new_assignments(&json!({}), &distribution),
-            json!({ "tools": { "shell.exec": "execute" } })
-        );
-        // A malformed saved value is left for the policy to refuse.
-        assert_eq!(
-            with_new_assignments(&json!({ "tools": 3 }), &distribution),
-            json!({ "tools": 3 })
-        );
-        assert_eq!(with_new_assignments(&json!(1), &distribution), json!(1));
-        let saved = json!({ "tools": { "fs.*": "read" } });
-        assert_eq!(with_new_assignments(&saved, &json!({})), saved);
     }
 }

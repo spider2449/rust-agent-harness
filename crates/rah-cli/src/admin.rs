@@ -10,7 +10,8 @@ use std::{
 use rah_api::{
     KernelHandle, MountOptions, Plugin, PluginError, PluginId, PluginManifest, PluginStatus, Scope,
     admin::{
-        ADMIN, AdminError, ConfigKeyHelp, MountRequest, PluginAdmin, PluginInstance, Workspace,
+        ADMIN, AdminError, ConfigChange, ConfigKeyHelp, MountRequest, PluginAdmin, PluginInstance,
+        Workspace,
     },
     async_trait,
 };
@@ -105,6 +106,7 @@ pub struct DistributionPlugin {
     manifest: PluginManifest,
     registry: Arc<Registry>,
     data_home: Option<PathBuf>,
+    file: Option<PathBuf>,
 }
 
 impl DistributionPlugin {
@@ -114,6 +116,7 @@ impl DistributionPlugin {
                 .provides(["admin"]),
             registry,
             data_home: None,
+            file: None,
         }
     }
 
@@ -121,6 +124,12 @@ impl DistributionPlugin {
     /// against `data_home` (see [`crate::Distribution::data_home`]).
     pub fn with_data_home(mut self, data_home: Option<PathBuf>) -> Self {
         self.data_home = data_home;
+        self
+    }
+
+    /// Keeps persisted changes in `file` (see [`PluginAdmin::persist`]).
+    pub fn with_file(mut self, file: Option<PathBuf>) -> Self {
+        self.file = file;
         self
     }
 }
@@ -137,6 +146,8 @@ impl Plugin for DistributionPlugin {
             registry: self.registry.clone(),
             own: scope.id().clone(),
             data_home: self.data_home.clone(),
+            file: self.file.clone(),
+            writing: Arc::new(Mutex::new(())),
         };
         scope.provide(ADMIN, Arc::new(admin) as Arc<dyn PluginAdmin>)?;
         Ok(())
@@ -148,6 +159,9 @@ struct Admin {
     registry: Arc<Registry>,
     own: PluginId,
     data_home: Option<PathBuf>,
+    file: Option<PathBuf>,
+    /// One persisted change at a time, so none is lost to another's write.
+    writing: Arc<Mutex<()>>,
 }
 
 fn failed(error: impl std::fmt::Display) -> AdminError {
@@ -433,6 +447,25 @@ impl PluginAdmin for Admin {
             plugins.push((id, status));
         }
         Ok(Workspace { root, plugins })
+    }
+
+    async fn persist(&self, change: ConfigChange) -> Result<PathBuf, AdminError> {
+        let Some(file) = self.file.clone() else {
+            return Err(failed(
+                "rah started without a configuration file, so settings are not saved; \
+                 `rah config init` writes one",
+            ));
+        };
+        let writing = self.writing.clone();
+        let home = self.data_home.clone();
+        // File work off the async workers.
+        tokio::task::spawn_blocking(move || {
+            let _guard = writing.lock().unwrap_or_else(PoisonError::into_inner);
+            crate::persist::persist(&file, &change, home.as_deref()).map(|()| file)
+        })
+        .await
+        .map_err(failed)?
+        .map_err(AdminError::Failed)
     }
 }
 

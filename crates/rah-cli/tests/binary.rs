@@ -570,7 +570,7 @@ fn config_show_is_short_unless_plugins_are_asked_for() {
     assert!(short.contains("rah.toml"), "{short}");
     assert!(short.contains("features:    shell=git"), "{short}");
     assert!(short.contains("UNGUARDED"), "{short}");
-    assert!(short.contains("web ui overrides: none"), "{short}");
+    assert!(!short.contains("not applied"), "{short}");
     assert!(!short.contains("tools-shell"), "{short}");
     let long = show(&["--plugins"]);
     assert!(long.contains("tools-shell  <- feature shell=git"), "{long}");
@@ -676,4 +676,47 @@ fn a_first_start_without_a_terminal_explains_how_to_choose_a_model() {
     let output = rah(&dir).args(["sessions", "list"]).output().unwrap();
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert!(text(&output.stdout).contains("no sessions"));
+}
+
+#[test]
+fn config_migrate_moves_earlier_web_ui_settings_into_the_file() {
+    let dir = TempDir::new("bin-migrate");
+    write_home_config(&dir, "# mine\nmodel = \"mock\"\n");
+    let stored = dir.home().join("storage").join("frontend-web");
+    std::fs::create_dir_all(&stored).unwrap();
+    std::fs::write(
+        stored.join("settings-model"),
+        r#"{"kind":"model-mock","config":{"label":"OLD"}}"#,
+    )
+    .unwrap();
+    std::fs::write(stored.join("web-search"), "on").unwrap();
+    std::fs::write(stored.join("preferences"), "{}").unwrap();
+
+    let show = || {
+        let output = rah(&dir).args(["config", "show"]).output().unwrap();
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    };
+    let before = show();
+    assert!(before.contains("not applied:"), "{before}");
+    assert!(before.contains("settings-model, web-search"), "{before}");
+
+    let output = rah(&dir).args(["config", "migrate"]).output().unwrap();
+    let stderr = text(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("moved 2 stored settings"), "{stderr}");
+    assert!(!stored.join("settings-model").exists());
+    assert!(!stored.join("web-search").exists());
+    assert!(stored.join("preferences").exists());
+
+    let file = std::fs::read_to_string(dir.home().join("rah.toml")).unwrap();
+    assert!(file.starts_with("# mine\n"), "{file}");
+    assert!(file.contains("label = \"OLD\""), "{file}");
+    let after = show();
+    assert!(!after.contains("not applied"), "{after}");
+    assert!(after.contains("features:    web-search"), "{after}");
+
+    let output = rah(&dir).args(["config", "migrate"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(text(&output.stderr).contains("no settings of an earlier version"));
 }

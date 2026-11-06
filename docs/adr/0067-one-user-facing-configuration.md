@@ -129,33 +129,53 @@ configurations. The old flags (`--preset`, `--prompt`, `--web`, `--export`,
 ### 5. Settings saved from the Web UI go to `rah.toml`
 
 The `admin` service (`rah-api::admin::PluginAdmin`) gains one operation that
-asks the distribution to persist a change:
+asks the distribution to persist a change. It is provider-neutral: the
+distribution maps a model kind and configuration back to `model` and
+`model_options`.
 
 ```rust
 async fn persist(&self, change: ConfigChange) -> Result<PathBuf, AdminError>;
 
 pub enum ConfigChange {
-    Model { model: String, options: serde_json::Map<String, Value> },
-    Permissions(String),
+    /// The model the distribution runs, whatever its runtime instance id.
+    Model { kind: String, config: Value },
+    /// Plugin `id` runs as `kind` with `config`.
+    Plugin { id: PluginId, kind: String, config: Value },
+    /// Plugin `id` no longer runs.
+    Removed { id: PluginId },
     Feature { name: String, enabled: bool },
-    /// A `[[plugin]]` change in the sense of ADR 0058, by instance id.
-    Plugin { id: PluginId, config: Value },
-    /// An approved command (ADR 0066), added to the policy's `commands`.
-    Command(Vec<String>),
 }
 ```
 
-The distribution plugin edits the file with `toml_edit` so comments and order
-are kept, writes it atomically, and refuses when the start used `--config`
-pointing at a read-only file or a file without user keys (the change would
-need an `extends` rewrite the user did not ask for). `frontend-web` applies a
-change at runtime through the existing admin operations first, and persists it
-only once the plugin is active, as it stores settings today.
+The default implementation refuses, so other `admin` providers are
+unaffected. The `rah` distribution:
 
-Existing stored settings are not applied any more. At the first start that
-finds them, RAH reports them through a `HostNotice` and `rah config migrate`
-folds them into `rah.toml` and removes them.
+- edits the file with `toml_edit`, keeping comments and order, checks that
+  the result still parses, and replaces the file atomically; one change at a
+  time;
+- writes a `Plugin` change as a `[[plugin]]` entry holding only what differs
+  from what the file composes without that entry (data paths resolved the
+  same way first), so assignments a later release adds to the base still
+  reach the plugin. When a merge cannot express the change (a key was
+  dropped) the entry uses `replace = true`. A policy whose `allow` and `ask`
+  match a mode sets `permissions` instead;
+- writes `Removed` as dropping the plugin's entry and, for a base plugin,
+  adding it to `remove`. Removing the policy or the model is refused;
+- refuses when the start had no configuration file or read one without user
+  keys, with the reason.
 
+`frontend-web` applies a change at runtime through the existing admin
+operations first and persists it only once the plugin is active. The
+settings model slot, and a panel change to the only model plugin, send
+`Model`; other panel changes send `Plugin` or `Removed`; the web search switch
+sends `Feature`; an approved command (ADR 0066) sends the policy as `Plugin`.
+Stopping and starting a plugin is a runtime switch, like a mode, and is not
+kept. Replies carry `remembered` and, when false, `remember_error`.
+
+Existing stored settings are not applied any more. RAH reports them through a
+`HostNotice` at start and in `rah config show`, and `rah config migrate`
+folds them into `rah.toml` and removes them. UI state (preferences, layout,
+recent workspaces, the active mode and API group) stays in `storage`.
 ### 6. First start
 
 Without `rah.toml`, `--config` and `--model`, `rah` does not start a model it
@@ -172,8 +192,9 @@ guessed:
 
 - The user reads one file to know what runs, and the Web UI and the file can
   no longer disagree.
-- `rah-api` changes: `PluginAdmin::persist` and `ConfigChange`. Process
-  plugins do not get `admin` unless they require it, as before. The kernel,
+- `rah-api` changes: `PluginAdmin::persist` (with a refusing default) and
+  `ConfigChange`. The process and WASM hosts do not proxy `admin`, so the
+  plugin protocol is unchanged. The kernel,
   `rah-protocol` and the plugin protocol are unchanged; plugins still receive
   one `config` at mount.
 - `rah-cli` gains a dependency edge on `toml_edit` (already in the lock file

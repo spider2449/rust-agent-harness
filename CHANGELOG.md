@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Breaking:** the Web UI keeps its settings in the configuration file
+  instead of `storage` (ADR 0067). The Settings forms, the web search switch
+  (as the `web-search` feature), Plugins panel changes and "Always allow this
+  command" are written to `rah.toml` through the new `admin` operation
+  `persist`, keeping its comments; a plugin's entry holds only what differs
+  from the base, so later preset additions still reach it. Nothing is applied
+  from `storage` at start any more, so the file and the Web UI cannot
+  disagree. Settings an earlier version stored are reported at start and by
+  `rah config show`; `rah config migrate` moves them into the file. Stopping
+  or starting a plugin in the panel is no longer kept across a restart. A
+  file that lists its plugins (no `model` key) is not written; the Web UI
+  says the change holds until restart and why.
+- `rah-api`: `PluginAdmin::persist(ConfigChange)` with a refusing default.
+
 - **Breaking:** without `rah.toml`, `--config` and `--model`, `rah` no longer
   starts llama.cpp (the old `default` preset). On a terminal it asks for the
   provider (marking which have their key variable set and whether a local

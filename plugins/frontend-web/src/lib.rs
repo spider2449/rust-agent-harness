@@ -36,13 +36,16 @@
 //!   the root.
 //! - With an `admin` service: `GET|PUT /api/web-search {enabled}` turns
 //!   web search on (the policy asks before `web.*`, then `tools-web-search`
-//!   is mounted) or off, and remembers the choice in `storage` for the next
-//!   start (see [`web_search`]). `PUT /api/settings/{slot} {id, kind,
-//!   config}` saves the Settings forms (`model`, `assistant`, `tools`,
-//!   `loop`) the same way, rolled back when the plugin does not start, and
-//!   applies them again at the next start (see [`settings`]).
+//!   is mounted) or off, and keeps the choice in the configuration file as
+//!   the `web-search` feature (see [`web_search`]). `PUT /api/settings/{slot}
+//!   {id, kind, config}` saves the Settings forms (`model`, `assistant`,
+//!   `tools`, `loop`), rolled back when the plugin does not start, and keeps
+//!   them in the configuration file through the `admin` service's `persist`
+//!   (ADR 0067; see [`settings`]). A reply says `remembered`, and why not in
+//!   `remember_error`.
 //!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
-//!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's preferences the same way, for every browser.
+//!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's
+//!   preferences in `storage`, for every browser.
 //! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
 //!   problems, panels}`, the panels of each column from the `ui-layout` service, else
 //!   the standard layout, and every panel id a layout can place (ADR 0062;
@@ -66,8 +69,8 @@
 //!   `PUT /api/plugins/{id}/config
 //!   {config}` and `POST /api/plugins/{id}/replace {kind, id, config, bind}`
 //!   (mounts the replacement, then unmounts `{id}` once it is active).
-//!   Changes that succeed are applied again at the next start (see
-//!   [`panel`]).
+//!   Changes that succeed, except stop and start, are kept in the
+//!   configuration file (see [`panel`]).
 //! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
 //!   delay_secs, every_secs}` and `DELETE /api/jobs/{id}`.
 //! - `GET|POST /api/sessions`, `GET|DELETE /api/sessions/{id}`,
@@ -96,7 +99,7 @@
 //! (`approval_required` carries `may_remember`). For `shell.exec`, the
 //! notice also carries `command`, the exact `[program, args...]`, and an
 //! approval sent with `command: true` adds it to the policy's `commands` and
-//! stores the policy like a saved Tools form (ADR 0066).
+//! keeps the policy like a saved Tools form (ADR 0066).
 //!
 //! The loop and session services are resolved per request, so other plugins
 //! can be swapped while the server runs. HTTP connections are served by
@@ -217,8 +220,9 @@ pub(crate) struct Shared {
     pub approvals: Approvals,
     /// Cancelled when the plugin scope is disposed.
     pub stop: CancellationToken,
-    /// Serializes updates of the recorded Plugins panel changes.
-    pub panel: tokio::sync::Mutex<()>,
+    /// Notices about changes that hold only until the next start, once per
+    /// reason.
+    pub notices: rah_api::host::NoticeOnce,
     pub modes: modes::Modes,
     /// The `mode` configuration key.
     pub start_mode: Option<String>,
@@ -261,7 +265,7 @@ impl Plugin for WebFrontendPlugin {
             hosts: access::allowed_hosts(address),
             approvals: Approvals::new(timeout),
             stop: scope.spawner().cancellation(),
-            panel: tokio::sync::Mutex::new(()),
+            notices: rah_api::host::NoticeOnce::new(scope.kernel(), scope.id().clone()),
             modes: modes::Modes::new(config.modes()),
             start_mode: config.mode.clone(),
             folders: std::sync::Mutex::new(None),

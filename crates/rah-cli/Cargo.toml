@@ -50,6 +50,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal", "sync"] }
 toml = "1"
+toml_edit = "0.25"
 
 [dev-dependencies]
 futures.workspace = true

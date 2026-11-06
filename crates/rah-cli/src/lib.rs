@@ -10,6 +10,7 @@ mod data;
 mod extend;
 mod features;
 mod help;
+pub mod persist;
 pub mod setup;
 mod show;
 mod user;
@@ -405,6 +406,10 @@ pub struct Distribution {
     /// The permissions mode last applied, from the file or `--permissions`.
     #[serde(skip)]
     pub permissions: Option<Permissions>,
+    /// The configuration file it was read from, where the `admin` service
+    /// keeps settings saved at runtime (ADR 0067 §5).
+    #[serde(skip)]
+    pub file: Option<PathBuf>,
 }
 
 impl Distribution {
@@ -496,6 +501,7 @@ pub fn select_distribution(
         }
     };
     distribution.data_home = Some(home.to_path_buf());
+    distribution.file = used.clone();
     distribution.apply_features()?;
     Ok((distribution, used))
 }
@@ -584,7 +590,8 @@ pub async fn boot(
         .mount(
             Arc::new(
                 DistributionPlugin::new(registry.clone())
-                    .with_data_home(distribution.data_home.clone()),
+                    .with_data_home(distribution.data_home.clone())
+                    .with_file(distribution.file.clone()),
             ),
             MountOptions::default(),
         )

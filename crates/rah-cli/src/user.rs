@@ -70,6 +70,13 @@ pub const PROVIDERS: [Provider; 6] = [
     },
 ];
 
+impl Provider {
+    /// Configuration the kind needs for this provider, besides `model`.
+    pub(crate) fn preset(&self) -> &'static [(&'static str, &'static str)] {
+        self.preset
+    }
+}
+
 /// Whether `kind` is a model plugin a provider mounts.
 pub fn is_model_kind(kind: &str) -> bool {
     PROVIDERS.iter().any(|provider| provider.kind == kind)
@@ -143,7 +150,7 @@ impl Permissions {
     }
 
     /// The policy's `allow` levels.
-    fn allow(self) -> &'static [&'static str] {
+    pub(crate) fn allow(self) -> &'static [&'static str] {
         match self {
             Self::ReadOnly | Self::Ask => &["none", "read"],
             Self::AutoEdit => &["none", "read", "write"],
@@ -152,7 +159,7 @@ impl Permissions {
     }
 
     /// The policy's `ask` levels; a level in neither list is denied.
-    fn ask(self) -> &'static [&'static str] {
+    pub(crate) fn ask(self) -> &'static [&'static str] {
         match self {
             Self::ReadOnly | Self::Full => &[],
             Self::Ask => &["write", "execute"],

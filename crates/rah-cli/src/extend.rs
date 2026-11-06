@@ -239,7 +239,7 @@ fn position(distribution: &Distribution, id: &str) -> Option<usize> {
 
 /// Merges `patch` into `base`: tables key by key, anything else replaces.
 /// A missing `config` (null) changes nothing.
-fn merge(base: &mut Value, patch: Value) {
+pub(crate) fn merge(base: &mut Value, patch: Value) {
     match (base, patch) {
         (_, Value::Null) => {}
         (Value::Object(base), Value::Object(patch)) => {

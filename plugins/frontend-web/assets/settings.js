@@ -2,7 +2,7 @@
 // (model, context, policy, loop), and display preferences. Each form starts from the plugin's current
 // configuration, changes only its own fields and saves through
 // `/api/settings/{slot}`, so options it does not show are kept and the
-// result is remembered for the next start. Other plugins stay
+// result is written to the configuration file for the next start. Other plugins stay
 // in the Plugins panel's JSON editor.
 "use strict";
 
@@ -109,7 +109,7 @@ async function savePlugin(slot, plugin, kind, config, label, done) {
   if (result.state && result.state !== "active") {
     settingsMessage(`${label} saved, but ${result.id} is ${result.state}${result.detail ? `: ${result.detail}` : ""}`, true);
   } else {
-    const kept = result.remembered ? "" : " It is not remembered after rah restarts (no storage plugin).";
+    const kept = result.remembered ? "" : ` It holds until rah restarts, but is not kept: ${result.remember_error || "unknown reason"}.`;
     settingsMessage(`${label} saved.${done ? ` ${done(result.id)}` : ""}${kept}`);
     // Also under the conversation, where it stays after the dialog closes.
     if (done) showInfo(done(result.id));
@@ -295,7 +295,7 @@ function webSearchField() {
       const result = await api("/web-search", { method: "PUT", body: JSON.stringify({ enabled: box.checked }) });
       await reloadSettings();
       loadPlugins().catch(() => {});
-      const kept = result.remembered ? "" : " It will be off again after rah restarts (no storage plugin).";
+      const kept = result.remembered ? "" : ` It holds until rah restarts, but is not kept: ${result.remember_error || "unknown reason"}.`;
       settingsMessage(result.enabled ? `Web search is on. The model asks before each search or page fetch.${kept}` : "Web search is off.");
     } catch (error) {
       box.checked = !box.checked;

@@ -47,9 +47,38 @@ impl Drop for TempDir {
     }
 }
 
+/// The configuration file [`from_file`] starts with: user keys only, as
+/// `rah config init` writes one.
+pub const USER_FILE: &str = "# written by the tests\nmodel = \"mock\"\n";
+
+/// The configuration file of `dir`.
+pub fn config_file(dir: &TempDir) -> PathBuf {
+    dir.0.join("rah.toml")
+}
+
+/// What `dir`'s configuration file composes (written from [`USER_FILE`]
+/// when missing), as `rah` would read it, without the terminal frontend and
+/// with the data paths of [`headless`]. Settings the Web UI saves go to the
+/// file, so a later call starts with them.
+pub fn from_file(dir: &TempDir) -> Distribution {
+    let path = config_file(dir);
+    if !path.exists() {
+        std::fs::write(&path, USER_FILE).unwrap();
+    }
+    let (mut distribution, _) = rah_cli::select_distribution(Some(&path), &dir.home()).unwrap();
+    isolate(&mut distribution, dir);
+    distribution
+}
+
 /// The dev preset without the terminal frontend, rooted in `dir`.
 pub fn headless(dir: &TempDir) -> Distribution {
     let mut distribution = Distribution::preset("dev").unwrap();
+    isolate(&mut distribution, dir);
+    distribution
+}
+
+/// Drops the terminal frontend and keeps every data path in `dir`.
+fn isolate(distribution: &mut Distribution, dir: &TempDir) {
     distribution
         .plugin
         .retain(|spec| spec.kind != "frontend-cli");
@@ -75,7 +104,6 @@ pub fn headless(dir: &TempDir) -> Distribution {
         "memory_dir",
         json!(path(&dir.0.join("memory"))),
     );
-    distribution
 }
 
 fn path(path: &Path) -> String {

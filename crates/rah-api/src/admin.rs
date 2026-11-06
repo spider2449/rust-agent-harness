@@ -139,6 +139,36 @@ pub trait PluginAdmin: Send + Sync {
             "this distribution cannot switch workspaces".into(),
         ))
     }
+
+    /// Keeps `change` in the distribution's configuration file and returns
+    /// the file's path. The running plugins are not touched. A distribution
+    /// without a file it can write refuses with the reason.
+    async fn persist(&self, change: ConfigChange) -> Result<PathBuf, AdminError> {
+        let _ = change;
+        Err(AdminError::Failed(
+            "this distribution cannot save its configuration".into(),
+        ))
+    }
+}
+
+/// A change for the distribution to keep in its configuration file, so it
+/// still holds after a restart (ADR 0067 §5). A frontend applies the change
+/// at runtime first and asks to persist it only once it took effect.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigChange {
+    /// The model the distribution runs is `kind` with `config`, whatever
+    /// instance id it has at runtime.
+    Model { kind: String, config: Value },
+    /// Plugin `id` runs as `kind` with `config` (mounted, or configured).
+    Plugin {
+        id: PluginId,
+        kind: String,
+        config: Value,
+    },
+    /// Plugin `id` no longer runs.
+    Removed { id: PluginId },
+    /// An opt-in feature of the distribution is on or off.
+    Feature { name: String, enabled: bool },
 }
 
 /// The result of [`PluginAdmin::set_workspace`].

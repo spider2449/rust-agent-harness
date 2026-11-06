@@ -238,7 +238,6 @@ pub(crate) async fn replace(
     let kind = admin.instance(&old).map(|instance| instance.kind);
     let request = mount.request();
     let (id, status) = admin.replace(&old, request.clone()).await?;
-    panel::removed(&shared, &old, kind.as_deref()).await;
-    panel::mounted(&shared, &id, &request).await;
+    panel::replaced(&shared, &old, kind.as_deref(), &id, &request).await;
     Ok(status_reply(id.as_str(), &status))
 }

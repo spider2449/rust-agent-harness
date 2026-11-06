@@ -112,6 +112,9 @@ enum ConfigCommand {
     Init,
     /// Open the configuration file in $VISUAL, $EDITOR or the system editor.
     Edit,
+    /// Move settings an earlier version of the Web UI kept in the data
+    /// directory into the configuration file, and delete them there.
+    Migrate,
 }
 
 fn fail(message: impl std::fmt::Display) -> i32 {
@@ -348,6 +351,49 @@ fn edit(global: &GlobalArgs) -> Result<i32, String> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// `rah config migrate`: applies each stored setting to the configuration
+/// file and deletes the stored file once all of its changes are kept.
+/// Returns how many stored files were moved.
+fn migrate(global: &GlobalArgs) -> Result<usize, String> {
+    let path = global.config_path()?;
+    if !path.is_file() {
+        return Err(format!(
+            "`{}` does not exist; write one with `rah config init` first",
+            path.display()
+        ));
+    }
+    let home = global.home()?;
+    let dir = home.join("storage").join("frontend-web");
+    let found = rah_cli::persist::legacy_changes(&dir)?;
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let mut moved = 0;
+    let mut problems = Vec::new();
+    for (stored, changes) in found {
+        let mut kept = true;
+        for change in &changes {
+            if let Err(problem) = rah_cli::persist::persist(&path, change, Some(&home)) {
+                problems.push(format!("{}: {problem}", stored.display()));
+                kept = false;
+            }
+        }
+        if kept {
+            std::fs::remove_file(&stored)
+                .map_err(|error| format!("cannot delete `{}`: {error}", stored.display()))?;
+            moved += 1;
+        }
+    }
+    if problems.is_empty() {
+        Ok(moved)
+    } else {
+        Err(format!(
+            "moved {moved} stored settings; these were kept where they are:\n  {}",
+            problems.join("\n  ")
+        ))
+    }
+}
+
 /// What clap cannot say: `--session` before a command belongs to the REPL.
 fn validate(cli: &Cli) -> Result<(), String> {
     if cli.session.is_some() && cli.command.is_some() {
@@ -380,6 +426,22 @@ async fn run(cli: Cli) -> i32 {
                     Err(message) => fail(message),
                 },
                 ConfigCommand::Edit => edit(global).unwrap_or_else(fail),
+                ConfigCommand::Migrate => match migrate(global) {
+                    Ok(0) => {
+                        eprintln!("rah: no settings of an earlier version to move");
+                        0
+                    }
+                    Ok(moved) => {
+                        eprintln!(
+                            "rah: moved {moved} stored settings into `{}`",
+                            global
+                                .config_path()
+                                .map_or_else(|e| e, |p| p.display().to_string())
+                        );
+                        0
+                    }
+                    Err(message) => fail(message),
+                },
                 ConfigCommand::Show { plugins } => match global.prepare(false) {
                     Ok(prepared) => {
                         print!("{}", rah_cli::show(&prepared, *plugins));
