@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Presets: every preset except `minimal` mounts `tools-shell`, and the
+  policy assigns `shell.exec = "execute"`, so the model can run programs
+  (such as `netstat` to find what listens on a port) after the user approves
+  each call (ADR 0064). Before, no preset had it and a request that needed a
+  program ended without an answer. `minimal` has no policy and still has no
+  shell. `--with shell=<programs>` now limits the mounted plugin.
 - `plugin-builder`: a plugin's details in "My plugins" have a Delete form;
   typing the plugin's name deletes its directory. Only directories the
   builder wrote are deleted, and the message says to remove the `rah.toml`

@@ -170,10 +170,12 @@ fn the_shell_flag_enables_shell_exec_on_a_preset() {
 
     let run_flag = |flag_args: &[&str], answer: &str| run_flag_with(flag_args, CALL, answer);
 
-    // Without the flag the preset has no `shell.exec`.
-    let output = run_flag(&[], "y\n");
+    // Without the flag the guarded preset already mounts `shell.exec`, and
+    // the policy asks before the program runs.
+    let output = run_flag(&[], "n\n");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("[approve]"), "{stdout}");
+    assert!(stdout.contains("[approve] shell.exec"), "{stdout}");
+    assert!(!stdout.contains(r#""exit_code":"#), "{stdout}");
 
     // With the flag the policy asks, then the program runs (the rustup shim
     // may fail without a toolchain in the sandbox, which still means it ran).

@@ -31,6 +31,43 @@ fn every_preset_except_minimal_mounts_the_policy() {
     }
 }
 
+#[test]
+fn only_the_guarded_presets_mount_the_shell_and_they_ask_before_it() {
+    for preset in PRESETS {
+        let distribution = Distribution::preset(preset.name).unwrap();
+        let shell = distribution
+            .plugin
+            .iter()
+            .position(|spec| spec.kind == "tools-shell");
+        assert_eq!(shell.is_some(), preset.guarded, "{}", preset.name);
+        let Some(shell) = shell else { continue };
+        let sandbox = distribution
+            .plugin
+            .iter()
+            .position(|spec| spec.kind == "sandbox-process");
+        assert!(
+            sandbox.is_some_and(|sandbox| sandbox < shell),
+            "{}",
+            preset.name
+        );
+        let policy = &distribution.plugin[0].config;
+        assert_eq!(
+            policy["tools"]["shell.exec"],
+            json!("execute"),
+            "{}",
+            preset.name
+        );
+        assert!(
+            policy["ask"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("execute")),
+            "{}",
+            preset.name
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_dev_preset_is_guarded_and_allows_assigned_built_in_tools() {
     let dir = TempDir::new("policy-guarded");

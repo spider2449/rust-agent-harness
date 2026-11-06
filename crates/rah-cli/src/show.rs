@@ -94,14 +94,15 @@ mod tests {
 
     #[test]
     fn shows_features_origin_and_overrides() {
-        let mut distribution = Distribution::preset("dev").unwrap();
+        // `minimal` has no `tools-shell`, so the feature mounts it.
+        let mut distribution = Distribution::preset("minimal").unwrap();
         distribution.enable("shell=git").unwrap();
         let dir = std::env::temp_dir().join(format!("rah-show-{}", std::process::id()));
         let web = dir.join("storage").join(WEB_NAMESPACE);
         std::fs::create_dir_all(&web).unwrap();
         std::fs::write(web.join("settings-model"), "{}").unwrap();
         std::fs::write(web.join("preferences"), "{}").unwrap();
-        let text = show_config(&distribution, "preset `dev`", &dir);
+        let text = show_config(&distribution, "preset `minimal`", &dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(text.contains("features:  shell=git"), "{text}");
         assert!(text.contains("tools-shell  <- feature shell=git"), "{text}");

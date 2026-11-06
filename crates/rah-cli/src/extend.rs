@@ -317,7 +317,7 @@ use = "context-default"
                 "plugin `model-mock` is a `model-mock` in preset `dev`, not a `model-openai`",
             ),
             (
-                "extends = \"dev\"\n[[plugin]]\nuse = \"tools-shell\"\nreplace = true\n",
+                "extends = \"minimal\"\n[[plugin]]\nuse = \"tools-shell\"\nreplace = true\n",
                 "which has no `tools-shell`",
             ),
             ("remove = [\"x\"]\n", "`remove` needs `extends"),

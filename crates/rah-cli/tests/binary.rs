@@ -473,7 +473,7 @@ fn check_config_reports_every_problem_and_starts_nothing() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("configuration ok: 17 plugins"), "{stdout}");
+    assert!(stdout.contains("configuration ok: 18 plugins"), "{stdout}");
 
     let config = dir.0.join("rah.toml");
     std::fs::write(
@@ -518,13 +518,20 @@ config = { program = "rah-no-such-program-x7" }
 fn show_config_prints_the_plugins_features_and_source() {
     let dir = TempDir::new("bin-show-config");
     let output = rah(&dir)
-        .args(["--preset", "dev", "--with", "shell=git", "--show-config"])
+        // `minimal` has no `tools-shell`, so the feature mounts it.
+        .args([
+            "--preset",
+            "minimal",
+            "--with",
+            "shell=git",
+            "--show-config",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
-    assert!(stdout.contains("source:    --preset `dev`"), "{stdout}");
+    assert!(stdout.contains("source:    --preset `minimal`"), "{stdout}");
     assert!(stdout.contains("features:  shell=git"), "{stdout}");
     assert!(
         stdout.contains("tools-shell  <- feature shell=git"),

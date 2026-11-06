@@ -29,10 +29,12 @@ documented in [docs/legacy/SECURITY.md](legacy/SECURITY.md).
 4. Uncertain external effects are never replayed automatically. Timeout,
    cancellation, disconnect, crash or a lost response does not imply rollback.
    Session replay never re-executes tool calls.
-5. Shell and process execution exist only as opt-in plugins that require a
-   `sandbox` service. They use a fixed program and argument vector, explicit
-   cwd and environment policy, bounded output, timeout and cancellation. Under
-   `policy-authority` they default to Ask.
+5. Shell and process execution exist only as plugins that require a
+   `sandbox` service, mounted by configuration. The guarded presets mount
+   `tools-shell`; `minimal`, which has no policy, does not (ADR 0064). They
+   use a fixed program and argument vector, explicit cwd and environment
+   policy, bounded output, timeout and cancellation. Under `policy-authority`
+   they default to Ask.
 6. Process supervision is not OS sandboxing. RAH makes no network-isolation,
    rollback or strong-sandbox claim until one is implemented and tested.
 7. Credentials are backend configuration (environment or a storage plugin).
@@ -156,7 +158,9 @@ files are refused; run `cmd.exe /c` explicitly.
 
 `tools-shell` provides `shell.exec` with `execute` permission and requires
 `sandbox`. It accepts `program`, `args`, `cwd` and `timeout_ms` only, and can
-be restricted further with `allow_programs`. A program terminated by the
+be restricted further with `allow_programs`. The guarded presets mount it and
+assign `shell.exec = "execute"`, so every program run is asked about unless an
+exact `commands` rule matches (ADR 0064). A program terminated by the
 sandbox, or a supervision failure, is reported as an error, which the
 `ToolInvoker` records as an `uncertain` effect; it is never retried.
 

@@ -124,7 +124,7 @@ mistake at once; `rah --check-config` does only that, starting no plugin and
 no program ([ADR 0059](docs/adr/0059-check-every-configuration-before-boot.md)).
 A missing API key or a program that does not run is still found only at start.
 
-**Features** are the simple way to turn on what no preset mounts. Each one
+**Features** are the simple way to turn on what a preset leaves out. Each one
 mounts its plugins and adds the policy entries they need, so nothing else is
 edited by hand: `rah --list-features` lists them (`shell`, `web-search`, `format`, `lsp`,
 `compact`, `telemetry`, `todo`, `plugin-builder`, `plan`), `rah --preset deepseek --with web-search
@@ -132,10 +132,16 @@ edited by hand: `rah --list-features` lists them (`shell`, `web-search`, `format
 `--with` too), and `features = ["shell=git", "web-search"]` at the top of
 `rah.toml`, before the first `[[plugin]]`, keeps them. A policy entry you wrote
 is never overwritten, a feature applied twice changes nothing, and tools still
-go through the policy: `shell` and `web-search` ask before each call. The
-manual way for program execution follows. `rah --show-config` prints what would
-run, which plugins a feature added, and the Web UI settings that override the
-file. Add `tools-shell` to a distribution file
+go through the policy: `shell` and `web-search` ask before each call.
+`rah --show-config` prints what would run, which plugins a feature added, and
+the Web UI settings that override the file.
+
+**Program execution** is on in every preset except `minimal`
+([ADR 0064](docs/adr/0064-guarded-presets-mount-the-shell.md)): they mount
+`tools-shell`, and the policy asks before each `shell.exec` call. On a
+preset, `--with shell=git,cargo` limits it to those programs, and a file with
+`extends` and `remove = ["tools-shell"]` turns it off. The manual way follows.
+Add `tools-shell` to a distribution file
 next to `sandbox-process` (process supervision, not an OS sandbox), and assign
 `shell.exec` in the policy:
 
@@ -309,8 +315,8 @@ Your settings live there too. Without `--preset` and `--config`, `rah` runs
 `rah.toml` in the data directory when it exists (your own plugin
 composition, see below), otherwise the `default` preset. `rah --init-config`
 (or `scripts\start.ps1 -InitConfig`) writes a preset (`--preset`, else
-`default`) there as a starting point, or to `--config <file>`, with the
-opt-in `tools-shell` commented out; it never overwrites a file. What you change in
+`default`) there as a starting point, or to `--config <file>`; it never
+overwrites a file. What you change in
 the Web UI is kept under `storage/frontend-web`: the Settings forms, the
 web search switch, changes made in the **Plugins** panel, the display
 preference, the recent workspaces, which folders of the session list are

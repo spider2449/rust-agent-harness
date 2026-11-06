@@ -210,8 +210,10 @@ pub struct Preset {
 /// the Web UI's Usage view), `plugin-builder` (the model writes personal
 /// plugins; saving asks), the default loop and the terminal
 /// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
-/// None mounts `tools-shell`. Every preset except `minimal` mounts
-/// `policy-authority`; `minimal` runs unguarded and `rah` warns about it.
+/// Every preset except `minimal` mounts `policy-authority` and `tools-shell`
+/// (`shell.exec` at `execute`, so the policy asks before each call);
+/// `minimal` runs unguarded, without program execution, and `rah` warns
+/// about it.
 pub const PRESETS: [Preset; 6] = [
     Preset {
         name: "default",
@@ -256,7 +258,14 @@ pub const PRESETS: [Preset; 6] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read", "plugins.guide" = "none", "plugins.list" = "read", "plugins.read" = "read", "plugins.save" = "write" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read", "plugins.guide" = "none", "plugins.list" = "read", "plugins.read" = "read", "plugins.save" = "write", "shell.exec" = "execute" } }
+"#;
+
+/// Program execution, mounted only by the guarded presets: the policy asks
+/// before every `shell.exec` call, which an unguarded preset could not do.
+const SHELL_TEMPLATE: &str = r#"
+[[plugin]]
+use = "tools-shell"
 "#;
 
 const PRESET_TEMPLATE: &str = r#"
@@ -276,7 +285,7 @@ config = { root = "." }
 [[plugin]]
 use = "sandbox-process"
 config = { root = "." }
-
+{SHELL}
 [[plugin]]
 use = "tools-repo"
 
@@ -493,7 +502,11 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
         .iter()
         .find(|preset| preset.name == name)
         .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
-    let policy = if preset.guarded { POLICY_TEMPLATE } else { "" };
+    let (policy, shell) = if preset.guarded {
+        (POLICY_TEMPLATE, SHELL_TEMPLATE)
+    } else {
+        ("", "")
+    };
     let model_config = preset
         .model_config
         .map(|config| format!("\nconfig = {config}"))
@@ -501,6 +514,7 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
     Ok(format!(
         "{policy}{}",
         PRESET_TEMPLATE
+            .replace("{SHELL}", shell)
             .replace("{MODEL_CONFIG}", &model_config)
             .replace("{MODEL}", preset.model)
     ))

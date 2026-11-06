@@ -166,8 +166,8 @@ Implemented:
   changes that the frontends offer as `/undo` and an Undo button, ADR 0060);
   `tools-mcp` (one MCP stdio server
   per instance, requires `sandbox`); `tools-mcp-http` (one Streamable HTTP
-  MCP server per instance, ADR 0038); `tools-shell` (opt-in `shell.exec`,
-  requires `sandbox`); `tools-http` (opt-in; one instance is one API group
+  MCP server per instance, ADR 0038); `tools-shell` (`shell.exec`,
+  requires `sandbox`; mounted by the guarded presets, ADR 0064); `tools-http` (opt-in; one instance is one API group
   whose endpoints are declared as tools in configuration, ADR 0047);
   `tools-web-search` (opt-in keyless `web.search` over
   DuckDuckGo, Bing and SearXNG with failover, merged `web.multi_search`, and
@@ -227,7 +227,8 @@ Implemented:
   `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`); a
   `rah.toml` with `extends = "<preset>"` lists only its changes to that preset
   (ADR 0058). Every preset
-  except `minimal` mounts `policy-authority` first. `rah` warns `UNGUARDED`
+  except `minimal` mounts `policy-authority` first and `tools-shell`, whose
+  `shell.exec` the policy asks about (ADR 0064). `rah` warns `UNGUARDED`
   when no `tool.before_invoke` handler is mounted, and aborts the boot when a
   configured `policy-authority` does not become active.
 
