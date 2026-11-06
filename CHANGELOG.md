@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.3 (2026-11-06)
+
+- Build: third-party crates are compiled without debug information in the
+  dev profile (`[profile.dev.package."*"] debug = false`); RAH's own crates
+  keep it. A full clippy and test build now takes about 14 GB of `target/`
+  on Windows, where every feature or version variant used to keep its own
+  copy of large debug files (`target/debug` had grown to 98 GB).
+
 ## v0.45.2 (2026-11-06)
 
 - `scripts\update.ps1`: one command to install or update RAH from the
