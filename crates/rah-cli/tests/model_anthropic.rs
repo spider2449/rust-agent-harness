@@ -191,11 +191,10 @@ config = {{ prompt = "say hello" }}
 }
 
 #[test]
-fn anthropic_preset_without_a_key_runs_but_reports_the_inactive_model() {
+fn anthropic_without_a_key_runs_but_reports_the_inactive_model() {
     let dir = TempDir::new("anthropic-no-key");
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .args(["--preset", "anthropic", "--prompt", "hi", "--session-dir"])
-        .arg(dir.sessions())
+        .args(["--model", "anthropic", "run", "hi"])
         .arg("--root")
         .arg(dir.workspace())
         .env_remove("ANTHROPIC_API_KEY")

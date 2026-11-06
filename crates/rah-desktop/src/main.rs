@@ -1,7 +1,7 @@
 //! `rah-desktop`: RAH in a native window.
 //!
 //! The window shows the Web UI of `frontend-web`, served on a free loopback
-//! port by the same distribution `rah --web` runs, in this process. Every
+//! port by the same distribution `rah web` runs, in this process. Every
 //! behavior (sessions, turns, approvals, settings and modes) is the Web
 //! UI's, so a change there reaches the browser and the desktop alike; this
 //! binary only owns the window and the process lifetime (ADR 0046).
@@ -13,7 +13,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    path::{Path, PathBuf},
     sync::{Mutex, PoisonError, mpsc},
     time::Duration,
 };
@@ -24,7 +23,7 @@ use rah_api::{
     host::{ExitRequested, FrontendListening},
     tools::ToolInvoker,
 };
-use rah_cli::{Distribution, boot, default_data_home, select_distribution};
+use rah_cli::{Distribution, boot, cli::GlobalArgs};
 use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
@@ -38,26 +37,12 @@ use wry::{WebView, WebViewBuilder};
 #[derive(Debug, Parser)]
 #[command(name = "rah-desktop", version)]
 struct Args {
-    /// Built-in preset to run (ignored with --config), as for `rah`.
-    #[arg(long)]
-    preset: Option<String>,
-    /// Distribution file listing the plugins to mount.
-    #[arg(long)]
-    config: Option<PathBuf>,
-    /// Data directory, as for `rah`. Default: RAH_HOME, else `.rah` in the
-    /// user's home directory.
-    #[arg(long)]
-    data_dir: Option<PathBuf>,
-    /// Workspace root for file tools and processes.
-    #[arg(long)]
-    root: Option<PathBuf>,
+    #[command(flatten)]
+    global: GlobalArgs,
     /// Mode to enter at start, such as `daily` or `coding`, instead of the
     /// last one used.
     #[arg(long)]
     mode: Option<String>,
-    /// Turn on an opt-in feature, as for `rah`; repeatable.
-    #[arg(long = "with", value_name = "FEATURE")]
-    with: Vec<String>,
 }
 
 /// The window and taskbar icon: the logo as 64x64 RGBA, made by
@@ -70,47 +55,16 @@ fn window_icon() -> Option<Icon> {
 /// How long the Web UI may take to start listening.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn absolute(path: &Path) -> Result<PathBuf, String> {
-    std::path::absolute(path).map_err(|error| format!("`{}`: {error}", path.display()))
-}
-
-/// The distribution `rah --web` would run for these arguments, with the Web
-/// UI on a free loopback port.
+/// The distribution `rah web` would run for these arguments, with the Web UI
+/// on a free loopback port.
 fn distribution(args: &Args) -> Result<Distribution, String> {
-    let home = args
-        .data_dir
-        .clone()
-        .or_else(default_data_home)
-        .unwrap_or_else(|| PathBuf::from(".rah"));
-    let (mut distribution, _) = select_distribution(
-        args.config.as_deref(),
-        args.preset.as_deref(),
-        &absolute(&home)?,
-    )?;
-    for request in &args.with {
-        distribution.enable(request)?;
-    }
+    let mut distribution = args.global.prepare(true)?.distribution;
     if !distribution.use_web_frontend() {
         return Err("the distribution needs a `frontend-cli` or `frontend-web` plugin".into());
     }
     distribution.set_config("frontend-web", "bind", Value::from("127.0.0.1:0"));
     if let Some(mode) = &args.mode {
         distribution.set_config("frontend-web", "mode", Value::from(mode.as_str()));
-    }
-    if let Some(root) = &args.root {
-        if !distribution.set_root(&absolute(root)?) {
-            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
-        }
-    } else if let Some(root) = distribution.user_root().map(Path::to_path_buf) {
-        // Again, for the workspace plugins `--with` mounted.
-        distribution.set_root(&root);
-    }
-    if distribution.user.is_some() && !distribution.has_model() {
-        return Err(
-            "no model is configured: add `model = \"<provider>/<model id>\"` to the \
-             configuration file"
-                .into(),
-        );
     }
     Ok(distribution)
 }
@@ -250,10 +204,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn args(extra: &[&str]) -> Args {
-        let mut argv = vec!["rah-desktop", "--preset", "dev", "--data-dir", "."];
+        let mut argv = vec!["rah-desktop", "--model", "mock", "--data-dir", "."];
         argv.extend_from_slice(extra);
         Args::parse_from(argv)
     }
@@ -295,7 +251,12 @@ mod tests {
             .clone();
         assert_eq!(
             root,
-            Value::from(absolute(Path::new(".")).unwrap().display().to_string())
+            Value::from(
+                rah_cli::cli::absolute(Path::new("."))
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )
         );
     }
 

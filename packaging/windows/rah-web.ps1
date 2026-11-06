@@ -2,7 +2,7 @@
 # token. The console window stays open as the server's log.
 $ErrorActionPreference = "Continue"
 $opened = $false
-& (Join-Path $PSScriptRoot "rah.exe") --web @args 2>&1 | ForEach-Object {
+& (Join-Path $PSScriptRoot "rah.exe") web @args 2>&1 | ForEach-Object {
     $line = "$_"
     Write-Host $line
     if (-not $opened -and $line -match '(http://\S+/#token=[0-9a-f]+)') {

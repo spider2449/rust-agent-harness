@@ -51,11 +51,11 @@ sessions, memory and storage of runs never mix:
 
 ```text
 rah --config runs/<run-id>/rah.toml --data-dir runs/<run-id>
-    --root <task workspace> --prompt "<task>"
-    --summary runs/<run-id>/summary.json --approve <tool>,<tool>
+    --root <task workspace> --permissions auto-edit
+    run "<task>" --summary runs/<run-id>/summary.json
 ```
 
-- `--check-config` with the same options before any run reports every
+- `rah config check` with the same options before any run reports every
   configuration problem and starts nothing (ADR 0059). It does not check API
   keys or programs, which are found only at start.
 - `--summary` writes how the run ended (`outcome`, `error`), `wall_ms`, model
@@ -64,14 +64,16 @@ rah --config runs/<run-id>/rah.toml --data-dir runs/<run-id>
   `uncertain` or have no recorded result. It never contains a price; convert
   tokens with the provider's prices.
 - The session id is on the first line of standard output (`session <id>`).
-- `--approve` lets the named tools run without a person answering. Any
-  other tool the policy asks about is answered from standard input, and
-  denied when there is none.
+- `--permissions` sets what runs without a person answering: `auto-edit`
+  lets file writes run and still asks before programs; `full` lets every
+  assigned tool run. To let only some tools run, list them in the policy's
+  `approve` key in the run's `rah.toml`. Any other tool the policy asks about
+  is answered from standard input, and denied when there is none.
 
 ## Reading the run back
 
 ```text
-rah --data-dir runs/<run-id> --session <id> --export trace
+rah --data-dir runs/<run-id> sessions export <id> --format trace
 ```
 
 prints the session in the line grammar harness2 reads: `[USER]`,
@@ -79,7 +81,7 @@ prints the session in the line grammar harness2 reads: `[USER]`,
 `[OBSERVATION ERROR]` and `[ERROR]`, with arguments cut at 400 characters
 and other text at 50 000, each cut followed by the number of characters left
 out. A result whose effect is uncertain says so, and a call with no recorded
-result shows as an `[OBSERVATION ERROR]`. `--export json` gives every record
+result shows as an `[OBSERVATION ERROR]`. `--format json` gives every record
 for an adapter that renders its own format.
 
 Deliverables are whatever the task wrote in the workspace (`--root`).

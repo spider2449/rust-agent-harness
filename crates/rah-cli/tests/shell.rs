@@ -65,7 +65,7 @@ fn run(config: &std::path::Path, prompt: &str, answer: Option<&str>) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rah"))
         .arg("--config")
         .arg(config)
-        .args(["--prompt", prompt])
+        .args(["run", prompt])
         .stdin(if answer.is_some() {
             Stdio::piped()
         } else {
@@ -144,12 +144,11 @@ fn programs_outside_allow_programs_never_start() {
 }
 
 #[test]
-fn the_shell_flag_enables_shell_exec_on_a_preset() {
+fn the_shell_feature_enables_shell_exec() {
     let dir = TempDir::new("shell-flag");
     let run_flag_with = |flag_args: &[&str], prompt: &str, answer: &str| {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rah"))
-            .args(["--preset", "dev", "--prompt", prompt, "--session-dir"])
-            .arg(dir.sessions())
+            .args(["--model", "mock", "run", prompt])
             .arg("--root")
             .arg(dir.workspace())
             .args(flag_args)
@@ -239,9 +238,9 @@ use = "frontend-cli"
 }
 
 #[test]
-fn list_features_names_every_feature() {
+fn features_names_every_feature() {
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .arg("--list-features")
+        .arg("features")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

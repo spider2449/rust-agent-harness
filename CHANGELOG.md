@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Breaking:** `rah` takes commands instead of mode flags (ADR 0067). The
+  old flags are removed without aliases:
+
+  | removed | now |
+  | --- | --- |
+  | `--prompt "<text>"` | `rah run "<text>"` |
+  | `--prompt ... --session <id>` | `rah run "<text>" --session <id>` |
+  | `--summary <file>` | `rah run "<text>" --summary <file>` |
+  | `--web`, `--bind`, `--mode` | `rah web [--bind ...] [--mode ...]` |
+  | `--session <id> --export <format>` | `rah sessions export <id> --format <format>` |
+  | `--show-config` | `rah config show` (`--plugins` for the plugin list) |
+  | `--check-config` | `rah config check` |
+  | `--init-config [--preset <name>]` | `rah config init --model <provider>/<id>` |
+  | `--list-features` | `rah features` |
+  | `--preset <name>` | `--model <provider>/<id>`; `extends = "<name>"` in a file |
+  | `--approve <tools>` | `--permissions auto-edit\|full`, or `approve` in the policy's configuration |
+  | `--session-dir <dir>` | `dir` of `session-jsonl` in a `[[plugin]]` entry |
+
+  `--model`, `--permissions`, `--root`, `--with`, `--config` and `--data-dir`
+  are accepted before or after a command, and `rah-desktop` takes the same
+  ones. New: `rah sessions list`, `rah config edit`. `rah config show` prints
+  the model, permissions, root and features with where each came from; the
+  plugin list needs `--plugins`. `config init` writes a short file of user
+  keys instead of the whole preset.
 - `rah.toml` takes user keys that describe intent instead of plugins
   (ADR 0067): `model = "<provider>/<model id>"` (providers `anthropic`,
   `openai`, `deepseek`, `openai-compatible`, `llamacpp`, `mock`),

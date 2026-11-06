@@ -284,6 +284,76 @@ impl Distribution {
         Ok(())
     }
 
+    /// The model as `<provider>/<id>` (or `<provider>`), read back from the
+    /// model plugin; the plugin kind when no provider matches its
+    /// configuration; `None` without a model plugin.
+    pub fn model_label(&self) -> Option<String> {
+        let spec = self.plugin.iter().find(|spec| is_model_kind(&spec.kind))?;
+        let matches = |provider: &&Provider| {
+            provider.kind == spec.kind
+                && provider.preset.iter().all(|(key, value)| {
+                    spec.config.get(*key).and_then(Value::as_str) == Some(*value)
+                })
+        };
+        // A provider with a preset is more specific than one without.
+        let provider = PROVIDERS
+            .iter()
+            .filter(matches)
+            .max_by_key(|provider| provider.preset.len());
+        let Some(provider) = provider else {
+            return Some(spec.kind.clone());
+        };
+        Some(match spec.config.get("model").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => format!("{}/{id}", provider.name),
+            _ => provider.name.to_owned(),
+        })
+    }
+
+    /// The permissions mode of the first policy: the one last applied, else
+    /// the mode its `allow` and `ask` match; `custom` when none does and
+    /// `none` without a policy.
+    pub fn permissions_label(&self) -> String {
+        let Some(policy) = self
+            .plugin
+            .iter()
+            .find(|spec| spec.kind == "policy-authority")
+        else {
+            return "none (no policy: UNGUARDED)".to_owned();
+        };
+        if let Some(permissions) = self.permissions {
+            return permissions.name().to_owned();
+        }
+        let levels = |key: &str, default: &[&str]| -> Vec<String> {
+            match policy.config.get(key).and_then(Value::as_array) {
+                Some(list) => list
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                None => default.iter().map(|level| (*level).to_owned()).collect(),
+            }
+        };
+        // The policy's own defaults are those of `ask`.
+        let allow = levels("allow", Permissions::Ask.allow());
+        let ask = levels("ask", Permissions::Ask.ask());
+        Permissions::ALL
+            .into_iter()
+            .find(|mode| allow == mode.allow() && ask == mode.ask())
+            .map_or_else(|| "custom".to_owned(), |mode| mode.name().to_owned())
+    }
+
+    /// The workspace root of the first workspace plugin that has one.
+    pub fn root_label(&self) -> Option<String> {
+        crate::WORKSPACE_PLUGINS.iter().find_map(|kind| {
+            self.plugin
+                .iter()
+                .find(|spec| spec.kind == *kind)
+                .and_then(|spec| spec.config.get("root"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    }
+
     /// The `root` of the user keys, applied again after features so that the
     /// workspace plugins they mount get it too.
     pub fn user_root(&self) -> Option<&Path> {
@@ -294,11 +364,99 @@ impl Distribution {
     }
 }
 
+/// A configuration file with only user keys, as `rah config init` writes it.
+/// The values are checked first, so the file it writes always parses.
+pub fn user_file_text(
+    model: &str,
+    permissions: Permissions,
+    root: Option<&str>,
+    features: &[String],
+) -> Result<String, String> {
+    model_plugin(model)?;
+    let quote = |text: &str| Value::String(text.to_owned()).to_string();
+    let mut text = String::from(
+        "# RAH configuration, written by `rah config init`.\n\
+         # `rah config show` prints what runs; docs/CONFIGURATION.md lists every key.\n\
+         # Command-line options override these values for one run.\n\n",
+    );
+    text.push_str("# <provider>/<model id>: anthropic, openai, deepseek, openai-compatible,\n");
+    text.push_str("# llamacpp or mock. API keys stay in environment variables.\n");
+    text.push_str(&format!("model = {}\n\n", quote(model)));
+    text.push_str("# read-only | ask | auto-edit | full\n");
+    text.push_str(&format!("permissions = {}\n", quote(permissions.name())));
+    match root {
+        Some(root) => text.push_str(&format!("\nroot = {}\n", quote(root))),
+        None => text.push_str("\n# Workspace folder; the current directory when not set.\n# root = \"D:/work/project\"\n"),
+    }
+    let features: Vec<String> = features.iter().map(|feature| quote(feature)).collect();
+    text.push_str(&format!(
+        "\n# Opt-in capabilities; `rah features` lists them.\nfeatures = [{}]\n",
+        features.join(", ")
+    ));
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn labels_read_the_composition_back() {
+        let mut distribution = Distribution::preset("deepseek").unwrap();
+        assert_eq!(distribution.model_label().as_deref(), Some("deepseek"));
+        assert_eq!(distribution.permissions_label(), "ask");
+        assert_eq!(distribution.root_label().as_deref(), Some("."));
+        distribution
+            .set_model("openai-compatible/m", &Map::new())
+            .unwrap();
+        // The `provider` key stays, so it still reads as DeepSeek.
+        assert_eq!(distribution.model_label().as_deref(), Some("deepseek/m"));
+        distribution.set_model("anthropic/x", &Map::new()).unwrap();
+        assert_eq!(distribution.model_label().as_deref(), Some("anthropic/x"));
+        distribution.set_permissions(Permissions::Full).unwrap();
+        assert_eq!(distribution.permissions_label(), "full");
+
+        let custom = Distribution::parse(
+            "extends = \"dev\"\n[[plugin]]\nuse = \"policy-authority\"\nconfig = { allow = [\"none\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(custom.permissions_label(), "custom");
+        let auto = Distribution::parse(
+            "extends = \"dev\"\n[[plugin]]\nuse = \"policy-authority\"\n\
+             config = { allow = [\"none\", \"read\", \"write\"], ask = [\"execute\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(auto.permissions_label(), "auto-edit");
+        let minimal = Distribution::preset("minimal").unwrap();
+        assert!(minimal.permissions_label().contains("UNGUARDED"));
+    }
+
+    #[test]
+    fn the_init_file_parses_back_to_its_values() {
+        let text = user_file_text(
+            "anthropic/claude-sonnet-5-5",
+            Permissions::AutoEdit,
+            Some("D:\\work \"x\""),
+            &["web-search".to_owned(), "shell=git".to_owned()],
+        )
+        .unwrap();
+        let distribution = Distribution::parse(&text).unwrap();
+        assert_eq!(
+            distribution.user,
+            Some(UserSettings {
+                model: Some("anthropic/claude-sonnet-5-5".into()),
+                permissions: Some(Permissions::AutoEdit),
+                root: Some("D:\\work \"x\"".into()),
+            })
+        );
+        assert_eq!(distribution.features, ["web-search", "shell=git"]);
+        let bare = user_file_text("mock", Permissions::Ask, None, &[]).unwrap();
+        let distribution = Distribution::parse(&bare).unwrap();
+        assert_eq!(distribution.user.unwrap().root, None);
+        assert!(user_file_text("nope/x", Permissions::Ask, None, &[]).is_err());
+    }
 
     fn spec<'a>(distribution: &'a Distribution, kind: &str) -> &'a PluginSpec {
         distribution

@@ -177,11 +177,10 @@ config = {{ prompt = "say hello" }}
 }
 
 #[test]
-fn deepseek_preset_without_a_key_runs_but_reports_the_inactive_model() {
+fn deepseek_without_a_key_runs_but_reports_the_inactive_model() {
     let dir = TempDir::new("deepseek-no-key");
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .args(["--preset", "deepseek", "--prompt", "hi", "--session-dir"])
-        .arg(dir.sessions())
+        .args(["--model", "deepseek", "run", "hi"])
         .arg("--root")
         .arg(dir.workspace())
         .env_remove("DEEPSEEK_API_KEY")

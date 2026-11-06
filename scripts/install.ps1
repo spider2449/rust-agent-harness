@@ -7,7 +7,7 @@ Installs RAH from this repository: `rah` (Web UI and terminal) and
 Runs `cargo install --locked` for `crates/rah-cli` and `crates/rah-desktop`
 into cargo's bin directory. Run it again after updating the repository: the
 Web UI is compiled into both binaries, so an old install keeps serving the old
-UI. Afterwards `rah --web` and `rah-desktop` work from any directory (the file
+UI. Afterwards `rah web` and `rah-desktop` work from any directory (the file
 tools then use that directory as their root).
 
 With -Shortcuts it also adds Start Menu entries "RAH Web" (starts the Web UI
@@ -110,7 +110,7 @@ if ($Shortcuts) {
         @'
 $ErrorActionPreference = "Continue"
 $opened = $false
-& rah --web @args 2>&1 | ForEach-Object {
+& rah web @args 2>&1 | ForEach-Object {
     $line = "$_"
     Write-Host $line
     if (-not $opened -and $line -match '(http://\S+/#token=[0-9a-f]+)') {
@@ -138,4 +138,4 @@ $opened = $false
     Write-Host "Start Menu entries added under $menuDir"
 }
 
-Write-Host "Run: rah --web   |   rah-desktop"
+Write-Host "Run: rah web   |   rah-desktop"

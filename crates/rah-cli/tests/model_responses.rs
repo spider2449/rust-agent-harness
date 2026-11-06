@@ -165,19 +165,10 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
 }
 
 #[test]
-fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
+fn openai_without_a_key_runs_but_reports_the_inactive_model() {
     let dir = TempDir::new("openai-no-key");
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .args([
-            "--preset",
-            "openai",
-            "--model",
-            "openai/gpt-test",
-            "--prompt",
-            "hi",
-            "--session-dir",
-        ])
-        .arg(dir.sessions())
+        .args(["--model", "openai/gpt-test", "run", "hi"])
         .arg("--root")
         .arg(dir.workspace())
         .env_remove("OPENAI_API_KEY")
@@ -196,7 +187,7 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
     assert!(stdout.contains("no model provider is mounted"), "{stdout}");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rah"))
-        .args(["--preset", "dev", "--model", "x", "--prompt", "hi"])
+        .args(["--model", "x", "run", "hi"])
         .env("RAH_HOME", dir.0.join("home"))
         .stdin(Stdio::null())
         .output()

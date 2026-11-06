@@ -22,8 +22,14 @@ impl TempDir {
         Self(path)
     }
 
+    /// The data home the binary tests give `rah` (`RAH_HOME`).
+    pub fn home(&self) -> PathBuf {
+        self.0.join("home")
+    }
+
+    /// The session directory: the data home's, where `rah` writes them.
     pub fn sessions(&self) -> PathBuf {
-        self.0.join("sessions")
+        self.home().join("sessions")
     }
 
     pub fn storage(&self) -> PathBuf {

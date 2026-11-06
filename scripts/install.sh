@@ -125,4 +125,4 @@ case ":$PATH:" in
 esac
 
 echo "Installed to $bin"
-echo "Run: rah --web   |   rah-web   |   rah-desktop"
+echo "Run: rah web   |   rah-web   |   rah-desktop"

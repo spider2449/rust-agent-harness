@@ -1,156 +1,258 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
+    process::Command as Process,
     sync::{Arc, Mutex},
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rah_api::{
     Kernel, PluginStatus,
     host::{ExitRequested, FrontendListening, HostNotice, Interrupt},
     tools::ToolInvoker,
 };
 use rah_cli::{
-    Distribution, Permissions, USER_CONFIG, boot, default_data_home, select_distribution,
+    Distribution, Permissions, boot,
+    cli::{GlobalArgs, absolute},
+    is_model_kind, user_file_text,
 };
 use serde_json::Value;
 
 /// RAH: a plugin-kernel agent harness.
+///
+/// Without a command, `rah` opens the terminal REPL. What runs comes from
+/// `rah.toml` in the data directory (`rah config show` prints it); the
+/// options below override it for one run.
 #[derive(Debug, Parser)]
 #[command(
     name = "rah",
     version,
-    after_help = "Other ways to run RAH:\n  \
-        rah --web            Web UI in the browser\n  \
-        rah-desktop          Web UI in a native window (a separate program, same options\n                       \
-        --preset --config --data-dir --root --mode --with;\n                       \
-        install it with `cargo install --path crates/rah-desktop`)\n  \
-        scripts\\start.ps1 -Desktop   build and start it from the source tree"
+    after_help = "Examples:\n  \
+        rah config init --model anthropic/claude-sonnet-5-5\n  \
+        rah\n  \
+        rah run \"summarize README.md\" --permissions read-only\n  \
+        rah web --with web-search\n  \
+        rah-desktop          the Web UI in a native window (same global options)"
 )]
-struct Args {
-    /// Built-in preset to run (ignored with --config): default (llama.cpp),
-    /// dev (mock model), minimal (mock model, no policy), openai, anthropic,
-    /// deepseek (DEEPSEEK_API_KEY).
-    /// Without --preset and --config, `rah.toml` in the data directory runs
-    /// when it exists, otherwise `default`.
-    #[arg(long)]
-    preset: Option<String>,
-    /// Model to run, as `<provider>/<model id>` (or `<provider>` for its
-    /// default model): anthropic, openai, deepseek, llamacpp, mock. Example:
-    /// `--model anthropic/claude-sonnet-5-5`.
-    #[arg(long)]
-    model: Option<String>,
-    /// What tools may do without asking: read-only, ask (default),
-    /// auto-edit (writes run, programs ask) or full (every assigned tool
-    /// runs without asking).
-    #[arg(long)]
-    permissions: Option<String>,
-    /// Distribution file listing the plugins to mount.
-    #[arg(long)]
-    config: Option<PathBuf>,
-    /// Serve the Web UI (frontend-web) instead of the terminal REPL.
-    #[arg(long)]
-    web: bool,
-    /// Web UI address, loopback only (frontend-web); port 0 picks one.
-    #[arg(long)]
-    bind: Option<String>,
-    /// Mode to enter at start (frontend-web), such as `daily` or `coding`,
-    /// instead of the last one used.
-    #[arg(long)]
-    mode: Option<String>,
-    /// Run one prompt and exit (frontend-cli).
-    #[arg(long)]
-    prompt: Option<String>,
-    /// Resume this session (frontend-cli).
-    #[arg(long)]
+struct Cli {
+    #[command(flatten)]
+    global: GlobalArgs,
+    /// Resume this session in the REPL.
+    #[arg(long, value_name = "ID")]
     session: Option<String>,
-    /// Write the --session to standard output as `md`, `json` or `trace`
-    /// (one tagged line per record, for tools that read agent runs) and exit
-    /// without running a turn (frontend-cli).
-    #[arg(long, value_name = "FORMAT", requires = "session", conflicts_with_all = ["prompt", "web"])]
-    export: Option<String>,
-    /// With --prompt: write a JSON summary of the run to this file, even when
-    /// the turn fails: how it ended, wall time, model requests, summed token
-    /// usage and the turn's tool calls (frontend-cli).
-    #[arg(long, value_name = "FILE", requires = "prompt")]
-    summary: Option<PathBuf>,
-    /// Data directory for sessions, storage, memory, skills and telemetry;
-    /// relative data paths in the configuration resolve against it.
-    /// Default: RAH_HOME, else `.rah` in the user's home directory.
-    #[arg(long)]
-    data_dir: Option<PathBuf>,
-    /// Session log directory (session-jsonl), instead of `sessions` in the
-    /// data directory.
-    #[arg(long)]
-    session_dir: Option<PathBuf>,
-    /// Workspace root for file tools and processes (tools-builtin,
-    /// tools-repo-write, sandbox-process, sandbox-os).
-    #[arg(long)]
-    root: Option<PathBuf>,
-    /// Turn on an opt-in feature on top of any preset or config, such as
-    /// `--with web-search` or `--with shell=git,cargo`; repeatable. See
-    /// --list-features.
-    #[arg(long = "with", value_name = "FEATURE")]
-    with: Vec<String>,
-    /// Run these tools without asking, such as `--approve repo.create-file`
-    /// or `--approve repo.create-file,repo.edit-files`; repeatable. Exact
-    /// tool names only; the policy still denies a tool it has no assignment
-    /// for. For this run only.
-    #[arg(long, value_name = "TOOL")]
-    approve: Vec<String>,
-    /// Print what would run (plugins in mount order, their configuration, the
-    /// features applied and the Web UI's stored overrides) and exit.
-    #[arg(long)]
-    show_config: bool,
-    /// Check every plugin's configuration as a start would, report every
-    /// problem and exit (2 when there is one). Starts no plugin or program.
-    #[arg(long)]
-    check_config: bool,
-    /// List the opt-in features and exit.
-    #[arg(long)]
-    list_features: bool,
-    /// Write the preset (--preset, else `default`) as a distribution file and
-    /// exit: to --config when given, else `rah.toml` in the data directory.
-    /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "permissions", "web","bind", "mode", "prompt", "session", "export", "summary", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
-    init_config: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-/// `path` made absolute against the current directory, so a relative path
-/// given on the command line means what it says where it was typed.
-fn absolute(path: &Path) -> Result<PathBuf, String> {
-    std::path::absolute(path).map_err(|error| format!("`{}`: {error}", path.display()))
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run one prompt and exit.
+    Run {
+        prompt: String,
+        /// Continue this session instead of starting one.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// Write a JSON summary of the run to this file, even when the turn
+        /// fails: how it ended, wall time, model requests, summed token usage
+        /// and the turn's tool calls.
+        #[arg(long, value_name = "FILE")]
+        summary: Option<PathBuf>,
+    },
+    /// Serve the Web UI in the browser.
+    Web {
+        /// Address to listen on, loopback only; port 0 picks one.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Mode to enter, such as `daily` or `coding`, instead of the last one.
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// List or export sessions.
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+    /// Show, check, write or edit the configuration file.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// List the opt-in features (`--with` or `features = [...]`).
+    Features,
 }
 
-/// `--data-dir`, else the default data home; `.rah` in the current directory
-/// only when no home directory is known.
-fn data_home(args: &Args) -> Result<PathBuf, String> {
-    let home = args
-        .data_dir
-        .clone()
-        .or_else(default_data_home)
-        .unwrap_or_else(|| PathBuf::from(".rah"));
-    absolute(&home)
+#[derive(Debug, Subcommand)]
+enum SessionsCommand {
+    /// List the sessions, the most recent first.
+    List,
+    /// Write a session to standard output.
+    Export {
+        id: String,
+        /// `md`, `json` or `trace` (one tagged line per record, for tools
+        /// that read agent runs).
+        #[arg(long, default_value = "md")]
+        format: String,
+    },
 }
 
-/// `--init-config`: writes the preset's distribution file; returns its path.
-fn init_config(args: &Args) -> Result<PathBuf, String> {
-    let path = match &args.config {
-        Some(path) => absolute(path)?,
-        None => data_home(args)?.join(USER_CONFIG),
-    };
-    let preset = args.preset.as_deref().unwrap_or("default");
-    let text = rah_cli::preset_text(preset).map_err(|error| error.to_string())?;
-    let text = format!(
-        "# RAH distribution, written by `rah --init-config` from the `{preset}` preset.\n\
-         # Without --preset and --config, `rah` runs `rah.toml` in the data directory.\n\
-         # Settings saved in the Web UI are kept in `storage` and replace a plugin's\n\
-         # configuration from this file at the next start.\n\
-         # This file lists every plugin. To keep only your changes instead, replace\n\
-         # it with `extends = \"{preset}\"` and the plugins you change or add\n\
-         # (see `remove` and `replace` in the README).\n\
-         # Opt-in features (see `rah --list-features`) go here, before the first plugin:\n\
-         # features = [\"shell=git\", \"web-search\"]\n{text}"
-    );
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print what would run and where each value comes from.
+    Show {
+        /// Also list every plugin with its configuration.
+        #[arg(long)]
+        plugins: bool,
+    },
+    /// Check every plugin's configuration as a start would; exits with 2 on
+    /// a problem. Starts no plugin or program.
+    Check,
+    /// Write a configuration file from --model, --permissions, --root and
+    /// --with. An existing file is never overwritten.
+    Init,
+    /// Open the configuration file in $VISUAL, $EDITOR or the system editor.
+    Edit,
+}
+
+fn fail(message: impl std::fmt::Display) -> i32 {
+    eprintln!("rah: {message}");
+    2
+}
+
+/// Sets `key` of every plugin of `kind`, or explains which plugin `option`
+/// needs.
+fn set(
+    distribution: &mut Distribution,
+    option: &str,
+    kind: &str,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    if distribution.set_config(kind, key, value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{option} needs a `{kind}` plugin in the configuration"
+        ))
+    }
+}
+
+/// Points the frontend at what `command` asks for. Returns whether the run
+/// only reads sessions, so no model is needed and nothing is guarded.
+fn frontend(
+    distribution: &mut Distribution,
+    session: Option<&str>,
+    command: Option<&Command>,
+) -> Result<bool, String> {
+    let text = |value: &str| Value::String(value.to_owned());
+    match command {
+        None => {
+            if let Some(session) = session {
+                set(
+                    distribution,
+                    "--session",
+                    "frontend-cli",
+                    "session",
+                    text(session),
+                )?;
+            }
+            Ok(false)
+        }
+        Some(Command::Run {
+            prompt,
+            session,
+            summary,
+        }) => {
+            set(distribution, "run", "frontend-cli", "prompt", text(prompt))?;
+            if let Some(session) = session {
+                set(
+                    distribution,
+                    "--session",
+                    "frontend-cli",
+                    "session",
+                    text(session),
+                )?;
+            }
+            if let Some(summary) = summary {
+                let path = absolute(summary)?.display().to_string();
+                set(
+                    distribution,
+                    "--summary",
+                    "frontend-cli",
+                    "summary",
+                    text(&path),
+                )?;
+            }
+            Ok(false)
+        }
+        Some(Command::Web { bind, mode }) => {
+            if !distribution.use_web_frontend() {
+                return Err("web needs a `frontend-cli` or `frontend-web` plugin".into());
+            }
+            if let Some(bind) = bind {
+                set(distribution, "--bind", "frontend-web", "bind", text(bind))?;
+            }
+            if let Some(mode) = mode {
+                set(distribution, "--mode", "frontend-web", "mode", text(mode))?;
+            }
+            Ok(false)
+        }
+        Some(Command::Sessions { command }) => {
+            match command {
+                SessionsCommand::List => {
+                    set(
+                        distribution,
+                        "sessions list",
+                        "frontend-cli",
+                        "list",
+                        Value::Bool(true),
+                    )?;
+                }
+                SessionsCommand::Export { id, format } => {
+                    set(
+                        distribution,
+                        "sessions export",
+                        "frontend-cli",
+                        "session",
+                        text(id),
+                    )?;
+                    set(
+                        distribution,
+                        "sessions export",
+                        "frontend-cli",
+                        "export",
+                        text(format),
+                    )?;
+                }
+            }
+            // Reading sessions needs no model, so no API key either.
+            distribution
+                .plugin
+                .retain(|spec| !is_model_kind(&spec.kind));
+            Ok(true)
+        }
+        Some(Command::Config { .. } | Command::Features) => Ok(false),
+    }
+}
+
+/// `rah config init`: writes a file with user keys only.
+fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
+    let model = global.model.as_deref().ok_or(
+        "config init needs --model, such as `rah config init --model anthropic/claude-sonnet-5-5`",
+    )?;
+    let permissions = global
+        .permissions
+        .as_deref()
+        .map(str::parse::<Permissions>)
+        .transpose()
+        .map_err(|error| format!("--permissions: {error}"))?
+        .unwrap_or(Permissions::Ask);
+    let root = global
+        .root
+        .as_deref()
+        .map(absolute)
+        .transpose()?
+        .map(|root| root.display().to_string());
+    let text = user_file_text(model, permissions, root.as_deref(), &global.with)?;
+    let path = global.config_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
@@ -162,7 +264,7 @@ fn init_config(args: &Args) -> Result<PathBuf, String> {
         .open(&path)
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::AlreadyExists => format!(
-                "`{}` already exists; remove or rename it first",
+                "`{}` already exists; edit it with `rah config edit`, or remove it first",
                 path.display()
             ),
             _ => format!("cannot create `{}`: {error}", path.display()),
@@ -172,171 +274,117 @@ fn init_config(args: &Args) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn distribution(args: &Args) -> Result<Distribution, String> {
-    let home = data_home(args)?;
-    let (mut distribution, user_config) =
-        select_distribution(args.config.as_deref(), args.preset.as_deref(), &home)?;
-    if let Some(path) = user_config {
-        eprintln!("rah: using `{}`", path.display());
+/// `rah config edit`: runs the editor on the configuration file and returns
+/// its exit code.
+fn edit(global: &GlobalArgs) -> Result<i32, String> {
+    let path = global.config_path()?;
+    if !path.is_file() {
+        return Err(format!(
+            "`{}` does not exist; write one with `rah config init --model <provider>/<id>`",
+            path.display()
+        ));
     }
-    let session_dir = args.session_dir.as_deref().map(absolute).transpose()?;
-    let summary = args.summary.as_deref().map(absolute).transpose()?;
-    if args.web {
-        if args.prompt.is_some() || args.session.is_some() {
-            return Err("--web cannot be combined with --prompt or --session".into());
-        }
-        if !distribution.replace("frontend-cli", "frontend-web") {
-            return Err("--web needs a `frontend-cli` plugin to replace".into());
-        }
-    }
-    let overrides = [
-        ("frontend-web", "bind", args.bind.clone().map(Value::String)),
-        ("frontend-web", "mode", args.mode.clone().map(Value::String)),
-        (
-            "frontend-cli",
-            "prompt",
-            args.prompt.clone().map(Value::String),
-        ),
-        (
-            "frontend-cli",
-            "session",
-            args.session.clone().map(Value::String),
-        ),
-        (
-            "frontend-cli",
-            "export",
-            args.export.clone().map(Value::String),
-        ),
-        (
-            "frontend-cli",
-            "summary",
-            summary.map(|p| Value::String(p.display().to_string())),
-        ),
-        (
-            "session-jsonl",
-            "dir",
-            session_dir.map(|p| Value::String(p.display().to_string())),
-        ),
-    ];
-    for (kind, key, value) in overrides {
-        if let Some(value) = value
-            && !distribution.set_config(kind, key, value)
-        {
-            return Err(format!(
-                "--{key} needs a `{kind}` plugin in the distribution"
-            ));
-        }
-    }
-    // Features first: `--root` then reaches the workspace plugins they mount
-    // (`format`, `lsp`); applied the other way round, those keep the current
-    // directory as their root.
-    for request in &args.with {
-        distribution.enable(request)?;
-    }
-    if let Some(root) = &args.root {
-        if !distribution.set_root(root) {
-            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
-        }
-    } else if let Some(root) = distribution.user_root().map(Path::to_path_buf) {
-        // Again, for the workspace plugins `--with` mounted.
-        distribution.set_root(&root);
-    }
-    if let Some(permissions) = &args.permissions {
-        let permissions = permissions
-            .parse::<Permissions>()
-            .map_err(|error| format!("--permissions: {error}"))?;
-        distribution.set_permissions(permissions)?;
-    }
-    if !args.approve.is_empty() {
-        distribution.approve(&args.approve)?;
-    }
-    if let Some(model) = &args.model {
-        distribution
-            .set_model(model, &serde_json::Map::new())
-            .map_err(|error| format!("--model: {error}"))?;
-    }
-    if distribution.user.is_some() && !distribution.has_model() {
+    let editor = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.to_owned());
+    // A fixed program and an argument vector, never a shell.
+    let mut words = editor.split_whitespace();
+    let program = words.next().ok_or("the editor command is empty")?;
+    let status = Process::new(program)
+        .args(words)
+        .arg(&path)
+        .status()
+        .map_err(|error| format!("cannot start the editor `{program}`: {error}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// What clap cannot say: `--session` before a command belongs to the REPL.
+fn validate(cli: &Cli) -> Result<(), String> {
+    if cli.session.is_some() && cli.command.is_some() {
         return Err(
-            "no model is configured: add `model = \"<provider>/<model id>\"` to the \
-             configuration file or pass --model, such as --model anthropic/claude-sonnet-5-5"
+            "`--session` before a command resumes the REPL; use `rah run --session <id> ...` \
+             or `rah sessions export <id>`"
                 .into(),
         );
     }
-    Ok(distribution)
+    Ok(())
 }
 
-/// Where the distribution comes from, in the order `select_distribution` tries.
-fn source(args: &Args, home: &Path) -> String {
-    let user_config = home.join(USER_CONFIG);
-    match (&args.config, &args.preset) {
-        (Some(path), _) => format!("--config `{}`", path.display()),
-        (None, Some(preset)) => format!("--preset `{preset}`"),
-        (None, None) if user_config.is_file() => format!("`{}`", user_config.display()),
-        (None, None) => "preset `default`".to_owned(),
+async fn run(cli: Cli) -> i32 {
+    if let Err(message) = validate(&cli) {
+        return fail(message);
     }
-}
-
-async fn run(args: Args) -> i32 {
-    if args.list_features {
-        print!("{}", rah_cli::list_features());
-        return 0;
-    }
-    if args.show_config {
-        let result = data_home(&args).and_then(|home| {
-            distribution(&args).map(|distribution| {
-                rah_cli::show_config(&distribution, &source(&args, &home), &home)
-            })
-        });
-        return match result {
-            Ok(text) => {
-                print!("{text}");
-                0
-            }
-            Err(message) => {
-                eprintln!("rah: {message}");
-                2
-            }
-        };
-    }
-    if args.check_config {
-        let distribution = match distribution(&args) {
-            Ok(distribution) => distribution,
-            Err(message) => {
-                eprintln!("rah: {message}");
-                return 2;
-            }
-        };
-        let problems = rah_cli::check_distribution(&distribution);
-        if problems.is_empty() {
-            println!(
-                "configuration ok: {} plugins (keys, values and ids; API keys \
-                 and programs are found only at start)",
-                distribution.plugin.len()
-            );
+    let global = &cli.global;
+    match &cli.command {
+        Some(Command::Features) => {
+            print!("{}", rah_cli::list_features());
             return 0;
         }
-        eprintln!("rah: {}", rah_cli::BootError::InvalidConfig(problems));
-        return 2;
-    }
-    if args.init_config {
-        return match init_config(&args) {
-            Ok(path) => {
-                eprintln!("rah: wrote `{}`", path.display());
-                0
-            }
-            Err(message) => {
-                eprintln!("rah: {message}");
-                2
-            }
-        };
-    }
-    let distribution = match distribution(&args) {
-        Ok(distribution) => distribution,
-        Err(message) => {
-            eprintln!("rah: {message}");
-            return 2;
+        Some(Command::Config { command }) => {
+            return match command {
+                ConfigCommand::Init => match init(global) {
+                    Ok(path) => {
+                        eprintln!("rah: wrote `{}`", path.display());
+                        0
+                    }
+                    Err(message) => fail(message),
+                },
+                ConfigCommand::Edit => edit(global).unwrap_or_else(fail),
+                ConfigCommand::Show { plugins } => match global.prepare(false) {
+                    Ok(prepared) => {
+                        print!("{}", rah_cli::show(&prepared, *plugins));
+                        0
+                    }
+                    Err(message) => fail(message),
+                },
+                ConfigCommand::Check => {
+                    let prepared = match global.prepare(true) {
+                        Ok(prepared) => prepared,
+                        Err(message) => return fail(message),
+                    };
+                    let problems = rah_cli::check_distribution(&prepared.distribution);
+                    if problems.is_empty() {
+                        println!(
+                            "configuration ok: {} plugins (keys, values and ids; API keys \
+                             and programs are found only at start)",
+                            prepared.distribution.plugin.len()
+                        );
+                        0
+                    } else {
+                        fail(rah_cli::BootError::InvalidConfig(problems))
+                    }
+                }
+            };
         }
+        _ => {}
+    }
+    let reads_sessions = matches!(cli.command, Some(Command::Sessions { .. }));
+    let prepared = match global.prepare(!reads_sessions) {
+        Ok(prepared) => prepared,
+        Err(message) => return fail(message),
     };
+    if let Some(file) = &prepared.file
+        && !reads_sessions
+    {
+        eprintln!("rah: using `{}`", file.display());
+    }
+    let mut distribution = prepared.distribution;
+    let quiet = match frontend(
+        &mut distribution,
+        cli.session.as_deref(),
+        cli.command.as_ref(),
+    ) {
+        Ok(quiet) => quiet,
+        Err(message) => return fail(message),
+    };
+    serve(&distribution, quiet).await
+}
+
+/// Boots `distribution` and runs until a frontend asks to exit. `quiet`
+/// skips the warnings about plugins and guards, for runs that only read.
+async fn serve(distribution: &Distribution, quiet: bool) -> i32 {
     let kernel = Kernel::new();
     let handle = kernel.handle();
     let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel::<i32>();
@@ -352,8 +400,10 @@ async fn run(args: Args) -> i32 {
     });
 
     // Something a plugin skips quietly but the user can act on (ADR 0057).
-    let _notices = handle.subscribe(|notice: &HostNotice| {
-        eprintln!("rah: {}: {}", notice.plugin, notice.message);
+    let _notices = handle.subscribe(move |notice: &HostNotice| {
+        if !quiet {
+            eprintln!("rah: {}: {}", notice.plugin, notice.message);
+        }
     });
 
     let _listening = handle.subscribe(|listening: &FrontendListening| {
@@ -363,10 +413,10 @@ async fn run(args: Args) -> i32 {
         );
     });
 
-    match boot(&kernel, &distribution).await {
+    match boot(&kernel, distribution).await {
         Ok(statuses) => {
             for (id, status) in statuses {
-                if status != PluginStatus::Active {
+                if status != PluginStatus::Active && !quiet {
                     eprintln!("rah: plugin `{id}` is not active: {status:?}");
                 }
             }
@@ -377,25 +427,19 @@ async fn run(args: Args) -> i32 {
             return 2;
         }
     }
-    if distribution.permissions == Some(Permissions::Full) {
-        eprintln!(
-            "rah: WARNING: permissions `full` - every tool with a permission assignment \
-             runs without asking."
-        );
-    }
-    if !args.approve.is_empty() {
-        // Already validated when the distribution was built.
-        let tools = rah_cli::approved_tools(&args.approve).unwrap_or_default();
-        eprintln!(
-            "rah: WARNING: --approve - these tools run without asking: {}.",
-            tools.join(", ")
-        );
-    }
-    if !ToolInvoker::new(handle.clone()).is_guarded() {
-        eprintln!(
-            "rah: WARNING: UNGUARDED - no tool policy plugin is mounted; \
-             model tool calls run without authorization."
-        );
+    if !quiet {
+        if distribution.permissions == Some(Permissions::Full) {
+            eprintln!(
+                "rah: WARNING: permissions `full` - every tool with a permission assignment \
+                 runs without asking."
+            );
+        }
+        if !ToolInvoker::new(handle.clone()).is_guarded() {
+            eprintln!(
+                "rah: WARNING: UNGUARDED - no tool policy plugin is mounted; \
+                 model tool calls run without authorization."
+            );
+        }
     }
 
     // Ctrl-C first lets a frontend cancel its running turn; it exits only
@@ -417,8 +461,52 @@ async fn run(args: Args) -> i32 {
 
 #[tokio::main]
 async fn main() {
-    let code = run(Args::parse()).await;
+    let code = run(Cli::parse()).await;
     // Exit without dropping the runtime: a pending terminal read must not
     // keep the process alive after every plugin has been shut down.
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn the_command_line_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn global_options_go_before_or_after_the_command() {
+        let before = Cli::try_parse_from(["rah", "--model", "mock", "run", "hi"]).unwrap();
+        let after = Cli::try_parse_from(["rah", "run", "hi", "--model", "mock"]).unwrap();
+        assert_eq!(before.global.model.as_deref(), Some("mock"));
+        assert_eq!(after.global.model.as_deref(), Some("mock"));
+        // `--session` of the REPL is not taken with a command.
+        let cli = Cli::try_parse_from(["rah", "--session", "x", "web"]).unwrap();
+        assert!(validate(&cli).unwrap_err().contains("`--session`"));
+        let repl = Cli::try_parse_from(["rah", "--session", "x"]).unwrap();
+        assert!(validate(&repl).is_ok());
+    }
+
+    #[test]
+    fn removed_options_are_refused() {
+        for removed in [
+            "--preset",
+            "--prompt",
+            "--web",
+            "--export",
+            "--show-config",
+            "--check-config",
+            "--init-config",
+            "--list-features",
+            "--approve",
+            "--session-dir",
+        ] {
+            let parsed = Cli::try_parse_from(["rah", removed, "x"]);
+            assert!(parsed.is_err(), "{removed}");
+        }
+    }
 }

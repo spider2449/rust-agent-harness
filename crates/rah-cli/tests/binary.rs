@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use common::TempDir;
 use rah_cli::DATA_HOME_ENV;
@@ -10,10 +10,36 @@ use rah_cli::DATA_HOME_ENV;
 /// The `rah` binary with its data home in `dir`, never the user's.
 fn rah(dir: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rah"));
+    command.stdin(Stdio::null()).env(DATA_HOME_ENV, dir.home());
     command
-        .stdin(Stdio::null())
-        .env(DATA_HOME_ENV, dir.0.join("home"));
-    command
+}
+
+/// `rah run <prompt>` with the mock model, rooted in the workspace.
+fn run_mock(dir: &TempDir, prompt: &str, extra: &[&str]) -> Output {
+    rah(dir)
+        .args(["--model", "mock", "run", prompt])
+        .args(extra)
+        .arg("--root")
+        .arg(dir.workspace())
+        .output()
+        .unwrap()
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn session_of(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session "))
+        .unwrap()
+        .to_owned()
+}
+
+fn write_home_config(dir: &TempDir, text: &str) {
+    std::fs::create_dir_all(dir.home()).unwrap();
+    std::fs::write(dir.home().join("rah.toml"), text).unwrap();
 }
 
 fn jsonl_files(dir: &std::path::Path) -> usize {
@@ -28,17 +54,11 @@ fn jsonl_files(dir: &std::path::Path) -> usize {
 }
 
 #[test]
-fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
+fn run_is_guarded_and_resumes_its_session() {
     let dir = TempDir::new("bin-dev");
-    let output = rah(&dir)
-        .args(["--preset", "dev", "--prompt", "hello", "--session-dir"])
-        .arg(dir.sessions())
-        .arg("--root")
-        .arg(dir.workspace())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = run_mock(&dir, "hello", &[]);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(
         output.status.success(),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -52,27 +72,9 @@ fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
     assert_eq!(jsonl_files(&dir.sessions()), 1);
 
     // Resume the same session from a new process.
-    let session = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("session "))
-        .unwrap()
-        .to_owned();
-    let output = rah(&dir)
-        .args([
-            "--preset",
-            "dev",
-            "--prompt",
-            "/notool again",
-            "--session",
-            &session,
-            "--session-dir",
-        ])
-        .arg(dir.sessions())
-        .arg("--root")
-        .arg(dir.workspace())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let session = session_of(&stdout);
+    let output = run_mock(&dir, "/notool again", &["--session", &session]);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.contains("you said: again (6 earlier items)"),
@@ -82,33 +84,36 @@ fn dev_preset_runs_a_guarded_prompt_and_resumes_its_session() {
 }
 
 #[test]
-fn export_writes_only_the_session_and_runs_no_turn() {
+fn sessions_list_and_export_need_no_model_and_run_no_turn() {
     let dir = TempDir::new("bin-export");
-    let run = |args: &[&str]| {
+    let output = run_mock(&dir, "hello", &[]);
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    let session = session_of(&stdout);
+    // The configuration names a model whose key is not set; reading sessions
+    // does not start it.
+    write_home_config(&dir, "model = \"anthropic/claude-x\"\n");
+    let sessions = |args: &[&str]| {
         let output = rah(&dir)
-            .args(["--preset", "dev"])
+            .env_remove("ANTHROPIC_API_KEY")
+            .arg("sessions")
             .args(args)
-            .arg("--session-dir")
-            .arg(dir.sessions())
-            .arg("--root")
-            .arg(dir.workspace())
             .output()
             .unwrap();
         (
             output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
+            text(&output.stdout),
+            text(&output.stderr),
         )
     };
-    let (code, stdout, _) = run(&["--prompt", "hello"]);
-    assert_eq!(code, Some(0), "{stdout}");
-    let session = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("session "))
-        .unwrap()
-        .to_owned();
 
-    let (code, trace, stderr) = run(&["--session", &session, "--export", "trace"]);
+    let (code, list, stderr) = sessions(&["list"]);
+    assert_eq!(code, Some(0), "{list}\n{stderr}");
+    assert!(list.starts_with(&session), "{list}");
+    assert!(list.contains("hello"), "{list}");
+    assert!(!stderr.contains("not active"), "{stderr}");
+
+    let (code, trace, stderr) = sessions(&["export", &session, "--format", "trace"]);
     assert_eq!(code, Some(0), "{trace}\n{stderr}");
     let lines: Vec<&str> = trace.lines().collect();
     assert_eq!(lines.first(), Some(&"[USER] hello"), "{trace}");
@@ -125,44 +130,34 @@ fn export_writes_only_the_session_and_runs_no_turn() {
         "{trace}"
     );
 
-    let (code, json, _) = run(&["--session", &session, "--export", "json"]);
+    let (code, json, _) = sessions(&["export", &session, "--format", "json"]);
     assert_eq!(code, Some(0), "{json}");
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["session"]["id"], session.as_str());
     // Exporting ran no turn: the records are those of the one prompt.
-    let (_, again, _) = run(&["--session", &session, "--export", "trace"]);
+    let (_, again, _) = sessions(&["export", &session, "--format", "trace"]);
     assert_eq!(again, trace);
+    let (code, markdown, _) = sessions(&["export", &session]);
+    assert_eq!(code, Some(0));
+    assert!(markdown.starts_with("# "), "{markdown}");
 
-    let (code, _, stderr) = run(&["--session", &session, "--export", "pdf"]);
+    let (code, _, stderr) = sessions(&["export", &session, "--format", "pdf"]);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("unknown export format `pdf`"), "{stderr}");
-    let (code, _, stderr) = run(&["--export", "md"]);
-    assert_eq!(code, Some(2), "{stderr}");
-    assert!(stderr.contains("--session"), "{stderr}");
 }
 
 #[test]
-fn summary_describes_a_prompt_run() {
+fn summary_describes_a_run() {
     let dir = TempDir::new("bin-summary");
     let summary = dir.0.join("summary.json");
-    let output = rah(&dir)
-        .args(["--preset", "dev", "--prompt", "hello", "--summary"])
-        .arg(&summary)
-        .arg("--session-dir")
-        .arg(dir.sessions())
-        .arg("--root")
-        .arg(dir.workspace())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let summary_arg = summary.display().to_string();
+    let output = run_mock(&dir, "hello", &["--summary", &summary_arg]);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    let session = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("session "))
-        .unwrap();
+    let session = session_of(&stdout);
     let text = std::fs::read_to_string(&summary).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(parsed["session"], session, "{text}");
+    assert_eq!(parsed["session"], session.as_str(), "{text}");
     assert_eq!(parsed["outcome"], "completed", "{text}");
     assert!(parsed["error"].is_null(), "{text}");
     assert!(parsed["model_requests"].as_u64().unwrap() >= 2, "{text}");
@@ -171,33 +166,20 @@ fn summary_describes_a_prompt_run() {
     assert_eq!(parsed["tools"]["unrecorded"], 0, "{text}");
     assert!(parsed["wall_ms"].is_u64(), "{text}");
     assert!(parsed["usage"]["reports"].is_u64(), "{text}");
-
-    let output = rah(&dir)
-        .args(["--preset", "dev", "--summary"])
-        .arg(&summary)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--prompt"));
 }
 
 #[test]
-fn minimal_preset_warns_that_it_is_unguarded() {
+fn a_composition_without_policy_warns_that_it_is_unguarded() {
     let dir = TempDir::new("bin-minimal");
+    write_home_config(&dir, "extends = \"minimal\"\n");
     let output = rah(&dir)
-        .args(["--preset", "minimal", "--prompt", "hello", "--session-dir"])
-        .arg(dir.sessions())
-        .arg("--root")
+        .args(["run", "hello", "--root"])
         .arg(dir.workspace())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "{stdout}
-{stderr}"
-    );
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stderr.contains("UNGUARDED"), "{stderr}");
     assert!(stdout.contains("echo returned: hello"), "{stdout}");
 }
@@ -220,7 +202,7 @@ config = { prompt = "hello" }
     )
     .unwrap();
     let output = rah(&dir).arg("--config").arg(&config).output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("refusing to run unguarded"), "{stderr}");
 }
@@ -228,7 +210,12 @@ config = { prompt = "hello" }
 #[test]
 fn config_files_compose_plugins_and_unknown_plugins_fail() {
     let dir = TempDir::new("bin-config");
-    let sessions = dir.sessions().display().to_string().replace('\\', "/");
+    let sessions = dir
+        .0
+        .join("elsewhere")
+        .display()
+        .to_string()
+        .replace('\\', "/");
     let config = dir.0.join("rah.toml");
     std::fs::write(
         &config,
@@ -254,39 +241,44 @@ config = {{ prompt = "no tools here" }}
     )
     .unwrap();
     let output = rah(&dir).arg("--config").arg(&config).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.contains("[custom] you said: no tools here"),
         "{stdout}"
     );
+    assert_eq!(jsonl_files(&dir.0.join("elsewhere")), 1);
 
     std::fs::write(&config, "[[plugin]]\nuse = \"model-gpt9\"\n").unwrap();
     let output = rah(&dir).arg("--config").arg(&config).output().unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown plugin `model-gpt9`"));
+    assert!(text(&output.stderr).contains("unknown plugin `model-gpt9`"));
 
-    let output = rah(&dir).args(["--preset", "nope"]).output().unwrap();
+    let output = rah(&dir)
+        .args(["--model", "nope/x", "run", "hi"])
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(2));
+    assert!(text(&output.stderr).contains("unknown model provider `nope`"));
 }
 
 #[test]
 fn data_lives_in_the_data_home_whatever_the_current_directory() {
     let dir = TempDir::new("bin-data-home");
     let output = rah(&dir)
-        .args(["--preset", "dev", "--prompt", "hello", "--root"])
+        .args(["--model", "mock", "run", "hello", "--root"])
         .arg(dir.workspace())
         .current_dir(dir.workspace())
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    assert_eq!(jsonl_files(&dir.0.join("home").join("sessions")), 1);
+    assert_eq!(jsonl_files(&dir.sessions()), 1);
     assert!(!dir.workspace().join(".rah").exists());
 
     // `--data-dir` moves it; a relative one is relative to where `rah` runs.
     let output = rah(&dir)
-        .args(["--preset", "dev", "--prompt", "hello", "--data-dir", "data"])
+        .args(["--model", "mock", "run", "hello", "--data-dir", "data"])
         .args(["--root", "."])
         .current_dir(dir.workspace())
         .output()
@@ -296,16 +288,14 @@ fn data_lives_in_the_data_home_whatever_the_current_directory() {
         jsonl_files(&dir.workspace().join("data").join("sessions")),
         1
     );
-    assert_eq!(jsonl_files(&dir.0.join("home").join("sessions")), 1);
+    assert_eq!(jsonl_files(&dir.sessions()), 1);
 }
 
 #[test]
-fn rah_toml_in_the_data_home_runs_without_preset_or_config() {
+fn rah_toml_in_the_data_home_runs_without_config() {
     let dir = TempDir::new("bin-user-config");
-    let home = dir.0.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        home.join("rah.toml"),
+    write_home_config(
+        &dir,
         r#"
 [[plugin]]
 use = "session-jsonl"
@@ -321,57 +311,62 @@ use = "loop-react"
 use = "frontend-cli"
 config = { prompt = "/notool hello" }
 "#,
-    )
-    .unwrap();
+    );
     let output = rah(&dir).current_dir(dir.workspace()).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("[mine] you said: hello"), "{stdout}");
     assert!(stderr.contains("rah.toml"), "{stderr}");
-    assert_eq!(jsonl_files(&home.join("sessions")), 1);
+    assert_eq!(jsonl_files(&dir.sessions()), 1);
 
-    // An explicit preset wins over it.
+    // `--config` wins over it.
+    let other = dir.0.join("other.toml");
+    std::fs::write(&other, "model = \"mock\"\n").unwrap();
     let output = rah(&dir)
-        .args([
-            "--preset",
-            "dev",
-            "--prompt",
-            "/notool hello",
-            "--root",
-            ".",
-        ])
+        .arg("--config")
+        .arg(&other)
+        .args(["run", "/notool hello", "--root", "."])
         .current_dir(dir.workspace())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(!stdout.contains("[mine]"), "{stdout}");
 }
 
 #[test]
-fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
+fn config_init_writes_user_keys_that_run_and_never_overwrites() {
     let dir = TempDir::new("bin-init-config");
-    let home = dir.0.join("home");
     let output = rah(&dir)
-        .args(["--init-config", "--preset", "dev"])
+        .args([
+            "config",
+            "init",
+            "--model",
+            "mock",
+            "--permissions",
+            "auto-edit",
+        ])
+        .args(["--with", "todo"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    let path = home.join("rah.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("use = \"model-mock\""), "{text}");
-    assert!(text.contains("# features = ["), "{text}");
+    let path = dir.home().join("rah.toml");
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(written.contains("model = \"mock\""), "{written}");
+    assert!(written.contains("permissions = \"auto-edit\""), "{written}");
+    assert!(written.contains("features = [\"todo\"]"), "{written}");
+    assert!(!written.contains("[[plugin]]"), "{written}");
 
-    // The written file is what runs without --preset and --config.
+    // The written file is what runs, and `config show` describes it.
     let output = rah(&dir)
-        .args(["--prompt", "hello", "--root"])
+        .args(["run", "hello", "--root"])
         .arg(dir.workspace())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stderr.contains("rah.toml"), "{stderr}");
     assert!(!stderr.contains("UNGUARDED"), "{stderr}");
@@ -379,20 +374,29 @@ fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
         stdout.contains("[model-mock] echo returned: hello"),
         "{stdout}"
     );
+    let output = rah(&dir).args(["config", "show"]).output().unwrap();
+    let shown = text(&output.stdout);
+    assert!(output.status.success(), "{shown}");
+    assert!(shown.contains("model:       mock"), "{shown}");
+    assert!(shown.contains("permissions: auto-edit"), "{shown}");
+    assert!(shown.contains("(file)"), "{shown}");
+    assert!(shown.contains("features:    todo"), "{shown}");
 
     // A second run leaves the file alone.
     std::fs::write(&path, "# mine\n").unwrap();
-    let output = rah(&dir).arg("--init-config").output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = rah(&dir)
+        .args(["config", "init", "--model", "mock"])
+        .output()
+        .unwrap();
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("already exists"), "{stderr}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
 
-    // --config names another target; an unknown preset writes nothing.
+    // --config names another target; a bad model or none writes nothing.
     let other = dir.0.join("other.toml");
     let output = rah(&dir)
-        .arg("--init-config")
-        .arg("--config")
+        .args(["config", "init", "--model", "deepseek", "--config"])
         .arg(&other)
         .output()
         .unwrap();
@@ -400,28 +404,61 @@ fn init_config_writes_a_preset_that_runs_and_never_overwrites() {
     assert!(
         std::fs::read_to_string(&other)
             .unwrap()
-            .contains("model-llamacpp")
+            .contains("deepseek")
     );
     let missing = dir.0.join("missing.toml");
+    for args in [&["--model", "nope/x"][..], &[]] {
+        let output = rah(&dir)
+            .args(["config", "init"])
+            .args(args)
+            .arg("--config")
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(!missing.exists());
+    }
+}
+
+#[test]
+fn config_edit_runs_the_editor_on_the_file() {
+    let dir = TempDir::new("bin-config-edit");
+    let output = rah(&dir).args(["config", "edit"]).output().unwrap();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("does not exist"), "{stderr}");
+
+    // The "editor" is `rah config check --config`, so the file's path is its
+    // last argument and its exit code says whether the file was checked.
+    write_home_config(&dir, "model = \"mock\"\n");
+    let editor = format!("{} config check --config", env!("CARGO_BIN_EXE_rah"));
     let output = rah(&dir)
-        .args(["--init-config", "--preset", "nope", "--config"])
-        .arg(&missing)
+        .args(["config", "edit"])
+        .env("VISUAL", &editor)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(!missing.exists());
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(text(&output.stdout).contains("configuration ok"));
 }
 
 #[test]
 fn root_reaches_the_workspace_plugins_that_features_mount() {
     let dir = TempDir::new("bin-root-features");
     let output = rah(&dir)
-        .args(["--preset", "dev", "--root", "workspace-x"])
-        .args(["--with", "format", "--with", "lsp", "--show-config"])
+        .args(["--model", "mock", "--root", "workspace-x"])
+        .args([
+            "--with",
+            "format",
+            "--with",
+            "lsp",
+            "config",
+            "show",
+            "--plugins",
+        ])
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     for plugin in ["format-on-write", "lsp-diagnostics"] {
         let at = stdout
@@ -430,34 +467,35 @@ fn root_reaches_the_workspace_plugins_that_features_mount() {
         let section = stdout[at..].lines().take(2).collect::<Vec<_>>().join("\n");
         assert!(section.contains("workspace-x"), "{plugin}: {section}");
     }
+    assert!(stdout.contains("(command line)"), "{stdout}");
 }
 
 #[test]
 fn a_user_file_that_extends_a_preset_runs_with_only_its_changes() {
     let dir = TempDir::new("bin-extends");
-    let home = dir.0.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        home.join("rah.toml"),
+    write_home_config(
+        &dir,
         "extends = \"dev\"\n\n[[plugin]]\nuse = \"model-mock\"\nconfig = { label = \"mine\" }\n",
-    )
-    .unwrap();
+    );
     let output = rah(&dir)
-        .args(["--prompt", "hello", "--root"])
+        .args(["run", "hello", "--root"])
         .arg(dir.workspace())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("[mine] echo returned: hello"), "{stdout}");
     // The preset's policy is still there, so the run is guarded.
     assert!(!stderr.contains("UNGUARDED"), "{stderr}");
 
-    let output = rah(&dir).arg("--show-config").output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let output = rah(&dir)
+        .args(["config", "show", "--plugins"])
+        .output()
+        .unwrap();
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("extends:   preset `dev`"), "{stdout}");
+    assert!(stdout.contains("extends:     preset `dev`"), "{stdout}");
     assert!(
         stdout.contains("model-mock  <- changed by the file"),
         "{stdout}"
@@ -465,13 +503,13 @@ fn a_user_file_that_extends_a_preset_runs_with_only_its_changes() {
 }
 
 #[test]
-fn check_config_reports_every_problem_and_starts_nothing() {
+fn config_check_reports_every_problem_and_starts_nothing() {
     let dir = TempDir::new("bin-check-config");
     let output = rah(&dir)
-        .args(["--preset", "dev", "--check-config"])
+        .args(["--model", "mock", "config", "check"])
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(stdout.contains("configuration ok: 18 plugins"), "{stdout}");
 
@@ -494,10 +532,10 @@ config = { program = "rah-no-such-program-x7" }
     let output = rah(&dir)
         .arg("--config")
         .arg(&config)
-        .arg("--check-config")
+        .args(["config", "check"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("nothing was mounted"), "{stderr}");
     assert!(stderr.contains("loop-react: "), "{stderr}");
@@ -508,55 +546,56 @@ config = { program = "rah-no-such-program-x7" }
 
     // A start with the same file stops at the same problems.
     let output = rah(&dir).arg("--config").arg(&config).output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("max_roundz"), "{stderr}");
     assert!(stderr.contains("needs an `id`"), "{stderr}");
 }
 
 #[test]
-fn show_config_prints_the_plugins_features_and_source() {
+fn config_show_is_short_unless_plugins_are_asked_for() {
     let dir = TempDir::new("bin-show-config");
-    let output = rah(&dir)
-        // `minimal` has no `tools-shell`, so the feature mounts it.
-        .args([
-            "--preset",
-            "minimal",
-            "--with",
-            "shell=git",
-            "--show-config",
-        ])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stdout}\n{stderr}");
-    assert!(stdout.contains("source:    --preset `minimal`"), "{stdout}");
-    assert!(stdout.contains("features:  shell=git"), "{stdout}");
-    assert!(
-        stdout.contains("tools-shell  <- feature shell=git"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("web ui overrides: none"), "{stdout}");
+    write_home_config(&dir, "extends = \"minimal\"\n");
+    let show = |extra: &[&str]| {
+        let output = rah(&dir)
+            // `minimal` has no `tools-shell`, so the feature mounts it.
+            .args(["--with", "shell=git", "config", "show"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    };
+    let short = show(&[]);
+    assert!(short.contains("rah.toml"), "{short}");
+    assert!(short.contains("features:    shell=git"), "{short}");
+    assert!(short.contains("UNGUARDED"), "{short}");
+    assert!(short.contains("web ui overrides: none"), "{short}");
+    assert!(!short.contains("tools-shell"), "{short}");
+    let long = show(&["--plugins"]);
+    assert!(long.contains("tools-shell  <- feature shell=git"), "{long}");
+}
+
+#[test]
+fn features_lists_the_opt_in_capabilities() {
+    let dir = TempDir::new("bin-features");
+    let output = rah(&dir).arg("features").output().unwrap();
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("web-search"), "{stdout}");
 }
 
 #[test]
 fn a_file_with_user_keys_runs_the_model_and_permissions_it_names() {
     let dir = TempDir::new("bin-user-keys");
-    let home = dir.0.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        home.join("rah.toml"),
-        "model = \"mock\"\npermissions = \"full\"\n",
-    )
-    .unwrap();
+    write_home_config(&dir, "model = \"mock\"\npermissions = \"full\"\n");
     let output = rah(&dir)
-        .args(["--prompt", "hello", "--root"])
+        .args(["run", "hello", "--root"])
         .arg(dir.workspace())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = text(&output.stdout);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(
         stdout.contains("[model-mock] echo returned: hello"),
@@ -567,11 +606,11 @@ fn a_file_with_user_keys_runs_the_model_and_permissions_it_names() {
 
     // `--permissions` overrides the file for one run.
     let output = rah(&dir)
-        .args(["--permissions", "ask", "--prompt", "hello", "--root"])
+        .args(["--permissions", "ask", "run", "hello", "--root"])
         .arg(dir.workspace())
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("permissions `full`"), "{stderr}");
 }
@@ -579,21 +618,15 @@ fn a_file_with_user_keys_runs_the_model_and_permissions_it_names() {
 #[test]
 fn a_file_with_user_keys_but_no_model_asks_for_one() {
     let dir = TempDir::new("bin-user-no-model");
-    let home = dir.0.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("rah.toml"), "permissions = \"ask\"\n").unwrap();
-    let output = rah(&dir).args(["--prompt", "hello"]).output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    write_home_config(&dir, "permissions = \"ask\"\n");
+    let output = rah(&dir).args(["run", "hello"]).output().unwrap();
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("no model is configured"), "{stderr}");
 
     // `--model` supplies it.
-    let output = rah(&dir)
-        .args(["--model", "mock", "--prompt", "hello", "--root"])
-        .arg(dir.workspace())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let output = run_mock(&dir, "hello", &[]);
+    let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.contains("[model-mock] echo returned: hello"),
@@ -601,17 +634,10 @@ fn a_file_with_user_keys_but_no_model_asks_for_one() {
     );
 
     let output = rah(&dir)
-        .args([
-            "--model",
-            "mock",
-            "--permissions",
-            "yolo",
-            "--prompt",
-            "hello",
-        ])
+        .args(["--model", "mock", "--permissions", "yolo", "run", "hello"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = text(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("--permissions: unknown permissions `yolo`"),

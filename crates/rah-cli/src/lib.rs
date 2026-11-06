@@ -5,6 +5,7 @@
 
 mod admin;
 mod check;
+pub mod cli;
 mod data;
 mod extend;
 mod features;
@@ -14,9 +15,11 @@ mod user;
 
 pub use check::{ConfigProblem, check_distribution};
 pub use extend::Extended;
-pub use features::{Applied, FEATURES, Feature, approved_tools, feature, list as list_features};
-pub use show::show_config;
-pub use user::{PROVIDERS, Permissions, Provider, UserSettings, is_model_kind, model_plugin};
+pub use features::{Applied, FEATURES, Feature, feature, list as list_features};
+pub use show::show;
+pub use user::{
+    PROVIDERS, Permissions, Provider, UserSettings, is_model_kind, model_plugin, user_file_text,
+};
 
 use std::{
     collections::BTreeMap,
@@ -473,25 +476,17 @@ pub fn read_distribution(path: &Path) -> Result<Distribution, String> {
 }
 
 /// The distribution to run, with `data_home` set to `home`: the file
-/// `config` when given, else the built-in `preset`, else [`USER_CONFIG`] in
-/// `home` when it exists, else the `default` preset. Also returns the user's
-/// file when that was the one read.
+/// `config` when given, else [`USER_CONFIG`] in `home` when it exists, else
+/// the `default` preset. Also returns the file that was read.
 pub fn select_distribution(
     config: Option<&Path>,
-    preset: Option<&str>,
     home: &Path,
 ) -> Result<(Distribution, Option<PathBuf>), String> {
     let user_config = home.join(USER_CONFIG);
-    let (mut distribution, used) = match (config, preset) {
-        (Some(path), _) => (read_distribution(path)?, None),
-        (None, Some(preset)) => (
-            Distribution::preset(preset).map_err(|error| error.to_string())?,
-            None,
-        ),
-        (None, None) if user_config.is_file() => {
-            (read_distribution(&user_config)?, Some(user_config))
-        }
-        (None, None) => (
+    let (mut distribution, used) = match config {
+        Some(path) => (read_distribution(path)?, Some(path.to_path_buf())),
+        None if user_config.is_file() => (read_distribution(&user_config)?, Some(user_config)),
+        None => (
             Distribution::preset("default").map_err(|error| error.to_string())?,
             None,
         ),

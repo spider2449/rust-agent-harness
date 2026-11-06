@@ -74,7 +74,7 @@ fn touch(config: &Path, target: &Path) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rah"))
         .arg("--config")
         .arg(config)
-        .args(["--prompt", &prompt])
+        .args(["run", &prompt])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -175,7 +175,7 @@ Implemented:
   DuckDuckGo, Bing and SearXNG with failover, merged `web.multi_search`, and
   `web.fetch` limited to public addresses); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API
-  with an embedded Web UI (`rah --web`), which answers `tool.approval` in the
+  with an embedded Web UI (`rah web`), which answers `tool.approval` in the
   browser and owns the modes (daily work, coding, configured ones) that
   switch plugins through `admin` and add instructions on
   `model.before_request`. `rah-desktop` is not a plugin: it boots the same

@@ -145,6 +145,9 @@ pub struct ReplOptions {
     pub export: Option<String>,
     /// With `prompt`: write a JSON summary of the run to this file.
     pub summary: Option<String>,
+    /// List the sessions, newest first, and exit.
+    #[serde(default)]
+    pub list: bool,
 }
 
 impl ReplOptions {
@@ -152,6 +155,9 @@ impl ReplOptions {
     fn checked(&self) -> Result<Option<ExportFormat>, String> {
         if self.summary.is_some() && self.prompt.is_none() {
             return Err("`summary` needs a `prompt` to summarize".into());
+        }
+        if self.list && (self.prompt.is_some() || self.session.is_some() || self.export.is_some()) {
+            return Err("`list` cannot be combined with `prompt`, `session` or `export`".into());
         }
         let Some(name) = &self.export else {
             return Ok(None);
@@ -311,6 +317,19 @@ where
         return Ok(1);
     };
     match options.checked() {
+        Ok(None) if options.list => {
+            return match sessions.list().await {
+                Ok(list) => {
+                    out.write_all(session_list(list).as_bytes()).await?;
+                    out.flush().await?;
+                    Ok(0)
+                }
+                Err(error) => {
+                    line(&mut out, &format!("error: {error}")).await?;
+                    Ok(1)
+                }
+            };
+        }
         Ok(None) => {}
         Ok(Some(format)) => {
             let id = options.session.as_deref().unwrap_or_default();
@@ -559,6 +578,56 @@ async fn open(sessions: &dyn SessionLog, id: &str) -> Result<SessionId, String> 
         .await
         .map_err(|error| error.to_string())?;
     Ok(id)
+}
+
+/// One line per session, the most recently updated first: id, last change
+/// (UTC), title or preview, and workspace.
+fn session_list(mut list: Vec<rah_protocol::SessionInfo>) -> String {
+    if list.is_empty() {
+        return "no sessions\n".to_owned();
+    }
+    list.sort_by_key(|info| std::cmp::Reverse(info.updated.max(info.created)));
+    let mut text = String::new();
+    for info in list {
+        let when = utc_minute(info.updated.max(info.created));
+        let title = info
+            .title
+            .or(info.preview)
+            .map(|title| title.replace(['\r', '\n'], " "))
+            .unwrap_or_default();
+        let workspace = info
+            .workspace
+            .map(|workspace| format!("  [{workspace}]"))
+            .unwrap_or_default();
+        text.push_str(&format!("{}  {when}  {title}{workspace}\n", info.id));
+    }
+    text
+}
+
+/// `seconds` since the Unix epoch as `YYYY-MM-DD HH:MMZ`.
+fn utc_minute(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX / 2);
+    let minute_of_day = seconds % 86_400 / 60;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}Z",
+        minute_of_day / 60,
+        minute_of_day % 60
+    )
 }
 
 /// Session `id` in `format`.
@@ -1244,6 +1313,44 @@ mod tests {
                 unrecorded: 1,
             }
         );
+    }
+
+    #[test]
+    fn the_session_list_is_newest_first_with_utc_times() {
+        let info = |id: &str, updated: u64, title: Option<&str>, workspace: Option<&str>| {
+            rah_protocol::SessionInfo {
+                id: id.parse().unwrap(),
+                parent: None,
+                created: 0,
+                title: title.map(str::to_owned),
+                updated,
+                preview: Some("first\nline".into()),
+                workspace: workspace.map(str::to_owned),
+            }
+        };
+        let text = session_list(vec![
+            info("00000000-0000-0000-0000-000000000001", 0, None, None),
+            info(
+                "00000000-0000-0000-0000-000000000002",
+                1_793_970_000,
+                Some("Kyoto trip"),
+                Some("D:/work"),
+            ),
+        ]);
+        assert_eq!(
+            text,
+            "00000000-0000-0000-0000-000000000002  2026-11-06 13:00Z  Kyoto trip  [D:/work]\n\
+             00000000-0000-0000-0000-000000000001  1970-01-01 00:00Z  first line\n"
+        );
+        assert_eq!(session_list(Vec::new()), "no sessions\n");
+        assert_eq!(utc_minute(951_782_400), "2000-02-29 00:00Z");
+        let error = |json: serde_json::Value| {
+            serde_json::from_value::<ReplOptions>(json)
+                .unwrap()
+                .checked()
+                .unwrap_err()
+        };
+        assert!(error(serde_json::json!({ "list": true, "prompt": "p" })).contains("`list`"));
     }
 
     #[test]
