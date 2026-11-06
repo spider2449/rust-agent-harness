@@ -218,6 +218,58 @@ fn input_that_already_fits_is_returned_unchanged() {
     assert_eq!(fix(fine.clone(), schema), fine);
 }
 
+fn shell_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "program": { "type": "string" },
+            "args": { "type": "array", "items": { "type": "string" } },
+            "timeout_ms": { "type": "integer" },
+        },
+        "required": ["program"],
+        "additionalProperties": false,
+    })
+}
+
+#[test]
+fn parameters_leaked_into_a_string_field_are_split_out() {
+    // As recorded from a local model behind a chat completions server.
+    let leaked = json!({
+        "program": "python\n<parameter=args>\n[\"D:\\\\rgl\\\\send.py\", \"-c\", \"print(1)\"]",
+    });
+    assert_eq!(
+        fix(leaked, shell_schema()),
+        json!({ "program": "python", "args": ["D:\\rgl\\send.py", "-c", "print(1)"] })
+    );
+    // Closing tags, CRLF line breaks and several leaked parameters.
+    let closed = json!({
+        "program": "python\r\n</parameter>\r\n<parameter=args>\r\n[\"-V\"]\r\n</parameter>\r\n<parameter=timeout_ms>\r\n5000\r\n</parameter>\r\n</function>",
+    });
+    assert_eq!(
+        fix(closed, shell_schema()),
+        json!({ "program": "python", "args": ["-V"], "timeout_ms": 5000 })
+    );
+}
+
+#[test]
+fn leaked_parameters_are_left_alone_when_the_split_is_ambiguous() {
+    let schema = shell_schema();
+    let untouched = [
+        // The leaked name is not declared.
+        json!({ "program": "python\n<parameter=cwd>\nD:\\x" }),
+        // The field is already present.
+        json!({ "program": "python\n<parameter=args>\n[\"-V\"]", "args": ["-c"] }),
+        // A name repeats, or names the field it leaked from.
+        json!({ "program": "python\n<parameter=args>\n[]\n<parameter=args>\n[]" }),
+        json!({ "program": "python\n<parameter=program>\nnode" }),
+        // The marker is not at the start of a line.
+        json!({ "program": "python <parameter=args>\n[\"-V\"]" }),
+    ];
+    for input in untouched {
+        assert_eq!(fix(input.clone(), schema.clone()), input, "{input}");
+    }
+}
+
 fn request(schema: Value, input: Value) -> ToolRequestContext {
     ToolRequestContext {
         session: SessionId::new(),

@@ -35,6 +35,17 @@ authorizes makes the decision depend on handler order.
    tuples, typed dictionaries, nested fields and local `$ref`s (to a depth of
    6). A value that does not fit stays as it is, and the tool's own
    validation reports it. It has no configuration and requires no service.
+   *(Amended 2026-11-06.)* It also splits the parameters of an XML-style
+   tool call (`<parameter=NAME>` lines, as in Qwen3-Coder's template) that a
+   model server left inside a string field, such as
+   `"program": "python
+<parameter=args>
+[\"-V\"]"`, into their own
+   fields. It does so only when every leaked name is a declared property,
+   appears once, is not already in the input and is not the field it leaked
+   from; the leaked values then get the same repairs as any other field.
+   Without this, the call fails with "program not found" and a model
+   concludes the program is not installed.
 4. **Presets mount it.** It cannot grant anything: the policy decides on the
    repaired input as it would on input the model had written correctly.
 5. **Not offered to process or WASM plugins** as a hook for now: the hook
@@ -46,8 +57,8 @@ authorizes makes the decision depend on handler order.
   receives, and the policy judged, the repaired input. The difference shows
   only in the tool's own output.
 - A tool whose schema is wrong or too loose can receive input the model did
-  not send in exactly that form. The repairs never add a field, only convert,
-  unwrap or drop.
+  not send in exactly that form. The repairs convert, unwrap or drop; the
+  only fields they add are leaked parameters the model did name in its call.
 - Another plugin can attach to the same hook (for example to fill defaults)
   with the same limits: it runs before the policy and cannot change which
   tool is called.

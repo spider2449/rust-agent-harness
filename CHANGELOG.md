@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `tool-input-repair`: parameters of an XML-style tool call that a model
+  server left inside a string field (`"program": "python
+<parameter=args>
+[...]"`,
+  seen with a local Qwen model behind Ollama) are split back into their own
+  fields when each name is a declared field the call lacks. Before, the call
+  failed with "program not found" and the model concluded that Python was not
+  installed (ADR 0049, amended).
+
 - Web UI: a `shell.exec` approval offers "Always allow this command". It
   runs the call and adds its exact program and arguments to the policy's
   `commands` (ADR 0050), stored like a saved Tools form, so the same command
