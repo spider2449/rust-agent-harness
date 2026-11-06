@@ -511,6 +511,11 @@ user mounts it, and mounting stays the user's act:
   plugin through the checks of `plugins.save` before writing any, skips a
   name already taken unless the user ticks "replace", and mounts nothing. A
   bundle from someone else is untrusted code until its files are read.
+- Deleting a plugin is a view action too, so only the user's click reaches
+  it, and the user must type the plugin's name. It deletes only a directory
+  the builder wrote (with `plugin-builder.json`), renamed aside first so the
+  plugin disappears whole; it never edits `rah.toml`, and says so when a
+  plugin of that id is still mounted.
 - `personal = true` on a process entry only changes how the Web UI lists the
   plugin; it grants nothing and changes nothing about how it runs.
 

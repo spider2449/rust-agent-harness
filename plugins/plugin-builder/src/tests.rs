@@ -341,7 +341,140 @@ async fn model_requests_say_a_plugin_means_a_personal_rah_plugin() {
         }
     );
     assert!(HINT.contains(GUIDE_TOOL) && HINT.contains(SAVE_TOOL));
+    // The hint narrows the trigger: only a RAH plugin, ask when unclear,
+    // and a missing tool is offered, not written unasked.
+    assert!(HINT.contains("only when the user asks for a RAH plugin"));
+    assert!(HINT.contains("ask"));
+    assert!(HINT.contains("do not write one unless the user agrees"));
+    assert!(!HINT.contains("automation"));
     assert!(matches!(&items[2], ContextItem::User { .. }));
+}
+
+#[tokio::test]
+async fn the_user_deletes_a_plugin_after_typing_its_name() {
+    let dir = TempDir::new("delete");
+    let kernel = Kernel::new();
+    mount_builder(&kernel, &dir.0).await;
+    assert!(!invoke(&kernel, SAVE_TOOL, greeter()).await.is_error);
+    let changed = Arc::new(Mutex::new(0));
+    let _subscription = {
+        let changed = changed.clone();
+        kernel
+            .handle()
+            .subscribe(move |_: &UiChanged| *changed.lock().unwrap() += 1)
+    };
+    let plugin = dir.0.join("greeter");
+
+    // A missing or wrong confirmation deletes nothing.
+    for input in [
+        json!({}),
+        json!({ CONFIRM_FIELD: "" }),
+        json!({ CONFIRM_FIELD: "farewell" }),
+        json!({ CONFIRM_FIELD: 1 }),
+    ] {
+        assert!(matches!(
+            act(&kernel, "delete:greeter", input).await,
+            Err(UiError::InvalidInput(_))
+        ));
+    }
+    assert!(matches!(
+        act(&kernel, "delete:../x", json!({ CONFIRM_FIELD: "../x" })).await,
+        Err(UiError::InvalidInput(_))
+    ));
+    assert!(plugin.join("plugin.py").exists());
+    assert_eq!(*changed.lock().unwrap(), 0);
+
+    // Typed, the plugin is deleted whole and the view goes back to the list.
+    act(&kernel, "details:greeter", Value::Null).await.unwrap();
+    let deleted = act(
+        &kernel,
+        "delete:greeter",
+        json!({ CONFIRM_FIELD: " greeter " }),
+    )
+    .await
+    .unwrap();
+    assert!(deleted.rerender);
+    let message = deleted.message.unwrap();
+    assert!(message.starts_with("Deleted `greeter`"), "{message}");
+    assert!(!message.contains("still mounted"), "{message}");
+    assert!(!plugin.exists());
+    // Nothing is left behind, not even a hidden directory.
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    assert_eq!(*changed.lock().unwrap(), 1);
+    assert!(matches!(
+        &render(&kernel).await.nodes[1],
+        Node::Text { text } if text == "No personal plugins yet."
+    ));
+    assert!(output_text(&invoke(&kernel, LIST_TOOL, json!({})).await).starts_with("No personal"));
+
+    // Deleting it again is refused.
+    assert!(matches!(
+        act(&kernel, "delete:greeter", json!({ CONFIRM_FIELD: "greeter" })).await,
+        Err(UiError::InvalidInput(reason)) if reason.contains("no saved plugin")
+    ));
+}
+
+#[tokio::test]
+async fn a_directory_the_builder_did_not_write_is_never_deleted() {
+    let dir = TempDir::new("delete-foreign");
+    std::fs::create_dir_all(dir.0.join("greeter")).unwrap();
+    std::fs::write(dir.0.join("greeter/notes.txt"), "mine").unwrap();
+    std::fs::write(dir.0.join("loose"), "mine").unwrap();
+    let kernel = Kernel::new();
+    mount_builder(&kernel, &dir.0).await;
+    for name in ["greeter", "loose"] {
+        let refused = act(
+            &kernel,
+            &format!("delete:{name}"),
+            json!({ CONFIRM_FIELD: name }),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(UiError::InvalidInput(reason)) if reason.contains("not written by plugin-builder")),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("greeter/notes.txt")).unwrap(),
+        "mine"
+    );
+    assert!(dir.0.join("loose").exists());
+}
+
+#[tokio::test]
+async fn deleting_a_mounted_plugin_says_to_remove_its_entry() {
+    let dir = TempDir::new("delete-mounted");
+    let kernel = Kernel::new();
+    mount_builder(&kernel, &dir.0).await;
+    assert!(!invoke(&kernel, SAVE_TOOL, greeter()).await.is_error);
+    // A plugin mounted under the same id stands in for the running plugin.
+    struct Running(PluginManifest);
+    #[async_trait]
+    impl Plugin for Running {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        async fn apply(&self, _: &mut Scope) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+    kernel
+        .mount(
+            Arc::new(Running(PluginManifest::new("greeter", "0.1.0"))),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let message = act(
+        &kernel,
+        "delete:greeter",
+        json!({ CONFIRM_FIELD: "greeter" }),
+    )
+    .await
+    .unwrap()
+    .message
+    .unwrap();
+    assert!(message.contains("still mounted"), "{message}");
 }
 
 #[tokio::test]
@@ -492,7 +625,15 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
         Node::KeyValue { items } if items[1] == KeyValue::new("Tools", "greeter.hello")
     ));
     assert!(matches!(&nodes[4], Node::Markdown { text } if text.contains("id = \"greeter\"")));
-    assert!(!nodes.iter().any(|node| matches!(node, Node::Form { .. })));
+    // The only form in the details deletes the plugin.
+    let forms: Vec<&str> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Form { action, .. } => Some(action.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(forms, ["delete:greeter"]);
     assert!(matches!(
         act(&kernel, "details:../x", Value::Null).await,
         Err(UiError::InvalidInput(_))

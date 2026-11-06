@@ -424,6 +424,55 @@ impl Store {
         Ok((dir, mount))
     }
 
+    /// Deletes the saved plugin `name` and returns the directory it was in,
+    /// with a note when the renamed directory could not be removed. Only a
+    /// directory the builder wrote is deleted. It is renamed aside first, so
+    /// the plugin disappears whole; a rename that fails (on Windows, while
+    /// the plugin runs) deletes nothing.
+    pub async fn delete(&self, name: &str) -> Result<(PathBuf, Option<String>), SaveError> {
+        let _saving = self.saving.lock().await;
+        let target = self.dir.join(name);
+        match tokio::fs::symlink_metadata(&target).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(SaveError::Refused(format!(
+                    "`{}` was not written by plugin-builder; it is not deleted",
+                    target.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SaveError::Refused(format!("no saved plugin `{name}`")));
+            }
+            Err(error) => {
+                return Err(SaveError::Refused(format!(
+                    "cannot read `{}`: {error}",
+                    target.display()
+                )));
+            }
+        }
+        if !is_file(&target.join(ABOUT_FILE)).await {
+            return Err(SaveError::Refused(format!(
+                "`{}` was not written by plugin-builder; it is not deleted",
+                target.display()
+            )));
+        }
+        let dir = self.plugin_dir(name);
+        let aside = self.unique("deleted", name);
+        tokio::fs::rename(&target, &aside).await.map_err(|error| {
+            SaveError::Failed(format!(
+                "cannot delete `{}`: {error}. If the plugin is mounted, remove its \
+                 [[plugin]] entry from rah.toml and restart first",
+                dir.display()
+            ))
+        })?;
+        // The plugin is gone; a leftover hidden directory is never listed.
+        let leftover = tokio::fs::remove_dir_all(&aside)
+            .await
+            .err()
+            .map(|error| format!("could not remove `{}`: {error}", aside.display()));
+        Ok((dir, leftover))
+    }
+
     async fn write_staging(
         &self,
         staging: &Path,

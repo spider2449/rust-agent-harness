@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `plugin-builder`: a plugin's details in "My plugins" have a Delete form;
+  typing the plugin's name deletes its directory. Only directories the
+  builder wrote are deleted, and the message says to remove the `rah.toml`
+  entry when a plugin of that id is still mounted. The model has no delete
+  tool.
+- `plugin-builder`: the model uses the builder only when the user asks for a
+  RAH plugin. A plugin for the user's project or another program is ordinary
+  workspace work, an unclear request is asked about, and a missing tool is
+  offered as a plugin instead of written unasked. Before, any request for "a
+  plugin", or for a tool or automation the model lacked, started a plugin.
+
 - Security: the repository write tools check `.git` and `.rah` where a path
   really resolves, not only as written. A link or a Windows short name
   (`git~1/hooks/pre-commit`, `rah~1/storage/...`) could reach them after a

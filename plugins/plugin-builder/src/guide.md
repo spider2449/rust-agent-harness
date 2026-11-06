@@ -9,20 +9,24 @@ reads the files and mounts it, and mounting is the user's trust decision.
 
 ## Workflow
 
-1. Make sure you understand what the user wants. Ask about anything that
+1. Write a plugin only when the user asked for a RAH plugin, or agreed to
+   one you offered. A plugin for the user's project or another program is
+   ordinary work in the workspace, not a personal plugin.
+2. Make sure you understand what the user wants. Ask about anything that
    changes the design: what the tools take and return, what must be kept
    between calls, whether it needs a view in the Web UI.
-2. Choose a short name (lowercase letters, digits, `-`; it starts with a
+3. Choose a short name (lowercase letters, digits, `-`; it starts with a
    letter). Every tool name is `<name>.<tool>`.
-3. Pick the smallest manifest that does the job, and the lowest permission
+4. Pick the smallest manifest that does the job, and the lowest permission
    for each tool.
-4. Call `plugins.save`. On a refusal, fix what it names and save again.
-5. Tell the user where the plugin is, what it can do, and to read its files
+5. Call `plugins.save`. On a refusal, fix what it names and save again.
+6. Tell the user where the plugin is, what it can do, and to read its files
    and `mount.toml` before mounting. Do not claim it was tested: saving does
    not run it.
 
 To change a plugin, `plugins.read` it, then save the whole plugin again with
-`replace: true`. `plugins.list` lists the saved plugins.
+`replace: true`. `plugins.list` lists the saved plugins. You cannot delete
+a plugin; the user deletes one from its details in the "My plugins" panel.
 
 ## `plugins.save` input
 

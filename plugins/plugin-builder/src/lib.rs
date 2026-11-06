@@ -19,7 +19,9 @@
 //! - The `plugins` view (ADR 0062) lists the saved plugins, and is announced
 //!   with `UiChanged` after each save. A plugin's `details:<name>` button
 //!   shows its tools, directory and `mount.toml` instead of the list, until
-//!   the `list` button goes back. Its
+//!   the `list` button goes back. The details also hold a `delete:<name>`
+//!   form that deletes the plugin's directory once the user types its name;
+//!   the model has no tool for it. Its
 //!   `export` form writes the ticked plugins to one bundle file
 //!   (`{"format": "rah-personal-plugins", "version": 1, "plugins": [...]}`,
 //!   each entry in the form `plugins.save` takes) and never overwrites a
@@ -27,8 +29,10 @@
 //!   passed the checks of `plugins.save`. Both run only on the user's click.
 //!
 //! Every model request gets one system item ([`HINT`]) after the leading
-//! system items: a request for "a plugin" means a personal RAH plugin and
-//! starts with `plugins.guide`.
+//! system items: a request for a RAH plugin starts with `plugins.guide`. A
+//! plugin for anything else is ordinary workspace work, an unclear request
+//! is asked about, and a missing tool is only offered as a plugin, never
+//! written unasked.
 //!
 //! `mount.toml` sets `personal = true` on the process entry, so the Web UI
 //! lists the mounted plugin apart from the distribution's own.
@@ -100,16 +104,23 @@ pub const LIST_ACTION: &str = "list";
 /// The prefix of the view action that shows a plugin's details; the rest is a
 /// plugin name.
 pub const DETAILS_PREFIX: &str = "details:";
+/// The prefix of the view action that deletes a plugin; the rest is a plugin
+/// name, which the form's [`CONFIRM_FIELD`] must repeat.
+pub const DELETE_PREFIX: &str = "delete:";
+/// The delete form's field, where the user types the plugin's name.
+pub const CONFIRM_FIELD: &str = "confirm";
 /// The longest plugin description, in characters.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 const GUIDE: &str = include_str!("guide.md");
-/// The system item every model request gets, so a request for "a plugin"
-/// reaches these tools.
-pub const HINT: &str = "You run inside RAH (Rust Agent Harness) with the plugin builder. When \
-     the user asks for a plugin, or for a tool or automation you do not have, they mean a \
-     personal RAH plugin: call `plugins.guide` first, then write the plugin and save it with \
-     `plugins.save`. Do not search the workspace for a plugin system; the plugin is saved in \
-     the user's plugin directory, not in the project.";
+/// The system item every model request gets, so a request for a RAH plugin
+/// reaches these tools, and only such a request.
+pub const HINT: &str = "You run inside RAH (Rust Agent Harness), which has a plugin builder: \
+     `plugins.guide` and `plugins.save` write a personal RAH plugin, a small program that adds \
+     tools to RAH, saved in the user's plugin directory rather than in the project. Use them \
+     only when the user asks for a RAH plugin or to add a tool to RAH. A plugin for anything \
+     else (the user's project, an editor, a browser, a build tool) is ordinary work in the \
+     workspace. If it is unclear which the user means, ask. When a task needs a tool you do \
+     not have, say so and offer a personal plugin; do not write one unless the user agrees.";
 const DEFAULT_MAX_FILES: usize = 16;
 const DEFAULT_MAX_FILE_BYTES: usize = 128 * 1024;
 /// The largest `max_file_bytes`: a file must fit in one tool call.
@@ -346,8 +357,8 @@ impl Tool for GuideTool {
         ToolDefinition {
             name: ToolName::new(GUIDE_TOOL),
             description: "Returns the rules for writing a personal RAH plugin: the manifest, the \
-                 runtime library and what every plugin must do. Call it before `plugins.save` \
-                 when the user asks for a plugin, or for a tool or automation RAH does not have."
+                 runtime library and what every plugin must do. Call it before `plugins.save`, \
+                 only when the user asked for a RAH plugin or agreed to one you offered."
                 .to_owned(),
             input_schema: empty_schema(),
             permission: PermissionLevel::None,
@@ -404,7 +415,8 @@ impl Tool for SaveTool {
             name: ToolName::new(SAVE_TOOL),
             description: "Checks a personal RAH plugin against the plugin rules and saves it to \
                  the user's plugin directory with the runtime library and a `mount.toml` that \
-                 tells the user how to mount it. Read `plugins.guide` first. It does not mount or \
+                 tells the user how to mount it. Only for a plugin the user asked for or agreed \
+                 to. Read `plugins.guide` first. It does not mount or \
                  run the plugin. Send the whole plugin every time; `replace: true` replaces a \
                  saved plugin of the same name."
                 .to_owned(),
@@ -688,6 +700,7 @@ impl UiViews for BuilderViews {
                     text: format!("````toml\n{}\n````", mount.trim_end()),
                 });
             }
+            nodes.extend(delete_form(&plugin.about.name));
             return Ok(View { nodes });
         }
         nodes.push(Node::Table {
@@ -776,6 +789,20 @@ impl UiViews for BuilderViews {
         let Value::Object(input) = input else {
             return Err(UiError::InvalidInput("the form sends an object".to_owned()));
         };
+        if let Some(name) = action.strip_prefix(DELETE_PREFIX) {
+            manifest::check_name(name).map_err(UiError::InvalidInput)?;
+            if input
+                .get(CONFIRM_FIELD)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                != Some(name)
+            {
+                return Err(UiError::InvalidInput(format!(
+                    "type `{name}` to confirm the deletion"
+                )));
+            }
+            return self.delete(name).await;
+        }
         let file = match input.get("file") {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(file)) => file.clone(),
@@ -810,6 +837,39 @@ impl BuilderViews {
 
     fn show(&self, name: Option<String>) {
         *self.shown.lock().unwrap_or_else(PoisonError::into_inner) = name;
+    }
+
+    /// Deletes the saved plugin `name` and goes back to the list.
+    async fn delete(&self, name: &str) -> Result<ActionOutcome, UiError> {
+        let builder = &self.builder;
+        let (dir, leftover) = builder
+            .store
+            .delete(name)
+            .await
+            .map_err(|error| match error {
+                SaveError::Refused(reason) => UiError::InvalidInput(reason),
+                SaveError::Failed(reason) => UiError::Failed(reason),
+            })?;
+        self.show(None);
+        builder.kernel.emit(&UiChanged {
+            instance: builder.instance.clone(),
+            view: VIEW.to_owned(),
+        });
+        let mut message = format!("Deleted `{name}` ({}).", dir.display());
+        // The mount id is the plugin's name (see `mount.toml`).
+        if builder.kernel.status(&PluginId::from(name)).is_some() {
+            message.push_str(&format!(
+                " A plugin `{name}` is still mounted: remove its [[plugin]] entry and policy \
+                 assignments from rah.toml, then restart."
+            ));
+        }
+        if let Some(leftover) = leftover {
+            message.push_str(&format!(" Remove the rest by hand: {leftover}."));
+        }
+        Ok(ActionOutcome {
+            message: Some(message),
+            rerender: true,
+        })
     }
 
     /// Writes the plugins `names` to a new bundle file.
@@ -921,6 +981,33 @@ impl BuilderViews {
             rerender: !imported.is_empty(),
         })
     }
+}
+
+/// The form that deletes the plugin `name` once its name is typed.
+fn delete_form(name: &str) -> [Node; 3] {
+    [
+        Node::Heading {
+            text: "Delete".to_owned(),
+        },
+        Node::Text {
+            text: format!(
+                "Deletes the directory of `{name}` and every file in it; it cannot be undone. \
+                 Export it first to keep a copy. If it is mounted, also remove its [[plugin]] \
+                 entry from rah.toml."
+            ),
+        },
+        Node::Form {
+            action: format!("{DELETE_PREFIX}{name}"),
+            submit: "Delete".to_owned(),
+            fields: vec![Field {
+                name: CONFIRM_FIELD.to_owned(),
+                label: format!("Type {name} to confirm"),
+                kind: FieldKind::Text,
+                value: String::new(),
+                options: Vec::new(),
+            }],
+        },
+    ]
 }
 
 /// The form that imports a bundle file.
