@@ -191,7 +191,7 @@ impl FromStr for Permissions {
     }
 }
 
-/// The user keys a distribution file set, as written, for `--show-config`
+/// The user keys a distribution file set, as written, for `rah config show`
 /// and to apply `root` again after features.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UserSettings {

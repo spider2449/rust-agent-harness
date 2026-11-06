@@ -524,9 +524,10 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
             entry.display().to_string().replace('\\', "\\\\")
         ),
         "# WARNING: `py3` was not found on PATH; set `program`".to_owned(),
-        "# 2. REQUIRED: add its tools".to_owned(),
+        "# 2. REQUIRED: assign its tools in the policy".to_owned(),
         "#      \"greeter.hello\" = \"none\"\n".to_owned(),
-        "tools = { echo = \"none\", ..., \"greeter.hello\" = \"none\" }".to_owned(),
+        "#      config = { tools = { \"greeter.hello\" = \"none\" } }\n".to_owned(),
+        "`rah config check`".to_owned(),
         "# It calls these host services: storage.".to_owned(),
         "# Its Web UI panels: greeter/board.".to_owned(),
         ", personal = true }\n".to_owned(),

@@ -33,7 +33,8 @@ use serde_json::Value;
         rah\n  \
         rah run \"summarize README.md\" --permissions read-only\n  \
         rah web --with web-search\n  \
-        rah-desktop          the Web UI in a native window (same global options)"
+        rah-desktop          the Web UI in a native window (same global options)\n\n\
+        Every key and option: docs/CONFIGURATION.md"
 )]
 struct Cli {
     #[command(flatten)]

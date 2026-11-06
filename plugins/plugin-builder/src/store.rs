@@ -246,7 +246,7 @@ pub fn mount_toml(about: &About, manifest: &Manifest, dir: &Path, program: &Foun
     text.push_str(
         "# To mount it:\n\
          # 1. Add the [[plugin]] entry below to rah.toml (in the data directory,\n\
-         #    such as ~/.rah/rah.toml), before the agent loop entry.\n",
+         #    such as ~/.rah/rah.toml; `rah config edit` opens it).\n",
     );
     let assignments: Vec<String> = manifest
         .tools
@@ -264,17 +264,20 @@ pub fn mount_toml(about: &About, manifest: &Manifest, dir: &Path, program: &Foun
         })
         .collect();
     let check = if assignments.is_empty() {
-        "# 2. Check it with `rah --check-config`, then restart.\n".to_owned()
+        "# 2. Check it with `rah config check`, then restart.\n".to_owned()
     } else {
-        let mut step = "# 2. REQUIRED: add its tools to the `tools = { ... }` of the\n\
-             #    policy-authority entry, or the policy refuses every call to them:\n"
+        let mut step = "# 2. REQUIRED: assign its tools in the policy, or the policy refuses\n\
+             #    every call to them:\n"
             .to_owned();
         for assignment in &assignments {
             step.push_str(&format!("#      {assignment}\n"));
         }
         step.push_str(&format!(
-            "#    For example: tools = {{ echo = \"none\", ..., {} }}\n\
-             # 3. Check it with `rah --check-config`, then restart.\n",
+            "#    In rah.toml (tables merge, so the other assignments stay):\n\
+             #      [[plugin]]\n\
+             #      use = \"policy-authority\"\n\
+             #      config = {{ tools = {{ {} }} }}\n\
+             # 3. Check it with `rah config check`, then restart.\n",
             assignments.join(", ")
         ));
         step

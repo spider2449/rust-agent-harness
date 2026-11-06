@@ -24,7 +24,7 @@ use crate::{BootError, Distribution, Permissions, PluginSpec, UserSettings, base
 /// What `Extended::preset` says for a file with user keys.
 pub const USER_BASE: &str = "base";
 
-/// What `extends` changed in a preset, for `--show-config`.
+/// What `extends` changed in a preset, for `rah config show`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extended {
     /// The preset the file extends.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Docs: the README is one page (install, `rah config init`, run, a minimal
+  `rah.toml`); everything else moved to the new `docs/CONFIGURATION.md`,
+  organised around the user keys and commands. `rah --help` and the file
+  `config init` writes point to it. Personal plugins' `mount.toml` says
+  `rah config check` and shows the policy entry as a merging `[[plugin]]`.
+  ADR 0067 is accepted; ADRs 0054, 0058 and 0066 note what it amends.
+
 - **Breaking:** the Web UI keeps its settings in the configuration file
   instead of `storage` (ADR 0067). The Settings forms, the web search switch
   (as the `web-search` feature), Plugins panel changes and "Always allow this

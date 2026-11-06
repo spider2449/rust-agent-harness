@@ -1,6 +1,6 @@
 # ADR 0067: One User-Facing Configuration
 
-Status: Proposed
+Status: Accepted
 
 Date: 2026-11-06
 

@@ -1,6 +1,6 @@
 # ADR 0058: A Distribution File Can Extend A Preset
 
-Status: Accepted
+Status: Accepted; amended by ADR 0067 (presets are no longer the starting point of a user file and `--preset` is removed; `extends` still works for files without user keys)
 
 Date: 2026-10-29
 

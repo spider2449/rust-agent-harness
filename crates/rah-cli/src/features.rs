@@ -54,7 +54,7 @@ pub struct Feature {
     decisions: &'static [(&'static str, &'static str)],
 }
 
-/// Every feature, in the order `rah --list-features` shows them.
+/// Every feature, in the order `rah features` shows them.
 pub const FEATURES: [Feature; 10] = [
     Feature {
         name: "shell",

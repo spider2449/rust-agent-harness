@@ -392,11 +392,11 @@ pub struct Distribution {
     /// the plugins resolve relative paths against the current directory.
     #[serde(skip)]
     pub data_home: Option<PathBuf>,
-    /// The features applied to this distribution, for `--show-config`.
+    /// The features applied to this distribution, for `rah config show`.
     #[serde(skip)]
     pub applied: Vec<Applied>,
     /// The preset this distribution extends and what the file changed in
-    /// it, when the file has `extends` (ADR 0058), for `--show-config`.
+    /// it, when the file has `extends` (ADR 0058), for `rah config show`.
     #[serde(skip)]
     pub extended: Option<Extended>,
     /// The user keys of the file (`model`, `permissions`, `root`), when it

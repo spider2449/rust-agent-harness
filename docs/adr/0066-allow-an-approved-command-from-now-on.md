@@ -1,6 +1,6 @@
 # ADR 0066: The Web UI Can Allow An Approved Command From Now On
 
-Status: Accepted
+Status: Accepted; amended by ADR 0067 (the rule is kept in `rah.toml` instead of `storage`)
 
 Date: 2026-11-06
 

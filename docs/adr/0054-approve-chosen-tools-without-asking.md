@@ -1,6 +1,6 @@
 # ADR 0054: The Policy Can Allow Chosen Tools Without Asking, and `--approve` Sets It For One Run
 
-Status: Accepted
+Status: Accepted; amended by ADR 0067 (the `--approve` option is removed; `permissions` modes and the policy's `approve` key remain)
 
 Date: 2026-10-19
 
