@@ -9,13 +9,14 @@ mod data;
 mod extend;
 mod features;
 mod help;
-
 mod show;
+mod user;
 
 pub use check::{ConfigProblem, check_distribution};
 pub use extend::Extended;
 pub use features::{Applied, FEATURES, Feature, approved_tools, feature, list as list_features};
 pub use show::show_config;
+pub use user::{PROVIDERS, Permissions, Provider, UserSettings, is_model_kind, model_plugin};
 
 use std::{
     collections::BTreeMap,
@@ -302,10 +303,7 @@ use = "skills-fs"
 
 [[plugin]]
 use = "tool-input-repair"
-
-[[plugin]]
-use = "{MODEL}"{MODEL_CONFIG}
-
+{MODEL}
 [[plugin]]
 use = "telemetry-log"
 
@@ -396,6 +394,13 @@ pub struct Distribution {
     /// it, when the file has `extends` (ADR 0058), for `--show-config`.
     #[serde(skip)]
     pub extended: Option<Extended>,
+    /// The user keys of the file (`model`, `permissions`, `root`), when it
+    /// has any (ADR 0067).
+    #[serde(skip)]
+    pub user: Option<UserSettings>,
+    /// The permissions mode last applied, from the file or `--permissions`.
+    #[serde(skip)]
+    pub permissions: Option<Permissions>,
 }
 
 impl Distribution {
@@ -502,22 +507,41 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
         .iter()
         .find(|preset| preset.name == name)
         .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
-    let (policy, shell) = if preset.guarded {
+    Ok(compose_text(
+        Some((preset.model, preset.model_config)),
+        preset.guarded,
+    ))
+}
+
+/// The guarded composition without a model plugin: what a file with user
+/// keys starts from (ADR 0067).
+pub(crate) fn base_text() -> String {
+    compose_text(None, true)
+}
+
+/// The preset template with `model` (kind and inline configuration) and, when
+/// `guarded`, the policy and the shell.
+fn compose_text(model: Option<(&str, Option<&str>)>, guarded: bool) -> String {
+    let (policy, shell) = if guarded {
         (POLICY_TEMPLATE, SHELL_TEMPLATE)
     } else {
         ("", "")
     };
-    let model_config = preset
-        .model_config
-        .map(|config| format!("\nconfig = {config}"))
-        .unwrap_or_default();
-    Ok(format!(
+    let model = match model {
+        Some((kind, config)) => {
+            let config = config
+                .map(|config| format!("\nconfig = {config}"))
+                .unwrap_or_default();
+            format!("\n[[plugin]]\nuse = \"{kind}\"{config}\n")
+        }
+        None => String::new(),
+    };
+    format!(
         "{policy}{}",
         PRESET_TEMPLATE
             .replace("{SHELL}", shell)
-            .replace("{MODEL_CONFIG}", &model_config)
-            .replace("{MODEL}", preset.model)
-    ))
+            .replace("{MODEL}", &model)
+    )
 }
 
 /// Plugin kinds that work in a workspace directory, through their `root`

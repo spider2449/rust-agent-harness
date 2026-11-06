@@ -127,7 +127,7 @@ config = {{ prompt = "say hello" }}
         Command::new(env!("CARGO_BIN_EXE_rah"))
             .arg("--config")
             .arg(&config)
-            .args(["--model", "fixture-model"])
+            .args(["--model", "openai-compatible/fixture-model"])
             .env(KEY_ENV, "fixture-key")
             .env("RAH_HOME", home)
             .stdin(Stdio::null())
@@ -147,7 +147,8 @@ config = {{ prompt = "say hello" }}
     assert!(requests[0].0.starts_with("post /v1/chat/completions "));
     assert!(requests[0].0.contains("authorization: bearer fixture-key"));
     let first = &requests[0].1;
-    // `--model` sets the model of a model-chat-completions plugin.
+    // `--model` sets the model of a model-chat-completions plugin and keeps
+    // its other configuration.
     assert_eq!(first["model"], "fixture-model");
     let tools: Vec<&str> = first["tools"]
         .as_array()

@@ -539,3 +539,82 @@ fn show_config_prints_the_plugins_features_and_source() {
     );
     assert!(stdout.contains("web ui overrides: none"), "{stdout}");
 }
+
+#[test]
+fn a_file_with_user_keys_runs_the_model_and_permissions_it_names() {
+    let dir = TempDir::new("bin-user-keys");
+    let home = dir.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("rah.toml"),
+        "model = \"mock\"\npermissions = \"full\"\n",
+    )
+    .unwrap();
+    let output = rah(&dir)
+        .args(["--prompt", "hello", "--root"])
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("[model-mock] echo returned: hello"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("WARNING: permissions `full`"), "{stderr}");
+    assert!(!stderr.contains("UNGUARDED"), "{stderr}");
+
+    // `--permissions` overrides the file for one run.
+    let output = rah(&dir)
+        .args(["--permissions", "ask", "--prompt", "hello", "--root"])
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("permissions `full`"), "{stderr}");
+}
+
+#[test]
+fn a_file_with_user_keys_but_no_model_asks_for_one() {
+    let dir = TempDir::new("bin-user-no-model");
+    let home = dir.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("rah.toml"), "permissions = \"ask\"\n").unwrap();
+    let output = rah(&dir).args(["--prompt", "hello"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("no model is configured"), "{stderr}");
+
+    // `--model` supplies it.
+    let output = rah(&dir)
+        .args(["--model", "mock", "--prompt", "hello", "--root"])
+        .arg(dir.workspace())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("[model-mock] echo returned: hello"),
+        "{stdout}"
+    );
+
+    let output = rah(&dir)
+        .args([
+            "--model",
+            "mock",
+            "--permissions",
+            "yolo",
+            "--prompt",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--permissions: unknown permissions `yolo`"),
+        "{stderr}"
+    );
+}

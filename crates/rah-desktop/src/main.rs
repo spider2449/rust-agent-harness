@@ -97,10 +97,20 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     if let Some(mode) = &args.mode {
         distribution.set_config("frontend-web", "mode", Value::from(mode.as_str()));
     }
-    if let Some(root) = &args.root
-        && !distribution.set_root(&absolute(root)?)
-    {
-        return Err("--root needs a `tools-builtin` or sandbox plugin".into());
+    if let Some(root) = &args.root {
+        if !distribution.set_root(&absolute(root)?) {
+            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
+        }
+    } else if let Some(root) = distribution.user_root().map(Path::to_path_buf) {
+        // Again, for the workspace plugins `--with` mounted.
+        distribution.set_root(&root);
+    }
+    if distribution.user.is_some() && !distribution.has_model() {
+        return Err(
+            "no model is configured: add `model = \"<provider>/<model id>\"` to the \
+             configuration file"
+                .into(),
+        );
     }
     Ok(distribution)
 }

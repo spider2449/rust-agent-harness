@@ -9,13 +9,20 @@
 //! tables merge key by key, and any other value (a string, a number, an array)
 //! replaces the preset's. `replace = true` starts that plugin's `config` and
 //! `bind` over instead.
+//!
+//! A file with user keys (`model`, `model_options`, `permissions`, `root`;
+//! ADR 0067) extends the guarded base composition implicitly: the keys are
+//! applied first, then `remove` and `[[plugin]]` as above.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use crate::{BootError, Distribution, PluginSpec};
+use crate::{BootError, Distribution, Permissions, PluginSpec, UserSettings, base_text};
+
+/// What `Extended::preset` says for a file with user keys.
+pub const USER_BASE: &str = "base";
 
 /// What `extends` changed in a preset, for `--show-config`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,6 +41,10 @@ pub struct Extended {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DistributionFile {
+    model: Option<String>,
+    model_options: Option<Map<String, Value>>,
+    permissions: Option<String>,
+    root: Option<String>,
     extends: Option<String>,
     #[serde(default)]
     remove: Vec<String>,
@@ -79,6 +90,13 @@ fn invalid(message: String) -> BootError {
 pub(crate) fn parse(text: &str) -> Result<Distribution, BootError> {
     let file: DistributionFile =
         toml::from_str(text).map_err(|error| invalid(error.to_string()))?;
+    let has_user_keys = file.model.is_some()
+        || file.model_options.is_some()
+        || file.permissions.is_some()
+        || file.root.is_some();
+    if has_user_keys {
+        return parse_user(file);
+    }
     let Some(preset) = file.extends else {
         if !file.remove.is_empty() {
             return Err(invalid("`remove` needs `extends = \"<preset>\"`".into()));
@@ -97,24 +115,86 @@ pub(crate) fn parse(text: &str) -> Result<Distribution, BootError> {
         });
     };
     let mut distribution = Distribution::preset(&preset)?;
+    let extended = apply_changes(&mut distribution, &preset, file.remove, file.plugin)?;
+    distribution.features = file.features;
+    distribution.extended = Some(extended);
+    Ok(distribution)
+}
+
+/// A file with user keys: the guarded base, then the keys, then the changes.
+fn parse_user(file: DistributionFile) -> Result<Distribution, BootError> {
+    if file.extends.is_some() {
+        return Err(invalid(
+            "`extends` cannot be combined with `model`, `model_options`, `permissions` \
+             or `root`: those keys already start from the guarded base"
+                .into(),
+        ));
+    }
+    let mut distribution = Distribution::parse(&base_text())?;
+    let options = file.model_options.unwrap_or_default();
+    match &file.model {
+        Some(model) => distribution
+            .set_model(model, &options)
+            .map_err(|error| invalid(format!("model: {error}")))?,
+        None if !options.is_empty() => {
+            return Err(invalid("`model_options` needs `model`".into()));
+        }
+        None => {}
+    }
+    let permissions = file
+        .permissions
+        .as_deref()
+        .map(str::parse::<Permissions>)
+        .transpose()
+        .map_err(|error| invalid(format!("permissions: {error}")))?;
+    if let Some(permissions) = permissions {
+        distribution.set_permissions(permissions).map_err(invalid)?;
+    }
+    if let Some(root) = &file.root {
+        distribution.set_root(Path::new(root));
+    }
+    let extended = apply_changes(&mut distribution, USER_BASE, file.remove, file.plugin)?;
+    distribution.features = file.features;
+    distribution.extended = Some(extended);
+    distribution.user = Some(UserSettings {
+        model: file.model,
+        permissions,
+        root: file.root,
+    });
+    Ok(distribution)
+}
+
+/// Applies `remove` and the `[[plugin]]` changes to `distribution`, which was
+/// composed from `preset`.
+fn apply_changes(
+    distribution: &mut Distribution,
+    preset: &str,
+    remove: Vec<String>,
+    plugins: Vec<PluginEntry>,
+) -> Result<Extended, BootError> {
     let mut extended = Extended {
-        preset: preset.clone(),
+        preset: preset.to_owned(),
         ..Extended::default()
     };
-    for id in file.remove {
-        let at = position(&distribution, &id)
-            .ok_or_else(|| invalid(format!("remove: no plugin `{id}` in preset `{preset}`")))?;
+    let source = if preset == USER_BASE {
+        "the base composition".to_owned()
+    } else {
+        format!("preset `{preset}`")
+    };
+    for id in remove {
+        let at = position(distribution, &id)
+            .ok_or_else(|| invalid(format!("remove: no plugin `{id}` in {source}")))?;
         distribution.plugin.remove(at);
         extended.removed.push(id);
     }
-    for entry in file.plugin {
+    for entry in plugins {
         let id = entry.id.clone().unwrap_or_else(|| entry.kind.clone());
-        match position(&distribution, &id) {
+        match position(distribution, &id) {
             Some(at) => {
                 let spec = &mut distribution.plugin[at];
                 if spec.kind != entry.kind {
                     return Err(invalid(format!(
-                        "plugin `{id}` is a `{}` in preset `{preset}`, not a `{}`; \
+                        "plugin `{id}` is a `{}` in {source}, not a `{}`; \
                          remove it and add the new one with another id",
                         spec.kind, entry.kind
                     )));
@@ -132,7 +212,7 @@ pub(crate) fn parse(text: &str) -> Result<Distribution, BootError> {
             }
             None if entry.replace => {
                 return Err(invalid(format!(
-                    "`replace` changes a plugin of preset `{preset}`, which has no `{id}`"
+                    "`replace` changes a plugin of {source}, which has no `{id}`"
                 )));
             }
             None => {
@@ -146,9 +226,7 @@ pub(crate) fn parse(text: &str) -> Result<Distribution, BootError> {
             }
         }
     }
-    distribution.features = file.features;
-    distribution.extended = Some(extended);
-    Ok(distribution)
+    Ok(extended)
 }
 
 /// The position of the plugin with instance id `id`.
@@ -302,6 +380,90 @@ use = "context-default"
             spec(&distribution, "context-default").config,
             json!({ "memory_dir": "memory" })
         );
+    }
+
+    #[test]
+    fn user_keys_compose_the_guarded_base() {
+        let distribution = Distribution::parse(
+            r#"
+model = "anthropic/claude-sonnet-5-5"
+permissions = "auto-edit"
+root = "D:/work/project"
+features = ["web-search"]
+
+[model_options]
+max_tokens = 1000
+
+[[plugin]]
+use = "loop-react"
+config = { max_rounds = 4 }
+"#,
+        )
+        .unwrap();
+        let ids = ids(&distribution);
+        assert_eq!(ids[0], "policy-authority");
+        assert!(ids.iter().any(|id| id == "tools-shell"), "{ids:?}");
+        assert_eq!(
+            spec(&distribution, "model-anthropic").config,
+            json!({ "model": "claude-sonnet-5-5", "max_tokens": 1000 })
+        );
+        let policy = &spec(&distribution, "policy-authority").config;
+        assert_eq!(policy["allow"], json!(["none", "read", "write"]));
+        assert_eq!(policy["ask"], json!(["execute"]));
+        assert_eq!(policy["tools"]["shell.exec"], "execute");
+        assert_eq!(
+            spec(&distribution, "tools-builtin").config["root"],
+            "D:/work/project"
+        );
+        assert_eq!(
+            spec(&distribution, "sandbox-process").config["root"],
+            "D:/work/project"
+        );
+        assert_eq!(
+            spec(&distribution, "loop-react").config,
+            json!({ "max_rounds": 4 })
+        );
+        assert_eq!(distribution.features, ["web-search"]);
+        assert_eq!(
+            distribution.extended.as_ref().unwrap().changed,
+            ["loop-react"]
+        );
+        assert_eq!(
+            distribution.user,
+            Some(UserSettings {
+                model: Some("anthropic/claude-sonnet-5-5".into()),
+                permissions: Some(Permissions::AutoEdit),
+                root: Some("D:/work/project".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn user_keys_without_a_model_leave_it_to_the_command_line() {
+        let distribution = Distribution::parse("permissions = \"ask\"\n").unwrap();
+        assert!(!distribution.has_model());
+        assert!(distribution.user.is_some());
+    }
+
+    #[test]
+    fn user_key_mistakes_are_refused_with_the_reason() {
+        let cases = [
+            ("model = \"gemini/x\"\n", "unknown model provider `gemini`"),
+            ("permissions = \"yolo\"\n", "unknown permissions `yolo`"),
+            ("[model_options]\nx = 1\n", "`model_options` needs `model`"),
+            (
+                "model = \"mock\"\nextends = \"dev\"\n",
+                "`extends` cannot be combined with `model`",
+            ),
+            (
+                "model = \"mock\"\nremove = [\"nope\"]\n",
+                "remove: no plugin `nope` in the base composition",
+            ),
+        ];
+        for (text, expected) in cases {
+            let error = Distribution::parse(text).unwrap_err().to_string();
+            assert!(error.contains(expected), "{text}: {error}");
+        }
     }
 
     #[test]

@@ -9,7 +9,9 @@ use rah_api::{
     host::{ExitRequested, FrontendListening, HostNotice, Interrupt},
     tools::ToolInvoker,
 };
-use rah_cli::{Distribution, USER_CONFIG, boot, default_data_home, select_distribution};
+use rah_cli::{
+    Distribution, Permissions, USER_CONFIG, boot, default_data_home, select_distribution,
+};
 use serde_json::Value;
 
 /// RAH: a plugin-kernel agent harness.
@@ -32,10 +34,16 @@ struct Args {
     /// when it exists, otherwise `default`.
     #[arg(long)]
     preset: Option<String>,
-    /// Model id (model-openai, model-anthropic, model-llamacpp,
-    /// model-chat-completions).
+    /// Model to run, as `<provider>/<model id>` (or `<provider>` for its
+    /// default model): anthropic, openai, deepseek, llamacpp, mock. Example:
+    /// `--model anthropic/claude-sonnet-5-5`.
     #[arg(long)]
     model: Option<String>,
+    /// What tools may do without asking: read-only, ask (default),
+    /// auto-edit (writes run, programs ask) or full (every assigned tool
+    /// runs without asking).
+    #[arg(long)]
+    permissions: Option<String>,
     /// Distribution file listing the plugins to mount.
     #[arg(long)]
     config: Option<PathBuf>,
@@ -103,7 +111,7 @@ struct Args {
     /// Write the preset (--preset, else `default`) as a distribution file and
     /// exit: to --config when given, else `rah.toml` in the data directory.
     /// An existing file is never overwritten.
-    #[arg(long, conflicts_with_all = ["model", "web", "bind", "mode", "prompt", "session", "export", "summary", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
+    #[arg(long, conflicts_with_all = ["model", "permissions", "web","bind", "mode", "prompt", "session", "export", "summary", "session_dir", "root", "with", "approve", "list_features", "show_config", "check_config"])]
     init_config: bool,
 }
 
@@ -225,31 +233,34 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
     for request in &args.with {
         distribution.enable(request)?;
     }
-    if let Some(root) = &args.root
-        && !distribution.set_root(root)
-    {
-        return Err("--root needs a `tools-builtin` or sandbox plugin".into());
+    if let Some(root) = &args.root {
+        if !distribution.set_root(root) {
+            return Err("--root needs a `tools-builtin` or sandbox plugin".into());
+        }
+    } else if let Some(root) = distribution.user_root().map(Path::to_path_buf) {
+        // Again, for the workspace plugins `--with` mounted.
+        distribution.set_root(&root);
+    }
+    if let Some(permissions) = &args.permissions {
+        let permissions = permissions
+            .parse::<Permissions>()
+            .map_err(|error| format!("--permissions: {error}"))?;
+        distribution.set_permissions(permissions)?;
     }
     if !args.approve.is_empty() {
         distribution.approve(&args.approve)?;
     }
     if let Some(model) = &args.model {
-        let mut matched = false;
-        for kind in [
-            "model-openai",
-            "model-anthropic",
-            "model-llamacpp",
-            "model-chat-completions",
-        ] {
-            matched |= distribution.set_config(kind, "model", Value::String(model.clone()));
-        }
-        if !matched {
-            return Err(
-                "--model needs a `model-openai`, `model-anthropic`, `model-llamacpp` \
-                 or `model-chat-completions` plugin"
-                    .into(),
-            );
-        }
+        distribution
+            .set_model(model, &serde_json::Map::new())
+            .map_err(|error| format!("--model: {error}"))?;
+    }
+    if distribution.user.is_some() && !distribution.has_model() {
+        return Err(
+            "no model is configured: add `model = \"<provider>/<model id>\"` to the \
+             configuration file or pass --model, such as --model anthropic/claude-sonnet-5-5"
+                .into(),
+        );
     }
     Ok(distribution)
 }
@@ -365,6 +376,12 @@ async fn run(args: Args) -> i32 {
             let _ = kernel.shutdown().await;
             return 2;
         }
+    }
+    if distribution.permissions == Some(Permissions::Full) {
+        eprintln!(
+            "rah: WARNING: permissions `full` - every tool with a permission assignment \
+             runs without asking."
+        );
     }
     if !args.approve.is_empty() {
         // Already validated when the distribution was built.

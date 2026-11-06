@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `rah.toml` takes user keys that describe intent instead of plugins
+  (ADR 0067): `model = "<provider>/<model id>"` (providers `anthropic`,
+  `openai`, `deepseek`, `openai-compatible`, `llamacpp`, `mock`),
+  `model_options`, `permissions = "read-only" | "ask" | "auto-edit" | "full"`
+  and `root`. A file with any of them starts from the guarded base, and its
+  `[[plugin]]` entries change that base as with `extends`. Files without them
+  are read as before. `full` keeps the policy fail-closed (unassigned tools
+  are still denied) and warns at every start.
+- **Breaking:** `--model` takes `<provider>/<model id>` and mounts that
+  provider's plugin, instead of setting the id of whichever model plugin was
+  mounted: `--model gpt-x` becomes `--model openai/gpt-x`. New
+  `--permissions <mode>` overrides the mode for one run.
+
 - `tool-input-repair`: parameters of an XML-style tool call that a model
   server left inside a string field (`"program": "python
 <parameter=args>

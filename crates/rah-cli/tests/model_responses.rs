@@ -172,7 +172,7 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
             "--preset",
             "openai",
             "--model",
-            "gpt-test",
+            "openai/gpt-test",
             "--prompt",
             "hi",
             "--session-dir",
@@ -202,5 +202,9 @@ fn openai_preset_without_a_key_runs_but_reports_the_inactive_model() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--model needs"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--model: unknown model provider `x`"),
+        "{stderr}"
+    );
 }
