@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn shows_what_a_file_changed_in_its_preset() {
         let distribution = Distribution::parse(
-            "extends = \"dev\"\nremove = [\"skills-fs\"]\n\
+            "extends = \"dev\"\nremove = [\"tool-input-repair\"]\n\
              [[plugin]]\nuse = \"loop-react\"\nconfig = { max_rounds = 4 }\n\
              [[plugin]]\nuse = \"context-compact\"\n",
         )
@@ -215,7 +215,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rah-show-extends-{}", std::process::id()));
         let text = show(&prepared(distribution, dir), true);
         assert!(text.contains("extends:     preset `dev`"), "{text}");
-        assert!(text.contains("removed:     skills-fs"), "{text}");
+        assert!(text.contains("removed:     tool-input-repair"), "{text}");
         assert!(
             text.contains("loop-react  <- changed by the file"),
             "{text}"
@@ -224,7 +224,7 @@ mod tests {
             text.contains("context-compact  <- added by the file"),
             "{text}"
         );
-        assert!(!text.contains("\n  skills-fs\n"), "{text}");
+        assert!(!text.contains("\n  tool-input-repair\n"), "{text}");
     }
 
     #[test]

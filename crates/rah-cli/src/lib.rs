@@ -210,12 +210,11 @@ pub struct Preset {
 }
 
 /// Built-in presets. All share `storage-fs`, built-in tools, read-only repository tools
-/// over `sandbox-process`, repository write tools (Ask), JSONL sessions, `context-default` (history window
-/// and memory notes per workspace), `skills-fs`, `scheduler-basic`
-/// (background jobs and `agent.delegate`), `telemetry-log` (turn records and
-/// the Web UI's Usage view), `plugin-builder` (the model writes personal
-/// plugins; saving asks), the default loop and the terminal
-/// frontend. Their data lives under the data home (see [`Distribution::data_home`]).
+/// over `sandbox-process`, repository write tools (Ask), JSONL sessions,
+/// `context-default` (history window and memory notes per workspace),
+/// `tool-input-repair`, the default loop and the terminal frontend (ADR
+/// 0068). Session titles, skills, the scheduler, telemetry and the plugin
+/// builder are features (see [`FEATURES`]). Their data lives under the data home (see [`Distribution::data_home`]).
 /// Every preset except `minimal` mounts `policy-authority` and `tools-shell`
 /// (`shell.exec` at `execute`, so the policy asks before each call);
 /// `minimal` runs unguarded, without program execution, and `rah` warns
@@ -264,7 +263,7 @@ pub const PRESETS: [Preset; 6] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "skills.*" = "read", "agent.*" = "read", "plugins.guide" = "none", "plugins.list" = "read", "plugins.read" = "read", "plugins.save" = "write", "shell.exec" = "execute" } }
+config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "shell.exec" = "execute" } }
 "#;
 
 /// Program execution, mounted only by the guarded presets: the policy asks
@@ -280,9 +279,6 @@ use = "storage-fs"
 
 [[plugin]]
 use = "session-jsonl"
-
-[[plugin]]
-use = "session-titles"
 
 [[plugin]]
 use = "tools-builtin"
@@ -304,22 +300,10 @@ use = "context-default"
 config = { memory_dir = "memory" }
 
 [[plugin]]
-use = "skills-fs"
-
-[[plugin]]
 use = "tool-input-repair"
 {MODEL}
 [[plugin]]
-use = "telemetry-log"
-
-[[plugin]]
-use = "plugin-builder"
-
-[[plugin]]
 use = "loop-react"
-
-[[plugin]]
-use = "scheduler-basic"
 
 [[plugin]]
 use = "frontend-cli"

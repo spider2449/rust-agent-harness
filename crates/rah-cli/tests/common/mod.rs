@@ -47,9 +47,20 @@ impl Drop for TempDir {
     }
 }
 
+/// The features the tests turn on: the plugins the base leaves out (ADR
+/// 0068), which many tests exercise.
+pub const EXTRAS: [&str; 5] = [
+    "titles",
+    "skills",
+    "scheduler",
+    "telemetry",
+    "plugin-builder",
+];
+
 /// The configuration file [`from_file`] starts with: user keys only, as
-/// `rah config init` writes one.
-pub const USER_FILE: &str = "# written by the tests\nmodel = \"mock\"\n";
+/// `rah config init` writes one, with [`EXTRAS`] on.
+pub const USER_FILE: &str = "# written by the tests\nmodel = \"mock\"\n\
+     features = [\"titles\", \"skills\", \"scheduler\", \"telemetry\", \"plugin-builder\"]\n";
 
 /// The configuration file of `dir`.
 pub fn config_file(dir: &TempDir) -> PathBuf {
@@ -70,9 +81,13 @@ pub fn from_file(dir: &TempDir) -> Distribution {
     distribution
 }
 
-/// The dev preset without the terminal frontend, rooted in `dir`.
+/// The dev preset with [`EXTRAS`], without the terminal frontend, rooted in
+/// `dir`.
 pub fn headless(dir: &TempDir) -> Distribution {
     let mut distribution = Distribution::preset("dev").unwrap();
+    for feature in EXTRAS {
+        distribution.enable(feature).unwrap();
+    }
     isolate(&mut distribution, dir);
     distribution
 }

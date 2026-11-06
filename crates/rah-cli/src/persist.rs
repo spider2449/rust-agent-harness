@@ -254,6 +254,16 @@ fn remove_plugin(doc: &mut DocumentMut, id: &str, model: Option<&str>) -> Result
         }
         remove.fmt();
     }
+    // A plugin a feature mounts goes with that feature, or it comes back.
+    if let Some(features) = doc.get_mut("features").and_then(Item::as_array_mut) {
+        features.retain(|item| {
+            item.as_str().is_none_or(|request| {
+                let (name, _) = crate::features::parse_request(request);
+                feature(name).and_then(|feature| feature.mounts()) != Some(id)
+            })
+        });
+        features.fmt();
+    }
     Ok(())
 }
 
@@ -656,6 +666,30 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_plugin_a_feature_mounts_drops_the_feature() {
+        let file = File::new(
+            "feature-plugin",
+            "model = \"mock\"\nfeatures = [\"titles\", \"web-search\"]\n",
+        );
+        file.apply(ConfigChange::Removed {
+            id: PluginId::new("session-titles"),
+        })
+        .unwrap();
+        assert!(
+            file.text().contains("features = [\"web-search\"]"),
+            "{}",
+            file.text()
+        );
+        let kinds: Vec<String> = file
+            .composed()
+            .plugin
+            .iter()
+            .map(|s| s.kind.clone())
+            .collect();
+        assert!(!kinds.iter().any(|k| k == "session-titles"), "{kinds:?}");
+    }
+
+    #[test]
     fn features_switch_on_and_off_in_any_form() {
         let file = File::new("features", "model = \"mock\"\nfeatures = [\"shell=git\"]\n");
         file.apply(ConfigChange::Feature {
@@ -773,8 +807,8 @@ mod tests {
         fs::write(
             dir.join("plugins"),
             r#"{"api-a":{"state":"mounted","kind":"tools-http","config":{"base_url":"https://x.test"}},
-                "scheduler-basic":{"state":"stopped","kind":"scheduler-basic"},
-                "session-titles":{"state":"removed"}}"#,
+                "tools-repo":{"state":"stopped","kind":"tools-repo"},
+                "tool-input-repair":{"state":"removed"}}"#,
         )
         .unwrap();
         fs::write(dir.join("web-search"), "on").unwrap();
@@ -807,9 +841,9 @@ mod tests {
         );
         let kinds: Vec<&str> = composed.plugin.iter().map(|s| s.kind.as_str()).collect();
         assert!(kinds.contains(&"tools-web-search"), "{kinds:?}");
-        assert!(kinds.contains(&"scheduler-basic"), "{kinds:?}");
+        assert!(kinds.contains(&"tools-repo"), "{kinds:?}");
         assert!(
-            !kinds.contains(&"session-titles") && !kinds.contains(&"loop-react"),
+            !kinds.contains(&"tool-input-repair") && !kinds.contains(&"loop-react"),
             "{kinds:?}"
         );
 

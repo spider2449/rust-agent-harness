@@ -22,6 +22,8 @@ enum Place {
     AfterSandbox,
     /// Before the agent loop, which is where tool and context plugins sit.
     BeforeLoop,
+    /// After the agent loop, before the frontend: for plugins that use it.
+    BeforeFrontend,
 }
 
 /// What a feature does to the plugin list.
@@ -55,7 +57,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah features` shows them.
-pub const FEATURES: [Feature; 10] = [
+pub const FEATURES: [Feature; 13] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -136,7 +138,7 @@ pub const FEATURES: [Feature; 10] = [
     },
     Feature {
         name: "telemetry",
-        summary: "write one JSON line per turn, model request and tool call (every preset mounts it)",
+        summary: "write one JSON line per turn, model request and tool call; the Web UI's Usage view",
         argument: None,
         needs_any: &[],
         mount: Mount::Plugin {
@@ -162,7 +164,7 @@ pub const FEATURES: [Feature; 10] = [
     },
     Feature {
         name: "plugin-builder",
-        summary: "describe a plugin and the model writes it (`plugins.*`); saving asks first, mounting is yours (every preset mounts it)",
+        summary: "describe a plugin and the model writes it (`plugins.*`); saving asks first, mounting is yours",
         argument: None,
         needs_any: &[],
         mount: Mount::Plugin {
@@ -176,6 +178,45 @@ pub const FEATURES: [Feature; 10] = [
             ("plugins.read", "read"),
             ("plugins.save", "write"),
         ],
+        decisions: &[],
+    },
+    Feature {
+        name: "titles",
+        summary: "name each session from its first turn (one extra model request per session)",
+        argument: None,
+        needs_any: &[],
+        mount: Mount::Plugin {
+            kind: "session-titles",
+            place: Place::BeforeLoop,
+        },
+        argument_key: None,
+        tools: &[],
+        decisions: &[],
+    },
+    Feature {
+        name: "skills",
+        summary: "skills from the data directory, listed to the model and loaded on demand (`skills.*`)",
+        argument: None,
+        needs_any: &[],
+        mount: Mount::Plugin {
+            kind: "skills-fs",
+            place: Place::BeforeLoop,
+        },
+        argument_key: None,
+        tools: &[("skills.*", "read")],
+        decisions: &[],
+    },
+    Feature {
+        name: "scheduler",
+        summary: "background and repeated jobs, and `agent.delegate` to hand a task to a subagent",
+        argument: None,
+        needs_any: &[],
+        mount: Mount::Plugin {
+            kind: "scheduler-basic",
+            place: Place::BeforeFrontend,
+        },
+        argument_key: None,
+        tools: &[("agent.*", "read")],
         decisions: &[],
     },
     Feature {
@@ -196,6 +237,17 @@ pub const FEATURES: [Feature; 10] = [
 /// The feature called `name`.
 pub fn feature(name: &str) -> Option<&'static Feature> {
     FEATURES.iter().find(|feature| feature.name == name)
+}
+
+impl Feature {
+    /// The plugin kind it mounts, which is also that plugin's instance id;
+    /// `None` for a feature that swaps a plugin.
+    pub(crate) fn mounts(&self) -> Option<&'static str> {
+        match self.mount {
+            Mount::Plugin { kind, .. } => Some(kind),
+            Mount::Replace { .. } => None,
+        }
+    }
 }
 
 /// The feature names, for messages.
@@ -351,6 +403,10 @@ impl Feature {
             Place::BeforeLoop => distribution.plugin.iter().position(|spec| {
                 spec.kind.starts_with("loop-") || spec.kind.starts_with("frontend-")
             }),
+            Place::BeforeFrontend => distribution
+                .plugin
+                .iter()
+                .position(|spec| spec.kind.starts_with("frontend-")),
         };
         let at = at.unwrap_or(distribution.plugin.len());
         distribution.plugin.insert(at, spec);
@@ -533,6 +589,36 @@ use = "sandbox-process"
         let mut bare = Distribution::parse("[[plugin]]\nuse = \"loop-react\"\n").unwrap();
         let missing = bare.enable("shell").unwrap_err();
         assert!(missing.contains("sandbox-process"), "{missing}");
+    }
+
+    #[test]
+    fn the_base_leaves_the_extras_to_features() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        let extras = [
+            ("titles", "session-titles"),
+            ("skills", "skills-fs"),
+            ("scheduler", "scheduler-basic"),
+            ("telemetry", "telemetry-log"),
+            ("plugin-builder", "plugin-builder"),
+        ];
+        for (_, kind) in extras {
+            assert!(!kinds(&distribution).contains(&kind), "{kind}");
+        }
+        assert!(policy(&distribution)["tools"].get("skills.*").is_none());
+        for (feature, _) in extras {
+            distribution.enable(feature).unwrap();
+        }
+        let kinds = kinds(&distribution);
+        for (_, kind) in extras {
+            assert!(kinds.contains(&kind), "{kind}: {kinds:?}");
+        }
+        // The scheduler uses the loop, so it comes after it.
+        let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+        assert!(at("loop-react") < at("scheduler-basic"));
+        assert!(at("scheduler-basic") < at("frontend-cli"));
+        assert_eq!(policy(&distribution)["tools"]["skills.*"], "read");
+        assert_eq!(policy(&distribution)["tools"]["agent.*"], "read");
+        assert_eq!(policy(&distribution)["tools"]["plugins.save"], "write");
     }
 
     #[test]

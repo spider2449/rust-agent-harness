@@ -27,7 +27,7 @@ fn records(dir: &std::path::Path) -> Vec<Value> {
 async fn turns_are_recorded_with_usage_and_tool_decisions() {
     let dir = TempDir::new("telemetry");
     let telemetry = dir.0.join("telemetry");
-    // Every preset mounts `telemetry-log`; `headless` keeps it in `dir`.
+    // `headless` turns the `telemetry` feature on and keeps its files in `dir`.
     let distribution = headless(&dir);
     let kernel = kernel(&distribution).await;
     let handle = kernel.handle();

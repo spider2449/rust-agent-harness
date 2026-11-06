@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.45.4 (2026-11-06)
+
+- **Breaking:** the base composition is 13 plugins instead of 18
+  (ADR 0068). `session-titles`, `skills-fs`, `scheduler-basic`,
+  `telemetry-log` and `plugin-builder` are now features: `titles`, `skills`,
+  `scheduler`, `telemetry` and `plugin-builder`
+  (`features = ["titles", "telemetry"]`, or `--with`). Each brings its policy
+  assignments. Without them there are no title requests, telemetry files,
+  skills list or plugin tools; the Usage view, generated titles, background
+  jobs and "My plugins" need their feature. A file with
+  `extends = "<preset>"` that changes or removes one of them no longer
+  parses; turn the feature on instead.
+- Removing a plugin that a feature mounts in the Plugins panel now removes
+  the feature from `rah.toml`, so the plugin does not come back at the next
+  start.
+
 ## v0.45.3 (2026-11-06)
 
 - Build: third-party crates are compiled without debug information in the

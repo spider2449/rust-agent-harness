@@ -100,9 +100,10 @@ directory `rah` starts in. [Features](#features) turn on opt-in capabilities.
 1. Command-line options (`--model`, `--permissions`, `--root`, `--with`), for
    this run only.
 2. `rah.toml` (or `--config <file>`), including what the Web UI saved.
-3. The base composition: a guarded set of plugins (policy, storage, sessions,
-   file, repository and shell tools, context, skills, scheduler, telemetry,
-   plugin builder, loop, frontend).
+3. The base composition: a small guarded set of 13 plugins (policy, storage,
+   sessions, file, repository and shell tools, context, input repair, model,
+   loop, frontend; [ADR 0068](adr/0068-a-smaller-base-composition.md)).
+   Everything else is a feature.
 
 `rah config show` names the origin of the model, permissions and root, and
 `rah config show --plugins` lists every plugin with its configuration.
@@ -155,8 +156,8 @@ one, for example `/call repo.status {}`.
 `rah web` prints the address with a per-start access token; open exactly that
 URL. It listens on loopback only and loads nothing from outside.
 
-- **Sessions** are grouped by the folder they worked in, searchable and
-  titled by the model after the first turn. They can be renamed, forked,
+- **Sessions** are grouped by the folder they worked in and searchable; with
+  the `titles` feature the model names each one after its first turn. They can be renamed, forked,
   exported (Markdown or JSON) and deleted (moved to
   `~/.rah/sessions/deleted/`; `scripts\sessions.ps1` restores them). The last
   answer can be regenerated and an earlier message edited, both in a new
@@ -235,9 +236,9 @@ use = "ui-layout-config"
 config = { left = ["sessions", "telemetry-log/usage"], right = ["files", "plugins"], right_open = true }
 ```
 
-`telemetry-log/usage` shows turns, requests, tokens and tool calls of the
-process; `plugin-builder/plugins` lists your personal plugins; the `todo`
-feature adds `todo/list`.
+Features add views: `telemetry` adds `telemetry-log/usage` (turns, requests,
+tokens and tool calls of the process), `plugin-builder` adds
+`plugin-builder/plugins` (your personal plugins) and `todo` adds `todo/list`.
 
 ## Features
 
@@ -253,9 +254,12 @@ policy.
 | `lsp` | Appends language server diagnostics to the output of file-writing tools. |
 | `compact` | Summarizes old history with the model instead of dropping it. |
 | `instructions` | Gives the model the workspace's `AGENTS.md` (text only; it grants nothing). |
-| `telemetry` | One JSON line per turn, request and tool call. On in the base. |
+| `telemetry` | One JSON line per turn, request and tool call; the Web UI's Usage view. |
 | `todo` | A to-do list the model keeps per session, shown in the Web UI. |
-| `plugin-builder` | The model writes personal plugins on request; saving asks. On in the base. |
+| `plugin-builder` | The model writes personal plugins on request; saving asks. |
+| `titles` | Names each session from its first turn (one extra model request per session). |
+| `skills` | Skills from `~/.rah/skills`, listed to the model and loaded on demand. |
+| `scheduler` | Background and repeated jobs, and `agent.delegate` to hand a task to a subagent. |
 | `plan` | Plan first, then execute step by step (`loop-plan`). |
 
 ## Programs and sandboxes
@@ -373,7 +377,7 @@ id = "word-tools"
 config = { program = "python", args = ["examples/process-plugins/word_tools.py"] }
 ```
 
-**Personal plugins**: when you ask for a RAH plugin, the model writes a
+**Personal plugins** (`plugin-builder` feature): when you ask for a RAH plugin, the model writes a
 process plugin in Python or Node.js (standard library only) with
 `plugin-builder`. `plugins.save` checks it and writes it to `plugins/<name>/`
 in the data directory with a `mount.toml` that lists the `[[plugin]]` entry
@@ -404,14 +408,15 @@ names looked for and `files` adds your own (relative to the data directory).
 The text grants nothing, and a repository you did not write can use it to
 steer the model ([SECURITY.md](SECURITY.md)).
 
-Skills (`skills-fs`) live in `~/.rah/skills/<name>/SKILL.md`, are listed to
-the model and loaded on demand with `skills.load`. `scheduler-basic` runs
-background jobs and `agent.delegate` hands a task to a subagent in its own
+With the `skills` feature (`skills-fs`), skills live in
+`~/.rah/skills/<name>/SKILL.md`, are listed to the model and loaded on demand
+with `skills.load`. The `scheduler` feature (`scheduler-basic`) runs
+background jobs, and `agent.delegate` hands a task to a subagent in its own
 session.
 
 ## Diagnostics
 
-`telemetry-log` (in the base) writes one JSON line per turn, model request
+The `telemetry` feature (`telemetry-log`) writes one JSON line per turn, model request
 and tool call to `~/.rah/telemetry/<date>.jsonl`, with durations, policy
 decisions and token usage, never message text or tool output (ADR 0040).
 

@@ -1638,7 +1638,7 @@ async fn web_search_is_switched_on_asks_first_and_is_remembered() {
 
     // It is the `web-search` feature in the file, so a new start has it.
     let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
-    assert!(text.contains("features = [\"web-search\"]"), "{text}");
+    assert!(text.contains("\"web-search\"]"), "{text}");
     let restarted = Kernel::new();
     boot(&restarted, &with_web(from_file(&web.dir)))
         .await
@@ -2406,7 +2406,7 @@ async fn the_layout_is_standard_until_a_ui_layout_plugin_replaces_it() {
     assert_eq!(
         standard,
         json!({
-            // Every preset mounts `telemetry-log` and `plugin-builder`; their views
+            // The tests turn `telemetry` and `plugin-builder` on; their views
             // join the right column.
             "layout": {"left": ["sessions"], "right": ["files", "plugins", "telemetry-log/usage", "plugin-builder/plugins"]},
             "source": "standard",
@@ -2495,7 +2495,7 @@ config = { left = ["sesions"] }
 
 #[tokio::test]
 async fn a_plugin_view_is_listed_placed_rendered_and_acted_on() {
-    // Every preset mounts `telemetry-log` and `plugin-builder`, and with them
+    // The tests turn `telemetry` and `plugin-builder` on, and with them
     // their views.
     let web = start("ui-views", |_| {}).await;
     assert_eq!(

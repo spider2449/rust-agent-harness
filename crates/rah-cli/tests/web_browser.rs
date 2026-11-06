@@ -2015,7 +2015,7 @@ async fn a_plugin_view_is_a_tab_that_follows_turns_and_runs_its_actions() {
         return;
     };
     let _one = ONE_BROWSER.lock().await;
-    // Every preset mounts `telemetry-log` and `plugin-builder`, with their views.
+    // The tests turn `telemetry` and `plugin-builder` on, with their views.
     let web = start("web-browser-views").await;
     let browser = Browser::launch(PathBuf::from(program), "web-browser-views");
     let mut page = browser.page().await;

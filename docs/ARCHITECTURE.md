@@ -108,15 +108,15 @@ Implemented:
   `loop-react` and `loop-plan` (plan-and-execute;
   either can replace the other at runtime); `tools-builtin` (`echo` and
   workspace-bounded `fs.read`, `fs.list`, `fs.glob` and
-  `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (asks the
+  `fs.grep`, which need no Git); `session-jsonl`; `session-titles` (feature `titles`: asks the
   model for a title after a session's first turn); `policy-authority`;
-  `telemetry-log` (mounted by every preset: JSONL records of turns, model
+  `telemetry-log` (feature `telemetry`: JSONL records of turns, model
   requests and tools with durations, policy decisions and token usage, and
   the Web UI's `usage` view);
   `todo` (opt-in feature `todo`: `todo.write` and `todo.read`, permission
   `none`, keep a to-do list per session in memory, rebuilt from the session
   log when unknown, and its `list` view shows the open session's list);
-  `plugin-builder` (mounted by every preset: the model writes the
+  `plugin-builder` (feature `plugin-builder`: the model writes the
   user's personal process plugins; `plugins.guide` returns the rules,
   `plugins.save` (`write`) checks the manifest against the process host's
   rules plus its own, then writes the files, `manifest.json`, a Python or
@@ -152,7 +152,7 @@ Implemented:
   `AGENTS.md` and configured instruction files, read on every request
   through `model.before_request`; `context-default` can also read its system
   prompt from `system_file`);
-  `skills-fs` (skills listed through `model.before_request`, loaded with
+  `skills-fs` (feature `skills`: skills listed through `model.before_request`, loaded with
   `skills.load`; problems with a skill are told to the user once as a
   `HostNotice`); `sandbox-process` (supervised processes, not an OS
   sandbox); `sandbox-os` (opt-in: the same supervision plus, on Linux,
@@ -226,9 +226,9 @@ Implemented:
   runs in a fresh store with a fuel and memory budget. `rah` mounts them with
   `use = "wasm"`.
 - `rah` (crate `rah-cli`): the distribution binary. It mounts plugins from
-  `rah.toml` or a preset (`default`, `openai`, `dev`, `minimal`); a
-  `rah.toml` with `extends = "<preset>"` lists only its changes to that preset
-  (ADR 0058). Every preset
+  `rah.toml`: its user keys (`model`, `permissions`, `root`, `features`) over
+  a small guarded base (ADR 0067, 0068), or a preset with
+  `extends = "<preset>"` and its changes (ADR 0058). Every preset
   except `minimal` mounts `policy-authority` first and `tools-shell`, whose
   `shell.exec` the policy asks about (ADR 0064). `rah` warns `UNGUARDED`
   when no `tool.before_invoke` handler is mounted, and aborts the boot when a

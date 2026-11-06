@@ -77,7 +77,7 @@ fn run_is_guarded_and_resumes_its_session() {
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("you said: again (6 earlier items)"),
+        stdout.contains("you said: again (5 earlier items)"),
         "{stdout}"
     );
     assert_eq!(jsonl_files(&dir.sessions()), 1);
@@ -511,7 +511,7 @@ fn config_check_reports_every_problem_and_starts_nothing() {
         .unwrap();
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("configuration ok: 18 plugins"), "{stdout}");
+    assert!(stdout.contains("configuration ok: 13 plugins"), "{stdout}");
 
     let config = dir.0.join("rah.toml");
     std::fs::write(
