@@ -644,3 +644,36 @@ fn a_file_with_user_keys_but_no_model_asks_for_one() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_first_start_without_a_terminal_explains_how_to_choose_a_model() {
+    let dir = TempDir::new("bin-first-start");
+    for args in [&["run", "hello"][..], &[], &["web"]] {
+        let output = rah(&dir).args(args).output().unwrap();
+        let stderr = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("rah config init"), "{stderr}");
+        assert!(stderr.contains("--model"), "{stderr}");
+        // No model was guessed, so none was started.
+        assert!(!stderr.contains("llama"), "{stderr}");
+    }
+    assert!(!dir.home().join("rah.toml").exists());
+
+    // Nothing to answer with: init asks for --model instead.
+    let output = rah(&dir).args(["config", "init"]).output().unwrap();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("needs --model when it cannot ask"),
+        "{stderr}"
+    );
+
+    // What runs can still be shown, and sessions read.
+    let output = rah(&dir).args(["config", "show"]).output().unwrap();
+    let shown = text(&output.stdout);
+    assert!(output.status.success(), "{shown}");
+    assert!(shown.contains("model:       none"), "{shown}");
+    let output = rah(&dir).args(["sessions", "list"]).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(text(&output.stdout).contains("no sessions"));
+}

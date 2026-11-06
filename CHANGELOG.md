@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Breaking:** without `rah.toml`, `--config` and `--model`, `rah` no longer
+  starts llama.cpp (the old `default` preset). On a terminal it asks for the
+  provider (marking which have their key variable set and whether a local
+  llama.cpp answers), the model id, permissions and workspace, writes
+  `rah.toml` and starts. Elsewhere it exits with status 2 and says how to
+  choose a model. `rah config init` asks the same questions when `--model`
+  is not given, and refuses without a terminal. No API key is read or
+  written; the file names the variable. `rah config show` and
+  `rah sessions` work without a configuration.
 - **Breaking:** `rah` takes commands instead of mode flags (ADR 0067). The
   old flags are removed without aliases:
 

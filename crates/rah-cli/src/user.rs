@@ -19,6 +19,8 @@ pub struct Provider {
     preset: &'static [(&'static str, &'static str)],
     /// Whether the plugin takes a `model` key.
     takes_id: bool,
+    /// The environment variable its API key is read from by default.
+    pub key_env: Option<&'static str>,
 }
 
 /// Every provider, in the order messages list them.
@@ -28,18 +30,21 @@ pub const PROVIDERS: [Provider; 6] = [
         kind: "model-anthropic",
         preset: &[],
         takes_id: true,
+        key_env: Some("ANTHROPIC_API_KEY"),
     },
     Provider {
         name: "openai",
         kind: "model-openai",
         preset: &[],
         takes_id: true,
+        key_env: Some("OPENAI_API_KEY"),
     },
     Provider {
         name: "deepseek",
         kind: "model-chat-completions",
         preset: &[("provider", "deepseek")],
         takes_id: true,
+        key_env: Some("DEEPSEEK_API_KEY"),
     },
     // Any Chat Completions server; `model_options.base_url` names it.
     Provider {
@@ -47,18 +52,21 @@ pub const PROVIDERS: [Provider; 6] = [
         kind: "model-chat-completions",
         preset: &[],
         takes_id: true,
+        key_env: None,
     },
     Provider {
         name: "llamacpp",
         kind: "model-llamacpp",
         preset: &[],
         takes_id: true,
+        key_env: Some("RAH_LLAMA_CPP_API_KEY"),
     },
     Provider {
         name: "mock",
         kind: "model-mock",
         preset: &[],
         takes_id: false,
+        key_env: None,
     },
 ];
 
@@ -368,6 +376,7 @@ impl Distribution {
 /// The values are checked first, so the file it writes always parses.
 pub fn user_file_text(
     model: &str,
+    options: &[(String, String)],
     permissions: Permissions,
     root: Option<&str>,
     features: &[String],
@@ -393,6 +402,13 @@ pub fn user_file_text(
         "\n# Opt-in capabilities; `rah features` lists them.\nfeatures = [{}]\n",
         features.join(", ")
     ));
+    // A table, so it goes after every top-level key.
+    if !options.is_empty() {
+        text.push_str("\n# Provider-specific settings of the model plugin.\n[model_options]\n");
+        for (key, value) in options {
+            text.push_str(&format!("{key} = {}\n", quote(value)));
+        }
+    }
     Ok(text)
 }
 
@@ -437,6 +453,7 @@ mod tests {
     fn the_init_file_parses_back_to_its_values() {
         let text = user_file_text(
             "anthropic/claude-sonnet-5-5",
+            &[("api_key_env".to_owned(), "MY_KEY".to_owned())],
             Permissions::AutoEdit,
             Some("D:\\work \"x\""),
             &["web-search".to_owned(), "shell=git".to_owned()],
@@ -452,10 +469,14 @@ mod tests {
             })
         );
         assert_eq!(distribution.features, ["web-search", "shell=git"]);
-        let bare = user_file_text("mock", Permissions::Ask, None, &[]).unwrap();
+        assert_eq!(
+            spec(&distribution, "model-anthropic").config,
+            json!({ "model": "claude-sonnet-5-5", "api_key_env": "MY_KEY" })
+        );
+        let bare = user_file_text("mock", &[], Permissions::Ask, None, &[]).unwrap();
         let distribution = Distribution::parse(&bare).unwrap();
         assert_eq!(distribution.user.unwrap().root, None);
-        assert!(user_file_text("nope/x", Permissions::Ask, None, &[]).is_err());
+        assert!(user_file_text("nope/x", &[], Permissions::Ask, None, &[]).is_err());
     }
 
     fn spec<'a>(distribution: &'a Distribution, kind: &str) -> &'a PluginSpec {

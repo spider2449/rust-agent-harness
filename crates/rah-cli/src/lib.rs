@@ -10,6 +10,7 @@ mod data;
 mod extend;
 mod features;
 mod help;
+pub mod setup;
 mod show;
 mod user;
 
@@ -477,7 +478,9 @@ pub fn read_distribution(path: &Path) -> Result<Distribution, String> {
 
 /// The distribution to run, with `data_home` set to `home`: the file
 /// `config` when given, else [`USER_CONFIG`] in `home` when it exists, else
-/// the `default` preset. Also returns the file that was read.
+/// the guarded base without a model, as a file with only user keys would be
+/// (ADR 0067 §6: a model is never guessed). Also returns the file that was
+/// read.
 pub fn select_distribution(
     config: Option<&Path>,
     home: &Path,
@@ -486,10 +489,11 @@ pub fn select_distribution(
     let (mut distribution, used) = match config {
         Some(path) => (read_distribution(path)?, Some(path.to_path_buf())),
         None if user_config.is_file() => (read_distribution(&user_config)?, Some(user_config)),
-        None => (
-            Distribution::preset("default").map_err(|error| error.to_string())?,
-            None,
-        ),
+        None => {
+            let mut base = Distribution::parse(&base_text()).map_err(|error| error.to_string())?;
+            base.user = Some(UserSettings::default());
+            (base, None)
+        }
     };
     distribution.data_home = Some(home.to_path_buf());
     distribution.apply_features()?;

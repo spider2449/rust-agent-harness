@@ -37,6 +37,11 @@ pub struct GlobalArgs {
     pub data_dir: Option<PathBuf>,
 }
 
+/// Why a start that needs a model cannot go on, and the ways forward.
+pub const NO_MODEL: &str = "no model is configured. Run `rah config init` to choose one and \
+     write rah.toml, add `model = \"<provider>/<model id>\"` to the configuration file, or pass \
+     --model, such as --model anthropic/claude-sonnet-5-5 (--model mock needs no key)";
+
 /// Where a shown value came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -94,6 +99,13 @@ impl GlobalArgs {
         }
     }
 
+    /// Whether nothing names a model yet: no `--config`, no `rah.toml` in
+    /// the data directory and no `--model`. A start then needs
+    /// `rah config init` first.
+    pub fn unconfigured(&self) -> Result<bool, String> {
+        Ok(self.config.is_none() && self.model.is_none() && !self.config_path()?.exists())
+    }
+
     /// The distribution these options select, with the flags applied in
     /// order: features, root, permissions, model. Without `require_model`,
     /// a configuration that names no model is accepted (for commands that
@@ -136,11 +148,7 @@ impl GlobalArgs {
             origins.0 = Origin::Flag;
         }
         if require_model && distribution.user.is_some() && !distribution.has_model() {
-            return Err(
-                "no model is configured: add `model = \"<provider>/<model id>\"` to the \
-                 configuration file or pass --model, such as --model anthropic/claude-sonnet-5-5"
-                    .into(),
-            );
+            return Err(NO_MODEL.into());
         }
         Ok(Prepared {
             distribution,

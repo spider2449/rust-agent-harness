@@ -1,7 +1,9 @@
 use std::{
-    path::PathBuf,
+    io::IsTerminal,
+    path::{Path, PathBuf},
     process::Command as Process,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use clap::{Parser, Subcommand};
@@ -12,8 +14,8 @@ use rah_api::{
 };
 use rah_cli::{
     Distribution, Permissions, boot,
-    cli::{GlobalArgs, absolute},
-    is_model_kind, user_file_text,
+    cli::{GlobalArgs, NO_MODEL, absolute},
+    is_model_kind, setup, user_file_text,
 };
 use serde_json::Value;
 
@@ -233,26 +235,60 @@ fn frontend(
     }
 }
 
-/// `rah config init`: writes a file with user keys only.
+/// Whether a person can answer questions: stdin and stdout are a terminal.
+fn on_terminal() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// `rah config init`: writes a file with user keys only. With `--model` it
+/// asks nothing; without, it asks on a terminal and refuses elsewhere.
 fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
-    let model = global.model.as_deref().ok_or(
-        "config init needs --model, such as `rah config init --model anthropic/claude-sonnet-5-5`",
-    )?;
     let permissions = global
         .permissions
         .as_deref()
         .map(str::parse::<Permissions>)
         .transpose()
-        .map_err(|error| format!("--permissions: {error}"))?
-        .unwrap_or(Permissions::Ask);
+        .map_err(|error| format!("--permissions: {error}"))?;
     let root = global
         .root
         .as_deref()
         .map(absolute)
         .transpose()?
         .map(|root| root.display().to_string());
-    let text = user_file_text(model, permissions, root.as_deref(), &global.with)?;
     let path = global.config_path()?;
+    if path.exists() {
+        return Err(already_exists(&path));
+    }
+    let text = match &global.model {
+        Some(model) => user_file_text(
+            model,
+            &[],
+            permissions.unwrap_or(Permissions::Ask),
+            root.as_deref(),
+            &global.with,
+        )?,
+        None if on_terminal() => {
+            let is_set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+            let environment = setup::Environment {
+                is_set: &is_set,
+                llama_cpp_answers: setup::answers(
+                    setup::LLAMA_CPP_ADDRESS,
+                    Duration::from_millis(300),
+                ),
+                permissions,
+                root,
+                features: &global.with,
+            };
+            let mut stdout = std::io::stdout();
+            setup::interview(&mut std::io::stdin().lock(), &mut stdout, &environment)
+                .map_err(|error| error.to_string())?
+        }
+        None => {
+            return Err("config init needs --model when it cannot ask, such as \
+                 `rah config init --model anthropic/claude-sonnet-5-5`"
+                .into());
+        }
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
@@ -263,15 +299,27 @@ fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
         .create_new(true)
         .open(&path)
         .map_err(|error| match error.kind() {
-            std::io::ErrorKind::AlreadyExists => format!(
-                "`{}` already exists; edit it with `rah config edit`, or remove it first",
-                path.display()
-            ),
+            std::io::ErrorKind::AlreadyExists => already_exists(&path),
             _ => format!("cannot create `{}`: {error}", path.display()),
         })?;
     std::io::Write::write_all(&mut file, text.as_bytes())
         .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
     Ok(path)
+}
+
+fn already_exists(path: &Path) -> String {
+    format!(
+        "`{}` already exists; edit it with `rah config edit`, or remove it first",
+        path.display()
+    )
+}
+
+/// Runs `init` off the async workers: it may wait for a person to answer.
+async fn init_blocking(global: &GlobalArgs) -> Result<PathBuf, String> {
+    let global = global.clone();
+    tokio::task::spawn_blocking(move || init(&global))
+        .await
+        .map_err(|error| format!("config init failed: {error}"))?
 }
 
 /// `rah config edit`: runs the editor on the configuration file and returns
@@ -324,7 +372,7 @@ async fn run(cli: Cli) -> i32 {
         }
         Some(Command::Config { command }) => {
             return match command {
-                ConfigCommand::Init => match init(global) {
+                ConfigCommand::Init => match init_blocking(global).await {
                     Ok(path) => {
                         eprintln!("rah: wrote `{}`", path.display());
                         0
@@ -361,6 +409,19 @@ async fn run(cli: Cli) -> i32 {
         _ => {}
     }
     let reads_sessions = matches!(cli.command, Some(Command::Sessions { .. }));
+    // A first start: nothing names a model. Ask on a terminal, else explain.
+    match global.unconfigured() {
+        Ok(true) if !reads_sessions && on_terminal() => {
+            eprintln!("rah: no configuration yet; a few questions write one.");
+            match init_blocking(global).await {
+                Ok(path) => eprintln!("rah: wrote `{}`", path.display()),
+                Err(message) => return fail(message),
+            }
+        }
+        Ok(true) if !reads_sessions => return fail(NO_MODEL),
+        Ok(_) => {}
+        Err(message) => return fail(message),
+    }
     let prepared = match global.prepare(!reads_sessions) {
         Ok(prepared) => prepared,
         Err(message) => return fail(message),
