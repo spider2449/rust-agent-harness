@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::AppState;
+use crate::{AppState, approvals::Answered, settings};
 
 pub(crate) async fn upgrade(State(shared): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
     upgrade
@@ -43,6 +43,10 @@ enum ClientMessage {
         /// Also allow the tool for the rest of the session (ADR 0056).
         #[serde(default)]
         always: bool,
+        /// Also allow this exact `shell.exec` command from now on, as a
+        /// policy `commands` rule (ADR 0066).
+        #[serde(default)]
+        command: bool,
     },
 }
 
@@ -89,7 +93,7 @@ async fn serve(mut socket: WebSocket, shared: AppState) {
             () = shared.stop.cancelled() => break,
             message = socket.recv() => match message {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(message) => handle(&shared, &mut running, message),
+                    Ok(message) => handle(&shared, &mut running, message).await,
                     Err(problem) => Some(error(format!("invalid message: {problem}"))),
                 },
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -126,7 +130,7 @@ async fn serve(mut socket: WebSocket, shared: AppState) {
     }
 }
 
-fn handle(
+async fn handle(
     shared: &AppState,
     running: &mut Option<Running>,
     message: ClientMessage,
@@ -166,7 +170,21 @@ fn handle(
             id,
             approve,
             always,
-        } => (!shared.approvals.answer(&id, approve, always))
-            .then(|| error("that approval is no longer pending")),
+            command,
+        } => match shared.approvals.answer(&id, approve, always, command) {
+            None => Some(error("that approval is no longer pending")),
+            // The call already goes on; the rule is for the calls after it.
+            Some(Answered {
+                allow_command: Some(rule),
+            }) => settings::allow_command(shared, rule)
+                .await
+                .err()
+                .map(|problem| {
+                    error(format!(
+                        "the command was allowed once, not remembered: {problem}"
+                    ))
+                }),
+            Some(_) => None,
+        },
     }
 }

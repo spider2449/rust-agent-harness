@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Web UI: a `shell.exec` approval offers "Always allow this command". It
+  runs the call and adds its exact program and arguments to the policy's
+  `commands` (ADR 0050), stored like a saved Tools form, so the same command
+  is not asked about again, also after a restart. Other arguments still ask,
+  and the rule is taken from the call, never from the browser (ADR 0066).
+- Web UI: a policy saved in **Settings → Tools** gains, at start, the
+  permission assignments of the preset or `rah.toml` that it does not list.
+  A saved policy is a snapshot, so a tool assigned later (`shell.exec` in the
+  presets, `plugins.*`) had no assignment and every call was denied without
+  asking. Assignments the form saved still win, and `allow`, `ask`,
+  `decisions` and `commands` are still taken from the form only.
 - `context-default`: without `system` or `system_file` it sends a built-in
   agent prompt (act with the tools, investigate what a request names, keep
   going until done, ask only when blocked), and on every request it appends

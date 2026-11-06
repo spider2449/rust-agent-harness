@@ -344,6 +344,103 @@ async fn always_allows_a_tool_for_that_session_only() {
     assert!(text.contains("denied: rejected by the user"), "{text}");
 }
 
+/// Runs a turn and answers each approval with `answer` (`approve`,
+/// `command`); returns how many approvals were asked and the reply text.
+async fn run_shell_turn(
+    socket: &mut Socket,
+    session: &str,
+    input: &str,
+    answer: (bool, bool),
+) -> (usize, String) {
+    send(
+        socket,
+        json!({ "type": "turn", "session": session, "input": input }),
+    )
+    .await;
+    let (mut asked, mut text) = (0, String::new());
+    loop {
+        let message = next_json(socket).await;
+        match message["type"].as_str().unwrap() {
+            "approval_required" => {
+                asked += 1;
+                assert_eq!(message["tool"], "shell.exec");
+                send(
+                    socket,
+                    json!({ "type": "approval", "id": message["id"], "approve": answer.0, "command": answer.1 }),
+                )
+                .await;
+            }
+            "approval_resolved" | "ui" | "layout" => {}
+            "error" => panic!("{message}"),
+            "event" => {
+                let event = &message["event"];
+                match event["type"].as_str().unwrap() {
+                    "model_delta" => text.push_str(event["delta"].as_str().unwrap()),
+                    "completed" | "failed" | "cancelled" => return (asked, text),
+                    _ => {}
+                }
+            }
+            other => panic!("unexpected {other}: {message}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_approved_command_can_be_allowed_from_now_on() {
+    let web = start("web-allow-command", |_| {}).await;
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let version = r#"/call shell.exec {"program":"rustc","args":["--version"]}"#;
+    let other = r#"/call shell.exec {"program":"rustc","args":["--print","sysroot"]}"#;
+    let mut socket = web.socket().await;
+
+    // Asked, and allowed "from now on": the call runs.
+    let (asked, text) = run_shell_turn(&mut socket, &session, version, (true, true)).await;
+    assert_eq!(asked, 1, "{text}");
+    assert!(text.contains("exit_code"), "{text}");
+    let (_, policy) = instance(&web.kernel, "policy-authority").unwrap();
+    assert_eq!(policy["commands"], json!([["rustc", "--version"]]));
+    // The same command is not asked about again, in any session.
+    let session_two = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(wait_active(&web.kernel, "policy-authority").await);
+    let (asked, text) = run_shell_turn(&mut socket, &session_two, version, (false, false)).await;
+    assert_eq!(asked, 0, "{text}");
+    assert!(text.contains("exit_code"), "{text}");
+    // Other arguments are still asked about; a denial adds no rule.
+    let (asked, text) = run_shell_turn(&mut socket, &session, other, (false, true)).await;
+    assert_eq!(asked, 1, "{text}");
+    assert!(text.contains("denied: rejected by the user"), "{text}");
+    let (_, policy) = instance(&web.kernel, "policy-authority").unwrap();
+    assert_eq!(policy["commands"], json!([["rustc", "--version"]]));
+
+    // The rule is stored like a saved Tools form, so a restart keeps it.
+    let path = find_file(&web.dir.0, "settings-tools").expect("settings-tools stored");
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        stored["config"]["commands"],
+        json!([["rustc", "--version"]])
+    );
+}
+
+fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|file| file == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 #[tokio::test]
 async fn file_changes_are_undone_over_http_and_the_model_is_told() {
     let web = start("web-undo", |distribution| {
@@ -1806,8 +1903,20 @@ async fn settings_are_saved_rolled_back_when_invalid_and_restored_at_start() {
         .await;
     assert_eq!(status, 400);
 
-    // A new start with the same storage applies all three.
+    // A new start with the same storage applies all three. Its policy has
+    // gained an assignment since the save, which the saved policy gets too;
+    // the saved assignments still win.
     let mut distribution = headless(&web.dir);
+    distribution.set_config(
+        "policy-authority",
+        "tools",
+        json!({ "echo": "read", "later.tool": "read" }),
+    );
+    let changed = {
+        let mut restored = changed.clone();
+        restored["tools"]["later.tool"] = json!("read");
+        restored
+    };
     distribution.plugin.push(toml_spec(
         r#"
 [[plugin]]

@@ -83,7 +83,8 @@
 //!   with nothing to undo, 409 when a file changed since). The session's next
 //!   turn starts with a note telling the model.
 //! - `GET /api/ws`: WebSocket. Client messages: `{type: "turn", session,
-//!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve, always}`.
+//!   input}`, `{type: "cancel"}`, `{type: "approval", id, approve, always,
+//!   command}`.
 //!   Server messages: `{type: "event", session, event}`, `approval_required`,
 //!   `approval_resolved`, `ui`, `error`.
 //!
@@ -92,7 +93,10 @@
 //! denied after `approval_timeout_secs` (300). An approval sent with
 //! `always: true` also allows that tool for the rest of the session until the
 //! process ends (ADR 0056); a tool that needs `execute` is not remembered
-//! (`approval_required` carries `may_remember`).
+//! (`approval_required` carries `may_remember`). For `shell.exec`, the
+//! notice also carries `command`, the exact `[program, args...]`, and an
+//! approval sent with `command: true` adds it to the policy's `commands` and
+//! stores the policy like a saved Tools form (ADR 0066).
 //!
 //! The loop and session services are resolved per request, so other plugins
 //! can be swapped while the server runs. HTTP connections are served by

@@ -10,7 +10,9 @@
 //! back, so a bad policy never leaves tool calls unguarded. At start the
 //! stored settings are applied again (the policy first), then the web search
 //! switch. A stored setting replaces the distribution's configuration of
-//! that plugin as a whole. Changes made in the Plugins panel are applied
+//! that plugin as a whole, except that a stored policy gains the
+//! distribution's permission assignments it lacks (see
+//! [`with_new_assignments`]). Changes made in the Plugins panel are applied
 //! after them (see [`crate::panel`]).
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -146,6 +148,13 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
                 continue;
             };
             let current = current(&shared, admin.as_ref(), kinds);
+            let saved = match current.as_ref().and_then(|id| admin.instance(id)) {
+                Some(instance) if slot == "tools" && instance.kind == saved.kind => Saved {
+                    config: with_new_assignments(&saved.config, &instance.config),
+                    kind: saved.kind,
+                },
+                _ => saved,
+            };
             let unchanged = current
                 .as_ref()
                 .and_then(|id| admin.instance(id))
@@ -161,6 +170,92 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
     web_search::restore(&shared, admin.as_ref()).await;
     modes::restore(&shared, admin.as_ref(), shared.start_mode.clone()).await;
     groups::restore(&shared, admin.as_ref()).await;
+}
+
+/// The saved policy configuration plus the distribution's permission
+/// assignments (`tools`) it does not have. A saved policy is a snapshot: a
+/// tool the distribution assigned later (such as `shell.exec` when a preset
+/// starts to mount the shell) would otherwise have no assignment and be
+/// denied. An assignment the saved policy has always wins, and nothing else
+/// (`allow`, `ask`, `decisions`, `commands`) is taken from the distribution.
+fn with_new_assignments(saved: &Value, distribution: &Value) -> Value {
+    let Some(defaults) = distribution.get("tools").and_then(Value::as_object) else {
+        return saved.clone();
+    };
+    let mut merged = saved.clone();
+    let Some(config) = merged.as_object_mut() else {
+        return merged;
+    };
+    let tools = config
+        .entry("tools")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    // A malformed saved `tools` is left for the policy to refuse.
+    if let Some(tools) = tools.as_object_mut() {
+        for (pattern, level) in defaults {
+            tools
+                .entry(pattern.clone())
+                .or_insert_with(|| level.clone());
+        }
+    }
+    merged
+}
+
+/// The policy configuration with `rule` added to its `commands` (ADR 0050);
+/// `None` when it is already there. A malformed `commands` is replaced only
+/// when it is not a list.
+fn with_command(config: &Value, rule: &[String]) -> Option<Value> {
+    let mut config = match config {
+        Value::Object(_) => config.clone(),
+        _ => Value::Object(serde_json::Map::new()),
+    };
+    let object = config.as_object_mut()?;
+    let commands = object
+        .entry("commands")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !commands.is_array() {
+        *commands = Value::Array(Vec::new());
+    }
+    let list = commands.as_array_mut()?;
+    let rule = json!(rule);
+    if list.contains(&rule) {
+        return None;
+    }
+    list.push(rule);
+    Some(config)
+}
+
+/// Adds `rule` to the mounted policy's `commands` and stores the policy like
+/// a saved **Tools** form, so the exact command runs without asking from now
+/// on, also after a restart (ADR 0066). The user chose it at the approval
+/// prompt; the rule comes from the call the user saw.
+pub(crate) async fn allow_command(shared: &Shared, rule: Vec<String>) -> Result<(), String> {
+    let kinds = SLOTS[0].1;
+    let admin = shared
+        .kernel
+        .get(ADMIN)
+        .ok_or("no `admin` service is mounted")?;
+    let id = current(shared, admin.as_ref(), kinds).ok_or("no policy is mounted")?;
+    let instance = admin
+        .instance(&id)
+        .ok_or_else(|| format!("`{id}` is not mounted"))?;
+    let Some(config) = with_command(&instance.config, &rule) else {
+        return Ok(());
+    };
+    let saved = Saved {
+        kind: instance.kind,
+        config,
+    };
+    let (id, status) = apply(admin.as_ref(), Some(id), &saved)
+        .await
+        .map_err(|error| error.to_string())?;
+    if status != PluginStatus::Active {
+        return Err(format!("`{id}` is not active"));
+    }
+    if !remember(shared, SLOTS[0].0, &saved).await {
+        return Err("the policy was changed until the next start, but could not be stored".into());
+    }
+    panel::forget(shared, &id).await;
+    Ok(())
 }
 
 fn key(slot: &str) -> String {
@@ -422,4 +517,71 @@ pub(crate) async fn set_preferences(
     let mut reply = json!(preferences);
     reply["remembered"] = json!(remembered);
     Ok(Json(reply))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{with_command, with_new_assignments};
+
+    #[test]
+    fn a_command_rule_is_added_once() {
+        let rule = ["netstat".to_owned(), "-ano".to_owned()];
+        let added = with_command(&json!({ "tools": { "shell.exec": "execute" } }), &rule).unwrap();
+        assert_eq!(
+            added,
+            json!({ "tools": { "shell.exec": "execute" }, "commands": [["netstat", "-ano"]] })
+        );
+        assert_eq!(with_command(&added, &rule), None);
+        let other = ["git".to_owned()];
+        assert_eq!(
+            with_command(&added, &other).unwrap()["commands"],
+            json!([["netstat", "-ano"], ["git"]])
+        );
+        assert_eq!(
+            with_command(&json!({ "commands": 3 }), &other).unwrap(),
+            json!({ "commands": [["git"]] })
+        );
+    }
+
+    #[test]
+    fn a_saved_policy_gains_new_assignments_and_keeps_its_own() {
+        let saved = json!({
+            "ask": ["write"],
+            "decisions": { "echo": "deny" },
+            "tools": { "fs.*": "read", "repo.commit": "write" }
+        });
+        let distribution = json!({
+            "ask": ["write", "execute"],
+            "decisions": { "web.*": "ask" },
+            "commands": [["git", "status"]],
+            "tools": { "fs.*": "none", "repo.commit": "execute", "shell.exec": "execute" }
+        });
+        assert_eq!(
+            with_new_assignments(&saved, &distribution),
+            json!({
+                "ask": ["write"],
+                "decisions": { "echo": "deny" },
+                "tools": { "fs.*": "read", "repo.commit": "write", "shell.exec": "execute" }
+            })
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_tools_are_handled() {
+        let distribution = json!({ "tools": { "shell.exec": "execute" } });
+        assert_eq!(
+            with_new_assignments(&json!({}), &distribution),
+            json!({ "tools": { "shell.exec": "execute" } })
+        );
+        // A malformed saved value is left for the policy to refuse.
+        assert_eq!(
+            with_new_assignments(&json!({ "tools": 3 }), &distribution),
+            json!({ "tools": 3 })
+        );
+        assert_eq!(with_new_assignments(&json!(1), &distribution), json!(1));
+        let saved = json!({ "tools": { "fs.*": "read" } });
+        assert_eq!(with_new_assignments(&saved, &json!({})), saved);
+    }
 }

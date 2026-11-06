@@ -1083,13 +1083,20 @@ function showApproval(request) {
   // "Always" allows this tool for the rest of the session. The server decides
   // whether it may (a tool that needs `execute` is asked about every time);
   // the button only follows `may_remember`.
-  const choices = [["Deny", false, false], ["Allow", true, false]];
-  if (request.may_remember) choices.push(["Allow for this session", true, true]);
-  for (const [label, approve, always] of choices) {
+  const choices = [["Deny", false, false, false], ["Allow", true, false, false]];
+  if (request.may_remember) choices.push(["Allow for this session", true, true, false]);
+  // "Always allow this command" adds the exact program and arguments to the
+  // policy's `commands` (ADR 0066); the server takes them from the call, so
+  // the button only follows `command`.
+  if (Array.isArray(request.command)) {
+    choices.push(["Always allow this command", true, false, true]);
+  }
+  for (const [label, approve, always, command] of choices) {
     const button = el("button", approve ? "" : "ghost", label);
     button.type = "button";
+    if (command) button.title = request.command.join(" ");
     button.addEventListener("click", () => {
-      send({ type: "approval", id: request.id, approve, always });
+      send({ type: "approval", id: request.id, approve, always, command });
       card.remove();
     });
     buttons.append(button);

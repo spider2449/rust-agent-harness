@@ -84,6 +84,12 @@ The policy decides each call from its own configuration only:
   trusts the tool, not one call, so every argument is allowed; it is held in
   the frontend's memory, never saved, and never offered for a tool that
   declares `execute` or that the policy treats as `execute`.
+- The Web UI's "Always allow this command", offered on a `shell.exec`
+  approval, adds that call's exact program and arguments to the policy's
+  `commands` and stores the policy like a saved Tools form (ADR 0066). The
+  server derives the rule from the call it asked about, never from the
+  browser, and offers none when an element is `*`. It persists across
+  sessions and restarts, and is removed in **Settings → Tools**.
 
 The policy registers at hook priority 0. A mounted plugin with a higher
 priority runs first and can pre-empt it; mounting such a plugin is a trust

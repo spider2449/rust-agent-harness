@@ -95,7 +95,9 @@ result). With `--prompt`, a policy question is
 answered from standard input (only `y` or `yes` approves, and end of input
 denies; `a` also allows that tool for the rest of the session, as the Web UI's
 "Allow for this session" does, but never a tool that needs `execute`, ADR
-0056); for a script, `--approve repo.create-file,repo.edit-files` runs
+0056; for a program run, the Web UI's "Always allow this command" adds that
+exact command to the policy's `commands` so it is not asked about again,
+ADR 0066); for a script, `--approve repo.create-file,repo.edit-files` runs
 exactly those tools without asking for this run (ADR 0054). It takes exact tool
 names and prints a warning, and the policy still denies a tool it has no
 assignment for. In Windows PowerShell 5.1 a piped `y` may arrive with a byte
@@ -576,7 +578,10 @@ prompt, which tools may run (allow, ask first or off) and the agent loop with
 forms, and under **Display** whether replies show formatted (the default:
 headings, lists, tables, highlighted code) or as raw Markdown; what you save there is remembered (in `storage`) and applied again at
 the next start, and replaces that plugin's configuration from the preset or
-`rah.toml`. While a turn runs, a line above the message box shows what it is
+`rah.toml`. One exception keeps a saved policy current: a tool the preset or
+`rah.toml` assigns that the saved **Tools** form does not list (such as
+`shell.exec`, added to the presets later) gets the file's assignment; every
+entry the form saved still wins. While a turn runs, a line above the message box shows what it is
 doing (waiting for the model, thinking, writing, running a tool, waiting for
 your approval) and for how long, and the tab title is marked. The right-hand panel (**Workspace** in the header) shows the
 workspace's files as a tree, opens them read-only in tabs (with syntax

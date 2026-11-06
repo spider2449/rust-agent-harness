@@ -25,6 +25,43 @@ struct Waiting {
     key: (String, String),
     /// Whether the answer may allow the tool for the rest of the session.
     may_remember: bool,
+    /// The exact `shell.exec` command the answer may allow from now on
+    /// (ADR 0066), taken from the call, never from the browser.
+    command: Option<Vec<String>>,
+}
+
+/// The tool whose calls can be remembered as a policy `commands` rule.
+const SHELL_TOOL: &str = "shell.exec";
+
+/// The policy `commands` rule (ADR 0050) that allows exactly this call:
+/// `[program, args...]`. `None` for another tool, for input that is not a
+/// program string and an array of strings, and when an element is `*`, which
+/// a rule would read as a wildcard.
+pub fn command_rule(tool: &str, input: &Value) -> Option<Vec<String>> {
+    if tool != SHELL_TOOL {
+        return None;
+    }
+    let program = input.get("program")?.as_str()?;
+    let mut rule = vec![program.to_owned()];
+    match input.get("args") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(args)) => {
+            for arg in args {
+                rule.push(arg.as_str()?.to_owned());
+            }
+        }
+        Some(_) => return None,
+    }
+    let usable = !program.trim().is_empty() && rule.iter().all(|part| part != "*");
+    usable.then_some(rule)
+}
+
+/// What answering a request did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answered {
+    /// The command to add to the policy's `commands`, when the user chose to
+    /// allow it from now on.
+    pub allow_command: Option<Vec<String>>,
 }
 
 pub struct Approvals {
@@ -112,6 +149,7 @@ impl Approvals {
         // asked about every time.
         let may_remember =
             permission != PermissionLevel::Execute && !request.reason.contains("`execute`");
+        let command = command_rule(call.name.as_str(), &call.input.0);
         let notice = json!({
             "type": "approval_required",
             "id": id,
@@ -121,6 +159,7 @@ impl Approvals {
             "permission": permission,
             "reason": request.reason,
             "may_remember": may_remember,
+            "command": command,
         });
         let (answer, answered) = oneshot::channel();
         self.lock().insert(
@@ -130,6 +169,7 @@ impl Approvals {
                 answer,
                 key,
                 may_remember,
+                command,
             },
         );
         let _guard = Pending(self, id);
@@ -145,18 +185,23 @@ impl Approvals {
         let _ = self.notices.send(notice);
     }
 
-    /// Answers a waiting request; `false` if it is unknown or already over.
+    /// Answers a waiting request; `None` if it is unknown or already over.
     /// `always` with an approval also allows the tool for the rest of the
     /// session, unless the tool declares `execute`: the browser's word is not
-    /// taken for that.
-    pub fn answer(&self, id: &str, approve: bool, always: bool) -> bool {
-        let Some(waiting) = self.lock().remove(id) else {
-            return false;
-        };
+    /// taken for that. `command` with an approval returns the exact
+    /// `shell.exec` command of the call, for the caller to add to the policy
+    /// (ADR 0066); a request without one returns none.
+    pub fn answer(&self, id: &str, approve: bool, always: bool, command: bool) -> Option<Answered> {
+        let waiting = self.lock().remove(id)?;
         if approve && always && waiting.may_remember {
             self.remembered().insert(waiting.key);
         }
-        waiting.answer.send(approve).is_ok()
+        let allow_command = waiting.command.filter(|_| approve && command);
+        waiting
+            .answer
+            .send(approve)
+            .is_ok()
+            .then_some(Answered { allow_command })
     }
 }
 
@@ -230,7 +275,7 @@ mod tests {
         });
         let notice = notices.recv().await.unwrap();
         let id = notice["id"].as_str().unwrap().to_owned();
-        assert!(approvals.answer(&id, approve, always));
+        assert!(approvals.answer(&id, approve, always, false).is_some());
         (notice, asking.await.unwrap())
     }
 
@@ -275,6 +320,76 @@ mod tests {
                 .await,
             None
         );
+    }
+
+    #[test]
+    fn only_exact_shell_commands_become_rules() {
+        let rule = |tool: &str, input: Value| command_rule(tool, &input);
+        assert_eq!(
+            rule(
+                "shell.exec",
+                json!({ "program": "netstat", "args": ["-ano"] })
+            ),
+            Some(vec!["netstat".to_owned(), "-ano".to_owned()])
+        );
+        assert_eq!(
+            rule("shell.exec", json!({ "program": "git" })),
+            Some(vec!["git".to_owned()])
+        );
+        assert_eq!(rule("repo.patch", json!({ "program": "git" })), None);
+        assert_eq!(rule("shell.exec", json!({ "program": 3 })), None);
+        assert_eq!(rule("shell.exec", json!({ "program": " " })), None);
+        assert_eq!(
+            rule("shell.exec", json!({ "program": "git", "args": "status" })),
+            None
+        );
+        assert_eq!(
+            rule("shell.exec", json!({ "program": "git", "args": [1] })),
+            None
+        );
+        // `*` would widen the rule into a wildcard.
+        assert_eq!(
+            rule("shell.exec", json!({ "program": "git", "args": ["*"] })),
+            None
+        );
+        assert_eq!(rule("shell.exec", json!({ "program": "*" })), None);
+    }
+
+    #[tokio::test]
+    async fn an_approved_command_is_returned_only_when_asked_for() {
+        let approvals = Arc::new(Approvals::new(Duration::from_secs(5)));
+        for (approve, command, expected) in [
+            (true, true, Some(vec!["git".to_owned()])),
+            (true, false, None),
+            (false, true, None),
+        ] {
+            let (_client, mut notices, _) = approvals.connect();
+            let asking = tokio::spawn({
+                let approvals = approvals.clone();
+                async move { approvals.ask(request()).await }
+            });
+            let notice = notices.recv().await.unwrap();
+            assert_eq!(notice["command"], json!(["git"]));
+            assert_eq!(notice["may_remember"], false);
+            let id = notice["id"].as_str().unwrap();
+            let answered = approvals.answer(id, approve, true, command).unwrap();
+            assert_eq!(answered.allow_command, expected);
+            assert_eq!(asking.await.unwrap(), Some(approve));
+        }
+        // Another tool offers no command.
+        let (notice, _) = answered(
+            &approvals,
+            request_for(
+                &SessionId::new(),
+                "repo.create-file",
+                PermissionLevel::Write,
+                "write",
+            ),
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(notice["command"], Value::Null);
     }
 
     #[tokio::test]
@@ -351,10 +466,10 @@ mod tests {
         // A late browser sees the waiting request too.
         let (_late, _, waiting) = approvals.connect();
         assert_eq!(waiting.len(), 1);
-        assert!(approvals.answer(&id, true, false));
+        assert!(approvals.answer(&id, true, false, false).is_some());
         assert_eq!(asking.await.unwrap(), Some(true));
         assert_eq!(notices.recv().await.unwrap()["type"], "approval_resolved");
-        assert!(!approvals.answer(&id, true, false));
+        assert!(approvals.answer(&id, true, false, false).is_none());
         drop(client);
     }
 
