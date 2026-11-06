@@ -38,8 +38,8 @@ It never guesses one. To write the file without questions:
 rah config init --model anthropic/claude-sonnet-5-5 --permissions auto-edit --with web-search
 ```
 
-From a source checkout, `cargo run -p rah-cli -- <command>` runs the same
-binary, and [`scripts\start.ps1`](#scripts) builds and starts it.
+To install RAH, or update it after pulling changes, run `.\scripts\update.ps1`
+from the checkout; see [Scripts](#scripts).
 
 ## The configuration file
 
@@ -542,9 +542,10 @@ Windows PowerShell 5.1 or later; if scripts are blocked, run them as
 
 | Script | Does |
 |---|---|
-| `scripts\start.ps1` | Builds and runs `rah` from the checkout: the Web UI (opening its URL), `-Cli` for the REPL, `-Desktop` for the window, `-InitConfig` to write `rah.toml`. Options: `-Model`, `-Permissions`, `-Config`, `-Root`, `-DataDir`, `-Bind`, `-Mode`, `-Release`, `-NoBrowser`. |
-| `scripts\install.ps1` | `cargo install` of `rah` and `rah-desktop`; `-Only Web\|Desktop`, `-Shortcuts` for Start Menu entries, `-Uninstall`. |
+| `scripts\update.ps1` | **The one to use.** Builds this checkout (release) and installs `rah` and `rah-desktop` into `%LOCALAPPDATA%\Programs\RAH`, the installer's directory, so existing Start Menu entries and PATH run the new version; on a new machine it adds them. Prints the old and new version, warns when another `rah` comes first on PATH, and trims the debug build cache when `target` passes 30 GB (`-MaxTargetGB`). Never touches `~\.rah`. |
+| `scripts\start.ps1` | For development: runs `rah` from the checkout without installing: the Web UI (opening its URL), `-Cli` for the REPL, `-Desktop` for the window, `-InitConfig` to write `rah.toml`. Options: `-Model`, `-Permissions`, `-Config`, `-Root`, `-DataDir`, `-Bind`, `-Mode`, `-Release`, `-NoBrowser`. |
+| `scripts\install.ps1` | Alternative to `update.ps1`: `cargo install` into `~\.cargo\bin`; `-Only Web\|Desktop`, `-Shortcuts` for Start Menu entries, `-Uninstall`. |
 | `scripts/install.sh` | Linux: installs `rah`, `rah-desktop` and `rah-web`, menu entries and icon; `--only`, `--prefix`, `--no-menu`, `--uninstall [--purge]`. `rah-desktop` needs `libwebkit2gtk-4.1`. |
-| `scripts/package.sh`, `scripts\package.ps1` | Release archives (Linux tarball; Windows installer with Inno Setup 6, and a portable zip). |
+| `scripts/package.sh`, `scripts\package.ps1` | For releases only: archives (Linux tarball; Windows installer with Inno Setup 6, and a portable zip). |
 | `scripts\check.ps1` | The validation suite, with browser tests when Edge or Chrome is found; `-Quick`, `-Fix`, `-NoBrowser`. |
 | `scripts\sessions.ps1` | Lists deleted sessions, `-Restore <id prefix>`, `-Purge [-OlderThanDays n]`. |

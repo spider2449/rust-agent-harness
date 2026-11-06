@@ -10,7 +10,7 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 ## Quick start
 
 ```powershell
-.\scripts\install.ps1          # or: cargo install --path crates/rah-cli --locked
+.\scripts\update.ps1           # build and install (run it again after every pull)
 rah config init                # pick a model, permissions and workspace
 rah                            # terminal REPL
 rah web                        # Web UI in the browser
@@ -31,8 +31,9 @@ without a model or key: `rah --model mock`. Options such as `--model`,
 `--permissions` and `--root` override the file for one run, and settings saved
 in the Web UI are written to it. `rah config show` prints what would run.
 
-Without installing: `.\scripts\start.ps1` builds and starts the Web UI from
-this checkout (`-Cli`, `-Desktop`, `-Model mock`).
+`.\scripts\update.ps1` is the only command needed to install or update: it
+builds this checkout and replaces the installed `rah` and `rah-desktop` (the
+Start Menu entries follow), and prints the old and new version.
 
 ## Documentation
 
@@ -51,7 +52,7 @@ this checkout (`-Cli`, `-Desktop`, `-Model mock`).
 
 `master` has completed phases P0 to P6 of the
 [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
-(first released as 0.40.0; current release 0.45.1). RAH runs end to end with
+(first released as 0.40.0; current release 0.45.2). RAH runs end to end with
 a mock model, OpenAI and llama.cpp through the Responses API, Anthropic
 through the Messages API, and Chat Completions servers. Tool calls are guarded
 by the fail-closed `policy-authority` plugin. The model plugins are tested

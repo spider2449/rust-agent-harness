@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.45.2 (2026-11-06)
+
+- `scripts\update.ps1`: one command to install or update RAH from the
+  checkout. It builds the release binaries and copies them into the
+  installer's directory (`%LOCALAPPDATA%\Programs\RAH`), so the existing
+  Start Menu entries and PATH run the new version (on a new machine it adds
+  them), prints the old and new version, warns when another `rah` comes first
+  on PATH, refuses while RAH is running, and removes the debug build cache
+  once `target` passes 30 GB. It never touches `~\.rah`. `install.ps1` and
+  `package.ps1` stay, for a cargo install and for releases.
+
 ## v0.45.1 (2026-11-06)
 
 - Docs: the README is one page (install, `rah config init`, run, a minimal
