@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.45.1 (2026-11-06)
+
 - Docs: the README is one page (install, `rah config init`, run, a minimal
   `rah.toml`); everything else moved to the new `docs/CONFIGURATION.md`,
   organised around the user keys and commands. `rah --help` and the file
