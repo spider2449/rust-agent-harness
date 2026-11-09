@@ -35,7 +35,8 @@ jobs:
         # The runner image ships Chrome; it runs the Web UI browser test.
         env:
           RAH_TEST_BROWSER: /usr/bin/google-chrome
-        run: cargo test --workspace
+        # Every failing test is reported, not only those of the first crate.
+        run: cargo test --workspace --no-fail-fast
 
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

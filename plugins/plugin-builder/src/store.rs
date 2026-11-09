@@ -668,7 +668,13 @@ impl Store {
                 }
                 _ => format!("cannot create `{}`: {error}", path.display()),
             })?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, text.as_bytes())
+        // A tokio file finishes a write in the background; flush waits for
+        // it, so the bundle is complete when the export reports success.
+        let written = async {
+            tokio::io::AsyncWriteExt::write_all(&mut file, text.as_bytes()).await?;
+            tokio::io::AsyncWriteExt::flush(&mut file).await
+        };
+        written
             .await
             .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
     }

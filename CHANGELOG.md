@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.45.13 (2026-11-09)
+
+- `plugin-builder`: exporting personal plugins flushes the bundle file
+  before reporting success. The write finished in the background, so the
+  bundle could still be empty or incomplete right after "Exported"; the
+  Linux CI runner read it empty.
+- CI runs `cargo test --workspace --no-fail-fast`, as AGENTS.md does, so a
+  run reports every failing test instead of stopping at the first crate.
+
 ## v0.45.12 (2026-11-09)
 
 - `scripts\update.ps1` downloads release files through the GitHub API's
