@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.10 (2026-11-09)
+
+- Web UI: Settings has four tabs instead of six. **Model** also holds how
+  the assistant works (the loop, formerly its own tab), and **Features &
+  display** holds the feature switches and the display preferences (raw
+  Markdown, theme). Assistant and Permissions are unchanged.
+- Web UI: the session header keeps Undo and moves Rename, Export Markdown,
+  Export JSON and Delete into one "⋯" menu. Double-clicking the title still
+  renames.
+
 ## v0.45.9 (2026-11-09)
 
 - `scripts\update.ps1` no longer stops when RAH is running. RAH can stay

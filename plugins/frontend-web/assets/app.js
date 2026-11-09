@@ -3298,6 +3298,16 @@ async function start() {
   for (const format of ["md", "json"]) {
     $(`export-${format}`).addEventListener("click", () => exportSession(format).catch(report));
   }
+  // The session menu closes once an item is chosen, on Escape, and on a
+  // click elsewhere.
+  const sessionMenu = $("session-menu");
+  sessionMenu.querySelector(".menu-items").addEventListener("click", () => { sessionMenu.open = false; });
+  sessionMenu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") sessionMenu.open = false;
+  });
+  document.addEventListener("click", (event) => {
+    if (sessionMenu.open && !sessionMenu.contains(event.target)) sessionMenu.open = false;
+  });
   $("toggle-plugins").addEventListener("click", () => toggleSide("plugins"));
   $("toggle-side").addEventListener("click", () => toggleSide("files"));
   $("side-close").addEventListener("click", hideSide);

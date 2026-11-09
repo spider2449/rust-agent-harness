@@ -958,11 +958,17 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     // The buttons' handler, awaited so the exports finish before the delete.
     // With a save dialog, the file goes where the user picks; the stub
     // records what would be written.
+    // They are in the session menu, hidden until it opens.
+    assert_eq!(page.eval("shown(byId('export-md'))").await, false);
     assert_eq!(
-        page.eval("shown(byId('export-md')) && shown(byId('export-json'))")
-            .await,
+        page.eval(
+            "byId('session-menu').querySelector('summary').click(); \
+             shown(byId('export-md')) && shown(byId('export-json'))"
+        )
+        .await,
         true
     );
+    page.screenshot("session-menu").await;
     page.eval(
         "window.saved = [];          window.showSaveFilePicker = async (options) => ({ createWritable: async () => {            const parts = [];            return { write: async (part) => { parts.push(part); }, abort: async () => {},              close: async () => { saved.push({ name: options.suggestedName,                type: Object.keys(options.types[0].accept)[0],                text: await new Blob(parts).text() }); } }; } }); true",
     )
@@ -1883,7 +1889,8 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         "{formatted}"
     );
 
-    page.eval(&TAB.replace("{tab}", "display")).await;
+    // Display is a section of the Features & display tab.
+    page.eval(&TAB.replace("{tab}", "features")).await;
     page.wait(
         "the display form",
         "!!byId('raw-markdown') && !byId('raw-markdown').checked",
@@ -1909,14 +1916,11 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     .await;
 
     // Loop: switch to plan-and-execute.
-    page.eval(&TAB.replace("{tab}", "loop")).await;
-    page.wait(
-        "the loop form",
-        "!!document.querySelector('#settings-body select')",
-    )
-    .await;
+    // It is a section of the Model tab.
+    page.eval(&TAB.replace("{tab}", "model")).await;
+    page.wait("the loop form", "!!byId('loop-kind')").await;
     page.eval(&format!(
-        "{{ const kind = document.querySelector('#settings-body select'); kind.value = 'loop-plan'; \
+        "{{ const kind = byId('loop-kind'); kind.value = 'loop-plan'; \
          kind.dispatchEvent(new Event('change')); {}; true }}",
         save("Save loop")
     ))

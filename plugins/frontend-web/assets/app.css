@@ -316,6 +316,24 @@ details.advanced[open] > summary { margin-bottom: 8px; }
 .session-head h1.untitled { color: var(--muted); font-weight: normal; }
 .head-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .head-actions button { font-size: 12px; padding: 2px 8px; }
+details.session-menu { position: relative; }
+details.session-menu > summary {
+  list-style: none; cursor: pointer; font-size: 14px; line-height: 1; padding: 3px 8px;
+  border: 1px solid var(--line); border-radius: 6px; color: var(--muted); user-select: none;
+}
+details.session-menu > summary::-webkit-details-marker { display: none; }
+details.session-menu[open] > summary, details.session-menu > summary:hover { color: var(--text); }
+details.session-menu .menu-items {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 160px;
+  display: flex; flex-direction: column; padding: 4px; gap: 2px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+details.session-menu:not([open]) .menu-items { display: none; }
+details.session-menu .menu-items button { text-align: left; border: none; padding: 5px 10px; font-size: 13px; }
+details.session-menu .menu-items button:hover, details.session-menu .menu-items button:focus-visible { background: var(--tool); }
+.dialog h3.section-title:first-child { margin-top: 0; }
+.dialog h3.section-title + .form { margin-bottom: 8px; }
 button.danger { color: var(--bad); border-color: var(--bad); }
 .entry .edit { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .entry .edit textarea { font: inherit; padding: 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; }

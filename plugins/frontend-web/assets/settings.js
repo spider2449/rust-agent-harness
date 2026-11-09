@@ -405,7 +405,8 @@ function loopForm() {
   const config = { ...(current?.config && typeof current.config === "object" ? current.config : {}) };
   const form = el("div", "form");
   const kind = select(LOOP_KINDS, current?.kind || "loop-react");
-  form.append(field("How the assistant works", kind));
+  kind.id = "loop-kind";
+  form.append(field("Loop", kind));
   const fields = el("div", "form");
   form.append(fields);
   const inputs = {};
@@ -512,7 +513,7 @@ function displayForm() {
 // ---- Features --------------------------------------------------------------
 
 // Features with a home of their own elsewhere: web search in Permissions,
-// planning in Loop.
+// planning under Model > How the assistant works.
 const FEATURES_SHOWN_ELSEWHERE = ["web-search", "plan"];
 
 // One switch per feature; a switch applies at once and is written to rah.toml.
@@ -556,7 +557,23 @@ function featuresForm() {
 
 // ---- Dialog ---------------------------------------------------------------
 
-const FORMS = { model: modelForm, assistant: assistantForm, tools: toolsForm, features: featuresForm, loop: loopForm, display: displayForm };
+// A tab of sections, each with a heading and its own form.
+function sections(...parts) {
+  const page = el("div", "form");
+  for (const [title, form] of parts) {
+    page.append(el("h3", "section-title", title), form());
+  }
+  return page;
+}
+
+// Four tabs: what runs (model and how it works), what it is told, what it
+// may do, and extras with the look of the page.
+const FORMS = {
+  model: () => sections(["Model", modelForm], ["How the assistant works", loopForm]),
+  assistant: assistantForm,
+  tools: toolsForm,
+  features: () => sections(["Features", featuresForm], ["Display", displayForm]),
+};
 
 function renderSettings() {
   for (const button of document.querySelectorAll("#settings-tabs button")) {
@@ -584,6 +601,7 @@ async function reloadSettings() {
 
 async function openSettings(tab) {
   if (tab) settings.tab = tab;
+  if (!FORMS[settings.tab]) settings.tab = "model";
   settingsMessage("");
   $("settings-dialog").showModal();
   try {

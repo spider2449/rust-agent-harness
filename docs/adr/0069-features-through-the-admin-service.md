@@ -40,7 +40,9 @@ without that knowledge, and plugins must not depend on `rah-cli`.
 4. `frontend-web` serves `GET /api/features` and `PUT /api/features/{name}
    {enabled}`, and Settings gets a **Features** tab with one switch each.
    `web-search` keeps its switch under Permissions and `plan` its choice under
-   Loop, so no capability has two controls.
+   Loop, so no capability has two controls. (Since 0.45.10 Settings has four
+   tabs: Model with a "How the assistant works" section holding the loop
+   choice, Assistant, Permissions, and Features & display.)
 
 ## Consequences
 

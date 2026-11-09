@@ -37,10 +37,15 @@
         <h1 id="session-title" title="Double-click to rename"></h1>
         <span class="head-actions">
           <button id="session-undo" type="button" class="ghost" hidden>Undo</button>
-          <button id="session-rename" type="button" class="ghost">Rename</button>
-          <button id="export-md" type="button" class="ghost" title="Save as Markdown">Export .md</button>
-          <button id="export-json" type="button" class="ghost" title="Save as JSON">Export .json</button>
-          <button id="session-delete" type="button" class="ghost danger">Delete</button>
+          <details id="session-menu" class="session-menu">
+            <summary class="ghost" title="Rename, export or delete this session" aria-label="Session actions">⋯</summary>
+            <div class="menu-items" role="menu">
+              <button id="session-rename" type="button" class="ghost" role="menuitem">Rename</button>
+              <button id="export-md" type="button" class="ghost" role="menuitem" title="Save as Markdown">Export Markdown</button>
+              <button id="export-json" type="button" class="ghost" role="menuitem" title="Save as JSON">Export JSON</button>
+              <button id="session-delete" type="button" class="ghost danger" role="menuitem">Delete</button>
+            </div>
+          </details>
         </span>
       </div>
       <div id="notice" class="notice" hidden>
@@ -199,9 +204,7 @@
       <button type="button" role="tab" data-tab="model">Model</button>
       <button type="button" role="tab" data-tab="assistant">Assistant</button>
       <button type="button" role="tab" data-tab="tools">Permissions</button>
-      <button type="button" role="tab" data-tab="features">Features</button>
-      <button type="button" role="tab" data-tab="loop">Loop</button>
-      <button type="button" role="tab" data-tab="display">Display</button>
+      <button type="button" role="tab" data-tab="features">Features &amp; display</button>
     </div>
     <div id="settings-message" class="settings-message" hidden></div>
     <div id="settings-body"></div>
