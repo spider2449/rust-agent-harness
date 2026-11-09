@@ -45,6 +45,11 @@ in the commit which entry it closes.
   full `cargo test --workspace` runs with the browser tests. Those runs did
   find two other intermittent failures, fixed the same day: a `sandbox-os`
   pipe name collision and a refused `storage-fs` rename.
+- **Seen again on 2026-11-09** (Windows 10, Edge, v0.45.7 full run), this
+  time in `the_web_ui_works_in_a_real_browser`: a wait timed out with the
+  page showing "turn failed", the "fork here" control and "cancelled". The
+  change under test did not touch `frontend-web`; the test passed three
+  times in a row alone right after. The full output was not kept.
 - **To reproduce:** run the full suite repeatedly and keep the output, for
   example
   `cargo test --workspace --no-fail-fast 2>&1 | Out-File run.txt`

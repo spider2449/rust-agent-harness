@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.7 (2026-11-09)
+
+- `rah-desktop`: a first start without a configuration file shows a setup
+  form (provider, model id, server for OpenAI-compatible, permissions,
+  workspace) instead of an error page. It marks the providers whose key
+  variable is set and whether a local llama.cpp answers, writes `rah.toml`
+  and starts. Like `rah config init`, it never asks for or writes an API key.
+- `rah-cli`: `setup::Answers`, `setup::write_new` and `setup::already_exists`
+  are shared by `rah config init` and the desktop form.
+
 ## v0.45.6 (2026-11-09)
 
 - Web UI: **Settings → Features** has one switch per feature (titles,

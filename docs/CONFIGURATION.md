@@ -32,7 +32,8 @@ rah-desktop            # the same Web UI in a native window
 
 `rah` without a configuration asks the same questions on a terminal before
 it starts, and elsewhere exits with a message saying how to choose a model.
-It never guesses one. To write the file without questions:
+`rah-desktop` without one shows them as a form in its window and starts once
+it is answered. Neither guesses a model. To write the file without questions:
 
 ```powershell
 rah config init --model anthropic/claude-sonnet-5-5 --permissions auto-edit --with web-search

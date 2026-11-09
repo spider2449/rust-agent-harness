@@ -185,6 +185,9 @@ guessed:
   providers, marks the ones whose key variable is set and whether a local
   llama.cpp answers, asks for the model id, permissions and root, and writes
   `rah.toml`;
+- `rah-desktop` shows the same questions as a form in its window, writes
+  `rah.toml` from the answers and then starts (amended in 0.45.7; before, it
+  showed only the error);
 - otherwise it exits with status 2 and a message naming `--model` and
   `rah config init`.
 

@@ -23,7 +23,9 @@ use rah_api::{
     host::{ExitRequested, FrontendListening},
     tools::ToolInvoker,
 };
-use rah_cli::{Distribution, boot, cli::GlobalArgs};
+use rah_cli::{Distribution, boot, cli::GlobalArgs, setup};
+
+mod first_start;
 use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
@@ -71,6 +73,8 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
 
 enum UserEvent {
     Exit(i32),
+    /// The setup form's answers, as JSON.
+    Setup(String),
 }
 
 /// Boots the distribution; returns the Web UI's URL.
@@ -124,15 +128,64 @@ const TITLE: &str = concat!("RAH ", env!("CARGO_PKG_VERSION"));
 
 /// A page that shows why RAH did not start; a GUI program has no console.
 fn failure_page(message: &str) -> String {
-    let escaped = message
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let escaped = first_start::escape(message);
     format!(
         "<!doctype html><meta charset=\"utf-8\"><title>{TITLE}</title>\
          <body style=\"font:15px system-ui,sans-serif;margin:32px\">\
          <h1 style=\"font-size:20px\">{TITLE} did not start</h1><pre style=\"white-space:pre-wrap\">{escaped}</pre>"
     )
+}
+
+/// What the window shows first.
+enum Start {
+    Running(String),
+    Failed(String),
+    /// No configuration yet: the setup form.
+    Setup(String),
+}
+
+/// The setup form for a first start, with what is known about the machine.
+fn setup_page(global: &GlobalArgs) -> String {
+    let is_set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let root = global
+        .root
+        .as_deref()
+        .and_then(|root| rah_cli::cli::absolute(root).ok())
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(Into::into)
+        })
+        .map(|root: std::path::PathBuf| root.display().to_string())
+        .unwrap_or_default();
+    let environment = setup::Environment {
+        is_set: &is_set,
+        llama_cpp_answers: setup::answers(setup::LLAMA_CPP_ADDRESS, Duration::from_millis(300)),
+        permissions: global
+            .permissions
+            .as_deref()
+            .and_then(|permissions| permissions.parse().ok()),
+        root: None,
+        features: &global.with,
+    };
+    first_start::page(TITLE, &environment, &root)
+}
+
+/// Writes the configuration file from the setup form's answers. An error
+/// leaves nothing written, and the form says why.
+fn configure(global: &GlobalArgs, body: &str) -> Result<(), String> {
+    let text = first_start::answers(body)?.text(&global.with)?;
+    setup::write_new(&global.config_path()?, &text)
+}
+
+/// Boots the distribution `args` select.
+fn launch(runtime: &tokio::runtime::Runtime, kernel: &Kernel, args: &Args) -> Start {
+    match distribution(args).and_then(|distribution| runtime.block_on(start(kernel, &distribution)))
+    {
+        Ok(url) => Start::Running(url),
+        Err(message) => {
+            eprintln!("rah-desktop: {message}");
+            Start::Failed(message)
+        }
+    }
 }
 
 fn run(args: Args) -> Result<(), String> {
@@ -141,11 +194,11 @@ fn run(args: Args) -> Result<(), String> {
         .build()
         .map_err(|error| format!("cannot start the async runtime: {error}"))?;
     let kernel = Kernel::new();
-    let started = distribution(&args)
-        .and_then(|distribution| runtime.block_on(start(&kernel, &distribution)));
-    if let Err(message) = &started {
-        eprintln!("rah-desktop: {message}");
-    }
+    let first = match args.global.unconfigured() {
+        Ok(true) => Start::Setup(setup_page(&args.global)),
+        Ok(false) => launch(&runtime, &kernel, &args),
+        Err(message) => Start::Failed(message),
+    };
 
     let event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = Mutex::new(event_loop.create_proxy());
@@ -155,6 +208,7 @@ fn run(args: Args) -> Result<(), String> {
             .unwrap_or_else(PoisonError::into_inner)
             .send_event(UserEvent::Exit(exit.code));
     });
+    let setup_proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title(TITLE)
         .with_window_icon(window_icon())
@@ -162,9 +216,19 @@ fn run(args: Args) -> Result<(), String> {
         .with_min_inner_size(LogicalSize::new(480.0, 360.0))
         .build(&event_loop)
         .map_err(|error| format!("cannot open a window: {error}"))?;
-    let builder = match &started {
-        Ok(url) => WebViewBuilder::new().with_url(url),
-        Err(message) => WebViewBuilder::new().with_html(failure_page(message)),
+    let mut awaiting_setup = matches!(first, Start::Setup(_));
+    let builder = match &first {
+        Start::Running(url) => WebViewBuilder::new().with_url(url),
+        Start::Failed(message) => WebViewBuilder::new().with_html(failure_page(message)),
+        // Only the setup form posts messages; the event loop ignores any
+        // that arrive once it is answered.
+        Start::Setup(page) => {
+            WebViewBuilder::new()
+                .with_html(page)
+                .with_ipc_handler(move |request| {
+                    let _ = setup_proxy.send_event(UserEvent::Setup(request.body().clone()));
+                })
+        }
     };
     let view =
         webview(&window, builder).map_err(|error| format!("cannot create the WebView: {error}"))?;
@@ -180,6 +244,21 @@ fn run(args: Args) -> Result<(), String> {
                 ..
             } => 0,
             Event::UserEvent(UserEvent::Exit(code)) => code,
+            Event::UserEvent(UserEvent::Setup(body)) if awaiting_setup => {
+                let Some((view, _)) = &shown else { return };
+                if let Err(message) = configure(&args.global, &body) {
+                    let _ = view.evaluate_script(&first_start::failed_script(&message));
+                    return;
+                }
+                awaiting_setup = false;
+                let _ = match launch(&runtime, &kernel, &args) {
+                    Start::Running(url) => view.load_url(&url),
+                    Start::Failed(message) | Start::Setup(message) => {
+                        view.load_html(&failure_page(&message))
+                    }
+                };
+                return;
+            }
             _ => return,
         };
         // The window goes first, so closing feels immediate. Both are

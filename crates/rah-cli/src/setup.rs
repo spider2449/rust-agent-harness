@@ -6,6 +6,7 @@
 use std::{
     io::{self, BufRead, Write},
     net::{SocketAddr, TcpStream},
+    path::Path,
     time::Duration,
 };
 
@@ -36,7 +37,7 @@ pub struct Environment<'a> {
 
 impl Environment<'_> {
     /// What the provider list says about `provider`.
-    fn status(&self, provider: &Provider) -> String {
+    pub fn status(&self, provider: &Provider) -> String {
         match provider.name {
             "openai-compatible" => "any Chat Completions server; asks for its URL".to_owned(),
             "llamacpp" if self.llama_cpp_answers => {
@@ -53,8 +54,8 @@ impl Environment<'_> {
     }
 
     /// The provider offered first: one whose key is set, else a running
-    /// llama.cpp, else the mock model.
-    fn suggested(&self) -> usize {
+    /// llama.cpp, else the mock model. An index into [`PROVIDERS`].
+    pub fn suggested(&self) -> usize {
         let ready = |provider: &Provider| match provider.name {
             "llamacpp" => self.llama_cpp_answers,
             "openai-compatible" | "mock" => false,
@@ -72,6 +73,99 @@ impl Environment<'_> {
             })
             .unwrap_or(0)
     }
+}
+
+/// Accepts the URL of an OpenAI-compatible server.
+fn check_url(url: &str) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err("the URL starts with http:// or https://".to_owned())
+    }
+}
+
+/// What a setup form (such as `rah-desktop`'s first start) sends back.
+/// Empty strings mean "not given" and take the same defaults as the terminal
+/// questions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answers {
+    /// A name from [`PROVIDERS`].
+    pub provider: String,
+    pub model_id: String,
+    /// `openai-compatible` only.
+    pub base_url: String,
+    /// `openai-compatible` only: the variable that holds its API key.
+    pub api_key_env: String,
+    pub permissions: String,
+    pub root: String,
+}
+
+impl Answers {
+    /// Checks the answers as the terminal questions do and returns the
+    /// configuration file's text.
+    pub fn text(&self, features: &[String]) -> Result<String, String> {
+        let name = self.provider.trim();
+        let provider = PROVIDERS
+            .iter()
+            .find(|provider| provider.name == name)
+            .ok_or_else(|| format!("choose a provider (unknown `{name}`)"))?;
+        let id = self.model_id.trim();
+        let model = if id.is_empty() || provider.name == "mock" {
+            provider.name.to_owned()
+        } else {
+            format!("{}/{id}", provider.name)
+        };
+        let mut options = Vec::new();
+        if provider.name == "openai-compatible" {
+            let url = self.base_url.trim();
+            check_url(url)?;
+            options.push(("base_url".to_owned(), url.to_owned()));
+            let variable = self.api_key_env.trim();
+            if !variable.is_empty() {
+                options.push(("api_key_env".to_owned(), variable.to_owned()));
+            }
+        }
+        let permissions = match self.permissions.trim() {
+            "" => Permissions::Ask,
+            permissions => permissions.parse()?,
+        };
+        let root = self.root.trim();
+        user_file_text(
+            &model,
+            &options,
+            permissions,
+            (!root.is_empty()).then_some(root),
+            features,
+        )
+    }
+}
+
+/// Writes a new configuration file at `path`, creating its folder. An
+/// existing file is never overwritten.
+pub fn write_new(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
+    }
+    // `create_new` refuses an existing file without a check-then-write race.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::AlreadyExists => already_exists(path),
+            _ => format!("cannot create `{}`: {error}", path.display()),
+        })?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
+}
+
+/// Why a configuration file is not written.
+pub fn already_exists(path: &Path) -> String {
+    format!(
+        "`{}` already exists; edit it with `rah config edit`, or remove it first",
+        path.display()
+    )
 }
 
 /// Reads one answer; end of input is an error, so a closed terminal never
@@ -152,13 +246,7 @@ pub fn interview<R: BufRead, W: Write>(
             input,
             out,
             "Server URL, such as https://host/v1: ",
-            |answer| {
-                if answer.starts_with("http://") || answer.starts_with("https://") {
-                    Ok(answer.to_owned())
-                } else {
-                    Err("the URL starts with http:// or https://".to_owned())
-                }
-            },
+            |answer| check_url(answer).map(|()| answer.to_owned()),
         )?;
         options.push(("base_url".to_owned(), url));
         let variable = ask(
@@ -320,6 +408,64 @@ mod tests {
         assert!(text.contains("permissions = \"read-only\""), "{text}");
         assert!(text.contains("root = \"D:/given\""), "{text}");
         assert!(text.contains("features = [\"todo\"]"), "{text}");
+    }
+
+    #[test]
+    fn form_answers_are_checked_like_the_questions() {
+        let compatible = Answers {
+            provider: "openai-compatible".into(),
+            model_id: " qwen3 ".into(),
+            base_url: "http://10.0.0.5:8000/v1".into(),
+            api_key_env: "MY_KEY".into(),
+            permissions: "auto-edit".into(),
+            root: "D:/work".into(),
+        };
+        let distribution = Distribution::parse(&compatible.text(&[]).unwrap()).unwrap();
+        let user = distribution.user.clone().unwrap();
+        assert_eq!(user.model.as_deref(), Some("openai-compatible/qwen3"));
+        assert_eq!(user.permissions, Some(Permissions::AutoEdit));
+        assert_eq!(user.root.as_deref(), Some("D:/work"));
+
+        // Empty answers take the defaults; a mock model takes no id.
+        let mock = Answers {
+            provider: "mock".into(),
+            model_id: "ignored".into(),
+            ..Answers::default()
+        };
+        let text = mock.text(&["todo".to_owned()]).unwrap();
+        assert!(text.contains("model = \"mock\""), "{text}");
+        assert!(text.contains("permissions = \"ask\""), "{text}");
+        assert!(text.contains("features = [\"todo\"]"), "{text}");
+
+        let refused = [
+            Answers::default(),
+            Answers {
+                base_url: "ftp://x".into(),
+                ..compatible.clone()
+            },
+            Answers {
+                permissions: "yolo".into(),
+                ..compatible
+            },
+        ];
+        for answers in refused {
+            assert!(answers.text(&[]).is_err(), "{answers:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_file_is_written_once() {
+        let dir = std::env::temp_dir().join(format!("rah-setup-{}", std::process::id()));
+        let path = dir.join("nested").join("rah.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        write_new(&path, "model = \"mock\"\n").unwrap();
+        let again = write_new(&path, "model = \"openai\"\n").unwrap_err();
+        assert!(again.contains("already exists"), "{again}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "model = \"mock\"\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

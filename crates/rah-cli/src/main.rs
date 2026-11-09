@@ -1,6 +1,6 @@
 use std::{
     io::IsTerminal,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command as Process,
     sync::{Arc, Mutex},
     time::Duration,
@@ -261,7 +261,7 @@ fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
         .map(|root| root.display().to_string());
     let path = global.config_path()?;
     if path.exists() {
-        return Err(already_exists(&path));
+        return Err(setup::already_exists(&path));
     }
     let text = match &global.model {
         Some(model) => user_file_text(
@@ -293,29 +293,8 @@ fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
                 .into());
         }
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
-    }
-    // `create_new` refuses an existing file without a check-then-write race.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::AlreadyExists => already_exists(&path),
-            _ => format!("cannot create `{}`: {error}", path.display()),
-        })?;
-    std::io::Write::write_all(&mut file, text.as_bytes())
-        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
+    setup::write_new(&path, &text)?;
     Ok(path)
-}
-
-fn already_exists(path: &Path) -> String {
-    format!(
-        "`{}` already exists; edit it with `rah config edit`, or remove it first",
-        path.display()
-    )
 }
 
 /// Runs `init` off the async workers: it may wait for a person to answer.
