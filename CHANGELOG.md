@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.45.11 (2026-11-09)
+
+- Releases are built by CI: pushing a tag `v<version>` runs
+  `.github/workflows/release.yml` on Windows, which checks that the tag
+  matches the version, builds the portable zip and the installer with
+  `scripts/package.ps1`, writes `SHA256SUMS.txt` and publishes them as a
+  GitHub release with this changelog's section as notes.
+- `scripts\update.ps1` downloads the latest release instead of compiling:
+  it checks the zip against `SHA256SUMS.txt` before installing and does
+  nothing when that version is already installed. In a checkout newer than
+  the latest release it builds the checkout as before; `-Source release` or
+  `-Source build` chooses. It also runs without a checkout, so a new
+  machine needs only one command (see README).
+
 ## v0.45.10 (2026-11-09)
 
 - Web UI: Settings has four tabs instead of six. **Model** also holds how

@@ -1,0 +1,74 @@
+name: Release
+
+# A pushed tag `v<version>` builds the Windows packages and publishes them as
+# a GitHub release: the portable zip `scripts/update.ps1` installs, the
+# installer, and SHA256SUMS.txt that update.ps1 checks the zip against.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check that the tag matches the version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "No workspace version in Cargo.toml." }
+          $version = $Matches[1]
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match version $version." }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $found = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
+          if (-not $found) { choco install innosetup -y --no-progress }
+
+      - name: Build packages
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Write checksums
+        shell: pwsh
+        run: |
+          Set-Location dist
+          $lines = Get-ChildItem -File -Filter "rah-$env:VERSION-*" | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          }
+          $lines | Out-File -FilePath SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+
+      - name: Release notes from the changelog
+        shell: pwsh
+        run: |
+          $lines = Get-Content CHANGELOG.md
+          $start = [array]::FindIndex($lines, [Predicate[string]] { param($l) $l -like "## v$env:VERSION *" })
+          $notes = @()
+          if ($start -ge 0) {
+            for ($i = $start + 1; $i -lt $lines.Count -and $lines[$i] -notlike "## *"; $i++) { $notes += $lines[$i] }
+          }
+          $notes += ""
+          $notes += "Install or update on Windows: ``.\scripts\update.ps1`` in a checkout, or"
+          $notes += '``& ([scriptblock]::Create((irm https://raw.githubusercontent.com/${{ github.repository }}/master/scripts/update.ps1)))``'
+          ($notes -join "`n").Trim() | Out-File -FilePath notes.md -Encoding utf8
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem dist -File -Filter "rah-$env:VERSION-*" | ForEach-Object FullName) + "dist/SHA256SUMS.txt"
+          gh release create "${{ github.ref_name }}" @assets --title "${{ github.ref_name }}" --notes-file notes.md

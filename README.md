@@ -32,8 +32,14 @@ without a model or key: `rah --model mock`. Options such as `--model`,
 in the Web UI are written to it. `rah config show` prints what would run.
 
 `.\scripts\update.ps1` is the only command needed to install or update: it
-builds this checkout and replaces the installed `rah` and `rah-desktop` (the
-Start Menu entries follow), and prints the old and new version.
+downloads the latest release (checked against its SHA256 sums) and replaces
+the installed `rah` and `rah-desktop` (the Start Menu entries follow); in a
+checkout newer than the release it builds the checkout instead. Without a
+checkout:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/spider2449/rust-agent-harness/master/scripts/update.ps1)))
+```
 
 ## Documentation
 
