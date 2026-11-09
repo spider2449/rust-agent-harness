@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.45.9 (2026-11-09)
+
+- `scripts\update.ps1` no longer stops when RAH is running. RAH can stay
+  open during the build; before copying, the script asks to close it (a
+  running turn is cancelled), closes the desktop window gracefully, and
+  opens RAH Desktop again once installed. `-Force` closes without asking.
+
 ## v0.45.8 (2026-11-09)
 
 - `rah config check` also checks that RAH can work, not only that the file

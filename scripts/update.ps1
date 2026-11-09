@@ -11,6 +11,10 @@ Start Menu entries and its PATH entry keep working and now run the new
 version. On a machine without RAH it also adds the Start Menu entries and
 puts the directory on the user's PATH.
 
+RAH may keep running while it builds. Before copying, a running `rah` or
+`rah-desktop` from the install directory is closed after asking (-Force:
+without asking), and RAH Desktop is opened again afterwards.
+
 Your data (`~\.rah`: rah.toml, sessions, settings) is never touched.
 
 When `target` has grown past -MaxTargetGB, the debug build cache is removed
@@ -27,7 +31,9 @@ param(
     # Remove the debug build cache when target is larger than this.
     [int]$MaxTargetGB = 30,
     # Do not create Start Menu entries or change PATH on a new install.
-    [switch]$NoShortcuts
+    [switch]$NoShortcuts,
+    # Close a running RAH without asking.
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,14 +54,6 @@ if (Test-Path -LiteralPath $installedRah) {
 }
 $fresh = -not (Test-Path -LiteralPath $InstallDir)
 
-# A running copy keeps its files locked; ask before going further.
-$running = Get-Process -Name rah, rah-desktop -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) }
-if ($running) {
-    $names = ($running | ForEach-Object { "$($_.Name) (pid $($_.Id))" }) -join ", "
-    throw "Close RAH first; these are still running from ${InstallDir}: $names"
-}
-
 Write-Host "Building RAH $newVersion (release)..."
 Push-Location $repo
 try {
@@ -68,6 +66,35 @@ try {
     if ($code -ne 0) { exit $code }
 } finally {
     Pop-Location
+}
+
+# A running copy keeps its files locked. RAH may keep running during the
+# build; only now is it closed, after asking (or at once with -Force).
+$running = @(Get-Process -Name rah, rah-desktop -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) })
+$reopen = $false
+if ($running.Count -gt 0) {
+    $names = ($running | ForEach-Object { "$($_.Name) (pid $($_.Id))" }) -join ", "
+    if (-not $Force) {
+        Write-Host "RAH is running from ${InstallDir}: $names"
+        $answer = Read-Host "Close it to finish the update? A running turn is cancelled. [Y/n]"
+        if ($answer -and $answer -notmatch '^(y|yes)$') {
+            throw "Not updated. Close RAH and run this again; the build is done, so it is quick."
+        }
+    }
+    $reopen = [bool]($running | Where-Object Name -eq "rah-desktop")
+    foreach ($process in $running) {
+        # The desktop window shuts its plugins down when asked to close.
+        if (-not ($process.MainWindowHandle -ne 0 -and $process.CloseMainWindow())) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($process in $running) {
+        if (-not $process.WaitForExit(10000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $null = $process.WaitForExit(5000)
+        }
+    }
 }
 
 $release = Join-Path $repo "target\release"
@@ -114,6 +141,10 @@ if ($oldVersion -and $oldVersion -ne $installed) {
     Write-Host "RAH $installed reinstalled ($InstallDir)"
 } else {
     Write-Host "RAH $installed installed ($InstallDir)"
+}
+if ($reopen) {
+    Start-Process -FilePath (Join-Path $InstallDir "rah-desktop.exe") -WorkingDirectory $env:USERPROFILE
+    Write-Host "Reopened RAH Desktop."
 }
 
 # Another `rah` earlier on PATH would still run instead of this one.
