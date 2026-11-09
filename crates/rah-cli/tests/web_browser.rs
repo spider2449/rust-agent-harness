@@ -804,9 +804,11 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.eval(&typing("/bogus")).await;
     assert_eq!(page.eval("shown(byId('slash-menu'))").await, false);
     page.eval(&key("Enter")).await;
+    // Shown at least once: a status refresh (such as the model switch
+    // above) may replace it right after.
     page.wait(
         "the unknown command notice",
-        "byId('notice-text').textContent === 'Unknown command /bogus. Type / to see the commands.'",
+        "notices.includes('Unknown command /bogus. Type / to see the commands.')",
     )
     .await;
     page.eval("true").await;

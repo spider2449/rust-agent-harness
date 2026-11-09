@@ -16,7 +16,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -109,7 +109,7 @@ struct Parsed {
 pub struct JsonlSessions {
     dir: PathBuf,
     /// Next sequence number per session, loaded lazily.
-    next_seq: Mutex<HashMap<SessionId, u64>>,
+    next_seq: Arc<Mutex<HashMap<SessionId, u64>>>,
     events: Option<KernelHandle>,
     /// A fixed workspace for new sessions, instead of the sandbox root.
     workspace: Option<String>,
@@ -119,7 +119,7 @@ impl JsonlSessions {
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            next_seq: Mutex::new(HashMap::new()),
+            next_seq: Arc::new(Mutex::new(HashMap::new())),
             events: None,
             workspace: None,
         }
@@ -159,96 +159,139 @@ impl JsonlSessions {
             }
             Err(error) => return Err(SessionError::Io(error.to_string())),
         };
-        let corrupt = |detail: String| SessionError::Corrupt {
-            session: session.clone(),
-            detail,
-        };
-        // A crash can tear the last line inside a multi-byte character, so
-        // only the complete lines are decoded.
-        let complete = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |i| i + 1);
-        let torn_at = (complete < bytes.len()).then_some(complete as u64);
-        let text = std::str::from_utf8(&bytes[..complete])
-            .map_err(|_| corrupt("a complete line is not UTF-8".into()))?;
-        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-        let header = lines
-            .next()
-            .ok_or_else(|| corrupt("missing header".into()))?;
-        let mut info = match serde_json::from_str(header) {
-            Ok(Line::Header {
-                version: FORMAT_VERSION,
-                session: id,
-                parent,
-                created,
-                workspace,
-            }) if id == *session => SessionInfo {
-                id,
-                parent,
-                created,
-                title: None,
-                updated: created,
-                preview: None,
-                workspace,
-            },
-            _ => return Err(corrupt("invalid header".into())),
-        };
-        let mut records = Vec::new();
-        for (index, line) in lines.enumerate() {
-            match serde_json::from_str(line) {
-                Ok(Line::Record { seq, entry }) => records.push(SessionRecord { seq, entry }),
-                Ok(Line::Title { title }) => info.title = title,
-                _ => return Err(corrupt(format!("invalid record line {}", index + 2))),
-            }
-        }
-        if let Some(modified) = tokio::fs::metadata(&path)
+        let modified = tokio::fs::metadata(&path)
             .await
             .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        {
-            info.updated = info.updated.max(modified.as_secs());
-        }
-        Ok(Parsed {
-            info,
-            records,
-            torn_at,
-        })
+            .and_then(|metadata| modified_secs(&metadata));
+        decode(session, &bytes, modified)
     }
 
-    /// Parses a session and removes a torn tail, so a new line can follow.
-    async fn repair(&self, session: &SessionId) -> Result<Parsed, SessionError> {
-        let parsed = self.parse(session).await?;
-        if let Some(length) = parsed.torn_at {
-            let file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(self.path(session))
-                .await
-                .map_err(|e| SessionError::Io(e.to_string()))?;
-            file.set_len(length)
-                .await
-                .map_err(|e| SessionError::Io(e.to_string()))?;
-        }
-        Ok(parsed)
+    /// Runs `work` on a blocking thread with the lock held for all of it.
+    /// The lock moves into the work, so a caller that is dropped (a
+    /// cancelled turn) cannot release it while a line is still being
+    /// written: the next operation always sees whole lines.
+    async fn exclusive<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut HashMap<SessionId, u64>, &Path) -> Result<T, SessionError>
+        + Send
+        + 'static,
+    ) -> Result<T, SessionError> {
+        let mut next = self.next_seq.clone().lock_owned().await;
+        let dir = self.dir.clone();
+        tokio::task::spawn_blocking(move || work(&mut next, &dir))
+            .await
+            .map_err(|error| SessionError::Io(error.to_string()))?
     }
+}
 
-    async fn write_line(&self, session: &SessionId, line: &Line) -> Result<(), SessionError> {
-        let mut text = serde_json::to_string(line).map_err(|e| SessionError::Io(e.to_string()))?;
-        text.push('\n');
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(self.path(session))
-            .await
-            .map_err(|_| SessionError::NotFound(session.clone()))?;
-        file.write_all(text.as_bytes())
-            .await
+fn modified_secs(metadata: &std::fs::Metadata) -> Option<u64> {
+    let modified = metadata.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_secs())
+}
+
+fn path_in(dir: &Path, session: &SessionId) -> PathBuf {
+    dir.join(format!("{session}.jsonl"))
+}
+
+/// A session log's bytes, parsed. `modified` is the file's modification
+/// time, which counts as an update.
+fn decode(
+    session: &SessionId,
+    bytes: &[u8],
+    modified: Option<u64>,
+) -> Result<Parsed, SessionError> {
+    let corrupt = |detail: String| SessionError::Corrupt {
+        session: session.clone(),
+        detail,
+    };
+    // A crash can tear the last line inside a multi-byte character, so
+    // only the complete lines are decoded.
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    let torn_at = (complete < bytes.len()).then_some(complete as u64);
+    let text = std::str::from_utf8(&bytes[..complete])
+        .map_err(|_| corrupt("a complete line is not UTF-8".into()))?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| corrupt("missing header".into()))?;
+    let mut info = match serde_json::from_str(header) {
+        Ok(Line::Header {
+            version: FORMAT_VERSION,
+            session: id,
+            parent,
+            created,
+            workspace,
+        }) if id == *session => SessionInfo {
+            id,
+            parent,
+            created,
+            title: None,
+            updated: created,
+            preview: None,
+            workspace,
+        },
+        _ => return Err(corrupt("invalid header".into())),
+    };
+    let mut records = Vec::new();
+    for (index, line) in lines.enumerate() {
+        match serde_json::from_str(line) {
+            Ok(Line::Record { seq, entry }) => records.push(SessionRecord { seq, entry }),
+            Ok(Line::Title { title }) => info.title = title,
+            _ => return Err(corrupt(format!("invalid record line {}", index + 2))),
+        }
+    }
+    if let Some(modified) = modified {
+        info.updated = info.updated.max(modified);
+    }
+    Ok(Parsed {
+        info,
+        records,
+        torn_at,
+    })
+}
+
+/// Parses a session and removes a torn tail, so a new line can follow.
+/// Blocking: run inside [`JsonlSessions::exclusive`].
+fn repair(dir: &Path, session: &SessionId) -> Result<Parsed, SessionError> {
+    let path = path_in(dir, session);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SessionError::NotFound(session.clone()));
+        }
+        Err(error) => return Err(SessionError::Io(error.to_string())),
+    };
+    let modified = std::fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| modified_secs(&metadata));
+    let parsed = decode(session, &bytes, modified)?;
+    if let Some(length) = parsed.torn_at {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(length))
             .map_err(|e| SessionError::Io(e.to_string()))?;
-        file.flush()
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))
     }
+    Ok(parsed)
+}
 
+/// Appends one line. Blocking: run inside [`JsonlSessions::exclusive`].
+fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<(), SessionError> {
+    let mut text = serde_json::to_string(line).map_err(|e| SessionError::Io(e.to_string()))?;
+    text.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path_in(dir, session))
+        .map_err(|_| SessionError::NotFound(session.clone()))?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .and_then(|()| std::io::Write::flush(&mut file))
+        .map_err(|e| SessionError::Io(e.to_string()))
+}
+
+impl JsonlSessions {
     /// Visible records, following fork parents.
     async fn visible(&self, session: &SessionId) -> Result<Vec<SessionRecord>, SessionError> {
         let mut chain = Vec::new();
@@ -372,29 +415,31 @@ impl SessionLog for JsonlSessions {
     }
 
     async fn append(&self, session: &SessionId, entry: SessionEntry) -> Result<u64, SessionError> {
-        let mut next = self.next_seq.lock().await;
-        // Forgotten until the line is written: after a failed or dropped write
-        // the next append reads the log again and removes any torn tail.
-        let seq = match next.remove(session) {
-            Some(seq) => seq,
-            None => {
-                let parsed = self.repair(session).await?;
-                let last = parsed
-                    .records
-                    .last()
-                    .map(|r| r.seq)
-                    .or(parsed.info.parent.map(|p| p.at))
-                    .unwrap_or(0);
-                last + 1
-            }
-        };
-        let line = Line::Record {
-            seq,
-            entry: entry.clone(),
-        };
-        self.write_line(session, &line).await?;
-        next.insert(session.clone(), seq + 1);
-        drop(next);
+        let id = session.clone();
+        let record = entry.clone();
+        let seq = self
+            .exclusive(move |next, dir| {
+                // Forgotten until the line is written: after a failed write
+                // the next append reads the log again and removes any torn
+                // tail.
+                let seq = match next.remove(&id) {
+                    Some(seq) => seq,
+                    None => {
+                        let parsed = repair(dir, &id)?;
+                        let last = parsed
+                            .records
+                            .last()
+                            .map(|r| r.seq)
+                            .or(parsed.info.parent.map(|p| p.at))
+                            .unwrap_or(0);
+                        last + 1
+                    }
+                };
+                write_line(dir, &id, &Line::Record { seq, entry: record })?;
+                next.insert(id, seq + 1);
+                Ok(seq)
+            })
+            .await?;
         if let Some(kernel) = &self.events {
             kernel.emit(&SessionAppended {
                 session: session.clone(),
@@ -459,10 +504,14 @@ impl SessionLog for JsonlSessions {
             Some(title) => Some(normalize_title(&title).ok_or(SessionError::InvalidTitle)?),
             None => None,
         };
-        let mut next = self.next_seq.lock().await;
-        self.repair(session).await?;
-        next.remove(session);
-        self.write_line(session, &Line::Title { title }).await?;
+        let id = session.clone();
+        self.exclusive(move |next, dir| {
+            repair(dir, &id)?;
+            next.remove(&id);
+            write_line(dir, &id, &Line::Title { title })
+        })
+        .await?;
+        let _guard = self.next_seq.lock().await;
         self.described(session).await
     }
 
@@ -472,14 +521,16 @@ impl SessionLog for JsonlSessions {
         title: String,
     ) -> Result<bool, SessionError> {
         let title = normalize_title(&title).ok_or(SessionError::InvalidTitle)?;
-        let mut next = self.next_seq.lock().await;
-        if self.repair(session).await?.info.title.is_some() {
-            return Ok(false);
-        }
-        next.remove(session);
-        self.write_line(session, &Line::Title { title: Some(title) })
-            .await?;
-        Ok(true)
+        let id = session.clone();
+        self.exclusive(move |next, dir| {
+            if repair(dir, &id)?.info.title.is_some() {
+                return Ok(false);
+            }
+            next.remove(&id);
+            write_line(dir, &id, &Line::Title { title: Some(title) })?;
+            Ok(true)
+        })
+        .await
     }
 
     async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
@@ -702,37 +753,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_interrupted_append_repairs_the_log_before_the_next_line() {
-        let dir = TempDir::new("interrupted");
+    async fn a_cancelled_append_is_written_whole_or_not_at_all() {
+        let dir = TempDir::new("cancelled");
         let log = JsonlSessions::new(dir.0.clone());
         let info = log.create().await.unwrap();
         log.append(&info.id, started("a")).await.unwrap();
-        // Polled once and dropped, as when a turn's task is cancelled. On a
-        // fast machine the append may finish within that one poll; the
-        // dropped future must leave the log usable either way.
-        let finished = tokio::select! {
-            biased;
-            appended = log.append(&info.id, started("lost")) => Some(appended.unwrap()),
-            () = std::future::ready(()) => None,
-        };
-        let next = if finished.is_some() { 3 } else { 2 };
-        // What such a write can leave behind.
-        let path = dir.0.join(format!("{}.jsonl", info.id));
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        let torn = format!("{{\"type\":\"record\",\"seq\":{next},\"en");
-        std::io::Write::write_all(&mut file, torn.as_bytes()).unwrap();
-        drop(file);
-
-        assert_eq!(log.append(&info.id, started("b")).await.unwrap(), next);
-        let mut expected = vec![(1, "a".into())];
-        if finished.is_some() {
-            expected.push((2, "lost".into()));
+        for round in 0..20 {
+            // Polled once and dropped, as when a turn's task is cancelled,
+            // then followed at once by the next append.
+            tokio::select! {
+                biased;
+                _ = log.append(&info.id, started("lost")) => {}
+                () = std::future::ready(()) => {}
+            }
+            log.append(&info.id, started(&format!("b{round}")))
+                .await
+                .unwrap();
         }
-        expected.push((next, "b".into()));
-        assert_eq!(inputs(&log.read(&info.id).await.unwrap()), expected);
+        // Every line is whole and the sequence has no gap or repeat: a
+        // dropped append never interleaves with the one after it.
+        let records = inputs(&log.read(&info.id).await.unwrap());
+        for (index, (seq, _)) in records.iter().enumerate() {
+            assert_eq!(*seq, index as u64 + 1, "{records:?}");
+        }
+        for round in 0..20 {
+            assert!(
+                records
+                    .iter()
+                    .any(|(_, input)| *input == format!("b{round}")),
+                "{records:?}"
+            );
+        }
+        assert!(
+            records
+                .iter()
+                .all(|(_, input)| input == "a" || input == "lost" || input.starts_with('b')),
+            "{records:?}"
+        );
     }
 
     #[tokio::test]

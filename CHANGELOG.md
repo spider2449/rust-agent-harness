@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.45.14 (2026-11-09)
+
+- `session-jsonl`: a cancelled append (a turn cancelled while its record is
+  written) can no longer corrupt the session log. The write went on in the
+  background after the lock was released, so the next append could land in
+  the middle of it and leave an unreadable line ("invalid record line").
+  Appends and title changes now write on a blocking thread that holds the
+  lock until the line is complete, so a cancelled append is written whole
+  or not at all.
+- Web UI: a mode chosen right after the page opened could snap back to the
+  previous one. The mode list is loaded again when the connection opens,
+  and an answer requested before the switch could land after it; such an
+  answer is now ignored.
+- Tests: the browser test for an unknown slash command checks that its
+  notice was shown, not that it is still the current one; a status refresh
+  may replace it right after.
+
 ## v0.45.13 (2026-11-09)
 
 - `plugin-builder`: exporting personal plugins flushes the bundle file

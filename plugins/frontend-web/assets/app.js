@@ -1595,13 +1595,22 @@ function applyMode() {
   }
 }
 
+// Counts mode changes made in this window or announced by the server, so a
+// `/modes` answer requested before one of them cannot undo it.
+let modeChanges = 0;
+
 async function loadModes() {
+  const asked = modeChanges;
+  let modes;
   try {
-    state.modes = await api("/modes");
+    modes = await api("/modes");
   } catch {
     // Older servers have no modes.
-    state.modes = { modes: [], active: null };
+    modes = { modes: [], active: null };
   }
+  // A switch since the request: its own answer is newer than this one.
+  if (asked !== modeChanges) return;
+  state.modes = modes;
   applyMode();
 }
 
@@ -1630,6 +1639,7 @@ async function switchGroup(id, on) {
 }
 
 async function switchMode(id) {
+  modeChanges += 1;
   $("mode").disabled = true;
   try {
     const reply = await api("/mode", {
@@ -2571,6 +2581,7 @@ function connect() {
     } else if (data.type === "mode") {
       // Another window (or this one) switched the mode.
       if (data.active !== state.modes.active) {
+        modeChanges += 1;
         state.modes.active = data.active;
         applyMode();
         refreshStatus();
