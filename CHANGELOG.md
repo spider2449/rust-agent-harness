@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.45.12 (2026-11-09)
+
+- `scripts\update.ps1` downloads release files through the GitHub API's
+  asset URL first, then the github.com link, each up to three times. Some
+  networks time out (504) on the github.com download link while the API
+  answers.
+- Tests: `session-jsonl`'s interrupted-append test no longer assumes an
+  append cannot finish within one poll; it failed on the faster Linux CI
+  runner. GitHub Actions had been limited to local actions since
+  2026-10-30, so CI had not run since then; it is allowed again.
+
 ## v0.45.11 (2026-11-09)
 
 - Releases are built by CI: pushing a tag `v<version>` runs

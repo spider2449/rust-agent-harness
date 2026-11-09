@@ -114,8 +114,29 @@ if ($Source -eq "release") {
     $sums = Join-Path $work "SHA256SUMS.txt"
     Write-Host "Downloading RAH $version..."
     $ProgressPreference = "SilentlyContinue"
-    Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $zip -UseBasicParsing -Headers @{ "User-Agent" = "rah-update" }
-    Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $sums -UseBasicParsing -Headers @{ "User-Agent" = "rah-update" }
+    # The API's asset URL first: some networks time out on the github.com
+    # download link but reach the API. Each is tried up to three times.
+    function Get-Asset($asset, $path) {
+        $sources = @(
+            @{ Uri = $asset.url; Headers = @{ "User-Agent" = "rah-update"; "Accept" = "application/octet-stream" } },
+            @{ Uri = $asset.browser_download_url; Headers = @{ "User-Agent" = "rah-update" } }
+        )
+        $failure = $null
+        foreach ($source in $sources) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                    Invoke-WebRequest -Uri $source.Uri -Headers $source.Headers -OutFile $path -UseBasicParsing
+                    return
+                } catch {
+                    $failure = $_.Exception.Message
+                    Start-Sleep -Seconds $attempt
+                }
+            }
+        }
+        throw "Cannot download $($asset.name): $failure"
+    }
+    Get-Asset $zipAsset $zip
+    Get-Asset $sumsAsset $sums
     $expected = Get-Content -LiteralPath $sums | ForEach-Object {
         $parts = $_ -split '\s+\*?', 2
         if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $zipName) { $parts[0].Trim().ToLowerInvariant() }

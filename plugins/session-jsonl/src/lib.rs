@@ -707,26 +707,32 @@ mod tests {
         let log = JsonlSessions::new(dir.0.clone());
         let info = log.create().await.unwrap();
         log.append(&info.id, started("a")).await.unwrap();
-        // Polled once and dropped, as when a turn's task is cancelled.
-        tokio::select! {
+        // Polled once and dropped, as when a turn's task is cancelled. On a
+        // fast machine the append may finish within that one poll; the
+        // dropped future must leave the log usable either way.
+        let finished = tokio::select! {
             biased;
-            _ = log.append(&info.id, started("lost")) => panic!("the append should still wait"),
-            () = std::future::ready(()) => {}
-        }
+            appended = log.append(&info.id, started("lost")) => Some(appended.unwrap()),
+            () = std::future::ready(()) => None,
+        };
+        let next = if finished.is_some() { 3 } else { 2 };
         // What such a write can leave behind.
         let path = dir.0.join(format!("{}.jsonl", info.id));
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
             .unwrap();
-        std::io::Write::write_all(&mut file, b"{\"type\":\"record\",\"seq\":2,\"en").unwrap();
+        let torn = format!("{{\"type\":\"record\",\"seq\":{next},\"en");
+        std::io::Write::write_all(&mut file, torn.as_bytes()).unwrap();
         drop(file);
 
-        assert_eq!(log.append(&info.id, started("b")).await.unwrap(), 2);
-        assert_eq!(
-            inputs(&log.read(&info.id).await.unwrap()),
-            [(1, "a".into()), (2, "b".into())]
-        );
+        assert_eq!(log.append(&info.id, started("b")).await.unwrap(), next);
+        let mut expected = vec![(1, "a".into())];
+        if finished.is_some() {
+            expected.push((2, "lost".into()));
+        }
+        expected.push((next, "b".into()));
+        assert_eq!(inputs(&log.read(&info.id).await.unwrap()), expected);
     }
 
     #[tokio::test]
