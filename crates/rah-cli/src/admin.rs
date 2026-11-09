@@ -10,8 +10,8 @@ use std::{
 use rah_api::{
     KernelHandle, MountOptions, Plugin, PluginError, PluginId, PluginManifest, PluginStatus, Scope,
     admin::{
-        ADMIN, AdminError, ConfigChange, ConfigKeyHelp, MountRequest, PluginAdmin, PluginInstance,
-        Workspace,
+        ADMIN, AdminError, ConfigChange, ConfigKeyHelp, FeatureInfo, MountRequest, PluginAdmin,
+        PluginInstance, Workspace,
     },
     async_trait,
 };
@@ -20,8 +20,8 @@ use rah_plugin_host_wasm::WasmPlugin;
 use serde_json::Value;
 
 use crate::{
-    PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example, config_help,
-    resolve_data_paths,
+    FEATURES, Feature, PROCESS_PLUGIN, WASM_PLUGIN, WORKSPACE_PLUGINS, catalog, config_example,
+    config_help, features::Mount, resolve_data_paths,
 };
 
 /// The id `rah` mounts the distribution plugin under.
@@ -168,7 +168,26 @@ fn failed(error: impl std::fmt::Display) -> AdminError {
     AdminError::Failed(error.to_string())
 }
 
+/// The plugin kind that runs while `feature` is on.
+fn feature_kind(feature: &Feature) -> &'static str {
+    match feature.mount {
+        Mount::Plugin { kind, .. } => kind,
+        Mount::Replace { to, .. } => to,
+    }
+}
+
 impl Admin {
+    /// Plugins of `kind` this distribution mounted, with whether each is
+    /// stopped, sorted by id.
+    fn instances(&self, kind: &str) -> Vec<(PluginId, bool)> {
+        self.registry
+            .lock()
+            .iter()
+            .filter(|(_, record)| record.kind == kind)
+            .map(|(id, record)| (id.clone(), record.stopped))
+            .collect()
+    }
+
     fn unlocked(&self, id: &PluginId) -> Result<(), AdminError> {
         if *id == self.own {
             return Err(AdminError::Locked(id.clone()));
@@ -447,6 +466,128 @@ impl PluginAdmin for Admin {
             plugins.push((id, status));
         }
         Ok(Workspace { root, plugins })
+    }
+
+    fn features(&self) -> Vec<FeatureInfo> {
+        FEATURES
+            .iter()
+            .map(|feature| FeatureInfo {
+                name: feature.name.to_owned(),
+                summary: feature.summary.to_owned(),
+                enabled: self
+                    .instances(feature_kind(feature))
+                    .iter()
+                    .any(|(_, stopped)| !stopped),
+            })
+            .collect()
+    }
+
+    async fn set_feature(&self, name: &str, enabled: bool) -> Result<(), AdminError> {
+        let feature =
+            crate::feature(name).ok_or_else(|| failed(format!("unknown feature `{name}`")))?;
+        if !enabled {
+            match feature.mount {
+                Mount::Plugin { kind, .. } => {
+                    for (id, _) in self.instances(kind) {
+                        // A stopped one is forgotten, a running one unmounted.
+                        self.unmount(&id).await?;
+                    }
+                }
+                Mount::Replace { from, to } => {
+                    for (id, _) in self.instances(to) {
+                        let request = MountRequest {
+                            kind: from.to_owned(),
+                            ..MountRequest::default()
+                        };
+                        self.replace(&id, request).await?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let running = |kinds: &[&str]| {
+            kinds
+                .iter()
+                .any(|kind| self.instances(kind).iter().any(|(_, stopped)| !stopped))
+        };
+        if !feature.needs_any.is_empty() && !running(feature.needs_any) {
+            return Err(failed(format!(
+                "feature `{name}` needs one of these plugins running: {}",
+                feature.needs_any.join(", ")
+            )));
+        }
+        if running(&[feature_kind(feature)]) {
+            return Ok(());
+        }
+        // The policy entries first, so the tools never run without them.
+        for (id, stopped) in self.instances(POLICY_KINDS[0]) {
+            if stopped {
+                continue;
+            }
+            let Some(record) = self.registry.lock().get(&id).cloned() else {
+                continue;
+            };
+            let mut config = match record.config {
+                Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            let mut changed = false;
+            for (key, entries) in [("tools", feature.tools), ("decisions", feature.decisions)] {
+                if entries.is_empty() {
+                    continue;
+                }
+                let table = config
+                    .entry(key)
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if let Value::Object(table) = table {
+                    for (pattern, value) in entries {
+                        if !table.contains_key(*pattern) {
+                            table.insert((*pattern).to_owned(), Value::from(*value));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                let status = self.configure(&id, Value::Object(config)).await?;
+                if status != PluginStatus::Active {
+                    return Err(failed(format!(
+                        "the policy `{id}` did not restart ({status:?}); `{name}` stays off"
+                    )));
+                }
+            }
+        }
+        let status = match feature.mount {
+            Mount::Plugin { kind, .. } => match self.instances(kind).first() {
+                Some((id, _)) => self.start(id).await?,
+                None => {
+                    let request = MountRequest {
+                        kind: kind.to_owned(),
+                        ..MountRequest::default()
+                    };
+                    self.mount(request).await?.1
+                }
+            },
+            Mount::Replace { from, to } => {
+                let Some((old, _)) = self.instances(from).into_iter().find(|(_, s)| !s) else {
+                    return Err(failed(format!(
+                        "feature `{name}` needs a running `{from}` to replace"
+                    )));
+                };
+                let request = MountRequest {
+                    kind: to.to_owned(),
+                    ..MountRequest::default()
+                };
+                self.replace(&old, request).await?.1
+            }
+        };
+        if status != PluginStatus::Active {
+            return Err(failed(format!(
+                "`{}` did not start: {status:?}",
+                feature_kind(feature)
+            )));
+        }
+        Ok(())
     }
 
     async fn persist(&self, change: ConfigChange) -> Result<PathBuf, AdminError> {

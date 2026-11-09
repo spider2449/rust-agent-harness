@@ -174,8 +174,8 @@ URL. It listens on loopback only and loads nothing from outside.
   log of the session.
 - **Settings** sets the model, the system prompt, the **Permissions** (the
   same four modes as `permissions`, plus a choice per tool under
-  *Advanced*, and web search), the loop and the display (formatted or raw
-  Markdown, themes).
+  *Advanced*, and web search), the **Features** (one switch each, applied
+  at once), the loop and the display (formatted or raw Markdown, themes).
   Saving writes `rah.toml`, keeping its comments; a plugin's entry holds only
   what differs from the base, so additions in later releases still reach it.
   When a change cannot be kept (no configuration file, or a file that lists
@@ -246,7 +246,9 @@ tokens and tool calls of the process), `plugin-builder` adds
 
 Each feature mounts its plugins and adds the policy entries they need; a
 policy entry you wrote is never overwritten, and tools still go through the
-policy.
+policy. Turn them on in `features = [...]`, with `--with` for one run, or
+in the Web UI's **Settings → Features**, which applies a switch at once and
+writes it to `rah.toml` ([ADR 0069](adr/0069-features-through-the-admin-service.md)).
 
 | Feature | Does |
 |---|---|

@@ -1780,6 +1780,33 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert!(file.contains("permissions = \"auto-edit\""), "{file}");
     assert!(file.contains("echo = \"deny\""), "{file}");
 
+    // Features: a switch applies at once and is kept in rah.toml.
+    page.eval(&TAB.replace("{tab}", "features")).await;
+    page.wait(
+        "the features form",
+        "!!document.querySelector('#settings-body input[data-feature=\"todo\"]')",
+    )
+    .await;
+    assert_eq!(
+        page.eval(
+            "document.querySelector('#settings-body input[data-feature=\"web-search\"]') === null"
+        )
+        .await,
+        true,
+        "web search keeps its switch in Permissions"
+    );
+    page.eval(
+        "document.querySelector('#settings-body input[data-feature=\"todo\"]').click(); true",
+    )
+    .await;
+    page.wait(
+        "the switched feature",
+        "byId('settings-message').textContent === 'todo is on.'",
+    )
+    .await;
+    let file = std::fs::read_to_string(common::config_file(&web.dir)).unwrap();
+    assert!(file.contains("\"todo\""), "{file}");
+
     // Web search: one switch mounts the tools and makes the policy ask.
     page.eval(&TAB.replace("{tab}", "tools")).await;
     page.wait(

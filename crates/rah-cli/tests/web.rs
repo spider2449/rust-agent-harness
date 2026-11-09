@@ -2076,6 +2076,52 @@ async fn plugins_panel_changes_are_applied_again_at_the_next_start() {
 }
 
 #[tokio::test]
+async fn features_are_switched_at_once_and_kept_in_the_file() {
+    use reqwest::Method;
+    let web = start("web-features", |_| {}).await;
+    let features = web.json(web.get("/api/features")).await;
+    let enabled = |features: &Value, name: &str| {
+        features
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|feature| feature["name"] == name)
+            .map(|feature| feature["enabled"].as_bool().unwrap())
+    };
+    // The tests' file turns `titles` on; `todo` is off.
+    assert_eq!(enabled(&features, "titles"), Some(true), "{features}");
+    assert_eq!(enabled(&features, "todo"), Some(false), "{features}");
+    assert!(features[0]["summary"].is_string(), "{features}");
+
+    let switch = |name: &str, on: bool| {
+        web.request(Method::PUT, &format!("/api/features/{name}"))
+            .json(&json!({ "enabled": on }))
+    };
+    let (status, reply) = web.status(switch("todo", true)).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["remembered"], true, "{reply}");
+    assert!(wait_active(&web.kernel, "todo").await);
+    // The policy entry came with it, so its tools are not denied.
+    let (_, policy) = instance(&web.kernel, "policy-authority").unwrap();
+    assert_eq!(policy["tools"]["todo.*"], "none", "{policy}");
+    let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert!(text.contains("\"todo\""), "{text}");
+    let features = web.json(web.get("/api/features")).await;
+    assert_eq!(enabled(&features, "todo"), Some(true));
+
+    let (status, reply) = web.status(switch("todo", false)).await;
+    assert_eq!(status, 200, "{reply}");
+    assert!(instance(&web.kernel, "todo").is_none());
+    let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert!(!text.contains("\"todo\""), "{text}");
+
+    // An unknown feature changes nothing.
+    let (status, reply) = web.status(switch("teleport", true)).await;
+    assert_eq!(status, 400, "{reply}");
+    let after = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+    assert_eq!(after, text);
+}
+#[tokio::test]
 async fn settings_an_earlier_version_stored_are_reported_not_applied() {
     let dir = TempDir::new("web-legacy");
     let stored = dir.storage().join("frontend-web");

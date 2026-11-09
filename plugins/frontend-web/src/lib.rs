@@ -46,6 +46,10 @@
 //!   `GET|PUT /api/preferences {raw_markdown, folders, recent_workspaces,
 //!   side, layout, wrap_files, wrap_activity, theme}` keeps the UI's
 //!   preferences in `storage`, for every browser.
+//! - With an `admin` service: `GET /api/features` lists the distribution's
+//!   features (`{name, summary, enabled}`) and `PUT /api/features/{name}
+//!   {enabled}` turns one on or off now and keeps it in the configuration
+//!   file (see [`features`]).
 //! - `GET /api/layout`: `{layout: {left, right, right_open}, source,
 //!   problems, panels}`, the panels of each column from the `ui-layout` service, else
 //!   the standard layout, and every panel id a layout can place (ADR 0062;
@@ -108,6 +112,7 @@
 
 mod access;
 mod approvals;
+mod features;
 mod files;
 mod git;
 mod groups;
@@ -335,6 +340,8 @@ fn router(shared: AppState) -> Router {
         .route("/jobs", get(jobs::list).post(jobs::submit))
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/web-search", get(web_search::get).put(web_search::set))
+        .route("/features", get(features::list))
+        .route("/features/{name}", put(features::set))
         .route("/settings/{slot}", put(settings::save))
         .route(
             "/preferences",

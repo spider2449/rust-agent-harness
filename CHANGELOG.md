@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.6 (2026-11-09)
+
+- Web UI: **Settings → Features** has one switch per feature (titles,
+  skills, scheduler, telemetry, plugin builder, todo, shell, format, lsp,
+  compact, instructions). A switch applies at once, without a restart, and is
+  written to `rah.toml`. Web search keeps its switch under Permissions and
+  planning its choice under Loop (ADR 0069).
+- `rah-api`: `PluginAdmin::features()` and `set_feature(name, enabled)`, with
+  refusing defaults; the `rah` distribution applies a feature at runtime as
+  the web search switch does (policy entries first, then the plugin).
+- `frontend-web`: `GET /api/features`, `PUT /api/features/{name} {enabled}`.
+
 ## v0.45.5 (2026-11-09)
 
 - Web UI: **Settings → Tools** is now **Settings → Permissions**, one choice

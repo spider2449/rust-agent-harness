@@ -17,7 +17,7 @@ use crate::{Distribution, PluginSpec};
 
 /// Where a feature's plugin is inserted in the plugin list.
 #[derive(Clone, Copy, Debug)]
-enum Place {
+pub(crate) enum Place {
     /// Right after the last sandbox plugin, which its tools start through.
     AfterSandbox,
     /// Before the agent loop, which is where tool and context plugins sit.
@@ -28,7 +28,7 @@ enum Place {
 
 /// What a feature does to the plugin list.
 #[derive(Clone, Copy, Debug)]
-enum Mount {
+pub(crate) enum Mount {
     /// Mounts `kind` unless it is already mounted.
     Plugin { kind: &'static str, place: Place },
     /// Swaps a mounted plugin for another one.
@@ -46,14 +46,14 @@ pub struct Feature {
     /// Usage of the argument, when the feature takes one.
     pub argument: Option<&'static str>,
     /// At least one of these plugin kinds must be mounted, when not empty.
-    needs_any: &'static [&'static str],
-    mount: Mount,
+    pub(crate) needs_any: &'static [&'static str],
+    pub(crate) mount: Mount,
     /// The configuration key the comma-separated argument fills, as a list.
     argument_key: Option<&'static str>,
     /// Policy permission assignments, `(tool pattern, level)`.
-    tools: &'static [(&'static str, &'static str)],
+    pub(crate) tools: &'static [(&'static str, &'static str)],
     /// Policy decisions, `(tool pattern, decision)`.
-    decisions: &'static [(&'static str, &'static str)],
+    pub(crate) decisions: &'static [(&'static str, &'static str)],
 }
 
 /// Every feature, in the order `rah features` shows them.

@@ -36,7 +36,7 @@ const EFFORTS = {
 };
 const LEVELS = ["none", "read", "write", "execute"];
 
-const settings = { tab: "model", plugins: [], tools: [], status: null, webSearch: null };
+const settings = { tab: "model", plugins: [], tools: [], status: null, webSearch: null, features: [] };
 
 function field(label, input, hint) {
   const row = el("label", "field");
@@ -509,9 +509,54 @@ function displayForm() {
   return form;
 }
 
+// ---- Features --------------------------------------------------------------
+
+// Features with a home of their own elsewhere: web search in Permissions,
+// planning in Loop.
+const FEATURES_SHOWN_ELSEWHERE = ["web-search", "plan"];
+
+// One switch per feature; a switch applies at once and is written to rah.toml.
+function featuresForm() {
+  const form = el("div", "form");
+  const features = settings.features.filter((feature) => !FEATURES_SHOWN_ELSEWHERE.includes(feature.name));
+  if (!features.length) {
+    form.append(el("p", "hint", "This rah has no features to switch."));
+    return form;
+  }
+  form.append(el("p", "hint", "Extra capabilities. A switch applies at once and is kept in rah.toml."));
+  for (const feature of features) {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = Boolean(feature.enabled);
+    box.dataset.feature = feature.name;
+    box.addEventListener("change", async () => {
+      box.disabled = true;
+      settingsMessage("");
+      try {
+        const result = await api(`/features/${encodeURIComponent(feature.name)}`, {
+          method: "PUT",
+          body: JSON.stringify({ enabled: box.checked }),
+        });
+        await reloadSettings();
+        loadPlugins().catch(() => {});
+        const kept = result.remembered ? "" : ` It holds until rah restarts, but is not kept: ${result.remember_error || "unknown reason"}.`;
+        settingsMessage(`${feature.name} is ${result.enabled ? "on" : "off"}.${kept}`);
+      } catch (error) {
+        box.checked = !box.checked;
+        box.disabled = false;
+        settingsMessage(error.message, true);
+      }
+    });
+    const row = el("label", "field switch");
+    row.append(box, el("span", "label", feature.name), el("small", "", feature.summary));
+    form.append(row);
+  }
+  return form;
+}
+
 // ---- Dialog ---------------------------------------------------------------
 
-const FORMS = { model: modelForm, assistant: assistantForm, tools: toolsForm, loop: loopForm, display: displayForm };
+const FORMS = { model: modelForm, assistant: assistantForm, tools: toolsForm, features: featuresForm, loop: loopForm, display: displayForm };
 
 function renderSettings() {
   for (const button of document.querySelectorAll("#settings-tabs button")) {
@@ -522,14 +567,16 @@ function renderSettings() {
 }
 
 async function reloadSettings() {
-  const [plugins, info, status, webSearch] = await Promise.all([
+  const [plugins, info, status, webSearch, features] = await Promise.all([
     api("/plugins"),
     api("/info"),
     api("/status").catch(() => null),
     api("/web-search").catch(() => null),
+    api("/features").catch(() => []),
   ]);
   settings.plugins = plugins;
   settings.webSearch = webSearch;
+  settings.features = features;
   settings.tools = info.tools;
   settings.status = status;
   renderSettings();

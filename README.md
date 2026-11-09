@@ -52,7 +52,7 @@ Start Menu entries follow), and prints the old and new version.
 
 `master` has completed phases P0 to P6 of the
 [plugin-kernel pivot plan](docs/plans/2026-10-11-plugin-kernel-pivot-plan.md)
-(first released as 0.40.0; current release 0.45.5). RAH runs end to end with
+(first released as 0.40.0; current release 0.45.6). RAH runs end to end with
 a mock model, OpenAI and llama.cpp through the Responses API, Anthropic
 through the Messages API, and Chat Completions servers. Tool calls are guarded
 by the fail-closed `policy-authority` plugin. The model plugins are tested

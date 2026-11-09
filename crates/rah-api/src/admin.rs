@@ -140,6 +140,23 @@ pub trait PluginAdmin: Send + Sync {
         ))
     }
 
+    /// The distribution's features and whether each is on; empty when it has
+    /// none.
+    fn features(&self) -> Vec<FeatureInfo> {
+        Vec::new()
+    }
+
+    /// Turns feature `name` on or off now: on adds its policy entries first,
+    /// then mounts (or starts) its plugin; off unmounts the plugin and keeps
+    /// the policy entries, which then match no tool. It does not persist the
+    /// choice (see [`persist`](Self::persist)).
+    async fn set_feature(&self, name: &str, enabled: bool) -> Result<(), AdminError> {
+        let _ = (name, enabled);
+        Err(AdminError::Failed(
+            "this distribution has no features".into(),
+        ))
+    }
+
     /// Keeps `change` in the distribution's configuration file and returns
     /// the file's path. The running plugins are not touched. A distribution
     /// without a file it can write refuses with the reason.
@@ -169,6 +186,17 @@ pub enum ConfigChange {
     Removed { id: PluginId },
     /// An opt-in feature of the distribution is on or off.
     Feature { name: String, enabled: bool },
+}
+
+/// An opt-in feature of the distribution (ADR 0069): a named capability that
+/// mounts its plugins with the policy entries they need.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeatureInfo {
+    pub name: String,
+    /// One line for the user.
+    pub summary: String,
+    /// Whether its plugin runs now.
+    pub enabled: bool,
 }
 
 /// The result of [`PluginAdmin::set_workspace`].

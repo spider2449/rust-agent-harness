@@ -399,7 +399,7 @@ Behind the same token and checks, and likewise unreachable from tools:
   plugin can. The `usage` view of `telemetry-log` shows counts only, never
   message text, tool output or arguments.
 - The Web UI writes `rah.toml` (ADR 0067). Successful changes through
-  `/api/plugins` (except stop and start), the web search switch, the
+  `/api/plugins` (except stop and start), the web search and feature switches, the
   Settings forms and "Always allow this command" are kept there through the
   `admin` service's `persist`, which only the local, token-holding user can
   reach, as for every `admin` call. The distribution refuses to remove the
