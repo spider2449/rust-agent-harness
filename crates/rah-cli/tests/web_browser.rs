@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{TempDir, headless};
+use common::{TempDir, from_file};
 use futures::{SinkExt, StreamExt};
 use rah_api::{Kernel, host::FrontendListening};
 use rah_cli::{Distribution, boot};
@@ -340,7 +340,8 @@ async fn start(name: &str) -> Web {
 /// test's directory too).
 async fn start_with(name: &str, adjust: impl FnOnce(&mut Distribution, &TempDir)) -> Web {
     let dir = TempDir::new(name);
-    let mut distribution = headless(&dir);
+    // A configuration file, so settings saved in the page are kept (ADR 0067).
+    let mut distribution = from_file(&dir);
     distribution.plugin.push(
         Distribution::parse(
             r#"
@@ -1702,13 +1703,16 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert_eq!(context["system"], "Be brief.", "{context}");
     assert!(context["memory_dir"].is_string(), "{context}");
 
-    // Tools: turn `echo` off; the default choice shows what applies.
+    // Permissions: one mode for every tool (the base's is `ask`), and a
+    // choice per tool under "Advanced"; turn `echo` off; the default choice
+    // shows what applies.
     page.eval(&TAB.replace("{tab}", "tools")).await;
     page.wait(
         "the tools form",
         "!!document.querySelector('#settings-body select[data-tool=\"echo\"]')",
     )
     .await;
+    assert_eq!(page.eval("byId('permissions-mode').value").await, "ask");
     page.screenshot("settings-tools").await;
     let choice = |tool: &str| {
         format!("document.querySelector('#settings-body select[data-tool=\"{tool}\"]')")
@@ -1726,12 +1730,12 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     page.eval(&format!(
         "{{ {}.value = 'deny'; {}; true }}",
         choice("echo"),
-        save("Save tools")
+        save("Save permissions")
     ))
     .await;
     page.wait(
         "the saved tools",
-        "byId('settings-message').textContent === 'Tools saved.'",
+        "byId('settings-message').textContent === 'Permissions saved.'",
     )
     .await;
     page.send_message("hello").await;
@@ -1748,6 +1752,33 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         policy["tools"]["repo.*"], "read",
         "assignments are kept: {policy}"
     );
+
+    // A mode is the `permissions` key of rah.toml.
+    page.eval(&TAB.replace("{tab}", "tools")).await;
+    page.wait("the permissions form", "!!byId('permissions-mode')")
+        .await;
+    page.eval(&format!(
+        "{{ byId('permissions-mode').value = 'auto-edit'; {}; true }}",
+        save("Save permissions")
+    ))
+    .await;
+    page.wait(
+        "the saved mode",
+        "byId('settings-message').textContent === 'Permissions saved.'",
+    )
+    .await;
+    let policy = page
+        .eval("api('/plugins').then((list) => list.find((p) => p.kind === 'policy-authority').config)")
+        .await;
+    assert_eq!(
+        policy["allow"],
+        json!(["none", "read", "write"]),
+        "{policy}"
+    );
+    assert_eq!(policy["ask"], json!(["execute"]), "{policy}");
+    let file = std::fs::read_to_string(common::config_file(&web.dir)).unwrap();
+    assert!(file.contains("permissions = \"auto-edit\""), "{file}");
+    assert!(file.contains("echo = \"deny\""), "{file}");
 
     // Web search: one switch mounts the tools and makes the policy ask.
     page.eval(&TAB.replace("{tab}", "tools")).await;

@@ -99,7 +99,7 @@
 //! (`approval_required` carries `may_remember`). For `shell.exec`, the
 //! notice also carries `command`, the exact `[program, args...]`, and an
 //! approval sent with `command: true` adds it to the policy's `commands` and
-//! keeps the policy like a saved Tools form (ADR 0066).
+//! keeps the policy like a saved Permissions form (ADR 0066).
 //!
 //! The loop and session services are resolved per request, so other plugins
 //! can be swapped while the server runs. HTTP connections are served by

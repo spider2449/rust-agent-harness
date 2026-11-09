@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.45.5 (2026-11-09)
+
+- Web UI: **Settings → Tools** is now **Settings → Permissions**, one choice
+  of the four modes `rah.toml` uses (read-only, ask, auto-edit, full)
+  instead of two dropdowns that tied writing and running programs together
+  and could not express `auto-edit`. A policy that matches no mode shows as
+  "Custom" and is kept as written. The choice per tool moved under
+  *Advanced* (open when one is set). Saving writes `permissions = "<mode>"`.
+- Tests: the browser tests boot from a configuration file like the other
+  Web UI tests; since 0.45.0's file-based settings their save messages
+  carried "not kept" and the checks failed (they run only with
+  `RAH_TEST_BROWSER`).
+
 ## v0.45.4 (2026-11-06)
 
 - **Breaking:** the base composition is 13 plugins instead of 18

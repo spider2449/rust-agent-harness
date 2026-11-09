@@ -248,7 +248,7 @@ fn with_command(config: &Value, rule: &[String]) -> Option<Value> {
 }
 
 /// Adds `rule` to the mounted policy's `commands` and keeps the policy in
-/// the configuration file like a saved **Tools** form, so the exact command
+/// the configuration file like a saved **Permissions** form, so the exact command
 /// runs without asking from now on, also after a restart (ADR 0066). The
 /// user chose it at the approval prompt; the rule comes from the call the
 /// user saw.

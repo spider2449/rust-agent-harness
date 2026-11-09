@@ -271,14 +271,6 @@ function levelDecision(policy, tool) {
 
 const DECISION_LABELS = { allow: "allowed", ask: "asks first", deny: "off" };
 
-function groupDecision(policy, levels) {
-  const allow = policy.allow || ["none", "read"];
-  const ask = policy.ask || ["write", "execute"];
-  if (levels.every((level) => allow.includes(level))) return "allow";
-  if (levels.every((level) => ask.includes(level))) return "ask";
-  return "deny";
-}
-
 // One switch for web search: the server makes the policy ask before each
 // `web.*` call, mounts tools-web-search and remembers the choice.
 function webSearchField() {
@@ -309,6 +301,24 @@ function webSearchField() {
   return row;
 }
 
+// The permission modes of rah.toml (ADR 0067): which levels run and which
+// ask first. A level in neither list is off.
+const PERMISSION_MODES = {
+  "read-only": { label: "Read-only: reading runs; writing and programs are off", allow: ["none", "read"], ask: [] },
+  ask: { label: "Ask: reading runs; writing and programs ask first", allow: ["none", "read"], ask: ["write", "execute"] },
+  "auto-edit": { label: "Auto-edit: reading and writing run; programs ask first", allow: ["none", "read", "write"], ask: ["execute"] },
+  full: { label: "Full: every allowed tool runs without asking", allow: ["none", "read", "write", "execute"], ask: [] },
+};
+
+// The mode a policy's `allow` and `ask` are, or "custom".
+function permissionMode(policy) {
+  const same = (a, b) => a.length === b.length && a.every((level, i) => level === b[i]);
+  const allow = policy.allow || ["none", "read"];
+  const ask = policy.ask || ["write", "execute"];
+  const found = Object.entries(PERMISSION_MODES).find(([, mode]) => same(allow, mode.allow) && same(ask, mode.ask));
+  return found ? found[0] : "custom";
+}
+
 function toolsForm() {
   const plugin = pluginOfKinds(["policy-authority"]);
   const form = el("div", "form");
@@ -319,24 +329,28 @@ function toolsForm() {
     return form;
   }
   const policy = { ...(plugin.config && typeof plugin.config === "object" ? plugin.config : {}) };
-  const reading = select({ allow: "Allow", ask: "Ask first", deny: "Off" }, groupDecision(policy, ["none", "read"]));
-  const writing = select({ ask: "Ask first", allow: "Allow without asking", deny: "Off" }, groupDecision(policy, ["write", "execute"]));
-  form.append(
-    el("p", "hint", "Tools the model can use. “Default” follows the two rules below; a choice per tool overrides them."),
-    field("Reading tools (files, Git status, search)", reading),
-    field("Writing tools and commands (edit files, run programs)", writing, "Allowing these without asking lets the model change files and run programs on its own."),
-  );
+  const current = permissionMode(policy);
+  const options = Object.fromEntries(Object.entries(PERMISSION_MODES).map(([name, mode]) => [name, mode.label]));
+  if (current === "custom") options.custom = "Custom (as written in rah.toml)";
+  const mode = select(options, current);
+  mode.id = "permissions-mode";
+  form.append(field("Permissions", mode, "What the model may do without asking you. A tool the policy does not know is always off."));
+
+  // A choice per tool, for the few that need one.
+  const advanced = el("details", "advanced");
+  advanced.append(el("summary", "", "Advanced: a choice per tool"));
   const table = el("table", "tool-table");
   const head = el("tr");
   head.append(el("th", "", "Tool"), el("th", "", "Kind"), el("th", "", "Choice"));
   table.append(head);
   const choices = [];
   const preview = () => {
-    const draft = rulesFrom(policy, reading.value, writing.value);
+    const draft = rulesFrom(policy, mode.value);
     for (const { tool, choice } of choices) {
       choice.options[0].textContent = `Default (${DECISION_LABELS[levelDecision(draft, tool)]})`;
     }
   };
+  let customized = false;
   for (const tool of [...settings.tools].sort((a, b) => a.name.localeCompare(b.name))) {
     const row = el("tr");
     const name = el("td", "", tool.name);
@@ -346,6 +360,7 @@ function toolsForm() {
       name.title = tool.description;
     }
     const exact = policy.decisions && Object.prototype.hasOwnProperty.call(policy.decisions, tool.name) ? policy.decisions[tool.name] : "default";
+    if (exact !== "default") customized = true;
     const choice = select({ default: "Default", allow: "Allow", ask: "Ask first", deny: "Off" }, exact);
     choice.setAttribute("aria-label", `Choice for ${tool.name}`);
     choice.dataset.tool = tool.name;
@@ -354,13 +369,14 @@ function toolsForm() {
     row.lastChild.append(choice);
     table.append(row);
   }
-  reading.addEventListener("change", preview);
-  writing.addEventListener("change", preview);
+  advanced.open = customized;
+  advanced.append(table);
+  mode.addEventListener("change", preview);
   preview();
   form.append(
-    table,
-    saveButton("Save tools", async () => {
-      const next = rulesFrom(policy, reading.value, writing.value);
+    advanced,
+    saveButton("Save permissions", async () => {
+      const next = rulesFrom(policy, mode.value);
       // Keep decisions for patterns and for tools not offered right now.
       const decisions = { ...(policy.decisions || {}) };
       for (const { tool, choice } of choices) {
@@ -368,23 +384,20 @@ function toolsForm() {
         else decisions[tool.name] = choice.value;
       }
       put(next, "decisions", Object.keys(decisions).length ? decisions : "");
-      if (writing.value === "allow" && !window.confirm("Let the model edit files and run programs without asking?")) return;
-      await savePlugin("tools", plugin, plugin.kind, next, "Tools");
+      if (mode.value === "full" && current !== "full" && !window.confirm("Let the model edit files and run programs without asking?")) return;
+      await savePlugin("tools", plugin, plugin.kind, next, "Permissions");
     }),
   );
   return form;
 }
 
-// The policy with `allow` and `ask` set from the two group choices.
-function rulesFrom(policy, reading, writing) {
-  const next = { ...policy, allow: [], ask: [] };
-  for (const [levels, choice] of [[["none", "read"], reading], [["write", "execute"], writing]]) {
-    if (choice === "allow") next.allow.push(...levels);
-    else if (choice === "ask") next.ask.push(...levels);
-  }
-  return next;
+// The policy with `allow` and `ask` of the permission mode; "custom" keeps
+// them as they are.
+function rulesFrom(policy, mode) {
+  const chosen = PERMISSION_MODES[mode];
+  if (!chosen) return { ...policy };
+  return { ...policy, allow: [...chosen.allow], ask: [...chosen.ask] };
 }
-
 // ---- Loop -----------------------------------------------------------------
 
 function loopForm() {

@@ -172,8 +172,10 @@ URL. It listens on loopback only and loads nothing from outside.
   VS Code, tools and Git work in the active folder. The right-hand panel shows
   the files read-only, Git changes and diffs per repository, and an activity
   log of the session.
-- **Settings** sets the model, the system prompt, which tools may run, the
-  loop, web search and the display (formatted or raw Markdown, themes).
+- **Settings** sets the model, the system prompt, the **Permissions** (the
+  same four modes as `permissions`, plus a choice per tool under
+  *Advanced*, and web search), the loop and the display (formatted or raw
+  Markdown, themes).
   Saving writes `rah.toml`, keeping its comments; a plugin's entry holds only
   what differs from the base, so additions in later releases still reach it.
   When a change cannot be kept (no configuration file, or a file that lists
