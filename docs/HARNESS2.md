@@ -56,8 +56,10 @@ rah --config runs/<run-id>/rah.toml --data-dir runs/<run-id>
 ```
 
 - `rah config check` with the same options before any run reports every
-  configuration problem and starts nothing (ADR 0059). It does not check API
-  keys or programs, which are found only at start.
+  configuration problem (ADR 0059), then starts only the model plugin, so a
+  missing API key variable or a server that does not answer shows before the
+  run. No tool, loop or frontend starts, and no tokens are spent. Programs
+  are still found only at start.
 - `--summary` writes how the run ended (`outcome`, `error`), `wall_ms`, model
   requests and retries, summed token `usage` (counts the provider did not
   report are `null`) and the tool calls with how many failed, are

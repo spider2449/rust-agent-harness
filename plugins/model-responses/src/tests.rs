@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use rah_api::{
     CancellationToken, Kernel, MountOptions, PluginStatus,
-    model::{ModelError, ModelProvider},
+    model::{ModelError, ModelHealth, ModelProvider},
 };
 use rah_protocol::{
     ContextItem, ModelEvent, ModelRequest, ModelUsage, PermissionLevel, ToolDefinition, ToolName,
@@ -421,6 +421,41 @@ async fn llamacpp_requires_an_explicit_model_when_several_are_served() {
         collect(&missing, request(user("x"))).await,
         Err(ModelError::Rejected(m)) if m.contains("not served")
     ));
+}
+
+#[tokio::test]
+async fn llamacpp_health_reads_readiness_and_served_models_only() {
+    let mut replies = vec![Reply::Json(503, json!({"error":"loading"}))];
+    replies.extend(llama_discovery(&["qwen"]));
+    replies.extend(llama_discovery(&["a", "b"]));
+    replies.extend(llama_discovery(&["a", "b"]));
+    let server = Server::new(replies).await;
+    let origin = llamacpp_origin(&server.origin).unwrap();
+    let health = |model: Option<&str>| {
+        let model =
+            ResponsesModel::llamacpp(origin.clone(), String::new(), model.map(Into::into)).unwrap();
+        async move { model.health(CancellationToken::new()).await }
+    };
+    assert!(matches!(health(None).await, ModelHealth::Unavailable(m) if m.contains("loading")));
+    assert_eq!(health(None).await, ModelHealth::Reachable);
+    assert!(matches!(health(None).await, ModelHealth::Unavailable(m) if m.contains("several")));
+    assert!(matches!(
+        health(Some("c")).await,
+        ModelHealth::Unavailable(m) if m.contains("does not serve `c`") && m.contains("a, b")
+    ));
+    // Only discovery requests; no conversation was sent.
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|(line, _)| line.starts_with("GET "))
+    );
+
+    let openai = openai(&server);
+    assert_eq!(
+        openai.health(CancellationToken::new()).await,
+        ModelHealth::Unknown
+    );
 }
 
 #[tokio::test]

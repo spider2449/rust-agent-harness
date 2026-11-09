@@ -49,6 +49,17 @@ check and runs it earlier instead.
 5. The kernel still checks at every mount and `update_config`; this check
    is in addition to it, not instead of it.
 
+**Amended in 0.45.8.** `--check-config` is now `rah config check` (ADR
+0067). When the configuration passes, it also mounts the model plugins
+alone, on a kernel of their own, and asks the first one for its `health`
+(`ModelProvider::health`: side-effect free, no conversation, no tokens). A
+model plugin that does not mount (such as one whose API key variable is not
+set) or a server that does not answer is a problem and exits with 2. It
+starts no tool, loop, sandbox, policy or frontend plugin and no program. It
+also prints the running program's version and path, and warns when another
+`rah` comes first on PATH. `model-responses` now answers `health` for
+llama.cpp from its readiness and served models (`/health`, `/v1/models`).
+
 ## Consequences
 
 - A refused distribution leaves nothing mounted, which is stricter than

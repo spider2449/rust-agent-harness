@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.8 (2026-11-09)
+
+- `rah config check` also checks that RAH can work, not only that the file
+  is valid: it starts the model plugin alone and reports a missing API key
+  variable or a server that does not answer (no conversation is sent, no
+  tokens are spent), prints the configuration file in use and the running
+  program's version and path, and warns when another `rah` comes first on
+  PATH (ADR 0059, amended).
+- `model-responses`: `health` for llama.cpp reads the server's readiness and
+  served models, and names the served ones when the configured model is not
+  among them. The Web UI status line now shows whether llama.cpp answers.
+
 ## v0.45.7 (2026-11-09)
 
 - `rah-desktop`: a first start without a configuration file shows a setup

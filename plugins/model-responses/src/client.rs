@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use rah_api::{
     CancellationToken, async_trait,
-    model::{ModelError, ModelProvider, ModelStream},
+    model::{ModelError, ModelHealth, ModelProvider, ModelStream},
 };
 use rah_protocol::{ModelEvent, ModelRequest, ToolName};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -187,6 +187,36 @@ impl ResponsesModel {
 
 #[async_trait]
 impl ModelProvider for ResponsesModel {
+    /// llama-server: its readiness and served models, as before a request
+    /// (`/health`, `/v1/models`); no conversation is sent. OpenAI cannot be
+    /// checked without a request.
+    async fn health(&self, cancel: CancellationToken) -> ModelHealth {
+        let Flavor::LlamaCpp { origin, model, .. } = &self.flavor else {
+            return ModelHealth::Unknown;
+        };
+        let served = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return ModelHealth::Unavailable("check cancelled".into()),
+            served = self.discover(origin) => served,
+        };
+        match served {
+            Err(error) => ModelHealth::Unavailable(error.to_string()),
+            Ok(served) => match model {
+                Some(model) if !served.iter().any(|served| &served.id == model) => {
+                    let ids: Vec<&str> = served.iter().map(|served| served.id.as_str()).collect();
+                    ModelHealth::Unavailable(format!(
+                        "the server does not serve `{model}`; it serves {}",
+                        ids.join(", ")
+                    ))
+                }
+                None if served.len() > 1 => ModelHealth::Unavailable(
+                    "the server serves several models; name one in `model`".into(),
+                ),
+                _ => ModelHealth::Reachable,
+            },
+        }
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,

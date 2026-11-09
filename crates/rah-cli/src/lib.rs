@@ -7,6 +7,7 @@ mod admin;
 mod check;
 pub mod cli;
 mod data;
+pub mod doctor;
 mod extend;
 mod features;
 mod help;

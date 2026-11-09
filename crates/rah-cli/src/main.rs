@@ -15,7 +15,7 @@ use rah_api::{
 use rah_cli::{
     Distribution, Permissions, boot,
     cli::{GlobalArgs, NO_MODEL, absolute},
-    is_model_kind, setup, user_file_text,
+    doctor, is_model_kind, setup, user_file_text,
 };
 use serde_json::Value;
 
@@ -105,8 +105,9 @@ enum ConfigCommand {
         #[arg(long)]
         plugins: bool,
     },
-    /// Check every plugin's configuration as a start would; exits with 2 on
-    /// a problem. Starts no plugin or program.
+    /// Check every plugin's configuration as a start would, then start only
+    /// the model plugin and ask whether its server answers (no request is
+    /// sent), and say which `rah` program runs. Exits with 2 on a problem.
     Check,
     /// Write a configuration file from --model, --permissions, --root and
     /// --with. An existing file is never overwritten.
@@ -435,15 +436,33 @@ async fn run(cli: Cli) -> i32 {
                         Err(message) => return fail(message),
                     };
                     let problems = rah_cli::check_distribution(&prepared.distribution);
-                    if problems.is_empty() {
-                        println!(
-                            "configuration ok: {} plugins (keys, values and ids; API keys \
-                             and programs are found only at start)",
-                            prepared.distribution.plugin.len()
-                        );
-                        0
+                    if !problems.is_empty() {
+                        return fail(rah_cli::BootError::InvalidConfig(problems));
+                    }
+                    if let Some(file) = &prepared.file {
+                        println!("file: `{}`", file.display());
+                    }
+                    println!(
+                        "configuration ok: {} plugins",
+                        prepared.distribution.plugin.len()
+                    );
+                    let mut findings =
+                        doctor::models(&prepared.distribution, Duration::from_secs(10)).await;
+                    findings.extend(doctor::program(
+                        std::env::current_exe().ok().as_deref(),
+                        std::env::var_os("PATH").as_deref(),
+                    ));
+                    for finding in &findings {
+                        if finding.problem {
+                            eprintln!("rah: problem: {}", finding.text);
+                        } else {
+                            println!("{}", finding.text);
+                        }
+                    }
+                    if findings.iter().any(|finding| finding.problem) {
+                        2
                     } else {
-                        fail(rah_cli::BootError::InvalidConfig(problems))
+                        0
                     }
                 }
             };

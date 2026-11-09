@@ -119,7 +119,7 @@ directory `rah` starts in. [Features](#features) turn on opt-in capabilities.
 | `rah sessions list` | Sessions, newest first, with title and workspace. Needs no model. |
 | `rah sessions export <id> --format md\|json\|trace` | One session on standard output, without running a turn. |
 | `rah config show [--plugins]` | What would run. |
-| `rah config check` | Checks every plugin's configuration as a start would; exit 2 on a problem. Starts nothing. |
+| `rah config check` | Checks every plugin's configuration as a start would, then starts only the model plugin: a missing API key variable is reported, and llama.cpp and OpenAI-compatible servers are asked whether they answer (no conversation is sent, no tokens are spent). Also prints which `rah` program runs and warns when another `rah` comes first on PATH. Exit 2 on a problem. Starts no tool, loop or frontend. |
 | `rah config init` | Writes `rah.toml` (asks, or takes `--model`). Never overwrites. |
 | `rah config edit` | Opens the file in `$VISUAL`, `$EDITOR`, or Notepad / vi. |
 | `rah config migrate` | Moves settings an earlier Web UI stored in the data directory into the file. |

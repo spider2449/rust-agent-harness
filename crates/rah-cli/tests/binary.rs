@@ -503,7 +503,7 @@ fn a_user_file_that_extends_a_preset_runs_with_only_its_changes() {
 }
 
 #[test]
-fn config_check_reports_every_problem_and_starts_nothing() {
+fn config_check_reports_every_problem_and_starts_only_the_model() {
     let dir = TempDir::new("bin-check-config");
     let output = rah(&dir)
         .args(["--model", "mock", "config", "check"])
@@ -512,6 +512,21 @@ fn config_check_reports_every_problem_and_starts_nothing() {
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(stdout.contains("configuration ok: 13 plugins"), "{stdout}");
+    assert!(stdout.contains("mock: starts"), "{stdout}");
+    assert!(
+        stdout.contains(concat!("rah ", env!("CARGO_PKG_VERSION"))),
+        "{stdout}"
+    );
+
+    // A model whose API key variable is not set is a problem.
+    let output = rah(&dir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .args(["--model", "anthropic", "config", "check"])
+        .output()
+        .unwrap();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("ANTHROPIC_API_KEY"), "{stderr}");
 
     let config = dir.0.join("rah.toml");
     std::fs::write(
