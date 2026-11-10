@@ -6,7 +6,7 @@
 //! `http://<address>/#token=<secret>` with
 //! [`FrontendListening`](rah_api::host::FrontendListening). Every `/api`
 //! request needs that per-start token (`Authorization: Bearer <token>`, or
-//! `?token=` for the WebSocket), a `Host` naming this server, and, when
+//! `?token=` for the WebSocket only), a `Host` naming this server, and, when
 //! present, an `Origin` naming this server. The static UI needs no token; it
 //! reads it from the URL fragment, which browsers never send.
 //!
@@ -370,7 +370,7 @@ fn router(shared: AppState) -> Router {
         .route("/sessions/{id}/export", get(export_session))
         .route("/sessions/{id}/changes", get(undo::changes))
         .route("/sessions/{id}/undo", post(undo::undo))
-        .route("/ws", get(ws::upgrade))
+        .route(SOCKET_ROUTE, get(ws::upgrade))
         .layer(middleware::from_fn_with_state(
             shared.clone(),
             require_token,
@@ -440,14 +440,24 @@ async fn require_host(State(shared): State<AppState>, request: Request, next: Ne
     next.run(request).await
 }
 
+/// The WebSocket route under `/api`.
+const SOCKET_ROUTE: &str = "/ws";
+
 async fn require_token(State(shared): State<AppState>, request: Request, next: Next) -> Response {
     let bearer = header_str(request.headers(), header::AUTHORIZATION)
         .and_then(|value| value.strip_prefix("Bearer "));
-    let query = request.uri().query().and_then(|query| {
-        query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("token="))
-    });
+    // A browser cannot set headers on a WebSocket, so only that route also
+    // takes the token from the query. Anywhere else a token in the URL is
+    // refused: URLs end up in logs and histories. The path is relative to
+    // `/api` here.
+    let query = (request.uri().path() == SOCKET_ROUTE)
+        .then(|| request.uri().query())
+        .flatten()
+        .and_then(|query| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("token="))
+        });
     match bearer.or(query) {
         Some(token) if access::token_matches(&shared.token, token) => next.run(request).await,
         _ => (StatusCode::UNAUTHORIZED, "a valid token is required").into_response(),

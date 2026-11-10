@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.45.31 (2026-11-10)
+
+- The Web API takes the access token from the URL (`?token=`) only for the
+  WebSocket, as documented. Every other `/api` route accepted it there too;
+  they now need the `Authorization` header, so a token does not end up in a
+  logged URL. The Web UI already sent the header.
+
 ## v0.45.30 (2026-11-10)
 
 - "Allow for this session" no longer depends on how the policy words its

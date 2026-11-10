@@ -204,6 +204,12 @@ async fn the_api_requires_the_token_this_host_and_this_origin() {
         401
     );
     assert_eq!(status(web.get("/api/sessions")).await, 200);
+    // The token in the URL is taken for the WebSocket only.
+    let in_url = |path: &str| client.get(format!("{base}{path}?token={}", web.token));
+    assert_eq!(status(in_url("/api/sessions")).await, 401);
+    assert_eq!(status(in_url("/api/ui/any/ws")).await, 401);
+    // Authorized, and then refused as a plain request: not an upgrade.
+    assert_ne!(status(in_url("/api/ws")).await, 401);
     assert_eq!(
         status(web.get("/api/sessions").header("Host", "evil.example")).await,
         403

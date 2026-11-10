@@ -351,7 +351,7 @@ The Web frontend serves the agent to the local machine only:
 - It listens on a loopback address; any other bind address fails the plugin.
 - Every start creates a random token (two UUIDv4, 244 random bits). Every
   `/api` request and the WebSocket must carry it (`Authorization: Bearer`, or
-  `?token=` for the WebSocket); comparison is constant-time. `rah` prints the
+  `?token=`, which only the WebSocket route accepts); comparison is constant-time. `rah` prints the
   URL with the token in the fragment, which browsers do not send to servers;
   the UI keeps it in `sessionStorage` for the tab and removes it from the
   address bar.

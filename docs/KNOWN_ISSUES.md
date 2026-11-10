@@ -75,8 +75,8 @@ in the commit which entry it closes.
 ## Open findings of the 2026-11-10 code review
 
 Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26, and one of the
-findings listed here in 0.45.30.
+fixed in 0.45.20 to 0.45.26, and two of the
+findings listed here in 0.45.30 and 0.45.31.
 
 - **A dispose that never returns blocks every later plugin change.**
   `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
@@ -87,8 +87,6 @@ findings listed here in 0.45.30.
   required service up with `KernelHandle::get` when it needs it stays
   `Active` after the provider is gone; only an injected service stops its
   dependents.
-- **`?token=` is accepted on every `/api` route**, not only for the
-  WebSocket as `frontend-web` documents; a token in a URL can end up in logs.
 - **On Unix, background descendants outlive a program that exits normally.**
   `sandbox-process` only ends the process group on a timeout, an output
   limit or a cancellation; on Windows closing the job ends them.
