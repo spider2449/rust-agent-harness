@@ -45,6 +45,16 @@ function field(label, input, hint) {
   return row;
 }
 
+// Rarely changed fields, folded under "Advanced"; open when one of them
+// holds a value, so nothing set is out of sight.
+function advanced(...rows) {
+  const fold = el("details", "advanced");
+  fold.append(el("summary", "", "Advanced"), ...rows);
+  fold.open = rows.some((row) => [...row.querySelectorAll("input, select, textarea")]
+    .some((input) => (input.type === "checkbox" ? input.checked : input.value !== "")));
+  return fold;
+}
+
 function textInput(value, placeholder) {
   const input = el("input");
   input.value = value ?? "";
@@ -163,8 +173,10 @@ function modelForm() {
       inputs.endpoint = textInput(value("endpoint"), "https://api.openai.com/v1/responses");
       fields.append(
         field("Model", inputs.model, "Required."),
-        field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
-        field("Endpoint", inputs.endpoint, "Optional."),
+        advanced(
+          field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+          field("Endpoint", inputs.endpoint, "Optional."),
+        ),
       );
     } else if (kind.value === "model-anthropic") {
       inputs.model = textInput(value("model"), "claude-opus-5-5");
@@ -173,9 +185,11 @@ function modelForm() {
       inputs.endpoint = textInput(value("endpoint"), "https://api.anthropic.com/v1/messages");
       fields.append(
         field("Model", inputs.model, "Leave empty for claude-opus-5-5."),
-        field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
         field("Effort", inputs.effort, "How much the model thinks before answering; higher is slower and costs more."),
-        field("Endpoint", inputs.endpoint, "Optional."),
+        advanced(
+          field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+          field("Endpoint", inputs.endpoint, "Optional."),
+        ),
       );
     } else if (kind.value === "model-chat-completions") {
       inputs.provider = select(CHAT_PROVIDERS, value("provider") || "");
@@ -186,7 +200,7 @@ function modelForm() {
         field("Server", inputs.provider, "A known server fills in the address, model and key variable; the fields below override them."),
         field("Address", inputs.base_url, "The base URL, before /chat/completions. HTTPS or http; a key is sent only over HTTPS or to this machine. Required for another server."),
         field("Model", inputs.model, "Leave empty for the server's default, or when it runs one model."),
-        field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here."),
+        advanced(field("API key variable", inputs.api_key_env, "The name of the environment variable that holds the key, read from rah's environment. The key itself is never stored here.")),
       );
     } else {
       inputs.label = textInput(value("label"), "model-mock");
@@ -233,8 +247,10 @@ function assistantForm() {
   const maxChars = numberInput(config.max_chars, "200000");
   form.append(
     field("System prompt", system),
-    field("History: messages kept", maxItems, "Older messages are left out of model requests; the session keeps them."),
-    field("History: characters kept", maxChars),
+    advanced(
+      field("History: messages kept", maxItems, "Older messages are left out of model requests; the session keeps them."),
+      field("History: characters kept", maxChars),
+    ),
     saveButton("Save assistant", async () => {
       const next = { ...config };
       put(next, "system", system.value.trim());
@@ -337,8 +353,8 @@ function toolsForm() {
   form.append(field("Permissions", mode, "What the model may do without asking you. A tool the policy does not know is always off."));
 
   // A choice per tool, for the few that need one.
-  const advanced = el("details", "advanced");
-  advanced.append(el("summary", "", "Advanced: a choice per tool"));
+  const perTool = el("details", "advanced");
+  perTool.append(el("summary", "", "Advanced: a choice per tool"));
   const table = el("table", "tool-table");
   const head = el("tr");
   head.append(el("th", "", "Tool"), el("th", "", "Kind"), el("th", "", "Choice"));
@@ -369,12 +385,12 @@ function toolsForm() {
     row.lastChild.append(choice);
     table.append(row);
   }
-  advanced.open = customized;
-  advanced.append(table);
+  perTool.open = customized;
+  perTool.append(table);
   mode.addEventListener("change", preview);
   preview();
   form.append(
-    advanced,
+    perTool,
     saveButton("Save permissions", async () => {
       const next = rulesFrom(policy, mode.value);
       // Keep decisions for patterns and for tools not offered right now.
@@ -417,14 +433,14 @@ function loopForm() {
     for (const key of Object.keys(inputs)) delete inputs[key];
     if (kind.value === "loop-react") {
       inputs.max_rounds = numberInput(value("max_rounds"), "32");
-      fields.append(field("Most model rounds per message", inputs.max_rounds, "Rounds that may call tools. When they are used up, the model answers from what it has gathered."));
+      fields.append(advanced(field("Most model rounds per message", inputs.max_rounds, "Rounds that may call tools. When they are used up, the model answers from what it has gathered.")));
     } else {
       inputs.max_steps = numberInput(value("max_steps"), "8");
       inputs.max_rounds_per_step = numberInput(value("max_rounds_per_step"), "16");
-      fields.append(
+      fields.append(advanced(
         field("Most plan steps", inputs.max_steps),
         field("Most model rounds per step", inputs.max_rounds_per_step, "Rounds that may call tools. When they are used up, the step ends with what it has gathered."),
-      );
+      ));
     }
   };
   kind.addEventListener("change", render);

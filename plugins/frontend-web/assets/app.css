@@ -513,6 +513,10 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .code.wrap .num { flex: none; box-sizing: content-box; width: var(--num-width, 3ch); padding: 0 10px 0 12px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); }
 .code.wrap .text { flex: 1; min-width: 0; padding: 0 16px 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity-head { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.pane-head button.fold { border: none; background: none; padding: 0; text-align: left; cursor: pointer; font-weight: normal; }
+.pane-head button.fold:hover { color: var(--accent); }
+.pane-head button.fold::before { content: "▸ "; }
+.pane-head button.fold[aria-expanded="true"]::before { content: "▾ "; }
 .activity {
   flex: calc(1 - var(--view-ratio)) 1 0; min-height: 60px; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0;
   font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--bg);

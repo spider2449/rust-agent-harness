@@ -1140,7 +1140,7 @@ const STANDARD_LAYOUT = { left: ["sessions"], right: ["files", "plugins"] };
 const PANELS = {
   sessions: { label: "Sessions", node: () => $("sessions-panel") },
   files: { label: "Workspace", node: () => $("files-view"), button: "toggle-side" },
-  plugins: { label: "Plugins", node: () => $("plugins-panel"), button: "toggle-plugins" },
+  plugins: { label: "Plugins", node: () => $("plugins-panel") },
 };
 const layout = { left: [], right: [], rightOpen: null };
 const REGIONS = {
@@ -1219,8 +1219,12 @@ function applyLayout(given) {
       panel.node().hidden = true;
       $("unplaced").append(panel.node());
     }
-    if (panel.button) $(panel.button).hidden = panelRegion(id) !== "right";
   }
+  // The header button opens the right column, whatever it holds; it is named
+  // after the workspace when that is there.
+  const side = $("toggle-side");
+  side.hidden = layout.right.length === 0;
+  side.textContent = layout.right.includes("files") ? "Workspace" : "Panel";
   // One left panel needs no tabs; an empty left column is not shown.
   $("left-tabs").hidden = layout.left.length < 2;
   $("left").hidden = layout.left.length === 0;
@@ -1659,9 +1663,21 @@ async function switchMode(id) {
 }
 
 // The header buttons open their view, or close the panel when it shows it.
-function toggleSide(view) {
-  if (panelRegion(view) === "right" && panelShown(view)) hideSide();
-  else showPanel(view);
+// The header button: closes the right column, or opens it on the workspace
+// (else on the panel shown last).
+function toggleRight() {
+  if (!$("side").hidden) hideSide();
+  else {
+    const view = layout.right.includes("files") && panelAllowed("files") ? "files" : preferredSideView();
+    if (view) showPanel(view);
+  }
+}
+
+// Every plugin: the Plugins panel where the layout has it, else the
+// permissions in Settings.
+function showPlugins() {
+  if (panelRegion("plugins")) showPanel("plugins");
+  else openSettings("tools");
 }
 
 function treeError(error) {
@@ -1979,14 +1995,12 @@ function codeView(text, path) {
   return code;
 }
 
-// The wrap switches (files and activity) and the theme come from the
-// preferences, so the browser and the desktop agree.
+// The wrap switch (the file and the activity log) and the theme come from
+// the preferences, so the browser and the desktop agree.
 function applyWrap() {
-  const files = Boolean(state.prefs.wrap_files);
-  const activity = Boolean(state.prefs.wrap_activity);
-  $("wrap-files").setAttribute("aria-pressed", String(files));
-  $("wrap-activity").setAttribute("aria-pressed", String(activity));
-  $("activity").classList.toggle("wrap", activity);
+  const wrap = Boolean(state.prefs.wrap_files);
+  $("wrap-files").setAttribute("aria-pressed", String(wrap));
+  $("activity").classList.toggle("wrap", wrap);
 }
 
 const THEMES = [
@@ -2009,11 +2023,28 @@ function applyTheme() {
   else document.documentElement.dataset.theme = theme;
 }
 
-function toggleWrap(key) {
-  state.prefs[key] = !state.prefs[key];
+function toggleWrap() {
+  const wrap = !state.prefs.wrap_files;
+  state.prefs.wrap_files = wrap;
+  state.prefs.wrap_activity = wrap;
   savePrefs();
   applyWrap();
-  if (key === "wrap_files") renderFile();
+  renderFile();
+}
+
+// The activity log is folded to its heading until opened; the choice is
+// kept with the side panel's layout.
+function applyActivityFold() {
+  const open = Boolean(sidePrefs().activity_open);
+  $("activity").hidden = !open;
+  $("view-splitter").hidden = !open;
+  $("activity-toggle").setAttribute("aria-expanded", String(open));
+}
+
+function toggleActivity() {
+  saveSidePrefs({ activity_open: !sidePrefs().activity_open });
+  applyActivityFold();
+  if (sidePrefs().activity_open) $("activity").scrollTop = $("activity").scrollHeight;
 }
 
 function fileTab(file) {
@@ -2858,10 +2889,6 @@ async function loadPlugins() {
   }
   $("plugins").replaceChildren(...rows);
   $("tools").replaceChildren(...info.tools.map((tool) => el("li", "", `${tool.name} (${tool.permission})`)));
-  const guard = $("guard");
-  guard.hidden = false;
-  guard.textContent = info.guarded ? "guarded" : "UNGUARDED";
-  guard.className = `badge ${info.guarded ? "good" : "bad"}`;
 }
 
 // ---- Status line ----------------------------------------------------------
@@ -2870,7 +2897,7 @@ function statusItem(id, text, title, className) {
   const node = $(id);
   node.textContent = text;
   node.title = title || text;
-  node.className = `item${className ? ` ${className}` : ""}${id === "status-root" ? " path link" : id === "status-git" ? " link" : ""}`;
+  node.className = `item${className ? ` ${className}` : ""}${id === "status-root" ? " path link" : id === "status-git" || id === "status-agent" ? " link" : ""}`;
   node.hidden = !text;
 }
 
@@ -2937,6 +2964,9 @@ function providerText(label, provider) {
 // A replaced provider reconnects without any visible sign, so say so once
 // the status line sees a different one. The first status only records it.
 function announceProvider(label, provider) {
+  // While plugins restart, the status may briefly not know a provider's kind
+  // (nor its model); such an answer is no switch.
+  if (provider && !provider.kind) return;
   const key = provider ? [provider.plugin, provider.kind, provider.model].join("\n") : "";
   const previous = state.providers[label];
   state.providers[label] = key;
@@ -2992,17 +3022,27 @@ async function loadStatus() {
     down ? `${modelTitle}\nNot reachable now: ${reason}` : modelTitle,
     status.model && !down ? "" : "bad",
   );
-  const [loop, loopTitle] = providerText("loop", status.loop);
-  statusItem("status-loop", loop, loopTitle, status.loop ? "" : "bad");
   announceProvider("model", status.model);
   announceProvider("loop", status.loop);
-  statusItem("status-tools", `${status.tools} tools`, "Tools offered to the model");
-  statusItem(
-    "status-policy",
-    status.guarded ? "guarded" : "UNGUARDED",
-    status.guarded ? "A policy plugin decides every tool call" : "No policy plugin: tool calls run without checks",
-    status.guarded ? "good" : "bad",
-  );
+  const [text, title, bad] = agentText(status);
+  statusItem("status-agent", text, title, bad ? "bad" : "");
+}
+
+// The loop, the tools and the policy in one status item: the tool count,
+// and the loop or the policy only when they are not the usual ones. The
+// title tells all three.
+function agentText(status) {
+  const [loop, loopTitle] = providerText("loop", status.loop);
+  const parts = [`${status.tools} tools`];
+  if (!status.loop || status.loop.kind !== "loop-react") parts.push(loop);
+  if (!status.guarded) parts.push("UNGUARDED");
+  const title = [
+    loopTitle,
+    `${status.tools} tools offered to the model`,
+    status.guarded ? "Guarded: a policy plugin decides every tool call" : "UNGUARDED: no policy plugin, tool calls run without checks",
+    "Click to see every plugin",
+  ].join("\n");
+  return [parts.join(" · "), title, !status.loop || !status.guarded];
 }
 
 function refreshStatus() {
@@ -3319,15 +3359,16 @@ async function start() {
   document.addEventListener("click", (event) => {
     if (sessionMenu.open && !sessionMenu.contains(event.target)) sessionMenu.open = false;
   });
-  $("toggle-plugins").addEventListener("click", () => toggleSide("plugins"));
-  $("toggle-side").addEventListener("click", () => toggleSide("files"));
+  $("toggle-side").addEventListener("click", toggleRight);
+  $("status-agent").addEventListener("click", showPlugins);
   $("side-close").addEventListener("click", hideSide);
   $("notice-close").addEventListener("click", () => showNotice(""));
   $("tree-refresh").addEventListener("click", () => reloadFiles().catch(report));
   $("close-all").addEventListener("click", closeAllFiles);
-  $("wrap-files").addEventListener("click", () => toggleWrap("wrap_files"));
-  $("wrap-activity").addEventListener("click", () => toggleWrap("wrap_activity"));
+  $("wrap-files").addEventListener("click", toggleWrap);
   applyWrap();
+  $("activity-toggle").addEventListener("click", toggleActivity);
+  applyActivityFold();
   $("activity-clear").addEventListener("click", () => $("activity").replaceChildren());
   setupLayout();
   $("git-refresh").addEventListener("click", () => loadGit());

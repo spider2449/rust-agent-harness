@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## v0.45.15 (2026-11-10)
+
+- Web UI: fewer controls in sight.
+  - Header: the Plugins button is gone. Plugins is a tab of the side panel,
+    and the status line opens it. The header's button opens or closes the
+    side panel. The `guarded` badge is gone too, since the status line
+    shows the policy.
+  - Status line: the loop, the tool count and the policy are one item. It
+    shows the tool count, and names the loop or `UNGUARDED` only when they
+    are not the usual ones. Hovering lists all three.
+  - Workspace panel: one Wrap switch for both the file and the activity
+    log. The activity log starts folded to its heading and opens on a
+    click; the choice is kept (`side.activity_open` in the preferences).
+  - Settings: rarely changed fields are folded under "Advanced": the API
+    key variable and the endpoint of a model, the history limits, and the
+    loop's round limits. The fold opens by itself when one of those fields
+    holds a value.
+- Web UI: no more "Reconnected to model …" for a model that was not
+  replaced. While plugins restart, a status answer can briefly lack the
+  provider's kind; the page took that as a switch. The browser test caught
+  it under load.
+
 ## v0.45.14 (2026-11-09)
 
 - `session-jsonl`: a cancelled append (a turn cancelled while its record is

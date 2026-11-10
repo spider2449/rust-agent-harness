@@ -392,7 +392,6 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.call("Page.navigate", json!({ "url": web.url })).await;
     page.wait("the page to connect", "connected()").await;
     assert_eq!(page.eval("location.hash").await, "");
-    assert_eq!(page.eval("byId('guard').textContent").await, "guarded");
 
     // The status line: workspace, Git state (not a repository here) and
     // the providers the next turn uses.
@@ -403,7 +402,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     let status = page
         .eval(
-            "['status-root', 'status-git', 'status-loop', 'status-policy'] \
+            "['status-root', 'status-git', 'status-agent'] \
              .map((id) => byId(id).textContent)",
         )
         .await;
@@ -411,14 +410,18 @@ async fn the_web_ui_works_in_a_real_browser() {
         status[0].as_str().unwrap().ends_with("workspace"),
         "{status}"
     );
-    assert_eq!(
-        status.as_array().unwrap()[1..],
-        [
-            json!("no git repository"),
-            json!("loop: loop-react"),
-            json!("guarded")
-        ],
+    assert_eq!(status[1], "no git repository", "{status}");
+    // The usual loop and a policy are not named; the title tells them.
+    let agent = status[2].as_str().unwrap();
+    assert!(
+        agent.ends_with(" tools") && !agent.contains('·'),
         "{status}"
+    );
+    let title = page.eval("byId('status-agent').title").await;
+    let title = title.as_str().unwrap();
+    assert!(
+        title.contains("loop plugin loop-react") && title.contains("Guarded"),
+        "{title}"
     );
     assert_eq!(page.eval("byId('input').disabled").await, true);
     assert_eq!(page.eval("shown(byId('notice'))").await, false);
@@ -508,7 +511,7 @@ async fn the_web_ui_works_in_a_real_browser() {
 
     // The Plugins panel.
     assert_eq!(page.eval("shown(byId('plugins-panel'))").await, false);
-    page.eval("byId('toggle-plugins').click(); true").await;
+    page.eval("byId('status-agent').click(); true").await;
     page.wait(
         "the plugin table",
         "shown(byId('plugins-panel')) && !!rowOf('policy-authority')",
@@ -1237,25 +1240,29 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          [...byId('file-view').querySelectorAll('.row .num')].map((n) => n.textContent).join() === '1,2' && \
          [...byId('file-view').querySelectorAll('.row .text')].map((t) => t.textContent).join('|') === '# Guide|line two' && \
          byId('file-view').querySelector('.row .tok-heading')?.textContent === '# Guide' && \
-         byId('wrap-files').getAttribute('aria-pressed') === 'true'",
+         byId('wrap-files').getAttribute('aria-pressed') === 'true' && \
+         byId('activity').classList.contains('wrap')",
     )
     .await;
     page.wait(
         "the saved wrap",
-        "api('/preferences').then((p) => p.wrap_files === true)",
+        "api('/preferences').then((p) => p.wrap_files === true && p.wrap_activity === true)",
     )
     .await;
     page.eval("byId('wrap-files').click(); true").await;
     page.wait(
         "the unwrapped file",
-        "!byId('file-view').querySelector('.code.wrap') && byId('file-view').querySelector('.gutter')",
+        "!byId('file-view').querySelector('.code.wrap') && byId('file-view').querySelector('.gutter') && \
+         !byId('activity').classList.contains('wrap')",
     )
     .await;
-    page.eval("byId('wrap-activity').click(); true").await;
+    // The activity log starts folded to its heading; unfolding it is kept.
+    assert_eq!(page.eval("shown(byId('activity'))").await, false);
+    page.eval("byId('activity-toggle').click(); true").await;
     page.wait(
-        "the wrapped activity log",
-        "byId('activity').classList.contains('wrap') && \
-         api('/preferences').then((p) => p.wrap_activity === true)",
+        "the unfolded activity log",
+        "shown(byId('activity')) && shown(byId('view-splitter')) && \
+         api('/preferences').then((p) => p.side?.activity_open === true)",
     )
     .await;
     // A theme applies at once and is kept for every window.
@@ -1931,7 +1938,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         "the new loop",
         "byId('settings-message').textContent === \
          'Loop saved. Switched to loop loop-plan. The next message uses it.' && \
-         byId('status-loop').textContent === 'loop: loop-plan'",
+         byId('status-agent').textContent.includes('loop: loop-plan')",
     )
     .await;
     // The switch is also shown under the conversation. The save shows it
@@ -1980,7 +1987,7 @@ const PLACES: &str = r#"({
   left: [...byId('left-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
   right: [...byId('side-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
   leftTabs: shown(byId('left-tabs')),
-  pluginsButton: shown(byId('toggle-plugins')),
+  sideButton: shown(byId('toggle-side')) && byId('toggle-side').textContent,
 })"#;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2000,7 +2007,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         json!({
             "sessions": "left", "files": "side", "plugins": "side",
             "left": ["Sessions"], "right": ["Workspace", "Plugins", "Usage", "My plugins"],
-            "leftTabs": false, "pluginsButton": true,
+            "leftTabs": false, "sideButton": "Workspace",
         })
     );
     assert_eq!(page.eval("shown(byId('sessions-panel'))").await, true);
@@ -2023,7 +2030,7 @@ async fn a_ui_layout_plugin_moves_panels_and_the_standard_layout_is_kept_without
         json!({
             "sessions": "left", "files": "side", "plugins": "left",
             "left": ["Sessions", "Plugins"], "right": ["Workspace", "Usage", "My plugins"],
-            "leftTabs": true, "pluginsButton": false,
+            "leftTabs": true, "sideButton": "Workspace",
         })
     );
     // The left column starts on its first panel; its Plugins tab lists them.
@@ -2464,7 +2471,7 @@ async fn personal_plugins_are_listed_apart_in_their_own_color() {
     let mut page = browser.page().await;
     page.call("Page.navigate", json!({ "url": web.url })).await;
     page.wait("the page to connect", "connected()").await;
-    page.eval("byId('toggle-plugins').click(); true").await;
+    page.eval("byId('status-agent').click(); true").await;
     page.wait(
         "the personal plugin",
         "shown(byId('plugins-panel')) && !!rowOf('greeter')",

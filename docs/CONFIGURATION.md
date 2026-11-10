@@ -168,20 +168,24 @@ URL. It listens on loopback only and loads nothing from outside.
   allow this command", on a `shell.exec` call, adds that exact program and
   arguments to the policy's `commands` and keeps it in `rah.toml`.
 - **Workspace**: the status line shows the workspace, its Git branch and
-  changes, the model and loop, and whether a policy guards tool calls. Click
+  changes, the model, and the tool count; it names the loop, or that no
+  policy guards tool calls, only when they are not the usual ones. Click
   the path to open another folder or add one; like a multi-root workspace in
   VS Code, tools and Git work in the active folder. The right-hand panel shows
   the files read-only, Git changes and diffs per repository, and an activity
-  log of the session.
+  log of the session, folded until opened.
 - **Settings** sets the model, the system prompt, the **Permissions** (the
   same four modes as `permissions`, plus a choice per tool under
   *Advanced*, and web search), the **Features** (one switch each, applied
   at once), the loop and the display (formatted or raw Markdown, themes).
+  Rarely changed fields (API key variables, endpoints, history and round
+  limits) are folded under *Advanced* until one holds a value.
   Saving writes `rah.toml`, keeping its comments; a plugin's entry holds only
   what differs from the base, so additions in later releases still reach it.
   When a change cannot be kept (no configuration file, or a file that lists
   its plugins), the UI says so and the change lasts until the next start.
-- **Plugins** adds, configures, replaces and removes plugins while `rah`
+- **Plugins**, a tab of the right-hand panel (the status line's tool count
+  opens it), adds, configures, replaces and removes plugins while `rah`
   runs; replacing the model or loop takes effect on the next turn. These
   changes are written to `rah.toml` too. Stopping and starting a plugin is a
   runtime switch and is not kept. The policy and the model cannot be removed

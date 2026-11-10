@@ -1945,7 +1945,7 @@ async fn preferences_are_kept_bounded_and_survive_a_restart() {
             "raw_markdown": true,
             "folders": { "c:/work/0": false, "": true },
             "recent_workspaces": recent,
-            "side": { "open": true, "view": "plugins", "width": 480, "tree_ratio": 0.4 },
+            "side": { "open": true, "view": "plugins", "width": 480, "tree_ratio": 0.4, "activity_open": true },
             "layout": { "sessions_width": 300, "view_ratio": 0.6 },
             "wrap_files": true,
             "theme": "midnight",

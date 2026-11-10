@@ -355,7 +355,9 @@ pub(crate) struct Preferences {
     /// Layout of the side panel.
     #[serde(default, skip_serializing_if = "SidePanel::is_empty")]
     side: SidePanel,
-    /// Wrap long lines in the file viewer and in the activity log.
+    /// Wrap long lines in the file viewer and in the activity log: one
+    /// switch in the UI, which also writes `wrap_activity` (kept so older
+    /// pages and stored preferences still read).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     wrap_files: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -384,6 +386,9 @@ struct SidePanel {
     /// Share of the file tree in the files view, between 0 and 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tree_ratio: Option<f64>,
+    /// Whether the activity log is unfolded; folded when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_open: Option<bool>,
 }
 
 impl SidePanel {
