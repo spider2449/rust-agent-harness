@@ -3,11 +3,14 @@ use std::{path::Path, sync::Mutex};
 use rah_api::{
     CancellationToken, Kernel, MountOptions,
     tools::{Invocation, ToolInvoker},
+    ui::{ActionOutcome, FieldKind, KeyValue, Node, UiError, View, ViewContext},
 };
 use rah_protocol::{SessionId, ToolCall, ToolCallId, ToolInput};
 
 use super::*;
 use crate::store::{ABOUT_FILE, MANIFEST_FILE, check_path};
+
+mod manage;
 
 /// A directory under the system temp directory, removed on drop.
 struct TempDir(PathBuf);
@@ -397,9 +400,14 @@ async fn the_user_deletes_a_plugin_after_typing_its_name() {
     let message = deleted.message.unwrap();
     assert!(message.starts_with("Deleted `greeter`"), "{message}");
     assert!(!message.contains("still mounted"), "{message}");
+    assert!(message.contains("A copy is in"), "{message}");
     assert!(!plugin.exists());
-    // Nothing is left behind, not even a hidden directory.
-    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    // Nothing is left behind but the copy, not even a hidden directory.
+    let left: Vec<String> = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["backups"]);
     assert_eq!(*changed.lock().unwrap(), 1);
     assert!(matches!(
         &render(&kernel).await.nodes[1],
@@ -590,6 +598,7 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
         &nodes[1],
         Node::Table { rows, .. } if rows == &[vec![
             "greeter".to_owned(),
+            "not enabled".to_owned(),
             "python".to_owned(),
             "Greets people by name.".to_owned(),
         ]]
@@ -598,7 +607,7 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
         nodes[2],
         Node::Button {
             action: "details:greeter".into(),
-            label: "Details: greeter".into(),
+            label: "Manage: greeter".into(),
         }
     );
     assert!(
@@ -623,7 +632,9 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
     );
     assert!(matches!(
         &nodes[3],
-        Node::KeyValue { items } if items[1] == KeyValue::new("Tools", "greeter.hello")
+        Node::KeyValue { items }
+            if items[0] == KeyValue::new("Status", "not enabled")
+                && items[2] == KeyValue::new("Tools (permission)", "greeter.hello (none)")
     ));
     assert!(matches!(&nodes[4], Node::Markdown { text } if text.contains("id = \"greeter\"")));
     // The only form in the details deletes the plugin.

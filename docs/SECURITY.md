@@ -501,7 +501,7 @@ request fails. Hook calls are never retried.
 ## `plugin-builder`
 
 The plugin source it writes is model output, so it is untrusted until the
-user mounts it, and mounting stays the user's act:
+user enables it, and enabling stays the user's act (ADR 0073):
 
 - `plugins.save` is a `write` tool (the default policy asks). It writes only
   under its `dir`, into `<dir>/<name>/`: file paths are relative, at most
@@ -510,9 +510,27 @@ user mounts it, and mounting stays the user's act:
   size limit. A directory it did not write (no `plugin-builder.json`) is
   never replaced. A plugin is written to a staging directory and renamed
   into place, so it is replaced whole or not at all.
-- It never mounts, starts or runs a plugin, and never edits `rah.toml` or the
-  policy. `mount.toml` shows the entry and the permission assignments for the
-  user to copy after reading the files.
+- The model's tools never mount, start or run a plugin, and never edit
+  `rah.toml` or the policy. Saving a plugin that runs leaves the earlier save
+  running.
+- Enable, reload and disable are actions of the "My plugins" view, so only
+  the click of the local, token-holding user of the Web UI reaches them; the
+  model cannot. Enable and reload show the tools with the permissions they
+  declare and need a ticked confirmation. They go through the `admin`
+  service: the policy gets the assignments it lacks at the declared level,
+  the plugin is mounted as a `process` plugin, and both are written to
+  `rah.toml`. An assignment the policy already has is never changed, and the
+  effective permission stays the stricter of the assignment and the tool's
+  declaration, so a plugin saved again with a higher permission is not
+  loosened by an assignment from its earlier save. A plugin that does not
+  start is unmounted and its new assignments are taken back. The
+  confirmation is not a review: enabling runs the plugin's code with the
+  user's rights, like every process plugin.
+- Without the Web UI, `mount.toml` shows the entry and the permission
+  assignments for the user to copy after reading the files.
+- A personal plugin runs with the plugin directory as its working directory.
+  That is a convenience for replacing it on Windows, not a boundary: the
+  process is not sandboxed.
 - The manifest passes the process host's `initialize` checks before it is
   saved, plus rules for model-written plugins: tool names must be
   `<plugin name>.<tool>`, and names of RAH's own namespaces (`fs`, `repo`,
@@ -527,11 +545,16 @@ user mounts it, and mounting stays the user's act:
   plugin through the checks of `plugins.save` before writing any, skips a
   name already taken unless the user ticks "replace", and mounts nothing. A
   bundle from someone else is untrusted code until its files are read.
+  Backup and restore are the same two actions with a fixed place: backups
+  are new files in `backups/` under the plugin directory, restore reads only
+  a file listed there, and a restored plugin is not enabled even when the
+  backup notes that it was.
 - Deleting a plugin is a view action too, so only the user's click reaches
   it, and the user must type the plugin's name. It deletes only a directory
   the builder wrote (with `plugin-builder.json`), renamed aside first so the
-  plugin disappears whole; it never edits `rah.toml`, and says so when a
-  plugin of that id is still mounted.
+  plugin disappears whole. A backup of the plugin is written first, and a
+  plugin the view enabled is disabled first; a plugin of that id mounted any
+  other way is left alone, and the message says so.
 - `personal = true` on a process entry only changes how the Web UI lists the
   plugin; it grants nothing and changes nothing about how it runs.
 

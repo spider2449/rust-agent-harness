@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.45.28 (2026-11-10)
+
+- Personal plugins are managed in the **My plugins** panel of the Web UI,
+  without editing `rah.toml` or restarting (ADR 0073). The list shows
+  whether each plugin is enabled. **Enable** shows the tools with their
+  permissions and, once you tick that you read the files, starts the
+  plugin, assigns its tools in the policy and writes both to `rah.toml`.
+  **Reload** runs the last save of a plugin the model changed; until then
+  the earlier one keeps running. **Disable** stops it and removes its entry
+  and assignments. **Delete** disables it and writes a backup first.
+  **Back up all** writes every plugin to `plugins/backups/`, and
+  **Restore** picks a backup from a list; a restored plugin is not enabled.
+  The model still cannot mount or run a plugin: every one of these runs
+  only on your click.
+- A personal plugin runs with the plugin directory as its working directory
+  instead of its own. On Windows a running plugin held its own directory
+  open, so the model could not save it again and you could not delete it
+  until `rah` stopped. A plugin mounted from an earlier `mount.toml` keeps
+  its entry and shows as enabled; disable and enable it once in the panel to
+  get the new working directory.
+
 ## v0.45.27 (2026-11-10)
 
 - Docs: the open low-severity findings of the 2026-11-10 code review are

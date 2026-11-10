@@ -233,7 +233,7 @@ writes it to `rah.toml` ([ADR 0069](adr/0069-features-through-the-admin-service.
 | `instructions` | Gives the model the workspace's `AGENTS.md` (text only; it grants nothing). |
 | `telemetry` | One JSON line per turn, request and tool call; the Web UI's Usage view. |
 | `todo` | A to-do list the model keeps per session, shown in the Web UI. |
-| `plugin-builder` | The model writes personal plugins on request; saving asks. |
+| `plugin-builder` | The model writes personal plugins on request; saving asks, and you enable them in the My plugins panel. |
 | `titles` | Names each session from its first turn (one extra model request per session). |
 | `skills` | Skills from `~/.rah/skills`, listed to the model and loaded on demand. |
 | `scheduler` | Background and repeated jobs, and `agent.delegate` to hand a task to a subagent. |
@@ -357,10 +357,22 @@ config = { program = "python", args = ["examples/process-plugins/word_tools.py"]
 **Personal plugins** (`plugin-builder` feature): when you ask for a RAH plugin, the model writes a
 process plugin in Python or Node.js (standard library only) with
 `plugin-builder`. `plugins.save` checks it and writes it to `plugins/<name>/`
-in the data directory with a `mount.toml` that lists the `[[plugin]]` entry
-and the policy assignments to add to `rah.toml`. Saving asks first and never
-mounts or runs anything. The `plugin-builder/plugins` panel lists, exports,
-imports and deletes them.
+in the data directory. Saving asks first and never mounts or runs anything.
+You manage them in the **My plugins** panel of the Web UI
+(`plugin-builder/plugins`, [ADR 0073](adr/0073-personal-plugins-managed-from-their-panel.md)),
+without editing `rah.toml` or restarting:
+
+| In the panel | Does |
+|---|---|
+| **Manage → Enable** | Shows the tools with their permissions; once you tick that you read the files, starts the plugin, assigns its tools in the policy and writes both to `rah.toml`. |
+| **Reload** | After the model changed an enabled plugin, the earlier save keeps running until you reload. A plugin that does not start again is left disabled. |
+| **Disable** | Stops it and removes its entry and assignments from `rah.toml`. The files stay. |
+| **Delete** | Disables it, writes a backup of it, then deletes its directory. You type its name to confirm. |
+| **Back up all** / **Restore** | Writes every plugin to a new file in `plugins/backups/`; restore picks one from a list. A restored plugin is not enabled. |
+| **Export** / **Import** | A bundle file at a path you choose, to move plugins to another machine. |
+
+Without the Web UI, each plugin's `mount.toml` lists the `[[plugin]]` entry
+and the policy assignments to add to `rah.toml` by hand.
 
 ## Context and prompts
 

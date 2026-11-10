@@ -16,17 +16,28 @@
 //!   into place, so it is replaced whole or not at all.
 //! - `plugins.list` and `plugins.read` (`read`) return the saved plugins, and
 //!   one plugin in the form `plugins.save` takes, to change it.
-//! - The `plugins` view (ADR 0062) lists the saved plugins, and is announced
-//!   with `UiChanged` after each save. A plugin's `details:<name>` button
-//!   shows its tools, directory and `mount.toml` instead of the list, until
-//!   the `list` button goes back. The details also hold a `delete:<name>`
-//!   form that deletes the plugin's directory once the user types its name;
-//!   the model has no tool for it. Its
-//!   `export` form writes the ticked plugins to one bundle file
-//!   (`{"format": "rah-personal-plugins", "version": 1, "plugins": [...]}`,
-//!   each entry in the form `plugins.save` takes) and never overwrites a
-//!   file; its `import` form saves the plugins of a bundle after every one
-//!   passed the checks of `plugins.save`. Both run only on the user's click.
+//! - The `plugins` view (ADR 0062, ADR 0073) is where the user manages the
+//!   saved plugins; it is announced with `UiChanged` after each change. The
+//!   list shows each plugin's state: not enabled, enabled, or enabled with a
+//!   later save waiting. A plugin's `details:<name>` button shows its tools
+//!   with their permissions, its services and hooks instead of the list,
+//!   until the `list` button goes back, with the actions its state allows:
+//!   - `enable:<name>` and `reload:<name>` forms, which need a ticked
+//!     confirmation, mount the plugin through the `admin` service, assign
+//!     the tools the policy lacks and keep both in the configuration file
+//!     ([`lifecycle`]); `disable:<name>` undoes it and keeps the files.
+//!   - A `delete:<name>` form deletes the plugin's directory once the user
+//!     types its name, after disabling it and writing a backup of it.
+//!
+//!   Under the list, `backup` writes every plugin to a new bundle in
+//!   `backups/` and the `restore` form saves the plugins of a chosen one.
+//!   The `export` form writes the ticked plugins to one bundle file
+//!   (`{"format": "rah-personal-plugins", "version": 1, "enabled": [...],
+//!   "plugins": [...]}`, each entry in the form `plugins.save` takes) and
+//!   never overwrites a file; the `import` form saves the plugins of a
+//!   bundle after every one passed the checks of `plugins.save`. Restoring
+//!   and importing enable nothing. All of it runs only on the user's click;
+//!   the model has no tool for any of it.
 //!
 //! Every model request gets one system item ([`HINT`]) after the leading
 //! system items: a request for a RAH plugin starts with `plugins.guide`. A
@@ -34,16 +45,19 @@
 //! is asked about, and a missing tool is only offered as a plugin, never
 //! written unasked.
 //!
-//! `mount.toml` sets `personal = true` on the process entry, so the Web UI
-//! lists the mounted plugin apart from the distribution's own.
+//! The mount entry, in `mount.toml` too, sets `personal = true`, so the Web
+//! UI lists the mounted plugin apart from the distribution's own, and sets
+//! the working directory to the plugin directory rather than the plugin's
+//! own, so a running plugin can be replaced and deleted on Windows.
 //!
 //! Saving never mounts or runs a plugin. The model's output is untrusted:
 //! the manifest is checked like the process host checks it at `initialize`,
 //! tool names must be `<plugin name>.<tool>` (so a plugin cannot take a
 //! built-in tool's name or fall under the user's policy entry for one), a
 //! `tool.before_invoke` hook needs a priority below the policy's, and file
-//! paths stay inside the plugin's directory. Mounting the result is the
-//! user's decision; the host checks the running plugin's manifest again.
+//! paths stay inside the plugin's directory. Enabling the result is the
+//! user's decision, taken in the view or by following `mount.toml`; the host
+//! checks the running plugin's manifest again.
 //!
 //! Configuration: `{ "dir": ".rah/plugins", "python": "python", "node":
 //! "node", "max_files": 16, "max_file_bytes": 131072 }`. `python` and `node`
@@ -53,23 +67,24 @@
 //! given, with a warning in `mount.toml` and in the reply. Looking only
 //! checks that files exist; nothing is run.
 
+mod lifecycle;
 mod manifest;
 mod programs;
 mod store;
+mod views;
 
 use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
 use rah_api::{
     KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::ModelBeforeRequest,
+    kernel::Spawner,
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
-    ui::{
-        ActionOutcome, Field, FieldKind, KeyValue, Node, UI_VIEWS, UI_VIEWS_SERVICE, UiChanged,
-        UiError, UiViews, View, ViewContext, ViewSpec,
-    },
+    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiChanged, UiViews},
 };
 use rah_protocol::{
     ContextItem, PermissionLevel, ToolContent, ToolDefinition, ToolName, ToolOutput,
@@ -99,6 +114,20 @@ pub const IMPORT_ACTION: &str = "import";
 /// The name prefix of the export form's check boxes; the rest is a plugin
 /// name.
 const EXPORT_PREFIX: &str = "plugin:";
+/// The view action that writes every saved plugin to a new backup.
+pub const BACKUP_ACTION: &str = "backup";
+/// The view action that saves the plugins of a backup.
+pub const RESTORE_ACTION: &str = "restore";
+/// The prefix of the view action that enables a plugin; the rest is a plugin
+/// name. Its form's [`READ_FIELD`] must be ticked.
+pub const ENABLE_PREFIX: &str = "enable:";
+/// The prefix of the view action that runs the last save of an enabled
+/// plugin; confirmed like [`ENABLE_PREFIX`].
+pub const RELOAD_PREFIX: &str = "reload:";
+/// The prefix of the view action that disables a plugin.
+pub const DISABLE_PREFIX: &str = "disable:";
+/// The field of the enable and reload forms the user ticks to confirm.
+pub const READ_FIELD: &str = "read";
 /// The view action that goes back from a plugin's details to the list.
 pub const LIST_ACTION: &str = "list";
 /// The prefix of the view action that shows a plugin's details; the rest is a
@@ -201,9 +230,24 @@ struct Builder {
     max_files: usize,
     max_file_bytes: usize,
     search: Search,
+    /// Starts the tasks of view actions, so they end with the scope and not
+    /// with the page that asked.
+    spawner: Spawner,
+    /// One enable, reload, disable or delete at a time.
+    lifecycle: tokio::sync::Mutex<()>,
+    /// The running plugins that were saved again since they started.
+    changed: Mutex<BTreeSet<String>>,
 }
 
 impl Builder {
+    /// Tells frontends that the view changed.
+    fn announce(&self) {
+        self.kernel.emit(&UiChanged {
+            instance: self.instance.clone(),
+            view: VIEW.to_owned(),
+        });
+    }
+
     /// The program `mount.toml` starts `runtime` plugins with, looked up
     /// on every save so an interpreter installed later is found.
     fn program(&self, runtime: Runtime) -> Found {
@@ -241,6 +285,9 @@ impl Plugin for PluginBuilderPlugin {
             max_files: config.max_files.unwrap_or(DEFAULT_MAX_FILES),
             max_file_bytes: config.max_file_bytes.unwrap_or(DEFAULT_MAX_FILE_BYTES),
             search: self.search.clone().unwrap_or_else(Search::from_env),
+            spawner: scope.spawner(),
+            lifecycle: tokio::sync::Mutex::new(()),
+            changed: Mutex::new(BTreeSet::new()),
         });
         // Without this, a model asked for "a plugin" in a project workspace
         // tends to search the project for a plugin system instead.
@@ -267,10 +314,7 @@ impl Plugin for PluginBuilderPlugin {
                 Arc::new(ReadTool(builder.clone())),
             ],
         )?;
-        let views: Arc<dyn UiViews> = Arc::new(BuilderViews {
-            builder,
-            shown: Mutex::new(None),
-        });
+        let views: Arc<dyn UiViews> = Arc::new(views::BuilderViews::new(builder));
         scope.provide(UI_VIEWS, views)?;
         Ok(())
     }
@@ -513,23 +557,39 @@ impl Tool for SaveTool {
                     SaveError::Refused(reason) => ToolError::InvalidInput(reason),
                     SaveError::Failed(reason) => ToolError::Execution(reason),
                 })?;
-        builder.kernel.emit(&UiChanged {
-            instance: builder.instance.clone(),
-            view: VIEW.to_owned(),
-        });
+        let running = builder.saved_again(&plan.about.name);
+        builder.announce();
         let warning = program.warning.map_or_else(String::new, |warning| {
             format!(
                 " The interpreter needs the user's attention before mounting: {warning}. Tell \
                  the user."
             )
         });
-        Ok(text(format!(
-            "Saved plugin `{name}` in `{dir}` ({count} files of yours). It is not mounted and \
-             has not run.{warning} Tell the user to read its files, then follow the steps in \
-             `{MOUNT_FILE}` (also the policy entries its tools need):\n\n{mount}",
+        let saved = format!(
+            "Saved plugin `{name}` in `{dir}` ({count} files of yours).",
             name = plan.about.name,
             dir = dir.display(),
             count = plan.files.len(),
+        );
+        if running {
+            return Ok(text(format!(
+                "{saved} The plugin that runs is still the earlier save, and this one has not \
+                 run.{warning} Tell the user to read the changed files, then press Reload for \
+                 it in the \"My plugins\" panel of the Web UI."
+            )));
+        }
+        if builder.manages() {
+            return Ok(text(format!(
+                "{saved} It is not enabled and has not run.{warning} Tell the user to read \
+                 its files, then enable it in the \"My plugins\" panel of the Web UI, which \
+                 shows the permissions of its tools to confirm. Without the Web UI, \
+                 `{MOUNT_FILE}` in its directory has the steps."
+            )));
+        }
+        Ok(text(format!(
+            "{saved} It is not mounted and has not run.{warning} Tell the user to read its \
+             files, then follow the steps in `{MOUNT_FILE}` (also the policy entries its tools \
+             need):\n\n{mount}"
         )))
     }
 }
@@ -636,407 +696,6 @@ impl Tool for ReadTool {
             is_error: false,
         })
     }
-}
-
-/// The view lists the saved plugins; a plugin's details show on its button.
-struct BuilderViews {
-    builder: Arc<Builder>,
-    /// The plugin whose details are shown instead of the list.
-    shown: Mutex<Option<String>>,
-}
-
-#[async_trait]
-impl UiViews for BuilderViews {
-    fn views(&self) -> Vec<ViewSpec> {
-        vec![ViewSpec::new(VIEW, "My plugins")]
-    }
-
-    async fn render(&self, view: &str, _: &ViewContext) -> Result<View, UiError> {
-        if view != VIEW {
-            return Err(UiError::UnknownView(view.to_owned()));
-        }
-        let store = &self.builder.store;
-        let saved = store.list().await;
-        let mut nodes = vec![Node::Text {
-            text: format!(
-                "Plugins the model wrote for you, in {}. Describe what you need and the model \
-                 writes one; it is never mounted for you. Read its files, then add its \
-                 mount.toml entry to rah.toml.",
-                store.dir().display()
-            ),
-        }];
-        if saved.is_empty() {
-            nodes.push(Node::Text {
-                text: "No personal plugins yet.".to_owned(),
-            });
-            nodes.extend(import_form());
-            return Ok(View { nodes });
-        }
-        let shown = self.shown();
-        if let Some(plugin) = shown.and_then(|name| saved.iter().find(|p| p.about.name == name)) {
-            let tools: Vec<&str> = plugin
-                .manifest
-                .tools
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect();
-            nodes.push(Node::Button {
-                action: LIST_ACTION.to_owned(),
-                label: "Back to the list".to_owned(),
-            });
-            nodes.push(Node::Heading {
-                text: plugin.about.name.clone(),
-            });
-            nodes.push(Node::KeyValue {
-                items: vec![
-                    KeyValue::new("Runtime", plugin.about.runtime.label()),
-                    KeyValue::new("Tools", tools.join(", ")),
-                    KeyValue::new("Description", plugin.about.description.clone()),
-                    KeyValue::new("Directory", plugin.dir.display().to_string()),
-                ],
-            });
-            if let Ok(mount) = tokio::fs::read_to_string(plugin.dir.join(MOUNT_FILE)).await {
-                nodes.push(Node::Markdown {
-                    text: format!("````toml\n{}\n````", mount.trim_end()),
-                });
-            }
-            nodes.extend(delete_form(&plugin.about.name));
-            return Ok(View { nodes });
-        }
-        nodes.push(Node::Table {
-            columns: ["Plugin", "Runtime", "Description"]
-                .map(str::to_owned)
-                .to_vec(),
-            rows: saved
-                .iter()
-                .map(|plugin| {
-                    vec![
-                        plugin.about.name.clone(),
-                        plugin.about.runtime.label().to_owned(),
-                        plugin.about.description.clone(),
-                    ]
-                })
-                .collect(),
-        });
-        nodes.extend(saved.iter().map(|plugin| Node::Button {
-            action: format!("{DETAILS_PREFIX}{}", plugin.about.name),
-            label: format!("Details: {}", plugin.about.name),
-        }));
-        nodes.push(Node::Heading {
-            text: "Export".to_owned(),
-        });
-        nodes.push(Node::Text {
-            text: "Tick the plugins to put in one bundle file, to keep or to import on another \
-                   machine. An existing file is never overwritten."
-                .to_owned(),
-        });
-        let mut fields: Vec<Field> = saved
-            .iter()
-            .map(|plugin| Field {
-                name: format!("{EXPORT_PREFIX}{}", plugin.about.name),
-                label: plugin.about.name.clone(),
-                kind: FieldKind::Boolean,
-                value: String::new(),
-                options: Vec::new(),
-            })
-            .collect();
-        fields.push(Field {
-            name: "file".to_owned(),
-            label: format!(
-                "Bundle file (empty: {}); relative to the plugin directory",
-                Path::new("exports")
-                    .join("personal-plugins-<time>.json")
-                    .display()
-            ),
-            kind: FieldKind::Text,
-            value: String::new(),
-            options: Vec::new(),
-        });
-        nodes.push(Node::Form {
-            action: EXPORT_ACTION.to_owned(),
-            submit: "Export".to_owned(),
-            fields,
-        });
-        nodes.extend(import_form());
-        Ok(View { nodes })
-    }
-
-    async fn act(
-        &self,
-        view: &str,
-        action: &str,
-        input: Value,
-        _: &ViewContext,
-    ) -> Result<ActionOutcome, UiError> {
-        if view != VIEW {
-            return Err(UiError::UnknownView(view.to_owned()));
-        }
-        if action == LIST_ACTION {
-            self.show(None);
-            return Ok(ActionOutcome {
-                message: None,
-                rerender: true,
-            });
-        }
-        if let Some(name) = action.strip_prefix(DETAILS_PREFIX) {
-            manifest::check_name(name).map_err(UiError::InvalidInput)?;
-            self.show(Some(name.to_owned()));
-            return Ok(ActionOutcome {
-                message: None,
-                rerender: true,
-            });
-        }
-        let Value::Object(input) = input else {
-            return Err(UiError::InvalidInput("the form sends an object".to_owned()));
-        };
-        if let Some(name) = action.strip_prefix(DELETE_PREFIX) {
-            manifest::check_name(name).map_err(UiError::InvalidInput)?;
-            if input
-                .get(CONFIRM_FIELD)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                != Some(name)
-            {
-                return Err(UiError::InvalidInput(format!(
-                    "type `{name}` to confirm the deletion"
-                )));
-            }
-            return self.delete(name).await;
-        }
-        let file = match input.get("file") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(file)) => file.clone(),
-            Some(_) => return Err(UiError::InvalidInput("`file` must be text".to_owned())),
-        };
-        match action {
-            EXPORT_ACTION => {
-                let names: Vec<&str> = input
-                    .iter()
-                    .filter(|(_, value)| **value == Value::Bool(true))
-                    .filter_map(|(key, _)| key.strip_prefix(EXPORT_PREFIX))
-                    .collect();
-                self.export(&names, &file).await
-            }
-            IMPORT_ACTION => {
-                let replace = input.get("replace") == Some(&Value::Bool(true));
-                self.import(&file, replace).await
-            }
-            other => Err(UiError::UnknownAction(other.to_owned())),
-        }
-    }
-}
-
-impl BuilderViews {
-    /// The plugin whose details the view shows, if any.
-    fn shown(&self) -> Option<String> {
-        self.shown
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    fn show(&self, name: Option<String>) {
-        *self.shown.lock().unwrap_or_else(PoisonError::into_inner) = name;
-    }
-
-    /// Deletes the saved plugin `name` and goes back to the list.
-    async fn delete(&self, name: &str) -> Result<ActionOutcome, UiError> {
-        let builder = &self.builder;
-        let (dir, leftover) = builder
-            .store
-            .delete(name)
-            .await
-            .map_err(|error| match error {
-                SaveError::Refused(reason) => UiError::InvalidInput(reason),
-                SaveError::Failed(reason) => UiError::Failed(reason),
-            })?;
-        self.show(None);
-        builder.kernel.emit(&UiChanged {
-            instance: builder.instance.clone(),
-            view: VIEW.to_owned(),
-        });
-        let mut message = format!("Deleted `{name}` ({}).", dir.display());
-        // The mount id is the plugin's name (see `mount.toml`).
-        if builder.kernel.status(&PluginId::from(name)).is_some() {
-            message.push_str(&format!(
-                " A plugin `{name}` is still mounted: remove its [[plugin]] entry and policy \
-                 assignments from rah.toml, then restart."
-            ));
-        }
-        if let Some(leftover) = leftover {
-            message.push_str(&format!(" Remove the rest by hand: {leftover}."));
-        }
-        Ok(ActionOutcome {
-            message: Some(message),
-            rerender: true,
-        })
-    }
-
-    /// Writes the plugins `names` to a new bundle file.
-    async fn export(&self, names: &[&str], file: &str) -> Result<ActionOutcome, UiError> {
-        if names.is_empty() {
-            return Err(UiError::InvalidInput(
-                "tick at least one plugin to export".to_owned(),
-            ));
-        }
-        let store = &self.builder.store;
-        let mut entries = Vec::new();
-        let mut left_out = Vec::new();
-        for name in names {
-            manifest::check_name(name).map_err(UiError::InvalidInput)?;
-            let (entry, skipped) = store
-                .entry(name)
-                .await
-                .map_err(|error| UiError::InvalidInput(format!("`{name}`: {error}")))?;
-            entries.push(entry);
-            left_out.extend(skipped.into_iter().map(|path| format!("{name}/{path}")));
-        }
-        let path = store.bundle_path(file);
-        store
-            .write_bundle(&path, entries)
-            .await
-            .map_err(UiError::Failed)?;
-        let mut message = format!("Exported {} to {}.", names.join(", "), path.display());
-        if !left_out.is_empty() {
-            message.push_str(&format!(
-                " Left out (not UTF-8 text or too large): {}.",
-                left_out.join(", ")
-            ));
-        }
-        Ok(ActionOutcome {
-            message: Some(message),
-            rerender: false,
-        })
-    }
-
-    /// Saves the plugins of a bundle file. Every plugin passes the checks
-    /// of `plugins.save` before any is written; a plugin whose name is
-    /// taken is skipped unless `replace` is set.
-    async fn import(&self, file: &str, replace: bool) -> Result<ActionOutcome, UiError> {
-        if file.trim().is_empty() {
-            return Err(UiError::InvalidInput("name the bundle file".to_owned()));
-        }
-        let builder = &self.builder;
-        let path = builder.store.bundle_path(file);
-        let entries = Store::read_bundle(&path)
-            .await
-            .map_err(UiError::InvalidInput)?;
-        let mut plans = Vec::new();
-        let mut names = std::collections::BTreeSet::new();
-        for (index, mut entry) in entries.into_iter().enumerate() {
-            let label = entry.get("name").and_then(Value::as_str).map_or_else(
-                || format!("plugin {}", index + 1),
-                |name| format!("`{name}`"),
-            );
-            if let Value::Object(map) = &mut entry {
-                map.insert("replace".to_owned(), Value::Bool(replace));
-            }
-            let plan = plan(entry, builder.max_files, builder.max_file_bytes)
-                .map_err(|error| UiError::InvalidInput(format!("{label}: {error}")))?;
-            if !names.insert(plan.about.name.clone()) {
-                return Err(UiError::InvalidInput(format!(
-                    "{label} is in the bundle twice"
-                )));
-            }
-            plans.push(plan);
-        }
-        if plans.is_empty() {
-            return Err(UiError::InvalidInput(
-                "the bundle holds no plugins".to_owned(),
-            ));
-        }
-        let (mut imported, mut skipped, mut failed) = (Vec::new(), Vec::new(), Vec::new());
-        for plan in &plans {
-            let program = builder.program(plan.about.runtime);
-            match builder.store.save(plan, &program).await {
-                Ok(_) => imported.push(plan.about.name.clone()),
-                Err(SaveError::Refused(reason)) => {
-                    skipped.push(format!("{} ({reason})", plan.about.name));
-                }
-                Err(SaveError::Failed(reason)) => failed.push(reason),
-            }
-        }
-        if !imported.is_empty() {
-            builder.kernel.emit(&UiChanged {
-                instance: builder.instance.clone(),
-                view: VIEW.to_owned(),
-            });
-        }
-        let mut message = if imported.is_empty() {
-            "Imported nothing.".to_owned()
-        } else {
-            format!(
-                "Imported {}; nothing was mounted, read the files first.",
-                imported.join(", ")
-            )
-        };
-        if !skipped.is_empty() {
-            message.push_str(&format!(" Skipped: {}.", skipped.join("; ")));
-        }
-        if !failed.is_empty() {
-            message.push_str(&format!(" Failed: {}.", failed.join("; ")));
-        }
-        Ok(ActionOutcome {
-            message: Some(message),
-            rerender: !imported.is_empty(),
-        })
-    }
-}
-
-/// The form that deletes the plugin `name` once its name is typed.
-fn delete_form(name: &str) -> [Node; 3] {
-    [
-        Node::Heading {
-            text: "Delete".to_owned(),
-        },
-        Node::Text {
-            text: format!(
-                "Deletes the directory of `{name}` and every file in it; it cannot be undone. \
-                 Export it first to keep a copy. If it is mounted, also remove its [[plugin]] \
-                 entry from rah.toml."
-            ),
-        },
-        Node::Form {
-            action: format!("{DELETE_PREFIX}{name}"),
-            submit: "Delete".to_owned(),
-            fields: vec![Field {
-                name: CONFIRM_FIELD.to_owned(),
-                label: format!("Type {name} to confirm"),
-                kind: FieldKind::Text,
-                value: String::new(),
-                options: Vec::new(),
-            }],
-        },
-    ]
-}
-
-/// The form that imports a bundle file.
-fn import_form() -> [Node; 2] {
-    [
-        Node::Heading {
-            text: "Import".to_owned(),
-        },
-        Node::Form {
-            action: IMPORT_ACTION.to_owned(),
-            submit: "Import".to_owned(),
-            fields: vec![
-                Field {
-                    name: "file".to_owned(),
-                    label: "Bundle file; relative to the plugin directory".to_owned(),
-                    kind: FieldKind::Text,
-                    value: String::new(),
-                    options: Vec::new(),
-                },
-                Field {
-                    name: "replace".to_owned(),
-                    label: "Replace saved plugins of the same name".to_owned(),
-                    kind: FieldKind::Boolean,
-                    value: String::new(),
-                    options: Vec::new(),
-                },
-            ],
-        },
-    ]
 }
 
 #[cfg(test)]

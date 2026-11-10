@@ -122,11 +122,13 @@ Implemented:
   `plugins.save` (`write`) checks the manifest against the process host's
   rules plus its own, then writes the files, `manifest.json`, a Python or
   Node.js runtime library and `mount.toml` into `plugins/<name>/` by a staged
-  rename, `plugins.list` and `plugins.read` return saved plugins, and its
-  `plugins` view lists them and exports ticked plugins to a bundle file or
-  imports one on the user's click; it never mounts or runs a plugin, and
-  marks its `mount.toml` entry `personal = true`, which the Web UI lists
-  apart);
+  rename, `plugins.list` and `plugins.read` return saved plugins; the model's
+  tools never mount or run a plugin. Its `plugins` view is where the user
+  manages them, on a click only (ADR 0073): enable, reload and disable go
+  through the `admin` service, which mounts the plugin, assigns its tools in
+  the policy and keeps both in `rah.toml`; delete, backup, restore, export
+  and import work on the files. Its mount entry is marked `personal = true`,
+  which the Web UI lists apart);
   `tool-input-repair` (mounted by every preset: converts arguments that are
   one unambiguous step from valid for the tool's schema, such as `"20"` for
   an integer, before the policy sees the call; ADR 0049);

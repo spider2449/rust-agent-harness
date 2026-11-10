@@ -44,6 +44,10 @@ pub const BUNDLE_VERSION: u64 = 1;
 const MAX_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
 /// The most plugins in one bundle.
 pub const MAX_BUNDLE_PLUGINS: usize = 64;
+/// The directory of the backups, in the plugin directory.
+pub const BACKUP_DIR: &str = "backups";
+/// The most backups listed, newest first.
+const MAX_BACKUPS_LISTED: usize = 50;
 
 fn unix_seconds() -> u64 {
     SystemTime::now()
@@ -230,6 +234,9 @@ fn toml_string(text: &str) -> String {
 pub fn mount_toml(about: &About, manifest: &Manifest, dir: &Path, program: &Found) -> String {
     let dir_text = dir.display().to_string();
     let entry = dir.join(about.runtime.entry()).display().to_string();
+    // Not the plugin's own directory: on Windows a process keeps its
+    // working directory open, and the plugin must stay replaceable.
+    let cwd = dir.parent().unwrap_or(dir).display().to_string();
     let mut text = format!(
         "# Personal plugin `{name}`, written by plugin-builder: {description}\n\
          #\n\
@@ -244,7 +251,8 @@ pub fn mount_toml(about: &About, manifest: &Manifest, dir: &Path, program: &Foun
         text.push_str(&format!("# WARNING: {warning}.\n#\n"));
     }
     text.push_str(
-        "# To mount it:\n\
+        "# The \"My plugins\" panel of the Web UI does all of this on Enable.\n\
+         # To mount it by hand instead:\n\
          # 1. Add the [[plugin]] entry below to rah.toml (in the data directory,\n\
          #    such as ~/.rah/rah.toml; `rah config edit` opens it).\n",
     );
@@ -291,7 +299,7 @@ pub fn mount_toml(about: &About, manifest: &Manifest, dir: &Path, program: &Foun
         id = toml_string(&about.name),
         program = toml_string(&program.program),
         entry = toml_string(&entry),
-        cwd = toml_string(&dir_text),
+        cwd = toml_string(&cwd),
     ));
     if !manifest.requires.is_empty() {
         text.push_str(&format!(
@@ -642,13 +650,65 @@ impl Store {
         std::path::absolute(&path).unwrap_or(path)
     }
 
+    /// A new file for a backup: `backups/personal-plugins-<time>.json`
+    /// under the plugin directory, with a counter when that name is taken.
+    pub async fn backup_path(&self) -> PathBuf {
+        let dir = self.dir.join(BACKUP_DIR);
+        let dir = std::path::absolute(&dir).unwrap_or(dir);
+        let stem = format!("personal-plugins-{}", unix_seconds());
+        let mut path = dir.join(format!("{stem}.json"));
+        let mut n = 2;
+        while tokio::fs::symlink_metadata(&path).await.is_ok() && n < 1000 {
+            path = dir.join(format!("{stem}-{n}.json"));
+            n += 1;
+        }
+        path
+    }
+
+    /// The file names of the backups, newest first.
+    pub async fn backups(&self) -> Vec<String> {
+        let Ok(mut entries) = tokio::fs::read_dir(self.dir.join(BACKUP_DIR)).await else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".json") || !is_file(&entry.path()).await {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            found.push((modified, name));
+        }
+        found.sort_by(|a, b| b.cmp(a));
+        found.truncate(MAX_BACKUPS_LISTED);
+        found.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// The backup file `name`, when it is one of [`Store::backups`].
+    pub async fn backup_file(&self, name: &str) -> Option<PathBuf> {
+        let listed = self.backups().await.iter().any(|backup| backup == name);
+        let path = self.dir.join(BACKUP_DIR).join(name);
+        listed.then(|| std::path::absolute(&path).unwrap_or(path))
+    }
+
     /// Writes a bundle of `entries` to the new file `path`; an existing file
-    /// is never overwritten.
-    pub async fn write_bundle(&self, path: &Path, entries: Vec<Value>) -> Result<(), String> {
+    /// is never overwritten. `enabled` names the plugins that ran when the
+    /// bundle was written; it is a note for the user and enables nothing.
+    pub async fn write_bundle(
+        &self,
+        path: &Path,
+        entries: Vec<Value>,
+        enabled: &[String],
+    ) -> Result<(), String> {
         let bundle = serde_json::json!({
             "format": BUNDLE_FORMAT,
             "version": BUNDLE_VERSION,
             "exported_at": unix_seconds(),
+            "enabled": enabled,
             "plugins": entries,
         });
         let text = serde_json::to_string_pretty(&bundle).unwrap_or_default() + "\n";
@@ -680,8 +740,9 @@ impl Store {
     }
 
     /// The plugin entries of the bundle at `path`, unchecked: each is
-    /// `plugins.save` input and must pass the same checks.
-    pub async fn read_bundle(path: &Path) -> Result<Vec<Value>, String> {
+    /// `plugins.save` input and must pass the same checks. With them, the
+    /// names the bundle notes as enabled when it was written.
+    pub async fn read_bundle(path: &Path) -> Result<(Vec<Value>, Vec<String>), String> {
         let metadata = tokio::fs::metadata(path)
             .await
             .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
@@ -708,9 +769,20 @@ impl Store {
                 path.display()
             ));
         }
+        let enabled = bundle
+            .get("enabled")
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         match bundle.get("plugins") {
             Some(Value::Array(plugins)) if plugins.len() <= MAX_BUNDLE_PLUGINS => {
-                Ok(plugins.clone())
+                Ok((plugins.clone(), enabled))
             }
             Some(Value::Array(_)) => Err(format!(
                 "a bundle holds at most {MAX_BUNDLE_PLUGINS} plugins"

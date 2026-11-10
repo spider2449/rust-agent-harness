@@ -164,7 +164,7 @@ pub const FEATURES: [Feature; 13] = [
     },
     Feature {
         name: "plugin-builder",
-        summary: "describe a plugin and the model writes it (`plugins.*`); saving asks first, mounting is yours",
+        summary: "describe a plugin and the model writes it (`plugins.*`); saving asks first, you enable it in My plugins",
         argument: None,
         needs_any: &[],
         mount: Mount::Plugin {

@@ -1,11 +1,13 @@
 # Writing a personal RAH plugin
 
 A personal plugin is a RAH **process plugin**: a small program that the user
-mounts in `rah.toml`, which then talks to RAH over JSON-RPC on stdin and
-stdout. You write its logic; `plugins.save` checks the manifest, adds the
-runtime library and the mount instructions, and writes everything to the
-user's plugin directory. Saving never mounts or runs the plugin. The user
-reads the files and mounts it, and mounting is the user's trust decision.
+enables, which then talks to RAH over JSON-RPC on stdin and stdout. You write
+its logic; `plugins.save` checks the manifest, adds the runtime library and
+the mount instructions, and writes everything to the user's plugin directory.
+Saving never mounts or runs the plugin. The user reads the files and enables
+it in the "My plugins" panel of the Web UI (without the Web UI, by following
+its `mount.toml`); that is the user's trust decision, and you have no tool
+for it.
 
 ## Workflow
 
@@ -21,12 +23,18 @@ reads the files and mounts it, and mounting is the user's trust decision.
    for each tool.
 5. Call `plugins.save`. On a refusal, fix what it names and save again.
 6. Tell the user where the plugin is, what it can do, and to read its files
-   and `mount.toml` before mounting. Do not claim it was tested: saving does
-   not run it.
+   before enabling it in the "My plugins" panel. Do not claim it was tested:
+   saving does not run it.
 
 To change a plugin, `plugins.read` it, then save the whole plugin again with
-`replace: true`. `plugins.list` lists the saved plugins. You cannot delete
-a plugin; the user deletes one from its details in the "My plugins" panel.
+`replace: true`. A plugin that runs keeps running the earlier save until the
+user presses Reload for it in the panel; say so. `plugins.list` lists the
+saved plugins. You cannot enable, disable, back up or delete a plugin; the
+user does that in the "My plugins" panel.
+
+A plugin runs with the plugin directory as its working directory, not its
+own directory. Find your own files from the entry file's location, and keep
+what must last in `storage`: a save replaces the plugin's directory whole.
 
 ## `plugins.save` input
 
