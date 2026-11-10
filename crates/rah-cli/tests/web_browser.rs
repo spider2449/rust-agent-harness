@@ -1617,7 +1617,7 @@ const TAB: &str = "[...document.querySelectorAll('#settings-tabs button')].find(
 /// Clicks the settings button labelled `label`.
 fn save(label: &str) -> String {
     format!(
-        "[...document.querySelectorAll('#settings-body button')].find((b) => b.textContent === '{label}').click()"
+        "[...document.querySelectorAll('#settings-actions button')].find((b) => b.textContent === '{label}').click()"
     )
 }
 

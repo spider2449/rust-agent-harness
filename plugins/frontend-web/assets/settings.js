@@ -140,9 +140,10 @@ function saveButton(label, handler) {
       button.disabled = false;
     }
   });
-  const row = el("div", "buttons");
-  row.append(button);
-  return row;
+  // Shown in the dialog header, next to Close, so it stays in reach while
+  // the body scrolls. The form itself keeps no placeholder.
+  $("settings-actions").append(button);
+  return document.createDocumentFragment();
 }
 
 // ---- Model ----------------------------------------------------------------
@@ -596,6 +597,8 @@ function renderSettings() {
     button.classList.toggle("current", button.dataset.tab === settings.tab);
     button.setAttribute("aria-selected", String(button.dataset.tab === settings.tab));
   }
+  // The tab's forms add their save buttons to the header again.
+  $("settings-actions").replaceChildren();
   $("settings-body").replaceChildren(FORMS[settings.tab]());
 }
 

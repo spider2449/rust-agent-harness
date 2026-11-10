@@ -193,7 +193,10 @@
   <dialog id="settings-dialog" class="dialog settings" aria-labelledby="settings-title">
     <div class="dialog-head">
       <h2 id="settings-title">Settings</h2>
-      <button id="settings-close" type="button" class="ghost" aria-label="Close settings">Close</button>
+      <div class="dialog-actions">
+        <span id="settings-actions"></span>
+        <button id="settings-close" type="button" class="ghost" aria-label="Close settings">Close</button>
+      </div>
     </div>
     <div id="settings-tabs" class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="model">Model</button>

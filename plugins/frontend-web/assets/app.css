@@ -257,8 +257,12 @@ button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
 .dialog .hint { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
 .dialog .notice { margin: 8px 0 0; }
 .dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.dialog.settings { width: min(760px, calc(100vw - 32px)); }
-.dialog-head { display: flex; align-items: center; justify-content: space-between; }
+.dialog.settings { width: min(760px, calc(100vw - 32px)); overflow: hidden; }
+/* Header, tabs and message stay put; only the body scrolls. */
+.dialog.settings[open] { display: flex; flex-direction: column; }
+#settings-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog-actions, #settings-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .tabs { display: flex; gap: 4px; margin: 10px 0; border-bottom: 1px solid var(--line); }
 .tabs button {
   border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none;
