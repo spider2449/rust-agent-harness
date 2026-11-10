@@ -123,6 +123,14 @@ fn webview(window: &Window, builder: WebViewBuilder<'_>) -> wry::Result<WebView>
     }
 }
 
+/// Moves keyboard focus into the WebView when the window owes it one and can
+/// give it: a minimized window cannot, and stays in debt until it is restored.
+fn give_focus(view: &WebView, window: &Window, owed: &mut bool) {
+    if *owed && !window.is_minimized() && view.focus().is_ok() {
+        *owed = false;
+    }
+}
+
 /// The window title, with the version of this build (`RAH 0.45.0`).
 const TITLE: &str = concat!("RAH ", env!("CARGO_PKG_VERSION"));
 
@@ -236,9 +244,36 @@ fn run(args: Args) -> Result<(), String> {
     // The WebView lives as long as the event loop, and goes before the window
     // it is in.
     let mut shown = Some((view, window));
+    // Set while the window has keyboard focus that the WebView has not taken.
+    let mut focus_owed = false;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let code = match event {
+            // Keyboard focus that stays on the window instead of the WebView
+            // sends IME composition to a floating system window, away from
+            // the input box. wry hands focus over as the window gains it,
+            // but WebView2 refuses while the window is minimized, so the
+            // hand-over is repeated here and again once the window is
+            // restored.
+            Event::WindowEvent {
+                event: WindowEvent::Focused(focused),
+                ..
+            } => {
+                focus_owed = focused;
+                if let Some((view, window)) = &shown {
+                    give_focus(view, window, &mut focus_owed);
+                }
+                return;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                if let Some((view, window)) = &shown {
+                    give_focus(view, window, &mut focus_owed);
+                }
+                return;
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..

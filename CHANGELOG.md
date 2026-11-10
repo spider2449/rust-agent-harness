@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.45.18 (2026-11-10)
+
+- Desktop: IME composition (Chinese, Japanese, Korean input) stays in the
+  input box. Keyboard focus could stay on the window instead of the page,
+  for example after restoring a minimized window, and the composition then
+  showed in a small floating window at the edge of the screen.
+
 ## v0.45.17 (2026-11-10)
 
 - Web UI: the default address is `127.0.0.1:18765`. The old `8765` is
