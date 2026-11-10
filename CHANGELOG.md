@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.35 (2026-11-10)
+
+- A plugin runs only while every service in its `requires` resolves
+  (ADR 0075). A plugin that required a service and looked it up later,
+  without injecting it, stayed `Active` after the last provider was gone.
+  It is now stopped before the provider, shown as `Pending`, and started
+  again once the service is back, like a plugin that injects. The plugins
+  that ship with RAH all inject what they require, so nothing changes for
+  them.
+
 ## v0.45.34 (2026-11-10)
 
 - On Unix, a program run by the sandbox no longer leaves background

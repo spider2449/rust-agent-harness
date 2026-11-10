@@ -68,6 +68,80 @@ async fn unmounting_provider_stops_dependents_first_and_hot_swap_recovers() {
     assert_eq!(seen.take(), ["consumer=provider-a", "consumer=provider-b"]);
 }
 
+/// Requires `greeter` and looks it up when it needs it, without injecting.
+fn lazy_consumer(id: &str, log: &Log) -> Arc<dyn Plugin> {
+    let (log, name) = (log.clone(), id.to_owned());
+    plugin(
+        PluginManifest::new(id, "1.0.0").requires(["greeter"]),
+        move |scope| {
+            log.push(format!("start:{name}"));
+            let (log, name) = (log.clone(), name.clone());
+            scope.on_dispose(move || async move { log.push(format!("dispose:{name}")) });
+            Ok(())
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_required_service_binds_without_an_injection() {
+    let (kernel, log) = (Kernel::new(), Log::default());
+    let options = MountOptions::default;
+    kernel
+        .mount(provider("provider-a", &log), options())
+        .await
+        .unwrap();
+    kernel
+        .mount(lazy_consumer("lazy", &log), options())
+        .await
+        .unwrap();
+    // Bound to one instance by its mount options.
+    let bound = MountOptions::default().bind("greeter", "provider-b");
+    kernel
+        .mount(lazy_consumer("bound", &log), bound)
+        .await
+        .unwrap();
+    assert_eq!(kernel.status(&id("bound")), Some(pending(&["greeter"])));
+    kernel
+        .mount(provider("provider-b", &log), options())
+        .await
+        .unwrap();
+    assert_eq!(kernel.status(&id("bound")), Some(PluginStatus::Active));
+    log.take();
+
+    // Another provider is left: `lazy` still resolves the service and is
+    // not touched. `bound` lost the instance it is bound to.
+    kernel.unmount(&id("provider-b")).await.unwrap();
+    assert_eq!(log.take(), ["dispose:bound", "dispose:provider-b"]);
+    assert_eq!(kernel.status(&id("lazy")), Some(PluginStatus::Active));
+    assert_eq!(kernel.status(&id("bound")), Some(pending(&["greeter"])));
+
+    // The last provider goes: the dependent is stopped first.
+    kernel.unmount(&id("provider-a")).await.unwrap();
+    assert_eq!(log.take(), ["dispose:lazy", "dispose:provider-a"]);
+    assert_eq!(kernel.status(&id("lazy")), Some(pending(&["greeter"])));
+
+    // And it starts again once the service resolves.
+    kernel
+        .mount(provider("provider-c", &log), options())
+        .await
+        .unwrap();
+    assert_eq!(log.take(), ["start:provider-c", "start:lazy"]);
+    assert_eq!(kernel.status(&id("lazy")), Some(PluginStatus::Active));
+    assert_eq!(kernel.status(&id("bound")), Some(pending(&["greeter"])));
+
+    // Restarting the only provider restarts the dependent around it.
+    kernel.restart(&id("provider-c")).await.unwrap();
+    assert_eq!(
+        log.take(),
+        [
+            "dispose:lazy",
+            "dispose:provider-c",
+            "start:provider-c",
+            "start:lazy"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn cascade_stops_transitive_dependents_in_reverse_activation_order() {
     let (kernel, log) = (Kernel::new(), Log::default());

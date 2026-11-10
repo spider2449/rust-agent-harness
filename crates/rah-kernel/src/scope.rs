@@ -234,7 +234,9 @@ impl Scope {
 
     /// Injects a service if available. The service must be declared in the
     /// manifest's `requires` or `optional`. Injection binds this plugin to the
-    /// provider: if the provider stops, this plugin is stopped first.
+    /// provider: if the provider stops, this plugin is stopped first. A
+    /// service in `requires` also binds without an injection: the plugin is
+    /// stopped when the service no longer resolves (ADR 0075).
     pub fn inject_optional<S>(&mut self, key: ServiceKey<S>) -> Result<Option<Arc<S>>, ScopeError>
     where
         S: ?Sized + Send + Sync + 'static,

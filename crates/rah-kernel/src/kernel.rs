@@ -702,7 +702,21 @@ async fn start(inner: &Arc<Inner>, id: &PluginId) {
     emit_changes(inner, changes);
 }
 
-/// Stops `root` and every active plugin transitively bound to it. Their
+/// Whether a service `entry` requires would not resolve once the plugins in
+/// `stopped` are gone.
+fn loses_a_requirement(state: &State, entry: &Entry, stopped: &BTreeSet<PluginId>) -> bool {
+    entry.manifest.requires.iter().any(|service| {
+        let binding = entry.options.bindings.get(service);
+        !state.services.get(service).is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|e| !stopped.contains(&e.provider) && binding.is_none_or(|b| &e.instance == b))
+        })
+    })
+}
+
+/// Stops `root`, every active plugin transitively bound to it, and every
+/// active plugin left without a service it requires (ADR 0075). Their
 /// registrations are withdrawn first; scopes are then disposed in reverse
 /// activation order (dependents before providers). Stopped dependents become
 /// `Pending`; the caller decides the root's next state.
@@ -722,6 +736,7 @@ async fn stop_cascade(inner: &Arc<Inner>, root: &PluginId) {
                     !stopped.contains(*id)
                         && e.active.as_ref().is_some_and(|a| {
                             a.bindings.iter().any(|b| stopped.contains(&b.provider))
+                                || loses_a_requirement(&state, e, &stopped)
                         })
                 })
                 .map(|(id, _)| id.clone())

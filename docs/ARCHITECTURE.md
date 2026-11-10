@@ -32,7 +32,8 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
 
 - Lifecycle: `Pending -> Starting -> Active -> Stopping`, plus `Failed` and
   `DependencyCycle`. A plugin starts when every `requires` service resolves.
-  When a provider it is bound to stops, it is stopped first (dependents before
+  When a provider it is bound to stops, or a stop leaves a service it
+  requires unresolved (ADR 0075), it is stopped first (dependents before
   providers, reverse activation order) and restarts once the service resolves
   again. Lifecycle operations are serialized; calling one from inside `apply`
   or a dispose effect returns `Reentrant`. Each one runs as a task of

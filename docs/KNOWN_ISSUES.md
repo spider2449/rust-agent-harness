@@ -75,15 +75,11 @@ in the commit which entry it closes.
 ## Open findings of the 2026-11-10 code review
 
 Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26, and five of
-the findings listed here in 0.45.30 to 0.45.34.
+fixed in 0.45.20 to 0.45.26, and six of
+the findings listed here in 0.45.30 to 0.45.35.
 
 - **A dispose that never returns blocks every later plugin change.**
   `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
   scope's tasks to reach an await point and for its dispose effects, without
   a time limit, while the operations lock is held. One task stuck in
   synchronous work stops all mounting, unmounting and the shutdown.
-- **`requires` without `inject` is not a binding.** A plugin that looks a
-  required service up with `KernelHandle::get` when it needs it stays
-  `Active` after the provider is gone; only an injected service stops its
-  dependents.
