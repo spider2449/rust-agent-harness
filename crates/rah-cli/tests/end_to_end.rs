@@ -591,3 +591,35 @@ async fn a_session_runs_one_turn_at_a_time() {
     let third = turn(&handle, &session, "/notool more").await;
     assert_eq!(kinds(&third).last(), Some(&"completed"));
 }
+
+#[tokio::test]
+async fn a_workspace_change_that_fails_moves_no_plugin() {
+    use rah_api::sandbox::SANDBOX;
+
+    let dir = TempDir::new("workspace-whole");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let admin = handle.get(ADMIN).unwrap();
+    let other = dir.0.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let root = || handle.get(SANDBOX).unwrap().root().unwrap();
+    let before = root();
+
+    // The file tools are gone without the admin service knowing, so they
+    // cannot be moved: the sandbox, which is moved first, goes back.
+    kernel
+        .unmount(&PluginId::new("tools-builtin"))
+        .await
+        .unwrap();
+    let error = admin.set_workspace(&other).await.unwrap_err();
+    assert!(
+        error.to_string().contains("the workspace was not changed"),
+        "{error}"
+    );
+    assert_eq!(root(), before);
+    let sandbox = admin.instance(&PluginId::new("sandbox-process")).unwrap();
+    assert_eq!(
+        sandbox.config["root"],
+        json!(dir.workspace().display().to_string())
+    );
+}

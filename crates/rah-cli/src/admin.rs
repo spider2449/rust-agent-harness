@@ -483,22 +483,43 @@ impl PluginAdmin for Admin {
         if targets.iter().all(|(_, record)| record.stopped) {
             return Err(failed("no plugin that works in a workspace is mounted"));
         }
-        let mut plugins = Vec::new();
-        for (id, record) in targets {
-            let mut config = match record.config {
-                Value::Object(map) => map,
+        let rooted = |config: &Value| {
+            let mut config = match config {
+                Value::Object(map) => map.clone(),
                 _ => serde_json::Map::new(),
             };
             config.insert("root".to_owned(), value.clone());
-            if record.stopped {
-                // Takes the new root when it is started again.
-                if let Some(record) = self.registry.lock().get_mut(&id) {
-                    record.config = Value::Object(config);
+            Value::Object(config)
+        };
+        // The running plugins move together or not at all: programs must
+        // not run in one folder while the file tools work in another.
+        let mut plugins = Vec::new();
+        let mut moved: Vec<(&PluginId, &Value)> = Vec::new();
+        for (id, record) in targets.iter().filter(|(_, record)| !record.stopped) {
+            match self.configure(id, rooted(&record.config)).await {
+                Ok(status) => {
+                    plugins.push((id.clone(), status));
+                    moved.push((id, &record.config));
                 }
-                continue;
+                Err(error) => {
+                    let mut kept = true;
+                    for (id, config) in moved.into_iter().rev() {
+                        kept &= self.configure(id, config.clone()).await.is_ok();
+                    }
+                    let outcome = if kept {
+                        "the workspace was not changed"
+                    } else {
+                        "and not every plugin could be moved back; restart rah"
+                    };
+                    return Err(failed(format!("`{id}`: {error}; {outcome}")));
+                }
             }
-            let status = self.configure(&id, Value::Object(config)).await?;
-            plugins.push((id, status));
+        }
+        // A stopped one takes the new root when it is started again.
+        for (id, record) in targets.iter().filter(|(_, record)| record.stopped) {
+            if let Some(stored) = self.registry.lock().get_mut(id) {
+                stored.config = rooted(&record.config);
+            }
         }
         Ok(Workspace { root, plugins })
     }

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.45.24 (2026-11-10)
+
+- Opening another workspace folder moves every workspace plugin or none.
+  When one of them could not take the new folder, the ones already moved
+  stayed there, so programs ran in one folder while the file tools worked
+  in another. They now go back, and the error says so.
+
 ## v0.45.23 (2026-11-10)
 
 - A tool that panics no longer ends the turn without a word. Its call
