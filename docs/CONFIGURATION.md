@@ -186,6 +186,10 @@ free port, and says so.
   what differs from the base, so additions in later releases still reach it.
   When a change cannot be kept (no configuration file, or a file that lists
   its plugins), the UI says so and the change lasts until the next start.
+- **Help** shows this documentation, built into the binary so it matches the
+  running version and needs no network, and the slash commands of the
+  message box. `/help` opens it. Links between the documents work; links to
+  files that are not built in (the decision records, the plans) stay text.
 - **Plugins**, a tab of the right-hand panel (the status line's tool count
   opens it), adds, configures, replaces and removes plugins while `rah`
   runs; replacing the model or loop takes effect on the next turn. These

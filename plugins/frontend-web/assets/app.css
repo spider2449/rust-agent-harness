@@ -255,6 +255,21 @@ button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
 /* Header, tabs and message stay put; only the body scrolls. */
 .dialog.settings[open] { display: flex; flex-direction: column; }
 #settings-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.dialog.help { width: min(1040px, calc(100vw - 32px)); height: calc(100vh - 64px); overflow: hidden; }
+/* The header and the document list stay put; only the document scrolls. */
+.dialog.help[open] { display: flex; flex-direction: column; }
+.help-layout { flex: 1 1 auto; min-height: 0; display: flex; gap: 14px; margin-top: 10px; }
+.help-nav { flex: 0 0 180px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.help-nav button { border: none; background: none; color: var(--muted); text-align: left; padding: 5px 8px; border-radius: 6px; }
+.help-nav button:hover { background: var(--tool); color: var(--text); }
+.help-nav button.current { background: var(--tool); color: var(--text); font-weight: 600; }
+.help-body { flex: 1 1 auto; min-width: 0; margin-top: 0; overflow-y: auto; padding-right: 8px; }
+.help-body dt { margin-top: 8px; }
+.help-body dd { margin: 2px 0 0; color: var(--muted); }
+@media (max-width: 640px) {
+  .help-layout { flex-direction: column; }
+  .help-nav { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; }
+}
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .dialog-actions, #settings-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .tabs { display: flex; gap: 4px; margin: 10px 0; border-bottom: 1px solid var(--line); }

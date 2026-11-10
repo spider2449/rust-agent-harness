@@ -1941,6 +1941,33 @@ async fn plugins_panel_changes_are_applied_again_at_the_next_start() {
 }
 
 #[tokio::test]
+async fn the_documentation_is_listed_and_read_with_the_token_only() {
+    let web = start("web-docs", |_| {}).await;
+    let docs = web.json(web.get("/api/docs")).await;
+    let docs = docs.as_array().unwrap();
+    let configuration = docs
+        .iter()
+        .find(|doc| doc["id"] == "configuration")
+        .expect("the configuration guide is listed");
+    assert_eq!(configuration["path"], "docs/CONFIGURATION.md");
+    assert!(configuration.get("markdown").is_none(), "{configuration}");
+    for doc in docs {
+        let id = doc["id"].as_str().unwrap();
+        let read = web.json(web.get(&format!("/api/docs/{id}"))).await;
+        assert_eq!(read["title"], doc["title"], "{id}");
+        assert!(read["markdown"].as_str().unwrap().starts_with("# "), "{id}");
+    }
+    let missing = web.get("/api/docs/nothing").send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let anonymous = reqwest::Client::new()
+        .get(format!("http://{}/api/docs", web.address))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+}
+
+#[tokio::test]
 async fn features_are_switched_at_once_and_kept_in_the_file() {
     use reqwest::Method;
     let web = start("web-features", |_| {}).await;

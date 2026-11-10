@@ -61,6 +61,9 @@
 //!   other plugins contribute through `ui-views` (see [`views`]). A
 //!   provider's `UiChanged` event reaches every window as `{type: "ui",
 //!   instance, view}`.
+//! - `GET /api/docs` (`[{id, title, path}]`) and `GET /api/docs/{id}` (the
+//!   same with `markdown`): the documentation built into the binary, shown
+//!   by the UI's Help (see [`docs`]).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog` (`{kinds, examples, help}`,
@@ -110,6 +113,7 @@
 
 mod access;
 mod approvals;
+mod docs;
 mod features;
 mod files;
 mod git;
@@ -349,6 +353,8 @@ fn router(shared: AppState) -> Router {
         .route("/groups", get(groups::list))
         .route("/group", put(groups::set))
         .route("/catalog", get(manage::catalog))
+        .route("/docs", get(docs::list))
+        .route("/docs/{id}", get(docs::read))
         .route("/plugins", get(manage::list).post(manage::mount))
         .route("/plugins/{id}", axum::routing::delete(manage::unmount))
         .route("/plugins/{id}/restart", post(manage::restart))

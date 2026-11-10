@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.29 (2026-11-10)
+
+- The Web UI has a **Help** button that shows the documentation: the
+  overview, configuring and running, MCP servers, process and WASM plugins,
+  security, architecture, harness2 and the known issues. The documents are
+  built into the binary, so they match the running version and need no
+  network (`GET /api/docs`, `GET /api/docs/{id}`). Links between them and to
+  their sections work. `/help` in the message box opens Help on the list of
+  slash commands; typing `/` still lists them in place.
+
 ## v0.45.28 (2026-11-10)
 
 - Personal plugins are managed in the **My plugins** panel of the Web UI,

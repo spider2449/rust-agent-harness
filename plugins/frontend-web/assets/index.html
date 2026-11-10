@@ -13,6 +13,7 @@
     <span id="connection" class="badge bad" title="This window lost its link to the local RAH process; it retries automatically" hidden>connecting</span>
     <span class="spacer"></span>
     <button id="open-settings" type="button">Settings</button>
+    <button id="open-help" type="button" class="ghost" title="Read the documentation">Help</button>
     <button id="toggle-side" type="button" class="ghost" title="Show or hide the side panel: workspace files and, as a tab, every plugin">Workspace</button>
   </header>
 
@@ -205,6 +206,16 @@
     </div>
     <div id="settings-message" class="settings-message" hidden></div>
     <div id="settings-body"></div>
+  </dialog>
+  <dialog id="help-dialog" class="dialog help" aria-labelledby="help-title">
+    <div class="dialog-head">
+      <h2 id="help-title">Help</h2>
+      <button id="help-close" type="button" class="ghost" aria-label="Close help">Close</button>
+    </div>
+    <div class="help-layout">
+      <nav id="help-nav" class="help-nav" aria-label="Documents"></nav>
+      <div id="help-body" class="help-body md" tabindex="0"></div>
+    </div>
   </dialog>
   <script src="/highlight.js"></script>
   <script src="/markdown.js"></script>

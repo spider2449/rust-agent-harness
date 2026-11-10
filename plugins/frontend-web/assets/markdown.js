@@ -8,6 +8,12 @@
 // pipe tables and thematic breaks. Inline: code, strong, emphasis,
 // strikethrough, links, autolinks and bare URLs. A single line break inside
 // a paragraph is kept, as in chat.
+//
+// `render(text, options)` takes two options for trusted documents (Help):
+// `breaks: false` joins the lines of a paragraph with a space, as hard-wrapped
+// files expect, and `link(url)` is asked about every link that is not an
+// absolute http, https or mailto URL; the function it returns runs when the
+// link is clicked, and without one the link stays text.
 "use strict";
 
 const Markdown = (() => {
@@ -39,7 +45,11 @@ const Markdown = (() => {
   const ITEM = /^( *)([-*+]|\d{1,9}[.)])(?:\s+(.*))?$/;
   const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 
-  function render(text) {
+  const DEFAULTS = { breaks: true, link: null };
+  // Options of the render in progress; rendering is synchronous.
+  let current = DEFAULTS;
+
+  function render(text, options) {
     const fragment = document.createDocumentFragment();
     if (text.length > MAX_CHARS) {
       const pre = node("pre");
@@ -47,7 +57,12 @@ const Markdown = (() => {
       fragment.append(pre);
       return fragment;
     }
-    blocks(text.replace(/\r\n?/g, "\n").split("\n"), fragment);
+    current = { ...DEFAULTS, ...options };
+    try {
+      blocks(text.replace(/\r\n?/g, "\n").split("\n"), fragment);
+    } finally {
+      current = DEFAULTS;
+    }
     return fragment;
   }
 
@@ -246,7 +261,19 @@ const Markdown = (() => {
   function link(url, label, parent) {
     const safe = safeUrl(url);
     if (!safe) {
-      inline(label, parent);
+      const follow = current.link ? current.link(url) : null;
+      if (!follow) {
+        inline(label, parent);
+        return;
+      }
+      const local = node("a");
+      local.href = "#";
+      local.addEventListener("click", (event) => {
+        event.preventDefault();
+        follow();
+      });
+      inline(label, local);
+      parent.append(local);
       return;
     }
     const anchor = node("a");
@@ -293,6 +320,9 @@ const Markdown = (() => {
         flush();
         parent.append(node("br"));
         i += 2;
+      } else if (c === "\n" && !current.breaks) {
+        plain += " ";
+        i += 1;
       } else if (c === "\n") {
         flush();
         parent.append(node("br"));

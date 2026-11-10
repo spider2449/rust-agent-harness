@@ -803,7 +803,7 @@ const SLASH_COMMANDS = [
   { name: "/restart", usage: "/restart <plugin>", help: "Restart a plugin", plugin: (p) => p.state !== "stopped" && p.kind && !p.locked },
   { name: "/cancel", usage: "/cancel", help: "Cancel the running turn" },
   { name: "/undo", usage: "/undo", help: "Undo the newest file change of this session" },
-  { name: "/help", usage: "/help", help: "List the commands" },
+  { name: "/help", usage: "/help", help: "Show the documentation and the commands" },
   { name: "/call", usage: "/call <tool> <json>", help: "Run a turn that requests a tool (mock model)", turn: true },
   { name: "/notool", usage: "/notool <text>", help: "Run a turn without tools (mock model)", turn: true },
 ];
@@ -975,9 +975,8 @@ async function runSlash(input) {
         await undoLast();
         break;
       case "/help":
-        $("input").value = "/";
-        updateSlashMenu();
-        return "keep";
+        await openHelp("commands");
+        break;
     }
   } catch (error) {
     report(error);
@@ -2579,6 +2578,123 @@ function report(error) {
   showNotice(error.message);
 }
 
+// Help: the documentation built into the server (`/api/docs`) and, last in
+// the list, the slash commands. Documents are loaded when first shown.
+const HELP_COMMANDS = "commands";
+const help = { docs: null, current: null, loaded: new Map() };
+
+// The anchor a heading gets on the usual Markdown hosts.
+function headingAnchor(text) {
+  return text.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+}
+
+function helpScroll(anchor) {
+  const heading = [...$("help-body").querySelectorAll("h1, h2, h3, h4, h5, h6")]
+    .find((candidate) => headingAnchor(candidate.textContent) === anchor);
+  if (heading) heading.scrollIntoView({ block: "start" });
+}
+
+function decoded(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+// What a relative link of the shown document does: `#anchor` scrolls, and a
+// path that names another built-in document opens it. Other links stay text.
+function helpLink(url) {
+  if (url.startsWith("#")) return () => helpScroll(decoded(url.slice(1)));
+  const from = (help.docs || []).find((doc) => doc.id === help.current);
+  if (!from) return null;
+  let target;
+  try {
+    target = new URL(url, `http://docs.invalid/${from.path}`);
+  } catch {
+    return null;
+  }
+  if (target.host !== "docs.invalid") return null;
+  const path = decoded(target.pathname.slice(1));
+  const doc = help.docs.find((candidate) => candidate.path === path);
+  return doc ? () => showHelp(doc.id, decoded(target.hash.slice(1))) : null;
+}
+
+function helpCommands() {
+  const list = el("dl");
+  for (const command of SLASH_COMMANDS) {
+    const usage = el("dt");
+    usage.append(el("code", "", command.usage));
+    list.append(usage, el("dd", "", command.help));
+  }
+  const page = document.createDocumentFragment();
+  page.append(
+    el("h1", "", "Commands"),
+    el("p", "", "Type these in the message box. Typing / lists them; Tab or Enter completes one."),
+    list,
+  );
+  return page;
+}
+
+async function showHelp(id, anchor) {
+  help.current = id;
+  for (const button of $("help-nav").children) {
+    const current = button.dataset.doc === id;
+    button.classList.toggle("current", current);
+    if (current) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  const body = $("help-body");
+  if (id === HELP_COMMANDS) {
+    body.replaceChildren(helpCommands());
+  } else {
+    let doc = help.loaded.get(id);
+    if (!doc) {
+      try {
+        doc = await api(`/docs/${encodeURIComponent(id)}`);
+      } catch (error) {
+        if (help.current === id) body.replaceChildren(el("p", "", error.message));
+        return;
+      }
+      help.loaded.set(id, doc);
+    }
+    // Another document was chosen meanwhile.
+    if (help.current !== id) return;
+    body.replaceChildren(Markdown.render(doc.markdown, { breaks: false, link: helpLink }));
+  }
+  if (anchor) helpScroll(anchor);
+  else body.scrollTop = 0;
+}
+
+// Opens Help on `id`, else on the document shown last, else on the first.
+async function openHelp(id) {
+  $("help-dialog").showModal();
+  if (!help.docs) {
+    let docs;
+    try {
+      docs = await api("/docs");
+    } catch (error) {
+      $("help-body").replaceChildren(el("p", "", error.message));
+      return;
+    }
+    help.docs = docs;
+    const entries = [...docs, { id: HELP_COMMANDS, title: "Commands" }];
+    $("help-nav").replaceChildren(...entries.map((doc) => {
+      const button = el("button", "", doc.title);
+      button.type = "button";
+      button.dataset.doc = doc.id;
+      button.addEventListener("click", () => showHelp(doc.id));
+      return button;
+    }));
+  }
+  await showHelp(id || help.current || help.docs[0]?.id || HELP_COMMANDS);
+}
+
+function setupHelp() {
+  $("open-help").addEventListener("click", () => openHelp());
+  $("help-close").addEventListener("click", () => $("help-dialog").close());
+}
+
 async function manage(path, method, body) {
   const options = { method };
   if (body !== undefined) options.body = JSON.stringify(body);
@@ -3154,6 +3270,7 @@ async function start() {
   $("cancel").addEventListener("click", () => send({ type: "cancel" }));
   $("new-session").addEventListener("click", () => newSession().catch((error) => showNotice(error.message)));
   setupSettings();
+  setupHelp();
   try {
     state.prefs = { ...state.prefs, ...(await api("/preferences")) };
   } catch {
