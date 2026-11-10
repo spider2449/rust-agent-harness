@@ -16,7 +16,8 @@
 //! ```
 //!
 //! - `tools[].method`: `GET` (default) or `POST`. A parameter goes to the
-//!   path when the path names it (`{name}`, percent-encoded), else to the
+//!   path when the path names it (`{name}`, percent-encoded; an empty value,
+//!   `.` and `..` are refused, so a call cannot leave its endpoint), else to the
 //!   query string (`GET`) or the JSON body (`POST`). `in` on a parameter
 //!   overrides this: `path`, `query` or `body`.
 //! - `tools[].permission`: `read` (default) or `write`. Declare `write` for
@@ -386,7 +387,16 @@ impl HttpTool {
             }
             match self.place(name, param) {
                 Place::Path => {
-                    path = path.replace(&format!("{{{name}}}"), &encode(&text_of(value)));
+                    let segment = text_of(value);
+                    // A URL drops `.` and `..` segments (and an empty one
+                    // shortens the path), which would reach an endpoint
+                    // this tool does not declare.
+                    if matches!(segment.as_str(), "" | "." | "..") {
+                        return Err(ToolError::InvalidInput(format!(
+                            "`{name}` is part of the path and must not be empty, `.` or `..`"
+                        )));
+                    }
+                    path = path.replace(&format!("{{{name}}}"), &encode(&segment));
                 }
                 Place::Query => query.push((name.clone(), text_of(value))),
                 Place::Body => {

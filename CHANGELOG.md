@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.45.25 (2026-11-10)
+
+- `tools-http`: a path parameter that is empty, `.` or `..` is refused.
+  A URL drops such segments, so a call to `/orders/{id}` with `..` asked
+  the server for `/` instead: an endpoint the configuration never named,
+  with the configured credentials.
+
 ## v0.45.24 (2026-11-10)
 
 - Opening another workspace folder moves every workspace plugin or none.

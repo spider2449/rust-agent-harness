@@ -279,3 +279,22 @@ fn the_example_configuration_is_valid() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn a_path_parameter_cannot_leave_its_endpoint() {
+    let fixture = fixture(200, "ok").await;
+    let tools = fixture.tools(json!([order_tool()]));
+    for id in ["", ".", ".."] {
+        let refused = call(&tools[0], json!({ "id": id })).await;
+        assert!(
+            matches!(&refused, Err(ToolError::InvalidInput(message)) if message.contains("`id`")),
+            "{id:?}: {refused:?}"
+        );
+    }
+    assert!(fixture.seen().is_empty());
+    // Dots inside a longer value are an ordinary name.
+    for id in ["a.b", "..x", "..."] {
+        assert!(call(&tools[0], json!({ "id": id })).await.is_ok(), "{id}");
+    }
+    assert_eq!(fixture.seen().len(), 3);
+}
