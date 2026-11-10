@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.30 (2026-11-10)
+
+- "Allow for this session" no longer depends on how the policy words its
+  reason (ADR 0074). An approval request now carries the permission level
+  the policy judged the call at, and both frontends decide from it. A tool
+  assigned `execute` and also listed under `decisions = ask` was offered the
+  answer and could be allowed for the session; it is now asked every time.
+  A tool under `decisions = ask` without a level in `tools` is asked every
+  time too. A process plugin's `ask` decision may carry `level`.
+
 ## v0.45.29 (2026-11-10)
 
 - The Web UI has a **Help** button that shows the documentation: the

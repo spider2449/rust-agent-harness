@@ -2,7 +2,9 @@
 //! attach here instead of patching loops or tools.
 
 use rah_kernel::{BailHook, WaterfallHook};
-use rah_protocol::{ModelRequest, SessionId, ToolCall, ToolDefinition, ToolEffect, ToolOutput};
+use rah_protocol::{
+    ModelRequest, PermissionLevel, SessionId, ToolCall, ToolDefinition, ToolEffect, ToolOutput,
+};
 
 /// What is about to be invoked. The definition comes from the tool provider;
 /// the call comes from the model and is untrusted.
@@ -22,6 +24,9 @@ pub enum ToolDecision {
     /// Requires confirmation through [`ToolApproval`]; no approver means deny.
     Ask {
         reason: String,
+        /// The permission level the policy judged the call at, when it has
+        /// one (ADR 0074). It reaches the approver unchanged.
+        level: Option<PermissionLevel>,
     },
 }
 
@@ -41,6 +46,21 @@ impl BailHook for ToolBeforeInvoke {
 pub struct ApprovalRequest {
     pub request: ToolRequestContext,
     pub reason: String,
+    /// The permission level the policy judged the call at (ADR 0074).
+    /// `None` when the policy that asked gave none.
+    pub level: Option<PermissionLevel>,
+}
+
+impl ApprovalRequest {
+    /// Whether an approver may keep its answer for later calls of the same
+    /// tool (ADR 0056). Never for a call judged at `execute`, for a tool
+    /// that declares `execute`, or when the policy gave no level: an unknown
+    /// level is not taken to be a harmless one.
+    pub fn may_remember(&self) -> bool {
+        let execute = PermissionLevel::Execute;
+        self.request.definition.permission != execute
+            && self.level.is_some_and(|level| level != execute)
+    }
 }
 
 /// Asks a frontend to confirm an `Ask` decision. `Some(true)` approves.

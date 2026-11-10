@@ -343,11 +343,18 @@ impl Policy {
     /// the host's configuration, never from tool metadata.
     pub fn decide(&self, definition: &ToolDefinition) -> ToolDecision {
         let name = definition.name.as_str();
+        // The level a call of this tool is judged at: the stricter of the
+        // host's assignment and what the tool declares. None without an
+        // assignment, since tool metadata alone sets no level.
+        let effective = self
+            .assignment(name)
+            .map(|assigned| stricter(assigned, definition.permission));
         match self.decisions.get(name) {
             Some(Decision::Allow) => return ToolDecision::Allow,
             Some(Decision::Ask) => {
                 return ToolDecision::Ask {
                     reason: format!("the policy asks before tool `{name}` runs"),
+                    level: effective,
                 };
             }
             Some(Decision::Deny) => {
@@ -357,18 +364,18 @@ impl Policy {
             }
             None => {}
         }
-        let Some(assigned) = self.assignment(name) else {
+        let Some(effective) = effective else {
             return ToolDecision::Deny {
                 reason: format!("tool `{name}` has no permission assignment"),
             };
         };
-        let effective = stricter(assigned, definition.permission);
         let level = level_name(effective);
         if self.allow.contains(&effective) {
             ToolDecision::Allow
         } else if self.ask.contains(&effective) {
             ToolDecision::Ask {
                 reason: format!("tool `{name}` requires `{level}` permission"),
+                level: Some(effective),
             }
         } else {
             ToolDecision::Deny {

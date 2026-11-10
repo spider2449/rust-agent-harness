@@ -89,7 +89,7 @@ No mode grants a tool the policy has no assignment for: it is denied, and tool
 metadata can only make a decision stricter. `full` prints a warning at every
 start. A question is answered in the terminal (only `y` or `yes` approves; `a`
 also allows that tool for the rest of the session, never one that needs
-`execute`) or in the Web UI.
+`execute` or that has no level in `tools`) or in the Web UI.
 
 ### `root` and `features`
 

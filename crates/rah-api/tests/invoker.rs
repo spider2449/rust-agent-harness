@@ -182,6 +182,7 @@ async fn ask_requires_an_approver() {
         &kernel,
         Some(ToolDecision::Ask {
             reason: "risky".into(),
+            level: Some(PermissionLevel::Write),
         }),
         false,
     )
@@ -193,7 +194,7 @@ async fn ask_requires_an_approver() {
 
     let approver = plugin(PluginManifest::new("approver", "1"), |scope| {
         scope.hook_bail::<ToolApproval, _, _>(0, |request| async move {
-            Some(request.reason == "risky")
+            Some(request.reason == "risky" && request.level == Some(PermissionLevel::Write))
         });
         Ok(())
     });
@@ -214,6 +215,7 @@ async fn a_declined_call_tells_the_model_not_to_send_it_again() {
         &kernel,
         Some(ToolDecision::Ask {
             reason: "risky".into(),
+            level: Some(PermissionLevel::Write),
         }),
         false,
     )
@@ -249,6 +251,7 @@ async fn cancellation_ends_a_call_waiting_for_approval() {
         &kernel,
         Some(ToolDecision::Ask {
             reason: "risky".into(),
+            level: Some(PermissionLevel::Write),
         }),
         false,
     )

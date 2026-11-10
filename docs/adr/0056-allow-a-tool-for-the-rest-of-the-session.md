@@ -1,6 +1,6 @@
 # ADR 0056: A Frontend Can Allow A Tool For The Rest Of The Session
 
-Status: Accepted
+Status: Accepted (point 4 amended by ADR 0074: the request carries the level)
 
 Date: 2026-10-19
 

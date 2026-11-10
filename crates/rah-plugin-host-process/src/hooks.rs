@@ -16,7 +16,7 @@ use rah_api::{
     session::SessionAppended,
     tools::image,
 };
-use rah_protocol::{ContextItem, ModelRequest, ToolContent, ToolOutput};
+use rah_protocol::{ContextItem, ModelRequest, PermissionLevel, ToolContent, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -187,8 +187,14 @@ fn decision(reply: &Value) -> Result<Option<ToolDecision>, String> {
     #[serde(tag = "decision", rename_all = "snake_case")]
     enum Reply {
         Allow,
-        Deny { reason: String },
-        Ask { reason: String },
+        Deny {
+            reason: String,
+        },
+        Ask {
+            reason: String,
+            #[serde(default)]
+            level: Option<PermissionLevel>,
+        },
     }
     if reply.is_null() {
         return Ok(None);
@@ -198,7 +204,7 @@ fn decision(reply: &Value) -> Result<Option<ToolDecision>, String> {
     Ok(Some(match reply {
         Reply::Allow => ToolDecision::Allow,
         Reply::Deny { reason } => ToolDecision::Deny { reason },
-        Reply::Ask { reason } => ToolDecision::Ask { reason },
+        Reply::Ask { reason, level } => ToolDecision::Ask { reason, level },
     }))
 }
 
@@ -233,4 +239,30 @@ fn replaced_request(reply: &Value) -> Result<Option<ModelRequest>, String> {
         }
     }
     Ok(Some(request))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_may_carry_the_level_it_was_judged_at() {
+        let ask = |reply: Value| decision(&reply).unwrap().unwrap();
+        assert_eq!(
+            ask(json!({ "decision": "ask", "reason": "r", "level": "execute" })),
+            ToolDecision::Ask {
+                reason: "r".into(),
+                level: Some(PermissionLevel::Execute),
+            }
+        );
+        // An older plugin sends none.
+        assert_eq!(
+            ask(json!({ "decision": "ask", "reason": "r" })),
+            ToolDecision::Ask {
+                reason: "r".into(),
+                level: None,
+            }
+        );
+        assert!(decision(&json!({ "decision": "ask", "reason": "r", "level": "root" })).is_err());
+    }
 }

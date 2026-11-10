@@ -49,8 +49,37 @@ fn assigned_levels_map_to_allow_ask_and_deny() {
     let decide = |name| policy.decide(&definition(name, PermissionLevel::None));
     assert_eq!(decide("a"), ToolDecision::Allow);
     assert_eq!(decide("b"), ToolDecision::Allow);
-    assert!(matches!(decide("c"), ToolDecision::Ask { reason } if reason.contains("`write`")));
+    assert!(matches!(
+        decide("c"),
+        ToolDecision::Ask { reason, level: Some(PermissionLevel::Write) } if reason.contains("`write`")
+    ));
     assert!(deny_reason(decide("d")).contains("`execute` permission, which is not granted"));
+}
+
+/// The level an Ask carries is the one the call is judged at, also when a
+/// `decisions` entry asks and its reason names no level (ADR 0074).
+#[test]
+fn an_ask_carries_the_effective_level() {
+    let policy = parse(json!({
+        "tools": { "custom.run": "execute", "custom.note": "read" },
+        "decisions": { "custom.run": "ask", "custom.note": "ask", "custom.free": "ask" }
+    }));
+    let level = |name, declared| match policy.decide(&definition(name, declared)) {
+        ToolDecision::Ask { level, .. } => level,
+        other => panic!("expected an Ask, got {other:?}"),
+    };
+    // Assigned `execute`, declared lower.
+    assert_eq!(
+        level("custom.run", PermissionLevel::Write),
+        Some(PermissionLevel::Execute)
+    );
+    // The declaration can raise the level.
+    assert_eq!(
+        level("custom.note", PermissionLevel::Write),
+        Some(PermissionLevel::Write)
+    );
+    // Without an assignment there is no level: metadata sets none.
+    assert_eq!(level("custom.free", PermissionLevel::Read), None);
 }
 
 #[test]

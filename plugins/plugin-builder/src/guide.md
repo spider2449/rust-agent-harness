@@ -165,7 +165,7 @@ plugin exits at start with the mismatch on stderr. `ctx` has:
 
 Hook results: `tool.before_invoke` gets `{session, call: {id, name, input},
 definition}` and returns `None` or `{"decision": "deny", "reason": "..."}` /
-`{"decision": "ask", "reason": "..."}`. `tool.after_invoke` gets `{session,
+`{"decision": "ask", "reason": "...", "level": "write"}` (`level` is optional). `tool.after_invoke` gets `{session,
 call, definition, output, effect}` and returns `None` or `{"output": <tool
 result>}`. `model.before_request` gets `{model, items, tools}` and returns
 `None` or `{"request": <request>}`.

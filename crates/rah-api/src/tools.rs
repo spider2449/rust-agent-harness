@@ -209,10 +209,11 @@ impl ToolInvoker {
         match decision {
             ToolDecision::Allow => Ok(()),
             ToolDecision::Deny { reason } => Err(reason),
-            ToolDecision::Ask { reason } => {
+            ToolDecision::Ask { reason, level } => {
                 let approval = ApprovalRequest {
                     request: request.clone(),
                     reason,
+                    level,
                 };
                 match self.kernel.bail::<ToolApproval>(approval).await {
                     Ok(Some(true)) => Ok(()),

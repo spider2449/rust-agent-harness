@@ -75,7 +75,8 @@ in the commit which entry it closes.
 ## Open findings of the 2026-11-10 code review
 
 Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26.
+fixed in 0.45.20 to 0.45.26, and one of the
+findings listed here in 0.45.30.
 
 - **A dispose that never returns blocks every later plugin change.**
   `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
@@ -86,11 +87,6 @@ fixed in 0.45.20 to 0.45.26.
   required service up with `KernelHandle::get` when it needs it stays
   `Active` after the provider is gone; only an injected service stops its
   dependents.
-- **Whether an approval may be remembered depends on the policy's wording.**
-  `plugins/frontend-web/src/approvals.rs` reads `` `execute` `` out of the
-  reason text. A tool the host assigned `execute` and also listed under
-  `decisions = ask` gets another reason and can be allowed for the session.
-  The approval request should carry the effective level.
 - **`?token=` is accepted on every `/api` route**, not only for the
   WebSocket as `frontend-web` documents; a token in a URL can end up in logs.
 - **On Unix, background descendants outlive a program that exits normally.**

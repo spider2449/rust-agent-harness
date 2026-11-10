@@ -89,7 +89,10 @@ The policy decides each call from its own configuration only:
   that tool, by name, in that session until the process ends (ADR 0056). It
   trusts the tool, not one call, so every argument is allowed; it is held in
   the frontend's memory, never saved, and never offered for a tool that
-  declares `execute` or that the policy treats as `execute`.
+  declares `execute` or that the policy judges at `execute`. The approval
+  request carries the level the policy judged the call at (ADR 0074), so
+  this does not depend on how a reason is worded; a request without a level
+  is asked every time.
 - The Web UI's "Always allow this command", offered on a `shell.exec`
   approval, adds that call's exact program and arguments to the policy's
   `commands` and keeps the policy like a saved Permissions form (ADR 0066). The

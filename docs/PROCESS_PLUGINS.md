@@ -144,7 +144,7 @@ retried.
 
 | Hook | `input` | Result |
 |---|---|---|
-| `tool.before_invoke` | `{session, call: {id, name, input}, definition}` | `null` (no decision) or `{"decision": "allow"}`, `{"decision": "deny", "reason"}`, `{"decision": "ask", "reason"}` |
+| `tool.before_invoke` | `{session, call: {id, name, input}, definition}` | `null` (no decision) or `{"decision": "allow"}`, `{"decision": "deny", "reason"}`, `{"decision": "ask", "reason", "level"}`; `level` is optional (`none`, `read`, `write`, `execute`: the level the call was judged at, ADR 0074) and without it the question is asked every time |
 | `tool.after_invoke` | `{session, call, definition, output, effect}` | `null` (unchanged) or `{"output": <tool output>}` |
 | `model.before_request` | the model request `{model, items, tools}` | `null` (unchanged) or `{"request": <model request>}` |
 

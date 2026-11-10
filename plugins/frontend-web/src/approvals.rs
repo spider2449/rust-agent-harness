@@ -10,7 +10,6 @@ use std::{
 };
 
 use rah_api::hooks::ApprovalRequest;
-use rah_protocol::PermissionLevel;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 
@@ -144,11 +143,9 @@ impl Approvals {
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let permission = request.request.definition.permission;
-        // A tool that declares `execute`, or that the policy treats as
-        // `execute` (its reason says so: the request carries no level), is
-        // asked about every time.
-        let may_remember =
-            permission != PermissionLevel::Execute && !request.reason.contains("`execute`");
+        // A call judged at `execute`, or at no known level, is asked about
+        // every time (ADR 0074).
+        let may_remember = request.may_remember();
         let command = command_rule(call.name.as_str(), &call.input.0);
         let notice = json!({
             "type": "approval_required",
@@ -157,6 +154,7 @@ impl Approvals {
             "tool": call.name,
             "input": call.input.0,
             "permission": permission,
+            "level": request.level,
             "reason": request.reason,
             "may_remember": may_remember,
             "command": command,
@@ -231,10 +229,12 @@ mod tests {
                 },
             },
             reason: "requires `execute` permission".into(),
+            level: Some(PermissionLevel::Execute),
         }
     }
 
-    /// A request for `tool` in `session`, declared at `permission`.
+    /// A request for `tool` in `session`, declared and judged at
+    /// `permission`.
     fn request_for(
         session: &SessionId,
         tool: &str,
@@ -257,6 +257,7 @@ mod tests {
                 },
             },
             reason: reason.into(),
+            level: Some(permission),
         }
     }
 
@@ -431,16 +432,29 @@ mod tests {
         assert_eq!(notice["may_remember"], false);
         assert_eq!(answer, Some(true), "this call is approved");
         assert_eq!(approvals.ask(declared).await, None);
-        // Declared lower, but the policy treats it as `execute`.
-        let assigned = request_for(
-            &session,
-            "custom.run",
-            PermissionLevel::Write,
-            "tool `custom.run` requires `execute` permission",
-        );
+        // Declared lower, but the policy judges it at `execute`, whatever
+        // its reason says: a `decisions = ask` entry does not name the level.
+        let assigned = ApprovalRequest {
+            level: Some(PermissionLevel::Execute),
+            ..request_for(
+                &session,
+                "custom.run",
+                PermissionLevel::Write,
+                "the policy asks before tool `custom.run` runs",
+            )
+        };
         let (notice, _) = answered(&approvals, assigned.clone(), true, true).await;
         assert_eq!(notice["may_remember"], false);
+        assert_eq!(notice["level"], "execute");
         assert_eq!(approvals.ask(assigned).await, None);
+        // A policy that gives no level: not known to be harmless.
+        let unknown = ApprovalRequest {
+            level: None,
+            ..request_for(&session, "custom.note", PermissionLevel::Read, "asks")
+        };
+        let (notice, _) = answered(&approvals, unknown.clone(), true, true).await;
+        assert_eq!(notice["may_remember"], false);
+        assert_eq!(approvals.ask(unknown).await, None);
     }
 
     #[tokio::test]

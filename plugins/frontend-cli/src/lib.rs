@@ -19,8 +19,8 @@
 //! shown on the terminal and approved only by an explicit `y` or `yes`. End
 //! of input, any other answer, or a REPL that is no longer running denies it.
 //! The answer `a` (or `always`) approves and also allows that tool for the
-//! rest of the session without asking again (ADR 0056); a tool that declares
-//! `execute` is not offered it.
+//! rest of the session without asking again (ADR 0056); a call judged at
+//! `execute`, or at no known level, is not offered it (ADR 0074).
 //!
 //! It also answers `host.interrupt` (Ctrl-C): a running turn is cancelled
 //! and the REPL continues. Without a running turn the host exits.
@@ -52,8 +52,8 @@ use rah_api::{
     undo,
 };
 use rah_protocol::{
-    AgentEvent, ModelUsage, PermissionLevel, SessionEntry, SessionId, SessionRecord, ToolContent,
-    ToolEffect, ToolOutput,
+    AgentEvent, ModelUsage, SessionEntry, SessionId, SessionRecord, ToolContent, ToolEffect,
+    ToolOutput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -678,7 +678,7 @@ async fn next_prompt(approvals: &mut Option<mpsc::Receiver<ApprovalPrompt>>) -> 
 
 /// Asks the user to confirm one tool call. Only `y` or `yes` approves, and
 /// `a` or `always` approves and allows the tool for the rest of the session,
-/// except for a tool that declares `execute`, which is asked every time.
+/// except for a call judged at `execute`, which is asked every time.
 /// Cancelling the turn denies it.
 async fn confirm<R, W>(
     terminal: &mut Terminal<'_, R, W>,
@@ -690,10 +690,9 @@ where
     W: AsyncWrite + Unpin,
 {
     let call = &request.request.call;
-    // A tool that declares `execute`, or that the policy treats as `execute`
-    // (its reason says so: the request carries no level), asks every time.
-    let may_remember = request.request.definition.permission != PermissionLevel::Execute
-        && !request.reason.contains("`execute`");
+    // A call judged at `execute`, or at no known level, asks every time
+    // (ADR 0074).
+    let may_remember = request.may_remember();
     let question = format!(
         "[approve] {} {} ({}). Allow? [y/N{}] ",
         call.name,
@@ -1128,6 +1127,7 @@ mod tests {
                 },
             },
             reason: "needs `write`".into(),
+            level: Some(permission),
         }
     }
 
