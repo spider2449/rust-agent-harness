@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.17 (2026-11-10)
+
+- Web UI: the default address is `127.0.0.1:18765`. The old `8765` is
+  also used by other local apps (Thunderbird), so `rah web` failed to
+  start. `--bind` and the `bind` setting still choose any address.
+- Web UI: a port already in use no longer stops it. It tries the next ten
+  ports, then any free one, prints the real address and a notice.
+
 ## v0.45.15 (2026-11-10)
 
 - Web UI: fewer controls in sight.

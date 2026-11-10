@@ -97,7 +97,7 @@ pub fn fallback(kind: &str) -> Help {
         "frontend-web" => &[
             (
                 "bind",
-                "Address of the Web UI; loopback only, port 0 picks a free one (127.0.0.1:8765).",
+                "Address of the Web UI; loopback only, port 0 or a busy port picks a free one (127.0.0.1:18765).",
             ),
             (
                 "approval_timeout_secs",

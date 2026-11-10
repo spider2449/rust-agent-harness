@@ -47,7 +47,7 @@ param(
     # else ~\.rah).
     [string]$DataDir,
     # Web UI address, loopback only.
-    [string]$Bind = "127.0.0.1:8765",
+    [string]$Bind = "127.0.0.1:18765",
     # The terminal REPL instead of the Web UI.
     [switch]$Cli,
     # The Web UI in a native window (rah-desktop) instead of the browser.

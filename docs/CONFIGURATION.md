@@ -155,7 +155,9 @@ one, for example `/call repo.status {}`.
 ## The Web UI
 
 `rah web` prints the address with a per-start access token; open exactly that
-URL. It listens on loopback only and loads nothing from outside.
+URL. It listens on loopback only and loads nothing from outside. The default
+port is 18765; when a port is already in use it tries the next ten, then any
+free port, and says so.
 
 - **Sessions** are grouped by the folder they worked in and searchable; with
   the `titles` feature the model names each one after its first turn. They can be renamed, forked,

@@ -1,7 +1,8 @@
 //! `frontend-web`: a loopback HTTP and WebSocket API with an embedded Web UI.
 //!
 //! The server listens on a loopback address only (default
-//! `127.0.0.1:8765`; port `0` picks a free one) and announces
+//! `127.0.0.1:18765`; port `0` picks a free one, and a port already in use
+//! falls back to the next free one) and announces
 //! `http://<address>/#token=<secret>` with
 //! [`FrontendListening`](rah_api::host::FrontendListening). Every `/api`
 //! request needs that per-start token (`Authorization: Bearer <token>`, or
@@ -131,6 +132,7 @@ mod ws;
 
 use std::{
     collections::HashSet,
+    net::SocketAddr,
     str::FromStr,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -238,7 +240,32 @@ pub(crate) struct Shared {
 pub(crate) type AppState = Arc<Shared>;
 
 /// Where the server listens without a `bind`.
-const DEFAULT_BIND: &str = "127.0.0.1:8765";
+const DEFAULT_BIND: &str = "127.0.0.1:18765";
+
+/// How many ports after a busy one are tried before any free port.
+const NEXT_PORTS: u16 = 10;
+
+/// Listens on `requested`. When its port is already in use, the next
+/// [`NEXT_PORTS`] ports on the same address are tried, then any free port:
+/// the announced URL names the real address, so the port does not matter.
+async fn listen(requested: SocketAddr) -> Result<tokio::net::TcpListener, String> {
+    let busy = match tokio::net::TcpListener::bind(requested).await {
+        Ok(listener) => return Ok(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && requested.port() != 0 => {
+            error
+        }
+        Err(error) => return Err(format!("cannot listen on {requested}: {error}")),
+    };
+    let next = (1..=NEXT_PORTS).filter_map(|offset| requested.port().checked_add(offset));
+    for port in next.chain(std::iter::once(0)) {
+        if let Ok(listener) =
+            tokio::net::TcpListener::bind(SocketAddr::new(requested.ip(), port)).await
+        {
+            return Ok(listener);
+        }
+    }
+    Err(format!("cannot listen on {requested}: {busy}"))
+}
 
 #[async_trait]
 impl Plugin for WebFrontendPlugin {
@@ -256,9 +283,7 @@ impl Plugin for WebFrontendPlugin {
         let config: Config = rah_api::config::parse(scope.config())?;
         config.check()?;
         let requested = access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
-        let listener = tokio::net::TcpListener::bind(requested)
-            .await
-            .map_err(|error| format!("cannot listen on {requested}: {error}"))?;
+        let listener = listen(requested).await?;
         let address = listener
             .local_addr()
             .map_err(|error| format!("cannot read the listening address: {error}"))?;
@@ -316,6 +341,12 @@ impl Plugin for WebFrontendPlugin {
         });
         if !started || !scope.spawn(settings::restore(shared.clone())) {
             return Err("the plugin scope is already disposed".into());
+        }
+        if address != requested && requested.port() != 0 {
+            shared.notices.emit(
+                "port-in-use",
+                &format!("{requested} is in use; the Web UI listens on {address} instead"),
+            );
         }
         scope.kernel().emit(&FrontendListening {
             plugin: scope.id().clone(),
@@ -692,7 +723,7 @@ impl WebFrontendPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "bind": "127.0.0.1:8765",
+  "bind": "127.0.0.1:18765",
   "approval_timeout_secs": 300,
   "mode": "coding"
 }"#;
@@ -703,4 +734,15 @@ impl WebFrontendPlugin {
 fn the_config_example_is_a_valid_configuration() {
     let parsed: Result<Config, _> = serde_json::from_str(WebFrontendPlugin::CONFIG_EXAMPLE);
     assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn a_busy_port_falls_back_to_another_loopback_port() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let busy = held.local_addr().unwrap();
+    let listener = listen(busy).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    assert_ne!(address, busy);
+    assert_eq!(address.ip(), busy.ip());
 }
