@@ -28,7 +28,7 @@ use std::sync::Arc;
 use futures::{StreamExt, channel::mpsc};
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    agent_loop::{AgentLoop, LOOP, TurnEvent, TurnRequest, TurnStream},
+    agent_loop::{AgentLoop, LOOP, RunningTurns, TURN_RUNNING, TurnEvent, TurnRequest, TurnStream},
     async_trait,
     hooks::ModelBeforeRequest,
     kernel::Spawner,
@@ -89,6 +89,7 @@ impl Plugin for PlanLoopPlugin {
             kernel: scope.kernel(),
             session: scope.inject(SESSION)?,
             spawner: scope.spawner(),
+            running: RunningTurns::default(),
             max_steps: config.max_steps.unwrap_or(8).max(1),
             max_rounds: config.max_rounds_per_step.unwrap_or(16).max(1),
             retry: RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?,
@@ -131,6 +132,7 @@ struct PlanLoop {
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
     spawner: Spawner,
+    running: RunningTurns,
     max_steps: usize,
     max_rounds: u32,
     retry: RetryPolicy,
@@ -139,6 +141,15 @@ struct PlanLoop {
 impl AgentLoop for PlanLoop {
     fn run_turn(&self, request: TurnRequest) -> TurnStream {
         let (sender, receiver) = mpsc::unbounded();
+        // One turn per session: a second one records nothing.
+        let Some(running) = self.running.begin(&request.session) else {
+            let _ = sender.unbounded_send(AgentEvent::Failed {
+                session_id: request.session,
+                code: AgentErrorCode::InvalidRequest,
+                message: TURN_RUNNING.into(),
+            });
+            return Box::pin(receiver);
+        };
         let turn = Turn {
             kernel: self.kernel.clone(),
             session: self.session.clone(),
@@ -151,7 +162,12 @@ impl AgentLoop for PlanLoop {
             stop: self.spawner.cancellation(),
             events: sender.clone(),
         };
-        if !self.spawner.spawn(turn.run(request.input)) {
+        let input = request.input;
+        let spawned = self.spawner.spawn(async move {
+            let _running = running;
+            turn.run(input).await;
+        });
+        if !spawned {
             let _ = sender.unbounded_send(AgentEvent::Failed {
                 session_id: request.session,
                 code: AgentErrorCode::Internal,

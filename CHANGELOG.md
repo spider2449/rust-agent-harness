@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.22 (2026-11-10)
+
+- A session runs one turn at a time. A second turn in the same session
+  (another window, or a scheduled job naming it) now ends at once with "a
+  turn is already running in this session" and records nothing. Two turns
+  used to interleave their records, and every later turn in that session
+  could then fail at the provider with mismatched tool results.
+
 ## v0.45.21 (2026-11-10)
 
 - Tool calls are denied while a configured policy is not running

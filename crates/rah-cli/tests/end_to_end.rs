@@ -547,3 +547,47 @@ async fn the_cli_lists_and_undoes_the_file_changes_of_its_session() {
         "{shown}"
     );
 }
+
+#[tokio::test]
+async fn a_session_runs_one_turn_at_a_time() {
+    use futures::StreamExt;
+    use rah_api::agent_loop::{LOOP, TURN_RUNNING, TurnRequest};
+
+    let dir = TempDir::new("one-turn");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let (session, other) = (new_session(&handle).await, new_session(&handle).await);
+    let agent_loop = handle.get(LOOP).unwrap();
+    let start = |session: &rah_protocol::SessionId, input: &str| {
+        agent_loop.run_turn(TurnRequest {
+            session: session.clone(),
+            input: input.to_owned(),
+            cancel: CancellationToken::new(),
+        })
+    };
+    // The first turn has started; a second in the same session is refused
+    // and records nothing, while another session runs its own.
+    let first = start(&session, "hello");
+    let second: Vec<AgentEvent> = start(&session, "again").collect().await;
+    assert!(
+        matches!(&second[..], [AgentEvent::Failed { message, .. }] if message == TURN_RUNNING),
+        "{second:?}"
+    );
+    let elsewhere: Vec<AgentEvent> = start(&other, "hello").collect().await;
+    assert_eq!(kinds(&elsewhere).last(), Some(&"completed"));
+    let first: Vec<AgentEvent> = first.collect().await;
+    assert_eq!(kinds(&first).last(), Some(&"completed"));
+    assert_eq!(
+        entries(&handle, &session).await,
+        [
+            "turn-started",
+            "tool-call",
+            "tool-result",
+            "assistant",
+            "turn-completed"
+        ]
+    );
+    // The session is free again once its turn has ended.
+    let third = turn(&handle, &session, "/notool more").await;
+    assert_eq!(kinds(&third).last(), Some(&"completed"));
+}
