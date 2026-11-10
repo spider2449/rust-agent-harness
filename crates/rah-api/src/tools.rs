@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use rah_kernel::{KernelHandle, Scope, ScopeError, ServiceKey};
 use rah_protocol::{
     IMAGE_MEDIA_TYPES, ImageContent, PermissionLevel, SessionId, ToolCall, ToolCallId, ToolContent,
@@ -297,10 +298,14 @@ impl ToolInvoker {
             call: call.id.clone(),
             cancel: cancel.clone(),
         };
+        // A panicking tool fails its call like any other error, so the turn
+        // goes on and a mutating tool's effect is recorded as uncertain.
+        let running = std::panic::AssertUnwindSafe(tool.call(call.input.0, cx)).catch_unwind();
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(ToolError::Cancelled),
-            result = tool.call(call.input.0, cx) => result,
+            result = running => result
+                .unwrap_or_else(|_| Err(ToolError::Execution("the tool panicked".into()))),
         };
         drop(permits);
         let uncertain = if mutating {

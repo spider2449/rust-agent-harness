@@ -702,3 +702,46 @@ async fn no_call_runs_undecided_while_the_policy_restarts() {
     calling.await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+struct Panics(PermissionLevel);
+
+#[async_trait]
+impl Tool for Panics {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::new("panics"),
+            description: "test tool".into(),
+            input_schema: json!({"type": "object"}),
+            permission: self.0,
+        }
+    }
+
+    async fn call(&self, _input: Value, _cx: ToolContext) -> Result<ToolOutput, ToolError> {
+        std::panic::resume_unwind(Box::new("tool bug"))
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_tool_fails_its_call_and_releases_its_admission() {
+    for (permission, effect) in [
+        (PermissionLevel::Write, ToolEffect::Uncertain),
+        (PermissionLevel::Read, ToolEffect::None),
+    ] {
+        let kernel = Kernel::new();
+        let tools = plugin(
+            PluginManifest::new("tools", "1").provides(["tools"]),
+            move |scope| {
+                provide_tools(scope, vec![Arc::new(Panics(permission))])?;
+                Ok(())
+            },
+        );
+        kernel.mount(tools, MountOptions::default()).await.unwrap();
+        let running = mount_limit(&kernel, 1).await;
+        let invoker = ToolInvoker::new(kernel.handle());
+        let outcome = invoker.invoke(invocation("panics"), || {}).await;
+        assert!(outcome.authorized && outcome.output.is_error);
+        assert_eq!(outcome.effect, effect);
+        assert_eq!(text(&outcome.output), "execution failed: the tool panicked");
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+    }
+}

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.45.23 (2026-11-10)
+
+- A tool that panics no longer ends the turn without a word. Its call
+  fails with "the tool panicked" (recorded as an uncertain effect for a
+  tool that writes or executes), and the model goes on with that result.
+
 ## v0.45.22 (2026-11-10)
 
 - A session runs one turn at a time. A second turn in the same session
