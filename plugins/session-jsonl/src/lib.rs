@@ -4,7 +4,9 @@
 //! per record. A fork writes only a header naming its parent and fork point;
 //! reading a fork concatenates the parent prefix with the fork's own records.
 //! A torn final line (no trailing newline, as after a crash) is ignored when
-//! reading and removed before the next write.
+//! reading and removed before the next write. Every line is synced to the
+//! disk before its append returns; the directory entry of a new session file
+//! is not, so a power loss can still lose a session created just before it.
 //!
 //! Titles are metadata lines (`{"type":"title","title":...}`) appended like
 //! records; the last one wins, and records are never rewritten. Deleting a
@@ -296,7 +298,9 @@ fn repair(dir: &Path, session: &SessionId) -> Result<Parsed, SessionError> {
     Ok(parsed)
 }
 
-/// Appends one line. Blocking: run inside [`JsonlSessions::exclusive`].
+/// Appends one line and waits until it is on the disk, so a record that
+/// was acknowledged (a tool call about to run, its result) survives a power
+/// loss. Blocking: run inside [`JsonlSessions::exclusive`].
 fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<(), SessionError> {
     let mut text = serde_json::to_string(line).map_err(|e| SessionError::Io(e.to_string()))?;
     text.push('\n');
@@ -305,7 +309,7 @@ fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<(), Sessio
         .open(path_in(dir, session))
         .map_err(|_| SessionError::NotFound(session.clone()))?;
     std::io::Write::write_all(&mut file, text.as_bytes())
-        .and_then(|()| std::io::Write::flush(&mut file))
+        .and_then(|()| file.sync_data())
         .map_err(|e| SessionError::Io(e.to_string()))
 }
 
@@ -397,7 +401,12 @@ impl JsonlSessions {
         file.write_all(line.as_bytes())
             .await
             .map_err(|e| SessionError::Io(e.to_string()))?;
+        // Also waits for the write, which `sync_data` alone does not
+        // promise for a tokio file.
         file.flush()
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        file.sync_data()
             .await
             .map_err(|e| SessionError::Io(e.to_string()))
     }

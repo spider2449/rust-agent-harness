@@ -75,8 +75,8 @@ in the commit which entry it closes.
 ## Open findings of the 2026-11-10 code review
 
 Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26, and three of
-the findings listed here in 0.45.30 to 0.45.32.
+fixed in 0.45.20 to 0.45.26, and four of
+the findings listed here in 0.45.30 to 0.45.33.
 
 - **A dispose that never returns blocks every later plugin change.**
   `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
@@ -90,6 +90,3 @@ the findings listed here in 0.45.30 to 0.45.32.
 - **On Unix, background descendants outlive a program that exits normally.**
   `sandbox-process` only ends the process group on a timeout, an output
   limit or a cancellation; on Windows closing the job ends them.
-- **Session appends are not synced to disk.** After a power loss the record
-  of a tool call that ran can be missing; the call is then not known to the
-  session at all.

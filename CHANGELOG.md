@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.45.33 (2026-11-10)
+
+- `session-jsonl` syncs every appended line to the disk before the append
+  returns. Until now a line was only handed to the operating system, so
+  after a power loss the record of a tool call that ran could be missing
+  and the session did not know about the call at all. A session file
+  created just before a power loss can still be lost: its directory entry
+  is not synced.
+
 ## v0.45.32 (2026-11-10)
 
 - The answer of a turn keeps the text of its model rounds apart. `loop-react`
