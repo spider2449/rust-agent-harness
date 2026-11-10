@@ -105,11 +105,22 @@ struct Parsed {
     torn_at: Option<u64>,
 }
 
-/// JSONL-backed [`SessionLog`]. All operations are serialized.
+/// What `list` last read of one session, and the size and modification
+/// time of its file then.
+struct Listed {
+    stamp: (u64, Option<SystemTime>),
+    info: SessionInfo,
+}
+
+/// JSONL-backed [`SessionLog`]. Writes are serialized; `list` reads beside
+/// them.
 pub struct JsonlSessions {
     dir: PathBuf,
     /// Next sequence number per session, loaded lazily.
     next_seq: Arc<Mutex<HashMap<SessionId, u64>>>,
+    /// Sessions as last listed. A log only grows, so a file whose size and
+    /// modification time are unchanged lists the same.
+    listed: std::sync::Mutex<HashMap<SessionId, Listed>>,
     events: Option<KernelHandle>,
     /// A fixed workspace for new sessions, instead of the sandbox root.
     workspace: Option<String>,
@@ -120,6 +131,7 @@ impl JsonlSessions {
         Self {
             dir,
             next_seq: Arc::new(Mutex::new(HashMap::new())),
+            listed: std::sync::Mutex::new(HashMap::new()),
             events: None,
             workspace: None,
         }
@@ -148,6 +160,12 @@ impl JsonlSessions {
 
     fn path(&self, session: &SessionId) -> PathBuf {
         self.dir.join(format!("{session}.jsonl"))
+    }
+
+    fn listed(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Listed>> {
+        self.listed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn parse(&self, session: &SessionId) -> Result<Parsed, SessionError> {
@@ -483,14 +501,41 @@ impl SessionLog for JsonlSessions {
         Ok(info)
     }
 
+    /// Lists without the write lock, so a long list never holds up a
+    /// running turn's appends: a reader only decodes complete lines, and a
+    /// line being written is simply not listed yet. Only sessions whose
+    /// file changed since the last listing are read again.
     async fn list(&self) -> Result<Vec<SessionInfo>, SessionError> {
-        let _guard = self.next_seq.lock().await;
+        let ids = self.ids().await?;
         let mut sessions = Vec::new();
-        for id in self.ids().await? {
-            if let Ok(info) = self.described(&id).await {
-                sessions.push(info);
-            }
+        for id in &ids {
+            // Taken before the read, so what is kept is never older than it.
+            let Ok(metadata) = tokio::fs::metadata(self.path(id)).await else {
+                continue;
+            };
+            let stamp = (metadata.len(), metadata.modified().ok());
+            let known = self
+                .listed()
+                .get(id)
+                .filter(|listed| listed.stamp == stamp)
+                .map(|listed| listed.info.clone());
+            let info = match known {
+                Some(info) => info,
+                None => {
+                    let Ok(info) = self.described(id).await else {
+                        continue;
+                    };
+                    let listed = Listed {
+                        stamp,
+                        info: info.clone(),
+                    };
+                    self.listed().insert(id.clone(), listed);
+                    info
+                }
+            };
+            sessions.push(info);
         }
+        self.listed().retain(|id, _| ids.contains(id));
         sessions.sort_by_key(|info| (info.created, info.id.to_string()));
         Ok(sessions)
     }
@@ -930,6 +975,43 @@ mod tests {
         ));
         let kept = dir.0.join(DELETED_DIR).join(format!("{}.jsonl", parent.id));
         assert!(kept.exists(), "the deleted log is kept for recovery");
+    }
+
+    #[tokio::test]
+    async fn listing_follows_changes_and_does_not_wait_for_writes() {
+        let dir = TempDir::new("list-cache");
+        let log = JsonlSessions::new(dir.0.clone());
+        let first = log.create().await.unwrap();
+        let empty = log.list().await.unwrap();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].preview, None);
+
+        // What changed since the last listing is read again: a record, a
+        // title, a new fork and a deleted session.
+        log.append(&first.id, started("hello")).await.unwrap();
+        log.rename(&first.id, Some("Named".into())).await.unwrap();
+        let fork = log.fork(&first.id, 1).await.unwrap();
+        let listed = log.list().await.unwrap();
+        assert_eq!(listed.len(), 2);
+        for info in &listed {
+            assert_eq!(info.preview.as_deref(), Some("hello"), "{info:?}");
+        }
+        assert_eq!(
+            listed
+                .iter()
+                .find(|info| info.id == first.id)
+                .and_then(|info| info.title.as_deref()),
+            Some("Named")
+        );
+        assert_eq!(log.list().await.unwrap(), listed);
+        log.delete(&fork.id).await.unwrap();
+        assert_eq!(log.list().await.unwrap().len(), 1);
+        assert_eq!(log.listed().len(), 1);
+
+        // A list is answered while a write holds the lock.
+        let writing = log.next_seq.clone().lock_owned().await;
+        assert_eq!(log.list().await.unwrap().len(), 1);
+        drop(writing);
     }
 }
 

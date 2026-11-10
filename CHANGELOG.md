@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.26 (2026-11-10)
+
+- Sessions: listing them no longer holds up running turns. A list read
+  every session file in full while every write waited; with many or large
+  sessions, opening the session list stalled the turns in progress. It
+  now reads beside the writes, and only the sessions that changed since
+  the last list.
+
 ## v0.45.25 (2026-11-10)
 
 - `tools-http`: a path parameter that is empty, `.` or `..` is refused.
