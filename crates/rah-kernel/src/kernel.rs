@@ -1,6 +1,7 @@
 use std::{
     any::TypeId,
     collections::{BTreeMap, BTreeSet, HashMap},
+    future::Future,
     panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, Weak,
@@ -37,6 +38,27 @@ pub(crate) async fn guarded<T>(call: impl FnOnce() -> BoxFuture<T>) -> Result<T,
         .catch_unwind()
         .await
         .map_err(|_| ())
+}
+
+/// Runs a lifecycle operation as a task of its own and waits for it. A
+/// caller that goes away (a dropped future, such as a request whose client
+/// disconnected) then cannot stop the operation halfway, which would leave
+/// plugins `Stopping` or `Starting` with their registrations withdrawn. The
+/// task holds the operations lock, so `shutdown` waits for it.
+async fn owned<T, F>(operation: F) -> Result<T, KernelError>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T, KernelError>> + Send + 'static,
+{
+    if in_lifecycle() {
+        return Err(KernelError::Reentrant);
+    }
+    match tokio::spawn(operation).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        // The runtime is shutting down and dropped the task.
+        Err(_) => Err(KernelError::ShutDown),
+    }
 }
 
 pub(crate) struct Inner {
@@ -143,12 +165,14 @@ impl Kernel {
         plugin: Arc<dyn Plugin>,
         options: MountOptions,
     ) -> Result<PluginStatus, KernelError> {
-        mount(&self.inner, plugin, options).await
+        let inner = self.inner.clone();
+        owned(async move { mount(&inner, plugin, options).await }).await
     }
 
     /// Stops a plugin (dependents first) and removes it.
     pub async fn unmount(&self, id: &PluginId) -> Result<(), KernelError> {
-        unmount(&self.inner, id).await
+        let (inner, id) = (self.inner.clone(), id.clone());
+        owned(async move { unmount(&inner, &id).await }).await
     }
 
     /// Replaces a plugin's configuration and restarts it and its dependents.
@@ -157,12 +181,14 @@ impl Kernel {
         id: &PluginId,
         config: serde_json::Value,
     ) -> Result<PluginStatus, KernelError> {
-        restart(&self.inner, id, Some(config)).await
+        let (inner, id) = (self.inner.clone(), id.clone());
+        owned(async move { restart(&inner, &id, Some(config)).await }).await
     }
 
     /// Restarts a plugin (for example after `Failed`) and its dependents.
     pub async fn restart(&self, id: &PluginId) -> Result<PluginStatus, KernelError> {
-        restart(&self.inner, id, None).await
+        let (inner, id) = (self.inner.clone(), id.clone());
+        owned(async move { restart(&inner, &id, None).await }).await
     }
 
     pub fn status(&self, id: &PluginId) -> Option<PluginStatus> {
@@ -176,35 +202,8 @@ impl Kernel {
     /// Stops every plugin in reverse activation order and rejects further
     /// lifecycle operations.
     pub async fn shutdown(&self) -> Result<(), KernelError> {
-        if in_lifecycle() {
-            return Err(KernelError::Reentrant);
-        }
-        let mut shut_down = self.inner.ops.lock().await;
-        if *shut_down {
-            return Ok(());
-        }
-        *shut_down = true;
-        loop {
-            let last = {
-                let state = self.inner.state();
-                state
-                    .plugins
-                    .iter()
-                    .filter_map(|(id, e)| e.active.as_ref().map(|a| (a.activation_seq, id)))
-                    .max()
-                    .map(|(_, id)| id.clone())
-            };
-            let Some(id) = last else { break };
-            stop_cascade(&self.inner, &id).await;
-        }
-        let mut state = self.inner.state();
-        state.plugins.clear();
-        state.services.clear();
-        state.hooks.clear();
-        for list in state.handlers.values_mut() {
-            list.retain(|h| matches!(h.owner, Owner::Subscription(_)));
-        }
-        Ok(())
+        let inner = self.inner.clone();
+        owned(async move { shutdown(&inner).await }).await
     }
 }
 
@@ -230,11 +229,13 @@ impl KernelHandle {
         plugin: Arc<dyn Plugin>,
         options: MountOptions,
     ) -> Result<PluginStatus, KernelError> {
-        mount(&self.upgrade()?, plugin, options).await
+        let inner = self.upgrade()?;
+        owned(async move { mount(&inner, plugin, options).await }).await
     }
 
     pub async fn unmount(&self, id: &PluginId) -> Result<(), KernelError> {
-        unmount(&self.upgrade()?, id).await
+        let (inner, id) = (self.upgrade()?, id.clone());
+        owned(async move { unmount(&inner, &id).await }).await
     }
 
     pub async fn update_config(
@@ -242,11 +243,13 @@ impl KernelHandle {
         id: &PluginId,
         config: serde_json::Value,
     ) -> Result<PluginStatus, KernelError> {
-        restart(&self.upgrade()?, id, Some(config)).await
+        let (inner, id) = (self.upgrade()?, id.clone());
+        owned(async move { restart(&inner, &id, Some(config)).await }).await
     }
 
     pub async fn restart(&self, id: &PluginId) -> Result<PluginStatus, KernelError> {
-        restart(&self.upgrade()?, id, None).await
+        let (inner, id) = (self.upgrade()?, id.clone());
+        owned(async move { restart(&inner, &id, None).await }).await
     }
 
     pub fn status(&self, id: &PluginId) -> Option<PluginStatus> {
@@ -446,6 +449,38 @@ fn emit_changes(inner: &Inner, changes: Changes) {
     for change in changes {
         emit(inner, &change);
     }
+}
+
+async fn shutdown(inner: &Arc<Inner>) -> Result<(), KernelError> {
+    if in_lifecycle() {
+        return Err(KernelError::Reentrant);
+    }
+    let mut shut_down = inner.ops.lock().await;
+    if *shut_down {
+        return Ok(());
+    }
+    *shut_down = true;
+    loop {
+        let last = {
+            let state = inner.state();
+            state
+                .plugins
+                .iter()
+                .filter_map(|(id, e)| e.active.as_ref().map(|a| (a.activation_seq, id)))
+                .max()
+                .map(|(_, id)| id.clone())
+        };
+        let Some(id) = last else { break };
+        stop_cascade(inner, &id).await;
+    }
+    let mut state = inner.state();
+    state.plugins.clear();
+    state.services.clear();
+    state.hooks.clear();
+    for list in state.handlers.values_mut() {
+        list.retain(|h| matches!(h.owner, Owner::Subscription(_)));
+    }
+    Ok(())
 }
 
 async fn mount(

@@ -580,3 +580,104 @@ async fn get_all_lists_instances_oldest_first_without_binding() {
     kernel.unmount(&id("one")).await.unwrap();
     assert_eq!(kernel.handle().get_all(GREETER).len(), 1);
 }
+
+/// Provides `greeter` like `provider`, but takes 100 ms to dispose.
+fn slow_provider(name: &'static str, log: &Log) -> Arc<dyn Plugin> {
+    let log = log.clone();
+    plugin(
+        PluginManifest::new(name, "1.0.0").provides(["greeter"]),
+        move |scope| {
+            scope.provide(GREETER, Arc::new(common::Fixed(name.to_owned())))?;
+            log.push(format!("start:{name}"));
+            let log = log.clone();
+            scope.on_dispose(move || async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                log.push(format!("dispose:{name}"));
+            });
+            Ok(())
+        },
+    )
+}
+
+/// Polls a lifecycle call just long enough for it to be under way, then
+/// drops it, as a request does whose client went away.
+async fn abandon<T>(call: impl Future<Output = T>) {
+    let abandoned = tokio::time::timeout(std::time::Duration::from_millis(20), call).await;
+    assert!(abandoned.is_err(), "the call ended before it was dropped");
+}
+
+#[tokio::test]
+async fn a_restart_whose_caller_goes_away_still_finishes() {
+    let (kernel, log, seen) = (Kernel::new(), Log::default(), Log::default());
+    kernel
+        .mount(slow_provider("provider", &log), MountOptions::default())
+        .await
+        .unwrap();
+    kernel
+        .mount(consumer("consumer", &log, &seen), MountOptions::default())
+        .await
+        .unwrap();
+    log.take();
+
+    abandon(kernel.restart(&id("provider"))).await;
+    // The next operation waits for the abandoned one.
+    let status = kernel.restart(&id("consumer")).await.unwrap();
+    assert_eq!(status, PluginStatus::Active);
+    assert_eq!(kernel.status(&id("provider")), Some(PluginStatus::Active));
+    assert_eq!(
+        log.take()[..4],
+        [
+            "dispose:consumer",
+            "dispose:provider",
+            "start:provider",
+            "start:consumer"
+        ]
+    );
+    assert!(kernel.handle().get(GREETER).is_some());
+}
+
+#[tokio::test]
+async fn an_unmount_whose_caller_goes_away_still_finishes() {
+    let (kernel, log, seen) = (Kernel::new(), Log::default(), Log::default());
+    kernel
+        .mount(slow_provider("provider", &log), MountOptions::default())
+        .await
+        .unwrap();
+    kernel
+        .mount(consumer("consumer", &log, &seen), MountOptions::default())
+        .await
+        .unwrap();
+    log.take();
+
+    abandon(kernel.handle().unmount(&id("provider"))).await;
+    kernel.shutdown().await.unwrap();
+    assert_eq!(log.take(), ["dispose:consumer", "dispose:provider"]);
+}
+
+#[tokio::test]
+async fn a_mount_whose_caller_goes_away_still_finishes() {
+    struct SlowStart(PluginManifest);
+
+    #[async_trait::async_trait]
+    impl Plugin for SlowStart {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+
+        async fn apply(&self, _scope: &mut Scope) -> Result<(), PluginError> {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(())
+        }
+    }
+
+    let kernel = Kernel::new();
+    let slow = Arc::new(SlowStart(PluginManifest::new("slow", "1.0.0")));
+    abandon(kernel.mount(slow, MountOptions::default())).await;
+    assert_eq!(kernel.status(&id("slow")), Some(PluginStatus::Starting));
+    // Waits for the abandoned mount, then finds the plugin started.
+    assert!(matches!(
+        kernel.unmount(&id("missing")).await,
+        Err(KernelError::UnknownPlugin(_))
+    ));
+    assert_eq!(kernel.status(&id("slow")), Some(PluginStatus::Active));
+}

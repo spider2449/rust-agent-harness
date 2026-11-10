@@ -35,7 +35,8 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
   When a provider it is bound to stops, it is stopped first (dependents before
   providers, reverse activation order) and restarts once the service resolves
   again. Lifecycle operations are serialized; calling one from inside `apply`
-  or a dispose effect returns `Reentrant`.
+  or a dispose effect returns `Reentrant`. Each one runs as a task of
+  its own, so it finishes even when its caller goes away (ADR 0071).
 - Services: typed `ServiceKey<S>`; several named instances per service. A
   mount `binding` selects an instance, otherwise the earliest-registered one
   is used. A plugin may only provide services in its `provides` and inject

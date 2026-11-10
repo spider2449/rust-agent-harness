@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.20 (2026-11-10)
+
+- Kernel: a plugin change whose caller goes away now finishes (ADR 0071).
+  Mounting, unmounting, restarting or reconfiguring a plugin ran inside the
+  caller, so a browser tab closed during a settings save could leave the
+  plugin and its dependents `Stopping` for good, with their tools, hooks
+  and services gone until each was restarted by hand.
+
 ## v0.45.19 (2026-11-10)
 
 - Modes are removed (ADR 0070): the mode picker (Daily work, Coding), the
