@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.45.19 (2026-11-10)
+
+- Modes are removed (ADR 0070): the mode picker (Daily work, Coding), the
+  `mode` and `modes` keys of `frontend-web`, `--mode` on `rah web`,
+  `rah-desktop` and `scripts/start.ps1`, and `/api/modes` and `/api/mode`.
+  A configuration that still has `mode` or `modes` stops the start and
+  names the key; delete it. The workspace and every plugin view always
+  show, the write tools and web search stay as configured (the Plugins
+  panel and Settings switch them), and no mode instructions are added to
+  model requests.
+- Web UI: the "Internal API" selector shows whenever a `tools-http`
+  instance exists; every such instance is a choice.
+
 ## v0.45.18 (2026-11-10)
 
 - Desktop: IME composition (Chinese, Japanese, Korean input) stays in the

@@ -115,7 +115,7 @@ directory `rah` starts in. [Features](#features) turn on opt-in capabilities.
 |---|---|
 | `rah` | Terminal REPL. `--session <id>` resumes a session. |
 | `rah run "<prompt>"` | One turn, then exit. `--session <id>` continues a session; `--summary <file>` writes a JSON summary. |
-| `rah web` | Web UI. `--bind 127.0.0.1:0` picks a free port; `--mode coding` enters a mode. |
+| `rah web` | Web UI. `--bind 127.0.0.1:0` picks a free port. |
 | `rah sessions list` | Sessions, newest first, with title and workspace. Needs no model. |
 | `rah sessions export <id> --format md\|json\|trace` | One session on standard output, without running a turn. |
 | `rah config show [--plugins]` | What would run. |
@@ -127,7 +127,7 @@ directory `rah` starts in. [Features](#features) turn on opt-in capabilities.
 
 Global options go before or after the command: `--model`, `--permissions`,
 `--root`, `--with <feature>` (repeatable), `--config <file>` and
-`--data-dir <dir>`. `rah-desktop` takes the same ones, plus `--mode`.
+`--data-dir <dir>`. `rah-desktop` takes the same ones.
 
 `--summary` is written even when the turn fails: `outcome` (`completed`,
 `failed`, `cancelled` or `stopped`), `error`, `wall_ms`, `model_requests`,
@@ -193,43 +193,9 @@ free port, and says so.
   runtime switch and is not kept. The policy and the model cannot be removed
   from the file.
 
-Display preferences, the layout, recent workspaces, the active mode and the
+Display preferences, the layout, recent workspaces and the
 connected API group are UI state, kept in `storage` for every browser and
 `rah-desktop` alike.
-
-### Modes
-
-The mode picker in the header (`--mode` at start) switches how RAH works, for
-every window at once. **Daily work** stops the repository write tools, turns
-web search on, hides the workspace and asks for direct, sourced answers;
-**Coding** runs the write tools and shows the workspace. The last mode is
-entered again at the next start. The `modes` key of `frontend-web` replaces
-the built-in ones:
-
-```toml
-[[plugin]]
-use = "frontend-web"
-
-[plugin.config]
-mode = "coding"
-
-[[plugin.config.modes]]
-id = "coding"
-label = "Coding"
-instructions = "Keep changes small and say which files you changed."
-plugins = { "tools-repo-write" = true }
-
-[[plugin.config.modes]]
-id = "writing"
-label = "Writing"
-workspace = false
-plugins = { "tools-repo-write" = false }
-```
-
-`plugins` runs (`true`) or stops (`false`) plugin kinds or instance ids;
-policy and frontend plugins cannot be listed. `instructions` is added after
-the system prompt; `workspace = false` hides files and Git; `views` lists the
-plugin views the mode shows. A mode with `extends` inherits its parent's.
 
 ### Layout and views
 
@@ -355,8 +321,8 @@ config = { engines = ["duckduckgo", "bing"], max_results = 8 }
 ```
 
 **Internal HTTP APIs**: every `tools-http` instance is one API with its
-endpoints declared in configuration. In daily work an "Internal API" selector
-connects one at a time ([ADR 0047](adr/0047-api-groups-as-sub-modes.md)).
+endpoints declared in configuration. An "Internal API" selector above the
+message box connects one at a time.
 Tools default to `GET` and `read`; declare `method = "POST"` and
 `permission = "write"` for an endpoint that changes anything.
 `examples/http-api/` has a runnable version:

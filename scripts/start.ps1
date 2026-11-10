@@ -24,8 +24,8 @@ Web UI with your `rah.toml`.
 Web UI with the mock model; needs no model server or key.
 
 .EXAMPLE
-.\scripts\start.ps1 -Desktop -Mode coding
-The Web UI in a native window, in the coding mode.
+.\scripts\start.ps1 -Desktop
+The Web UI in a native window.
 
 .EXAMPLE
 .\scripts\start.ps1 -Cli -Root D:\work\my-repo -Permissions auto-edit
@@ -52,9 +52,6 @@ param(
     [switch]$Cli,
     # The Web UI in a native window (rah-desktop) instead of the browser.
     [switch]$Desktop,
-    # Mode to enter at start, such as daily or coding, instead of the last
-    # one used.
-    [string]$Mode,
     # Do not open the browser.
     [switch]$NoBrowser,
     # Build with optimizations (slower first build, faster runs).
@@ -67,7 +64,6 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 
 if ($Desktop -and $Cli) { throw "-Desktop and -Cli cannot be combined." }
-if ($Cli -and $Mode) { throw "-Mode needs the Web UI; it cannot be combined with -Cli." }
 if ($Desktop -and $PSBoundParameters.ContainsKey("Bind")) {
     throw "-Bind is not supported with -Desktop; the window picks its own port."
 }
@@ -94,11 +90,8 @@ $cargoArgs += "--"
 if ($InitConfig) {
     if ($Desktop -or $Cli) { throw "-InitConfig cannot be combined with -Desktop or -Cli." }
     $cargoArgs += @("config", "init")
-} elseif ($Desktop) {
-    if ($Mode) { $cargoArgs += @("--mode", $Mode) }
-} elseif (-not $Cli) {
+} elseif (-not $Desktop -and -not $Cli) {
     $cargoArgs += @("web", "--bind", $Bind)
-    if ($Mode) { $cargoArgs += @("--mode", $Mode) }
 }
 $cargoArgs += $global
 

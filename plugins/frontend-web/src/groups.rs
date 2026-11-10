@@ -1,14 +1,12 @@
-//! API groups: every `tools-http` instance that no mode lists is one group,
-//! a choice of the "Internal API" selector in a mode with `groups = true` (daily work). Pressing it
-//! starts the instance, so the model can query that API; pressing it again
-//! stops it (`GET /api/groups`, `PUT /api/group {id, on}`).
+//! API groups: every `tools-http` instance is one group, a choice of the
+//! "Internal API" selector. Choosing it starts the instance, so the model can
+//! query that API; choosing "Off" stops it (`GET /api/groups`,
+//! `PUT /api/group {id, on}`).
 //!
 //! At most one group is connected at a time, so the model never has to pick
 //! between several APIs: connecting one disconnects the others. Groups are off
 //! until pressed: at start every group is stopped except the one that was on
-//! when the last run ended (kept in `storage`). A group is independent of the
-//! active mode, so it stays connected when the mode is switched. An instance a mode lists in `plugins` is that mode's own group
-//! (ADR 0047) and is not offered here.
+//! when the last run ended (kept in `storage`) (ADR 0070).
 
 use std::collections::BTreeSet;
 
@@ -21,7 +19,7 @@ use rah_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{ApiError, ApiResult, AppState, Shared, manage::admin, modes};
+use crate::{ApiError, ApiResult, AppState, Shared, manage::admin};
 
 const KIND: &str = "tools-http";
 const KEY: &str = "groups";
@@ -33,9 +31,8 @@ struct Group {
     active: bool,
 }
 
-/// Mounted and stopped `tools-http` instances no mode lists, sorted by id.
+/// Mounted and stopped `tools-http` instances, sorted by id.
 fn groups(shared: &Shared, admin: &dyn PluginAdmin) -> Vec<Group> {
-    let listed = shared.modes.listed_plugins();
     let mounted = shared
         .kernel
         .plugins()
@@ -49,7 +46,6 @@ fn groups(shared: &Shared, admin: &dyn PluginAdmin) -> Vec<Group> {
                 .instance(id)
                 .is_some_and(|instance| instance.kind == KIND)
         })
-        .filter(|(id, _)| !listed.contains(id.as_str()))
         .map(|(id, active)| Group {
             label: label(id.as_str()),
             id: id.as_str().to_owned(),
@@ -65,6 +61,32 @@ fn label(id: &str) -> String {
     match id.strip_prefix("http-") {
         Some(rest) if !rest.is_empty() => rest.to_owned(),
         _ => id.to_owned(),
+    }
+}
+
+/// Starts (`on`) or stops the instance `id`. Stopping keeps its
+/// configuration, so starting it again restores it.
+async fn set_running(
+    shared: &Shared,
+    admin: &dyn PluginAdmin,
+    id: &str,
+    on: bool,
+) -> Result<(), AdminError> {
+    let id = PluginId::new(id);
+    let status = shared
+        .kernel
+        .plugins()
+        .into_iter()
+        .find(|(found, _)| *found == id)
+        .map(|(_, status)| status);
+    match (on, status) {
+        (false, Some(_)) => admin.stop(&id).await,
+        (false, None) | (true, Some(PluginStatus::Active)) => Ok(()),
+        (true, Some(status)) => Err(AdminError::Failed(format!("did not start: {status:?}"))),
+        (true, None) => match admin.start(&id).await? {
+            PluginStatus::Active => Ok(()),
+            status => Err(AdminError::Failed(format!("did not start: {status:?}"))),
+        },
     }
 }
 
@@ -99,12 +121,12 @@ pub(crate) async fn set(State(shared): State<AppState>, Json(switch): Json<Switc
             .iter()
             .filter(|group| group.active && group.id != switch.id)
         {
-            modes::switch_kind(&shared, admin.as_ref(), &other.id, false)
+            set_running(&shared, admin.as_ref(), &other.id, false)
                 .await
                 .map_err(|error: AdminError| ApiError::from(error))?;
         }
     }
-    modes::switch_kind(&shared, admin.as_ref(), &switch.id, switch.on)
+    set_running(&shared, admin.as_ref(), &switch.id, switch.on)
         .await
         .map_err(|error: AdminError| ApiError::from(error))?;
     let now = groups(&shared, admin.as_ref());
@@ -146,10 +168,10 @@ pub(crate) async fn changed(
             .iter()
             .filter(|group| group.active && group.id != id.as_str())
         {
-            let _ = modes::switch_kind(shared, admin, &other.id, false).await;
+            let _ = set_running(shared, admin, &other.id, false).await;
         }
     } else {
-        let _ = modes::switch_kind(shared, admin, id.as_str(), false).await;
+        let _ = set_running(shared, admin, id.as_str(), false).await;
     }
     remember(shared, &groups(shared, admin)).await;
     shared.approvals.notify(json!({ "type": "groups" }));
@@ -175,7 +197,7 @@ pub(crate) async fn restore(shared: &Shared, admin: &dyn PluginAdmin) {
     for group in groups(shared, admin) {
         let on = keep.as_deref() == Some(group.id.as_str());
         if on != group.active {
-            let _ = modes::switch_kind(shared, admin, &group.id, on).await;
+            let _ = set_running(shared, admin, &group.id, on).await;
         }
     }
 }

@@ -1,11 +1,10 @@
-# An API group ("DDT") against the mock server in this folder (ADR 0047).
+# An API group ("DDT") against the mock server in this folder (ADR 0070).
 #
 #   1. node examples/http-api/server.mjs
-#   2. $env:DDT_AUTH = "Bearer demo-token"; cargo run -p rah-cli -- --config examples/http-api/ddt.toml --mode daily
-#   3. Open the printed URL. In "Daily work" the "Internal API" selector above the
-#      message box offers "ddt" (the instance id without "http-"); pick it to
-#      connect the API, then ask
-#      for example:
+#   2. $env:DDT_AUTH = "Bearer demo-token"; cargo run -p rah-cli -- --config examples/http-api/ddt.toml web
+#   3. Open the printed URL. The "Internal API" selector above the message
+#      box offers "ddt" (the instance id without "http-"); pick it to
+#      connect the API, then ask for example:
 #        "What is the status of order 1001?"
 #        "List the pending orders."
 #        "Add the note 'called customer' to order 1002."
@@ -34,7 +33,8 @@ use = "model-llamacpp"
 [[plugin]]
 use = "loop-react"
 
-# One instance is one API group. It is started by the DDT mode, not here.
+# One instance is one API group. It is off until picked in the "Internal API"
+# selector.
 [[plugin]]
 id = "http-ddt"
 use = "tools-http"

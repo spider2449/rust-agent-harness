@@ -5,7 +5,7 @@
 //! `persist` (ADR 0067): a mount, a configuration or a replacement as the
 //! plugin's configuration, an unmount as its removal. A change to the only
 //! model plugin is a change of the model the distribution runs. Stopping and
-//! starting a plugin is a runtime switch (modes do it too) and is not kept.
+//! starting a plugin is a runtime switch and is not kept.
 //!
 //! The distribution refuses to remove a policy plugin or the model from the
 //! file, so a restart never comes up unguarded or without a model. When it

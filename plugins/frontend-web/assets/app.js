@@ -16,8 +16,6 @@ const state = {
   // Preferences kept by the server (`/api/preferences`): display, the
   // folders opened in the session list, recent workspaces, the side panel.
   prefs: { raw_markdown: false },
-  // `GET /api/modes`: `{modes, active}`; one mode is active for every window.
-  modes: { modes: [], active: null },
   // `GET /api/groups`: the API groups (tools-http instances): `{id, label, active}`.
   groups: [],
   liveText: "",
@@ -1154,30 +1152,6 @@ function panelRegion(id) {
   return null;
 }
 
-// Whether a panel can be shown: the workspace only in a mode that has it,
-// and a plugin view only in a mode that lists it (or lists no views).
-function panelAllowed(id) {
-  if (id === "files") return workspaceShown();
-  if (!views.has(id)) return true;
-  const listed = activeMode()?.views;
-  return !Array.isArray(listed) || listed.includes(id);
-}
-
-// Hides the tabs of panels the active mode does not show, and moves a
-// column off such a panel.
-function applyPanelRules() {
-  for (const { tabs } of Object.values(REGIONS)) {
-    for (const tab of tabs().querySelectorAll("[data-view]")) tab.hidden = !panelAllowed(tab.dataset.view);
-  }
-  const right = regionView("right");
-  if (right && !panelAllowed(right)) {
-    const next = layout.right.find(panelAllowed);
-    if (next && !$("side").hidden) showPanel(next);
-    else if (!next) $("side").hidden = true;
-  }
-  selectLeft();
-}
-
 function regionOpen(region) {
   return region !== null && !REGIONS[region].box().hidden;
 }
@@ -1233,13 +1207,11 @@ function applyLayout(given) {
   selectLeft();
 }
 
-// Shows the first left panel that can be shown, unless the shown one can.
+// Shows the first left panel, unless one is shown.
 function selectLeft() {
-  const shown = regionView("left");
-  if (shown && panelAllowed(shown)) return;
-  const first = layout.left.find(panelAllowed);
+  if (regionView("left")) return;
+  const first = layout.left[0];
   if (first) selectTab("left", first);
-  else if (shown) PANELS[shown].node().hidden = true;
 }
 
 function selectTab(region, view) {
@@ -1275,10 +1247,9 @@ async function reloadLayout() {
   const right = regionView("right");
   const left = regionView("left");
   await loadLayout();
-  applyPanelRules();
-  if (left && layout.left.includes(left) && panelAllowed(left)) showPanel(left);
+  if (left && layout.left.includes(left)) showPanel(left);
   if (open) {
-    const view = layout.right.includes(right) && panelAllowed(right) ? right : preferredSideView();
+    const view = layout.right.includes(right) ? right : preferredSideView();
     if (view) showPanel(view);
   }
 }
@@ -1287,15 +1258,14 @@ function sideView() {
   return regionView("right");
 }
 
-// The right panel to open: the one shown last, else the first that can be.
+// The right panel to open: the one shown last, else the first.
 function preferredSideView() {
   const view = sidePrefs().view;
-  if (layout.right.includes(view) && panelAllowed(view)) return view;
-  return layout.right.find(panelAllowed) || null;
+  if (layout.right.includes(view)) return view;
+  return layout.right[0] || null;
 }
 
 function showPanel(view) {
-  if (!panelAllowed(view)) return;
   const region = panelRegion(view);
   if (!region) return;
   if (region === "right") {
@@ -1492,57 +1462,16 @@ function hideSide() {
   saveSidePrefs({ open: false });
 }
 
-// ---- Modes ----------------------------------------------------------------
+// ---- Internal APIs --------------------------------------------------------
 
-function activeMode() {
-  return state.modes.modes.find((mode) => mode.id === state.modes.active) || null;
-}
-
-// Whether the active mode shows the workspace (files, Git, the folder).
-function workspaceShown() {
-  return activeMode()?.workspace !== false;
-}
-
-// The mode whose API groups are offered: the active mode, or the parent of
-// the active sub-mode.
-function groupParent() {
-  const active = activeMode();
-  return active?.extends || active?.id || null;
-}
-
-function renderModes() {
-  const select = $("mode");
-  select.hidden = state.modes.modes.length === 0;
-  const none = el("option", "", "No mode");
-  none.value = "";
-  // Sub-modes (API groups) are not listed here: they are the buttons below.
-  const options = state.modes.modes
-    .filter((mode) => !mode.extends)
-    .map((mode) => {
-      const option = el("option", "", mode.label);
-      option.value = mode.id;
-      option.title = mode.description || "";
-      return option;
-    });
-  select.replaceChildren(none, ...options);
-  select.value = groupParent() || "";
-  select.title = activeMode()?.description || "Mode: the tools, instructions and panels to work with";
-  renderApiGroups();
-}
-
-// The internal APIs as one choice above the message box: "Off" or one API
-// (a group, or a sub-mode of the selected mode). Only one can be connected,
-// and the line beside it says what the model can reach right now.
+// The internal APIs (API groups) as one choice above the message box: "Off"
+// or one API. Only one can be connected, and the line beside it says what
+// the model can reach right now.
 function renderApiGroups() {
   const box = $("api-groups");
-  const parent = groupParent();
-  const subModes = parent ? state.modes.modes.filter((mode) => mode.extends === parent) : [];
-  // Instances no mode lists are offered in a mode with `groups`.
-  const offered = activeMode()?.groups ? state.groups : [];
-  $("api-bar").hidden = subModes.length === 0 && offered.length === 0;
-  const connected = offered.find((group) => group.active)?.label
-    || subModes.find((mode) => mode.id === state.modes.active)?.label
-    || null;
+  const offered = state.groups;
+  $("api-bar").hidden = offered.length === 0;
+  const connected = offered.find((group) => group.active) || null;
   const choice = (label, on, title, run) => {
     const button = el("button", on ? "group on" : "group", label);
     button.type = "button";
@@ -1554,68 +1483,24 @@ function renderApiGroups() {
     });
     return button;
   };
-  const off = async () => {
-    const group = offered.find((item) => item.active);
-    if (group) await switchGroup(group.id, false);
-    if (parent && state.modes.active !== parent) await switchMode(parent);
-  };
   box.replaceChildren(
-    choice("Off", connected === null, "Connect no internal API", off),
+    choice("Off", connected === null, "Connect no internal API", () => switchGroup(connected.id, false)),
     ...offered.map((group) =>
       choice(group.label, group.active, `Connect the ${group.label} API (disconnects any other)`, () =>
         switchGroup(group.id, true),
       ),
     ),
-    ...subModes.map((mode) =>
-      choice(mode.label, mode.id === state.modes.active, mode.description || `Connect the ${mode.label} API`, () =>
-        switchMode(mode.id),
-      ),
-    ),
   );
   const line = $("api-state");
   line.textContent = connected
-    ? `Connected to ${connected}: the model can query this API.`
+    ? `Connected to ${connected.label}: the model can query this API.`
     : "No API connected: the model cannot reach any internal API.";
   line.classList.toggle("connected", connected !== null);
 }
 
-// A mode or group switch starts and stops plugins: show it in the plugin list.
+// A group switch starts and stops plugins: show it in the plugin list.
 function refreshPluginList() {
   if (panelShown("plugins")) loadPlugins().catch(report);
-}
-
-// Applies the active mode to this window. The side panel's own preference
-// is kept: a mode without the workspace only hides the files view.
-function applyMode() {
-  renderModes();
-  refreshPluginList();
-  const shown = workspaceShown();
-  document.body.classList.toggle("no-workspace", !shown);
-  if (!shown && !$("side").hidden && sideView() === "files") $("side").hidden = true;
-  applyPanelRules();
-  if (shown && $("side").hidden && sidePrefs().open) {
-    const view = preferredSideView();
-    if (view) showPanel(view);
-  }
-}
-
-// Counts mode changes made in this window or announced by the server, so a
-// `/modes` answer requested before one of them cannot undo it.
-let modeChanges = 0;
-
-async function loadModes() {
-  const asked = modeChanges;
-  let modes;
-  try {
-    modes = await api("/modes");
-  } catch {
-    // Older servers have no modes.
-    modes = { modes: [], active: null };
-  }
-  // A switch since the request: its own answer is newer than this one.
-  if (asked !== modeChanges) return;
-  state.modes = modes;
-  applyMode();
 }
 
 async function loadGroups() {
@@ -1642,33 +1527,13 @@ async function switchGroup(id, on) {
   }
 }
 
-async function switchMode(id) {
-  modeChanges += 1;
-  $("mode").disabled = true;
-  try {
-    const reply = await api("/mode", {
-      method: "PUT",
-      body: JSON.stringify({ mode: id || null }),
-    });
-    state.modes = { modes: reply.modes, active: reply.active };
-    applyMode();
-    if (reply.problems?.length) showNotice(`Some plugins were not switched: ${reply.problems.join("; ")}`);
-    refreshStatus();
-  } catch (error) {
-    report(error);
-    renderModes();
-  } finally {
-    $("mode").disabled = false;
-  }
-}
-
 // The header buttons open their view, or close the panel when it shows it.
 // The header button: closes the right column, or opens it on the workspace
 // (else on the panel shown last).
 function toggleRight() {
   if (!$("side").hidden) hideSide();
   else {
-    const view = layout.right.includes("files") && panelAllowed("files") ? "files" : preferredSideView();
+    const view = layout.right.includes("files") ? "files" : preferredSideView();
     if (view) showPanel(view);
   }
 }
@@ -2586,9 +2451,7 @@ function connect() {
     $("connection").hidden = true;
     // Keep other notices, such as a failed startup request.
     if ($("notice-text").textContent === NOT_CONNECTED) showNotice("");
-    // A switch made while this window was not connected (such as the mode
-    // entered at start) sent no notice here.
-    loadModes();
+    // A switch made while this window was not connected sent no notice here.
     loadGroups();
   });
   socket.addEventListener("message", (message) => {
@@ -2609,14 +2472,6 @@ function connect() {
     } else if (data.type === "host_notice") {
       // A plugin skipped something quietly that the user can act on.
       showTransientNotice(`${data.plugin}: ${data.message}`, 20000);
-    } else if (data.type === "mode") {
-      // Another window (or this one) switched the mode.
-      if (data.active !== state.modes.active) {
-        modeChanges += 1;
-        state.modes.active = data.active;
-        applyMode();
-        refreshStatus();
-      }
     }
     else if (data.type === "error") {
       showNotice(data.message);
@@ -3391,9 +3246,7 @@ async function start() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshStatus();
   });
-  $("mode").addEventListener("change", () => switchMode($("mode").value));
   await loadLayout();
-  await loadModes();
   await loadGroups();
   const view = preferredSideView();
   if (view && (sidePrefs().open ?? layout.rightOpen ?? window.innerWidth >= 1100)) showPanel(view);

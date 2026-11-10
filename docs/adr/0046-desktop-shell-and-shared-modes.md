@@ -1,6 +1,7 @@
 # ADR 0046: A Desktop Shell over the Web UI, and Modes Shared by Both
 
-Status: Accepted
+Status: Accepted; the modes (points 2 to 5) are superseded by ADR 0070, the
+desktop shell stays
 
 Date: 2026-10-16
 

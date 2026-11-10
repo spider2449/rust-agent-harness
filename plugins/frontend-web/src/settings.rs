@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ApiError, ApiResult, AppState, Shared, groups, manage::admin, modes, status_json, web_search,
+    ApiError, ApiResult, AppState, Shared, groups, manage::admin, status_json, web_search,
     workspace,
 };
 
@@ -172,8 +172,8 @@ pub(crate) fn remembered(reply: &mut Value, result: Result<(), String>) {
 }
 
 /// Runs once this plugin is active: reports settings an earlier version
-/// stored, then restores the UI state that is not configuration (the mode
-/// and the connected API group).
+/// stored, then restores the UI state that is not configuration (the
+/// connected API group).
 pub(crate) async fn restore(shared: Arc<Shared>) {
     // Mounting from inside this plugin's own start would race the boot.
     let mut active = false;
@@ -195,7 +195,6 @@ pub(crate) async fn restore(shared: Arc<Shared>) {
         return;
     };
     report_legacy(&shared).await;
-    modes::restore(&shared, admin.as_ref(), shared.start_mode.clone()).await;
     groups::restore(&shared, admin.as_ref()).await;
 }
 

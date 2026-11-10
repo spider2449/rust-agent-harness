@@ -2,7 +2,7 @@
 //!
 //! The window shows the Web UI of `frontend-web`, served on a free loopback
 //! port by the same distribution `rah web` runs, in this process. Every
-//! behavior (sessions, turns, approvals, settings and modes) is the Web
+//! behavior (sessions, turns, approvals and settings) is the Web
 //! UI's, so a change there reaches the browser and the desktop alike; this
 //! binary only owns the window and the process lifetime (ADR 0046).
 //!
@@ -41,10 +41,6 @@ use wry::{WebView, WebViewBuilder};
 struct Args {
     #[command(flatten)]
     global: GlobalArgs,
-    /// Mode to enter at start, such as `daily` or `coding`, instead of the
-    /// last one used.
-    #[arg(long)]
-    mode: Option<String>,
 }
 
 /// The window and taskbar icon: the logo as 64x64 RGBA, made by
@@ -65,9 +61,6 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         return Err("the distribution needs a `frontend-cli` or `frontend-web` plugin".into());
     }
     distribution.set_config("frontend-web", "bind", Value::from("127.0.0.1:0"));
-    if let Some(mode) = &args.mode {
-        distribution.set_config("frontend-web", "mode", Value::from(mode.as_str()));
-    }
     Ok(distribution)
 }
 
@@ -349,13 +342,11 @@ mod tests {
         );
         let config = web_config(&distribution);
         assert_eq!(config["bind"], "127.0.0.1:0");
-        assert!(config.get("mode").is_none());
     }
 
     #[test]
-    fn the_mode_and_root_are_passed_on() {
-        let distribution = distribution(&args(&["--mode", "coding", "--root", "."])).unwrap();
-        assert_eq!(web_config(&distribution)["mode"], "coding");
+    fn the_root_is_passed_on() {
+        let distribution = distribution(&args(&["--root", "."])).unwrap();
         let root = distribution
             .plugin
             .iter()

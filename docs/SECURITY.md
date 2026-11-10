@@ -203,7 +203,7 @@ configuration; its messages and metadata are untrusted:
   never resent. A `404` for an ended session means the server did not run
   the request.
 - `tools-http` sends model-chosen parameters to the API its configuration
-  names (ADR 0047). The plugin is opt-in and each tool declares `read` or
+  names (ADR 0070). The plugin is opt-in and each tool declares `read` or
   `write`, so the policy must assign every tool. Input is checked against the
   declared parameters, path values are percent-encoded, redirects are not
   followed, credentials come from environment variables, and responses are

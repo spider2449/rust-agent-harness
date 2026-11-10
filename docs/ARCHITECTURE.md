@@ -170,15 +170,13 @@ Implemented:
   per instance, requires `sandbox`); `tools-mcp-http` (one Streamable HTTP
   MCP server per instance, ADR 0038); `tools-shell` (`shell.exec`,
   requires `sandbox`; mounted by the guarded presets, ADR 0064); `tools-http` (opt-in; one instance is one API group
-  whose endpoints are declared as tools in configuration, ADR 0047);
+  whose endpoints are declared as tools in configuration, ADR 0070);
   `tools-web-search` (opt-in keyless `web.search` over
   DuckDuckGo, Bing and SearXNG with failover, merged `web.multi_search`, and
   `web.fetch` limited to public addresses); `frontend-cli`, which also answers `tool.approval`
   on the terminal; and `frontend-web`, a loopback HTTP and WebSocket API
   with an embedded Web UI (`rah web`), which answers `tool.approval` in the
-  browser and owns the modes (daily work, coding, configured ones) that
-  switch plugins through `admin` and add instructions on
-  `model.before_request`. `rah-desktop` is not a plugin: it boots the same
+  browser. `rah-desktop` is not a plugin: it boots the same
   distribution and shows that Web UI in a native window, so every behavior
   is defined once (ADR 0046).
 - `ui-layout` service (`rah-api::ui`, ADR 0062): where `frontend-web` places

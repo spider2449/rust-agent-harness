@@ -65,9 +65,6 @@ enum Command {
         /// Address to listen on, loopback only; port 0 picks one.
         #[arg(long)]
         bind: Option<String>,
-        /// Mode to enter, such as `daily` or `coding`, instead of the last one.
-        #[arg(long)]
-        mode: Option<String>,
     },
     /// List or export sessions.
     Sessions {
@@ -190,15 +187,12 @@ fn frontend(
             }
             Ok(false)
         }
-        Some(Command::Web { bind, mode }) => {
+        Some(Command::Web { bind }) => {
             if !distribution.use_web_frontend() {
                 return Err("web needs a `frontend-cli` or `frontend-web` plugin".into());
             }
             if let Some(bind) = bind {
                 set(distribution, "--bind", "frontend-web", "bind", text(bind))?;
-            }
-            if let Some(mode) = mode {
-                set(distribution, "--mode", "frontend-web", "mode", text(mode))?;
             }
             Ok(false)
         }

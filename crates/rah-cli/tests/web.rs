@@ -1672,141 +1672,6 @@ async fn web_search_is_switched_on_asks_first_and_is_remembered() {
     );
 }
 
-#[tokio::test]
-async fn modes_switch_plugins_for_every_window_and_are_remembered() {
-    use reqwest::Method;
-    let web = start("modes", |_| {}).await;
-    let state = web.json(web.get("/api/modes")).await;
-    assert_eq!(state["active"], Value::Null, "{state}");
-    let ids: Vec<&str> = state["modes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|mode| mode["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, ["daily", "coding"]);
-    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
-    let write = PluginId::new("tools-repo-write");
-    let root = instance(&web.kernel, "tools-repo-write").unwrap().1["root"].clone();
-
-    // Every connected window hears about a switch.
-    let mut other = web.socket().await;
-    let (status, daily) = web
-        .status(
-            web.request(Method::PUT, "/api/mode")
-                .json(&json!({ "mode": "daily" })),
-        )
-        .await;
-    assert_eq!(status, 200, "{daily}");
-    assert_eq!(daily["active"], "daily", "{daily}");
-    assert_eq!(daily["problems"], json!([]), "{daily}");
-    assert_eq!(daily["remembered"], true, "{daily}");
-    let notice = next_json(&mut other).await;
-    assert_eq!(notice["type"], "mode", "{notice}");
-    assert_eq!(notice["active"], "daily", "{notice}");
-    assert_eq!(admin.stopped(), std::slice::from_ref(&write));
-    assert!(wait_active(&web.kernel, "tools-web-search").await);
-
-    // Coding starts the stopped plugin again with its configuration.
-    let (status, coding) = web
-        .status(
-            web.request(Method::PUT, "/api/mode")
-                .json(&json!({ "mode": "coding" })),
-        )
-        .await;
-    assert_eq!(status, 200, "{coding}");
-    assert!(admin.stopped().is_empty());
-    assert!(wait_active(&web.kernel, "tools-repo-write").await);
-    assert_eq!(
-        instance(&web.kernel, "tools-repo-write").unwrap().1["root"],
-        root
-    );
-
-    let (status, unknown) = web
-        .status(
-            web.request(Method::PUT, "/api/mode")
-                .json(&json!({ "mode": "nope" })),
-        )
-        .await;
-    assert_eq!(status, 400, "{unknown}");
-
-    // The last mode is entered again at the next start.
-    web.status(
-        web.request(Method::PUT, "/api/mode")
-            .json(&json!({ "mode": "daily" })),
-    )
-    .await;
-    let mut distribution = headless(&web.dir);
-    distribution.plugin.push(toml_spec(
-        r#"
-[[plugin]]
-use = "frontend-web"
-config = { bind = "127.0.0.1:0" }
-"#,
-    ));
-    let restarted = Kernel::new();
-    boot(&restarted, &distribution).await.unwrap();
-    assert!(wait_active(&restarted, "tools-web-search").await);
-    let restarted_admin = restarted.handle().get(rah_api::admin::ADMIN).unwrap();
-    assert_eq!(restarted_admin.stopped(), [write]);
-
-    // A configured mode must be one of the modes.
-    let mut refused = headless(&web.dir);
-    refused.plugin.push(toml_spec(
-        r#"
-[[plugin]]
-use = "frontend-web"
-config = { bind = "127.0.0.1:0", mode = "nope" }
-"#,
-    ));
-    assert!(boot(&Kernel::new(), &refused).await.is_err());
-}
-
-#[tokio::test]
-async fn configured_modes_replace_the_builtin_ones_and_pick_the_start_mode() {
-    // The example from the README.
-    let web = start("modes-configured", |distribution| {
-        distribution
-            .plugin
-            .retain(|spec| spec.kind != "frontend-web");
-        distribution.plugin.push(toml_spec(
-            r#"
-[[plugin]]
-use = "frontend-web"
-
-[plugin.config]
-bind = "127.0.0.1:0"
-mode = "writing"
-
-[[plugin.config.modes]]
-id = "coding"
-label = "Coding"
-instructions = "Keep changes small and say which files you changed."
-plugins = { "tools-repo-write" = true }
-
-[[plugin.config.modes]]
-id = "writing"
-label = "Writing"
-workspace = false
-plugins = { "tools-repo-write" = false }
-"#,
-        ));
-    })
-    .await;
-    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
-    for _ in 0..200 {
-        if !admin.stopped().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert_eq!(admin.stopped(), [PluginId::new("tools-repo-write")]);
-    let state = web.json(web.get("/api/modes")).await;
-    assert_eq!(state["active"], "writing", "{state}");
-    assert_eq!(state["modes"][1]["workspace"], false, "{state}");
-    assert_eq!(state["modes"].as_array().unwrap().len(), 2, "{state}");
-}
-
 /// The kind and configuration of `kernel`'s plugin `id`, through `admin`.
 fn instance(kernel: &Kernel, id: &str) -> Option<(String, Value)> {
     let admin = kernel.handle().get(rah_api::admin::ADMIN)?;
@@ -2252,90 +2117,29 @@ async fn several_sessions_are_deleted_at_once_forks_first() {
 }
 
 #[tokio::test]
-async fn a_sub_mode_runs_its_api_group_and_leaving_it_stops_the_group() {
-    use reqwest::Method;
-    let web = start("modes-api-group", |distribution| {
-        distribution
-            .plugin
-            .retain(|spec| spec.kind != "frontend-web");
-        distribution.plugin.push(toml_spec(
-            r#"
-[[plugin]]
-id = "http-ddt"
-use = "tools-http"
-
-[plugin.config]
-base_url = "http://127.0.0.1:9"
-tools = [
-  { name = "ddt.order", description = "Looks up one order.", path = "/orders/{id}", params = { id = { type = "string", required = true } } },
-]
-"#,
-        ));
-        distribution.plugin.push(toml_spec(
+async fn the_removed_mode_keys_stop_the_start_by_name() {
+    // Modes were removed (ADR 0070): an old configuration is refused with
+    // the key named, never applied in part.
+    for key in [r#"mode = "coding""#, "modes = []"] {
+        let dir = TempDir::new("modes-removed");
+        let mut distribution = headless(&dir);
+        distribution.plugin.push(toml_spec(&format!(
             r#"
 [[plugin]]
 use = "frontend-web"
-
-[plugin.config]
-bind = "127.0.0.1:0"
-
-[[plugin.config.modes]]
-id = "daily"
-label = "Daily work"
-instructions = "Be brief."
-
-[[plugin.config.modes]]
-id = "ddt"
-label = "DDT"
-extends = "daily"
-instructions = "Use the ddt.* tools."
-plugins = { "http-ddt" = true }
-"#,
-        ));
-    })
-    .await;
-    let admin = web.kernel.handle().get(rah_api::admin::ADMIN).unwrap();
-    let group = PluginId::new("http-ddt");
-    let switch = |mode: &str| {
-        web.request(Method::PUT, "/api/mode")
-            .json(&json!({ "mode": mode }))
-    };
-
-    // The sub-mode lists its parent and carries the parent's instructions.
-    let state = web.json(web.get("/api/modes")).await;
-    assert_eq!(state["modes"][1]["extends"], "daily", "{state}");
-    assert_eq!(
-        state["modes"][1]["instructions"], "Be brief.\n\nUse the ddt.* tools.",
-        "{state}"
-    );
-
-    // The parent does not run the group; the sub-mode does.
-    let (status, reply) = web.status(switch("daily")).await;
-    assert_eq!(status, 200, "{reply}");
-    assert_eq!(reply["problems"], json!([]), "{reply}");
-    assert_eq!(admin.stopped(), std::slice::from_ref(&group));
-    let (status, reply) = web.status(switch("ddt")).await;
-    assert_eq!(status, 200, "{reply}");
-    assert_eq!(reply["problems"], json!([]), "{reply}");
-    assert!(admin.stopped().is_empty());
-    assert!(wait_active(&web.kernel, "http-ddt").await);
-
-    // Leaving it, to the parent or to no mode, stops the group again.
-    web.status(switch("daily")).await;
-    assert_eq!(admin.stopped(), std::slice::from_ref(&group));
-    web.status(switch("ddt")).await;
-    let (status, _) = web
-        .status(
-            web.request(Method::PUT, "/api/mode")
-                .json(&json!({ "mode": null })),
-        )
-        .await;
-    assert_eq!(status, 200);
-    assert_eq!(admin.stopped(), [group]);
+config = {{ bind = "127.0.0.1:0", {key} }}
+"#
+        )));
+        let Err(error) = boot(&Kernel::new(), &distribution).await else {
+            panic!("`{key}` is no longer configuration");
+        };
+        let error = error.to_string();
+        assert!(error.contains("unknown field `mode"), "{error}");
+    }
 }
 
 #[tokio::test]
-async fn unlisted_tools_http_instances_are_api_groups_and_only_one_is_connected() {
+async fn tools_http_instances_are_api_groups_and_only_one_is_connected() {
     use reqwest::Method;
     let web = start("api-groups", |distribution| {
         for id in ["http-ddt", "http-crm"] {
@@ -2370,9 +2174,7 @@ tools = [
             .collect::<Vec<_>>()
     };
 
-    // The builtin daily mode offers groups, labelled without `http-`.
-    let state = web.json(web.get("/api/modes")).await;
-    assert_eq!(state["modes"][0]["groups"], true, "{state}");
+    // Groups are labelled without `http-`.
     let groups = web.json(web.get("/api/groups")).await;
     assert_eq!(groups["groups"][0]["label"], "crm", "{groups}");
     assert_eq!(groups["groups"][1]["label"], "ddt", "{groups}");
@@ -2664,50 +2466,6 @@ async fn a_changed_view_is_announced_to_every_window() {
         message,
         json!({ "type": "ui", "instance": "telemetry-log", "view": "usage" })
     );
-}
-
-#[tokio::test]
-async fn modes_list_the_views_they_show_and_a_bad_view_stops_the_start() {
-    let config = |views: &str| {
-        toml_spec(&format!(
-            r#"
-[[plugin]]
-use = "frontend-web"
-
-[plugin.config]
-bind = "127.0.0.1:0"
-
-[[plugin.config.modes]]
-id = "plain"
-label = "Plain"
-views = {views}
-"#
-        ))
-    };
-    let web = start("modes-views", |distribution| {
-        distribution
-            .plugin
-            .retain(|spec| spec.kind != "frontend-web");
-        distribution
-            .plugin
-            .push(config(r#"["telemetry-log/usage"]"#));
-    })
-    .await;
-    let state = web.json(web.get("/api/modes")).await;
-    assert_eq!(
-        state["modes"][0]["views"],
-        json!(["telemetry-log/usage"]),
-        "{state}"
-    );
-
-    let dir = TempDir::new("modes-views-bad");
-    let mut distribution = headless(&dir);
-    distribution.plugin.push(config(r#"["usage"]"#));
-    let Err(error) = boot(&Kernel::new(), &distribution).await else {
-        panic!("a mode listing a non-view stops the start");
-    };
-    let error = error.to_string();
-    assert!(error.contains("`usage` is not a view"), "{error}");
 }
 
 /// The next `{type: "layout"}` message, skipping others.

@@ -1,6 +1,6 @@
 # ADR 0062: Plugin-Contributed UI Views and a Replaceable Layout
 
-Status: Accepted
+Status: Accepted; decision 6 (modes choose views) is superseded by ADR 0070
 
 Date: 2026-10-30
 
@@ -127,9 +127,8 @@ XSS in all. B is worth having only once A cannot express a needed view.
      `{type: "layout"}` to every window, which applies it without a
      reload.
    - **The browser and the desktop share it.** `rah-desktop` is a shell over
-     `frontend-web` (ADR 0046), so the same layout, views and modes apply to
-     both without code in the shell. A mode naming a layout `instance` to
-     switch to, as it switches plugins, is a later step.
+     `frontend-web` (ADR 0046), so the same layout and views apply to
+     both without code in the shell.
 
    The layout is implemented first, as this ADR's first step, with
    `ui-layout-config`, a plugin whose configuration is the layout (its

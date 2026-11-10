@@ -1,6 +1,7 @@
 # ADR 0047: API Groups as Sub-Modes of Daily Work
 
-Status: Accepted
+Status: Superseded by ADR 0070 (sub-modes are removed; every `tools-http`
+instance is an API group of the selector, as in point 4)
 
 Date: 2026-10-17
 

@@ -1,11 +1,10 @@
 //! `tools-http`: tools declared in configuration, each one HTTP endpoint of
-//! one API (for example the "DDT" lookups of a daily-work group).
+//! one API (for example the "DDT" lookups of an internal service).
 //!
 //! One instance is one API group: a `base_url`, shared headers and a list of
-//! tools. Mount one instance per group and let a Web UI mode switch it on and
-//! off (`plugins = { "<instance id>" = true }`, see the `frontend-web`
-//! modes), so the model sees the tools of a group only while that group is
-//! wanted.
+//! tools. Mount one instance per group and connect it with the Web UI's
+//! "Internal API" selector, so the model sees the tools of a group only while
+//! that group is wanted.
 //!
 //! ```toml
 //! [[plugin]]

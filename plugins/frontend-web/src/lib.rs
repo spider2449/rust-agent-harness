@@ -61,9 +61,6 @@
 //!   other plugins contribute through `ui-views` (see [`views`]). A
 //!   provider's `UiChanged` event reaches every window as `{type: "ui",
 //!   instance, view}`.
-//! - `GET /api/modes`, `PUT /api/mode {mode}`: the modes (daily work,
-//!   coding, ...) and the active one, shared by every frontend of this plugin
-//!   (see [`modes`]).
 //! - `GET /api/plugins`: plugin statuses, with kind and configuration when
 //!   the distribution's `admin` service knows them.
 //! - With an `admin` service: `GET /api/catalog` (`{kinds, examples, help}`,
@@ -120,7 +117,6 @@ mod groups;
 mod jobs;
 mod layout;
 mod manage;
-mod modes;
 mod panel;
 mod settings;
 mod status;
@@ -149,7 +145,7 @@ use axum::{
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
     Scope, async_trait,
-    hooks::{ModelBeforeRequest, ToolApproval},
+    hooks::ToolApproval,
     host::{FrontendListening, HostNotice},
     session::{SESSION, SessionError, SessionLog, export::ExportFormat},
     tools::ToolInvoker,
@@ -195,27 +191,6 @@ impl WebFrontendPlugin {
 struct Config {
     bind: Option<String>,
     approval_timeout_secs: Option<u64>,
-    /// The mode entered at start, instead of the stored one.
-    mode: Option<String>,
-    /// Replaces the built-in modes.
-    modes: Option<Vec<modes::Mode>>,
-}
-
-impl Config {
-    fn modes(&self) -> Vec<modes::Mode> {
-        self.modes.clone().unwrap_or_else(modes::builtin)
-    }
-
-    fn check(&self) -> Result<(), PluginError> {
-        let modes = self.modes();
-        modes::check(&modes)?;
-        match &self.mode {
-            Some(mode) if !modes.iter().any(|known| &known.id == mode) => {
-                Err(format!("unknown mode `{mode}`").into())
-            }
-            _ => Ok(()),
-        }
-    }
 }
 
 pub(crate) struct Shared {
@@ -230,9 +205,6 @@ pub(crate) struct Shared {
     /// Notices about changes that hold only until the next start, once per
     /// reason.
     pub notices: rah_api::host::NoticeOnce,
-    pub modes: modes::Modes,
-    /// The `mode` configuration key.
-    pub start_mode: Option<String>,
     /// The workspace's folders, once read from `storage` (see [`workspace`]).
     pub folders: std::sync::Mutex<Option<workspace::Folders>>,
 }
@@ -276,12 +248,11 @@ impl Plugin for WebFrontendPlugin {
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
         let config: Config = rah_api::config::parse(config)?;
         access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
-        config.check()
+        Ok(())
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
         let config: Config = rah_api::config::parse(scope.config())?;
-        config.check()?;
         let requested = access::loopback(config.bind.as_deref().unwrap_or(DEFAULT_BIND))?;
         let listener = listen(requested).await?;
         let address = listener
@@ -296,8 +267,6 @@ impl Plugin for WebFrontendPlugin {
             approvals: Approvals::new(timeout),
             stop: scope.spawner().cancellation(),
             notices: rah_api::host::NoticeOnce::new(scope.kernel(), scope.id().clone()),
-            modes: modes::Modes::new(config.modes()),
-            start_mode: config.mode.clone(),
             folders: std::sync::Mutex::new(None),
         });
         // What a plugin skips quietly but the user can act on (ADR 0057).
@@ -326,11 +295,6 @@ impl Plugin for WebFrontendPlugin {
         scope.hook_bail::<ToolApproval, _, _>(0, move |request| {
             let asker = asker.clone();
             async move { asker.approvals.ask(request).await }
-        });
-        let shaper = shared.clone();
-        scope.hook_waterfall::<ModelBeforeRequest, _, _>(0, move |request| {
-            let shaped = shaper.modes.shape(request);
-            async move { shaped }
         });
         let app = router(shared.clone());
         let stop = shared.stop.clone();
@@ -382,8 +346,6 @@ fn router(shared: AppState) -> Router {
         .route("/ui", get(views::list))
         .route("/ui/{instance}/{view}", get(views::render))
         .route("/ui/{instance}/{view}/actions/{action}", post(views::act))
-        .route("/modes", get(modes::list))
-        .route("/mode", put(modes::set))
         .route("/groups", get(groups::list))
         .route("/group", put(groups::set))
         .route("/catalog", get(manage::catalog))
@@ -724,8 +686,7 @@ impl WebFrontendPlugin {
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
   "bind": "127.0.0.1:18765",
-  "approval_timeout_secs": 300,
-  "mode": "coding"
+  "approval_timeout_secs": 300
 }"#;
 }
 

@@ -40,7 +40,7 @@ configuration. Nothing else replaces plugin configuration at start. The Web UI
 saves its settings into this file (section 5), not into `storage`.
 
 `storage` keeps UI state that is not configuration: preferences, layout,
-recent workspaces, the active mode.
+recent workspaces.
 
 ### 2. Top-level user keys
 
@@ -110,7 +110,7 @@ surface becomes subcommands with a few global flags:
 ```text
 rah                      terminal REPL
 rah run "<prompt>"       one prompt and exit (--summary, --session)
-rah web                  Web UI (--bind, --mode)
+rah web                  Web UI (--bind)
 rah sessions list|export <id> --format md|json|trace
 rah config show|check|init|edit
 rah features
@@ -169,13 +169,13 @@ operations first and persists it only once the plugin is active. The
 settings model slot, and a panel change to the only model plugin, send
 `Model`; other panel changes send `Plugin` or `Removed`; the web search switch
 sends `Feature`; an approved command (ADR 0066) sends the policy as `Plugin`.
-Stopping and starting a plugin is a runtime switch, like a mode, and is not
+Stopping and starting a plugin is a runtime switch and is not
 kept. Replies carry `remembered` and, when false, `remember_error`.
 
 Existing stored settings are not applied any more. RAH reports them through a
 `HostNotice` at start and in `rah config show`, and `rah config migrate`
 folds them into `rah.toml` and removes them. UI state (preferences, layout,
-recent workspaces, the active mode and API group) stays in `storage`.
+recent workspaces and the connected API group) stays in `storage`.
 ### 6. First start
 
 Without `rah.toml`, `--config` and `--model`, `rah` does not start a model it
