@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.32 (2026-11-10)
+
+- The answer of a turn keeps the text of its model rounds apart. `loop-react`
+  joined them without a separator, so what the model wrote before a tool
+  call ran into what it wrote after it ("Let me check.The file has...").
+  They are now separated by a blank line. This is the output a scheduled job
+  records; the session log and the streamed text are unchanged.
+
 ## v0.45.31 (2026-11-10)
 
 - The Web API takes the access token from the URL (`?token=`) only for the

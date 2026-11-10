@@ -157,6 +157,20 @@ fn failure(code: AgentErrorCode, message: impl Into<String>) -> Failure {
     }
 }
 
+/// Adds the text of one model round to the answer of the turn. Rounds are
+/// separate messages, so they are kept apart by a blank line: text before a
+/// tool call does not run into the text after it.
+fn add_round(answer: &mut String, text: &str) {
+    if !answer.is_empty() {
+        answer.push_str(
+            "
+
+",
+        );
+    }
+    answer.push_str(text);
+}
+
 enum Ended {
     Completed(String),
     Cancelled,
@@ -281,7 +295,7 @@ impl Turn {
                 })
                 .await?;
                 items.push(ContextItem::Assistant { text: text.clone() });
-                answer.push_str(&text);
+                add_round(&mut answer, &text);
             }
             if calls.is_empty() {
                 return Ok(Ended::Completed(answer));
@@ -334,7 +348,7 @@ impl Turn {
             text: text.clone(),
         })
         .await?;
-        answer.push_str(&text);
+        add_round(&mut answer, &text);
         Ok(Ended::Completed(answer))
     }
 
@@ -513,4 +527,19 @@ impl ReactLoopPlugin {
 fn the_config_example_is_a_valid_configuration() {
     let parsed: Result<Config, _> = serde_json::from_str(ReactLoopPlugin::CONFIG_EXAMPLE);
     assert!(parsed.is_ok(), "{:?}", parsed.err());
+}
+
+#[cfg(test)]
+#[test]
+fn the_rounds_of_an_answer_are_kept_apart() {
+    let mut answer = String::new();
+    add_round(&mut answer, "Let me check.");
+    assert_eq!(answer, "Let me check.");
+    add_round(&mut answer, "The file has 3 lines.");
+    assert_eq!(
+        answer,
+        "Let me check.
+
+The file has 3 lines."
+    );
 }

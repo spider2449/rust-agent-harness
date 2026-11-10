@@ -75,8 +75,8 @@ in the commit which entry it closes.
 ## Open findings of the 2026-11-10 code review
 
 Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26, and two of the
-findings listed here in 0.45.30 and 0.45.31.
+fixed in 0.45.20 to 0.45.26, and three of
+the findings listed here in 0.45.30 to 0.45.32.
 
 - **A dispose that never returns blocks every later plugin change.**
   `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
@@ -93,5 +93,3 @@ findings listed here in 0.45.30 and 0.45.31.
 - **Session appends are not synced to disk.** After a power loss the record
   of a tool call that ran can be missing; the call is then not known to the
   session at all.
-- **The final answer of a turn joins the text of all rounds without a
-  separator** (`loop-react`, `AgentEvent::Completed`).
