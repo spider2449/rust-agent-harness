@@ -71,3 +71,33 @@ in the commit which entry it closes.
 - **Repositories owned by another account** (for example after a Windows
   reinstall) need `git config --global --add safe.directory <path>`. RAH's
   Git tools read that setting since the sandbox passes the home directory.
+
+## Open findings of the 2026-11-10 code review
+
+Low severity; none is fixed yet. The other findings of that review were
+fixed in 0.45.20 to 0.45.26.
+
+- **A dispose that never returns blocks every later plugin change.**
+  `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
+  scope's tasks to reach an await point and for its dispose effects, without
+  a time limit, while the operations lock is held. One task stuck in
+  synchronous work stops all mounting, unmounting and the shutdown.
+- **`requires` without `inject` is not a binding.** A plugin that looks a
+  required service up with `KernelHandle::get` when it needs it stays
+  `Active` after the provider is gone; only an injected service stops its
+  dependents.
+- **Whether an approval may be remembered depends on the policy's wording.**
+  `plugins/frontend-web/src/approvals.rs` reads `` `execute` `` out of the
+  reason text. A tool the host assigned `execute` and also listed under
+  `decisions = ask` gets another reason and can be allowed for the session.
+  The approval request should carry the effective level.
+- **`?token=` is accepted on every `/api` route**, not only for the
+  WebSocket as `frontend-web` documents; a token in a URL can end up in logs.
+- **On Unix, background descendants outlive a program that exits normally.**
+  `sandbox-process` only ends the process group on a timeout, an output
+  limit or a cancellation; on Windows closing the job ends them.
+- **Session appends are not synced to disk.** After a power loss the record
+  of a tool call that ran can be missing; the call is then not known to the
+  session at all.
+- **The final answer of a turn joins the text of all rounds without a
+  separator** (`loop-react`, `AgentEvent::Completed`).

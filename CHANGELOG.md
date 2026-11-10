@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.45.27 (2026-11-10)
+
+- Docs: the open low-severity findings of the 2026-11-10 code review are
+  listed in `docs/KNOWN_ISSUES.md`.
+
 ## v0.45.26 (2026-11-10)
 
 - Sessions: listing them no longer holds up running turns. A list read
