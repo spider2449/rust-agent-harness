@@ -25,7 +25,9 @@ documented in [docs/legacy/SECURITY.md](legacy/SECURITY.md).
    A missing permission assignment fails closed. Provider or tool metadata
    cannot grant or escalate permission.
 3. The `minimal` preset runs without a policy plugin and must print a prominent
-   *unguarded* warning at startup.
+   *unguarded* warning at startup. A composition that has a policy never runs
+   unguarded by accident: while its policy is not active (not started yet,
+   restarting, failed), every tool call is denied (ADR 0072).
 4. Uncertain external effects are never replayed automatically. Timeout,
    cancellation, disconnect, crash or a lost response does not imply rollback.
    Session replay never re-executes tool calls.
@@ -374,7 +376,10 @@ composition. The UI warns before unmounting the policy, and the header shows
 service refuses to unmount or reconfigure the `distribution` plugin itself,
 and refuses to stop a policy plugin (`policy-authority`): a stop is meant to
 be temporary, and tool calls would run unguarded meanwhile. Unmounting the
-policy remains possible, behind the warning.
+policy remains possible, behind the warning; it is the only way a composition
+with a policy becomes unguarded. Until then the distribution's `tool-guard`
+service requires a policy, and a tool call that no `tool.before_invoke`
+handler decides is denied (ADR 0072).
 
 Behind the same token and checks, and likewise unreachable from tools:
 

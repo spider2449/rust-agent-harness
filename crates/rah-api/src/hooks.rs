@@ -26,8 +26,9 @@ pub enum ToolDecision {
 }
 
 /// Authorization chain run before every tool call. A handler error (panic)
-/// is a denial. With no handler at all the call is allowed and the host must
-/// warn that it runs unguarded.
+/// is a denial. A call that no handler decides is allowed, and the host must
+/// warn that it runs unguarded, unless a `tool-guard` service requires a
+/// policy (ADR 0072): then the call is denied.
 pub struct ToolBeforeInvoke;
 
 impl BailHook for ToolBeforeInvoke {

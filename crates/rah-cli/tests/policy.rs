@@ -154,3 +154,68 @@ async fn an_inactive_policy_aborts_the_boot_before_later_plugins_mount() {
     // (ADR 0059).
     assert!(kernel.plugins().is_empty());
 }
+
+/// Invokes `echo` outside a turn and returns whether it was authorized and
+/// what it answered.
+async fn echo(kernel: &Kernel) -> (bool, Vec<ToolContent>) {
+    let handle = kernel.handle();
+    let invocation = Invocation {
+        session: new_session(&handle).await,
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new("echo"),
+            input: ToolInput(json!({ "text": "hi" })),
+        },
+        cancel: CancellationToken::new(),
+    };
+    let outcome = ToolInvoker::new(handle).invoke(invocation, || {}).await;
+    (outcome.authorized, outcome.output.content)
+}
+
+#[tokio::test]
+async fn a_policy_that_is_gone_denies_every_call_until_the_user_removes_it() {
+    let dir = TempDir::new("policy-gone");
+    let kernel = kernel(&headless(&dir)).await;
+    let policy = PluginId::new("policy-authority");
+    assert!(ToolInvoker::new(kernel.handle()).guard_required());
+    assert!(echo(&kernel).await.0);
+
+    // The policy goes away without the user removing it, as when it fails
+    // or is between two starts: nothing is allowed.
+    kernel.unmount(&policy).await.unwrap();
+    let (authorized, output) = echo(&kernel).await;
+    assert!(!authorized);
+    assert_eq!(
+        output,
+        vec![ToolContent::Text(
+            "denied: no tool policy is active; the call was not decided".into()
+        )]
+    );
+
+    // Mounting it again through the admin service guards calls again, and
+    // removing it there is the user's decision to run unguarded.
+    let admin = kernel.handle().get(rah_api::admin::ADMIN).unwrap();
+    let request = rah_api::admin::MountRequest {
+        kind: "policy-authority".into(),
+        config: json!({ "tools": { "echo": "none" } }),
+        ..Default::default()
+    };
+    admin.mount(request).await.unwrap();
+    assert!(echo(&kernel).await.0);
+    admin.unmount(&policy).await.unwrap();
+    let invoker = ToolInvoker::new(kernel.handle());
+    assert!(!invoker.guard_required() && !invoker.is_guarded());
+    assert!(echo(&kernel).await.0);
+}
+
+#[tokio::test]
+async fn a_distribution_without_a_policy_requires_no_guard() {
+    let dir = TempDir::new("policy-none");
+    let mut distribution = headless(&dir);
+    distribution
+        .plugin
+        .retain(|spec| spec.kind != "policy-authority" && spec.kind != "tools-shell");
+    let kernel = kernel(&distribution).await;
+    assert!(!ToolInvoker::new(kernel.handle()).guard_required());
+    assert!(echo(&kernel).await.0);
+}

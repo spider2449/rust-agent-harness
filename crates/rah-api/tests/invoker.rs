@@ -14,8 +14,8 @@ use rah_api::{
         ToolInput, ToolName, ToolOutput,
     },
     tools::{
-        Invocation, TOOL_ADMISSION, TOOL_ADMISSION_SERVICE, Tool, ToolAdmission, ToolContext,
-        ToolError, ToolInvoker, ToolPermit, provide_tools,
+        Invocation, TOOL_ADMISSION, TOOL_ADMISSION_SERVICE, TOOL_GUARD, TOOL_GUARD_SERVICE, Tool,
+        ToolAdmission, ToolContext, ToolError, ToolGuard, ToolInvoker, ToolPermit, provide_tools,
     },
 };
 use serde_json::{Value, json};
@@ -620,4 +620,85 @@ async fn on_a_name_clash_the_oldest_provider_wins_until_it_goes_away() {
     assert_eq!(invoker.definitions()[0].description, "second");
     let outcome = invoker.invoke(invocation("count"), || {}).await;
     assert!(outcome.authorized && !outcome.output.is_error);
+}
+
+struct Required(Arc<std::sync::atomic::AtomicBool>);
+
+impl ToolGuard for Required {
+    fn required(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Mounts a `tool-guard` provider and returns its switch.
+async fn mount_guard(kernel: &Kernel, required: bool) -> Arc<std::sync::atomic::AtomicBool> {
+    let switch = Arc::new(std::sync::atomic::AtomicBool::new(required));
+    let provided = switch.clone();
+    let guard = plugin(
+        PluginManifest::new("guard", "1").provides([TOOL_GUARD_SERVICE]),
+        move |scope| {
+            scope.provide(
+                TOOL_GUARD,
+                Arc::new(Required(provided.clone())) as Arc<dyn ToolGuard>,
+            )?;
+            Ok(())
+        },
+    );
+    kernel.mount(guard, MountOptions::default()).await.unwrap();
+    switch
+}
+
+#[tokio::test]
+async fn an_undecided_call_is_denied_while_a_guard_is_required() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Write, None).await;
+    let invoker = ToolInvoker::new(kernel.handle());
+    let required = mount_guard(&kernel, true).await;
+    assert!(invoker.guard_required());
+
+    // No policy is mounted (as while one restarts): nothing decides.
+    let outcome = invoker.invoke(invocation("count"), || {}).await;
+    assert!(!outcome.authorized);
+    assert_eq!(outcome.effect, ToolEffect::None);
+    assert_eq!(
+        text(&outcome.output),
+        "denied: no tool policy is active; the call was not decided"
+    );
+    // A handler that leaves the decision open does not decide either.
+    mount_policy(&kernel, None, false).await;
+    assert!(!invoker.invoke(invocation("count"), || {}).await.authorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // A policy that decides is asked as before.
+    kernel.unmount(&PluginId::new("policy")).await.unwrap();
+    mount_policy(&kernel, Some(ToolDecision::Allow), false).await;
+    assert!(invoker.invoke(invocation("count"), || {}).await.authorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Once no guard is required, an undecided call is allowed again.
+    kernel.unmount(&PluginId::new("policy")).await.unwrap();
+    required.store(false, Ordering::SeqCst);
+    assert!(!invoker.guard_required());
+    assert!(invoker.invoke(invocation("count"), || {}).await.authorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_call_runs_undecided_while_the_policy_restarts() {
+    let (kernel, calls) = kernel_with_tools(PermissionLevel::Write, None).await;
+    mount_guard(&kernel, true).await;
+    let deny = ToolDecision::Deny {
+        reason: "no".into(),
+    };
+    mount_policy(&kernel, Some(deny), false).await;
+    let invoker = ToolInvoker::new(kernel.handle());
+    let calling = tokio::spawn(async move {
+        for _ in 0..2000 {
+            assert!(!invoker.invoke(invocation("count"), || {}).await.authorized);
+        }
+    });
+    for _ in 0..200 {
+        kernel.restart(&PluginId::new("policy")).await.unwrap();
+    }
+    calling.await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

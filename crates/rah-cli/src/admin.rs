@@ -4,7 +4,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rah_api::{
@@ -14,6 +17,7 @@ use rah_api::{
         PluginInstance, Workspace,
     },
     async_trait,
+    tools::{TOOL_GUARD, TOOL_GUARD_SERVICE, ToolGuard},
 };
 use rah_plugin_host_process::ProcessPlugin;
 use rah_plugin_host_wasm::WasmPlugin;
@@ -58,9 +62,10 @@ pub(crate) async fn construct(
     Ok(constructor(id))
 }
 
-/// Kind and configuration of the plugins `rah` mounted.
+/// Kind and configuration of the plugins `rah` mounted, and whether the
+/// composition is meant to run with a tool policy (ADR 0072).
 #[derive(Default)]
-pub struct Registry(Mutex<BTreeMap<PluginId, Record>>);
+pub struct Registry(Mutex<BTreeMap<PluginId, Record>>, AtomicBool);
 
 /// How a plugin was mounted, enough to mount it again.
 #[derive(Clone)]
@@ -96,11 +101,36 @@ impl Registry {
     fn is_stopped(&self, id: &PluginId) -> bool {
         self.lock().get(id).is_some_and(|record| record.stopped)
     }
+
+    /// States whether tool calls need a policy. Set before the plugins of a
+    /// distribution with a policy are mounted, so no call is allowed before
+    /// the policy is active.
+    pub(crate) fn expect_guard(&self, expected: bool) {
+        self.1.store(expected, Ordering::SeqCst);
+    }
+
+    /// A policy is expected exactly while one is recorded. Called after the
+    /// user mounted or removed plugins: removing the last policy is their
+    /// decision to run unguarded, and mounting one ends that.
+    fn sync_guard(&self) {
+        let recorded = self
+            .lock()
+            .values()
+            .any(|record| POLICY_KINDS.contains(&record.kind.as_str()));
+        self.expect_guard(recorded);
+    }
 }
 
-/// Kinds that guard tool calls. They cannot be stopped: tool calls would
-/// run unguarded meanwhile.
-const POLICY_KINDS: [&str; 1] = ["policy-authority"];
+impl ToolGuard for Registry {
+    fn required(&self) -> bool {
+        self.1.load(Ordering::SeqCst)
+    }
+}
+
+/// Kinds that guard tool calls. They cannot be stopped: a stop is meant to
+/// be temporary. While one is recorded, a tool call that no policy decides
+/// is denied (see [`Registry::sync_guard`]).
+pub(crate) const POLICY_KINDS: [&str; 1] = ["policy-authority"];
 
 pub struct DistributionPlugin {
     manifest: PluginManifest,
@@ -113,7 +143,7 @@ impl DistributionPlugin {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
             manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION"))
-                .provides(["admin"]),
+                .provides(["admin", TOOL_GUARD_SERVICE]),
             registry,
             data_home: None,
             file: None,
@@ -150,6 +180,7 @@ impl Plugin for DistributionPlugin {
             writing: Arc::new(Mutex::new(())),
         };
         scope.provide(ADMIN, Arc::new(admin) as Arc<dyn PluginAdmin>)?;
+        scope.provide(TOOL_GUARD, self.registry.clone() as Arc<dyn ToolGuard>)?;
         Ok(())
     }
 }
@@ -250,6 +281,7 @@ impl Admin {
         let status = self.kernel.mount(plugin, options).await.map_err(failed)?;
         self.registry
             .record(id, &request.kind, request.config, request.bind);
+        self.registry.sync_guard();
         Ok(status)
     }
 }
@@ -310,6 +342,7 @@ impl PluginAdmin for Admin {
         self.unlocked(id)?;
         self.kernel.unmount(id).await.map_err(failed)?;
         self.registry.lock().remove(id);
+        self.registry.sync_guard();
         Ok(())
     }
 
@@ -413,6 +446,7 @@ impl PluginAdmin for Admin {
         if status != PluginStatus::Active {
             let _ = self.kernel.unmount(&id).await;
             self.registry.lock().remove(&id);
+            self.registry.sync_guard();
             return Err(AdminError::ReplacementFailed {
                 old: old.clone(),
                 id,
@@ -421,6 +455,7 @@ impl PluginAdmin for Admin {
         }
         self.kernel.unmount(old).await.map_err(failed)?;
         self.registry.lock().remove(old);
+        self.registry.sync_guard();
         Ok((id, status))
     }
 

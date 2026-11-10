@@ -231,7 +231,9 @@ Implemented:
   except `minimal` mounts `policy-authority` first and `tools-shell`, whose
   `shell.exec` the policy asks about (ADR 0064). `rah` warns `UNGUARDED`
   when no `tool.before_invoke` handler is mounted, and aborts the boot when a
-  configured `policy-authority` does not become active.
+  configured `policy-authority` does not become active. The `distribution`
+  plugin provides `tool-guard`: while a policy is part of the composition, a
+  tool call that no handler decides is denied, not allowed (ADR 0072).
 
 The tools service key is private to `rah-api`. Tool providers register with
 `provide_tools`, and the only way to call a tool is `ToolInvoker::invoke`.

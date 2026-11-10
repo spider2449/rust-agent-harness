@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.21 (2026-11-10)
+
+- Tool calls are denied while a configured policy is not running
+  (ADR 0072). A call that no policy decided was allowed, which was meant
+  for `minimal` but also applied for a moment whenever `policy-authority`
+  restarted (a saved Permissions form, "allow this command from now on"),
+  and for as long as it was failed or not started yet. With a policy in
+  the configuration, such a call is now refused with "no tool policy is
+  active". Removing the policy in the Plugins panel still runs unguarded.
+- Web UI: the status line says "NO POLICY: tools denied" in that state
+  instead of `UNGUARDED`.
+
 ## v0.45.20 (2026-11-10)
 
 - Kernel: a plugin change whose caller goes away now finishes (ADR 0071).

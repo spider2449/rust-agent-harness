@@ -46,6 +46,8 @@ pub(crate) async fn status(State(shared): State<AppState>) -> ApiResult {
         "model": model,
         "loop": provider(kernel, kernel.get_all(LOOP).first().map(|(id, _)| id.clone())),
         "guarded": ToolInvoker::new(kernel.clone()).is_guarded(),
+        // A policy is expected: without one, tool calls are denied.
+        "guard_required": ToolInvoker::new(kernel.clone()).guard_required(),
         "tools": ToolInvoker::new(kernel.clone()).definitions().len(),
         "version": env!("CARGO_PKG_VERSION"),
     })))

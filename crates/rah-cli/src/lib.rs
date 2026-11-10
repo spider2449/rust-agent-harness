@@ -571,6 +571,14 @@ pub async fn boot(
         return Err(BootError::InvalidConfig(problems));
     }
     let registry = Arc::new(Registry::default());
+    // Before any plugin is mounted: with a policy in the distribution, no
+    // tool call is allowed until that policy decides it (ADR 0072).
+    registry.expect_guard(
+        distribution
+            .plugin
+            .iter()
+            .any(|spec| admin::POLICY_KINDS.contains(&spec.kind.as_str())),
+    );
     kernel
         .mount(
             Arc::new(

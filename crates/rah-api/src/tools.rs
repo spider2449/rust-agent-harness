@@ -104,6 +104,22 @@ impl std::fmt::Debug for ToolPermit {
     }
 }
 
+/// Service name of the tool guard expectation (ADR 0072).
+pub const TOOL_GUARD_SERVICE: &str = "tool-guard";
+
+/// Whether tool calls must be decided by a policy. The distribution
+/// provides it; the [`ToolInvoker`] asks every instance.
+pub const TOOL_GUARD: ServiceKey<dyn ToolGuard> = ServiceKey::new(TOOL_GUARD_SERVICE);
+
+/// States that the composition is meant to run with a tool policy. While
+/// any provider requires one, a call that no `tool.before_invoke` handler
+/// decided is denied instead of allowed, so a policy that is restarting,
+/// failed or not mounted yet never leaves tool calls unguarded.
+pub trait ToolGuard: Send + Sync {
+    /// Whether an undecided call must be denied.
+    fn required(&self) -> bool;
+}
+
 /// Registers this plugin's tools. The manifest must declare `provides = ["tools"]`.
 pub fn provide_tools(scope: &mut Scope, tools: Vec<Arc<dyn Tool>>) -> Result<(), ScopeError> {
     scope.provide(TOOLS, Arc::new(ToolSet(tools)))
@@ -142,6 +158,15 @@ impl ToolInvoker {
         self.kernel.has_handlers::<ToolBeforeInvoke>()
     }
 
+    /// Whether a [`ToolGuard`] requires a policy. A call that no handler
+    /// decides is then denied.
+    pub fn guard_required(&self) -> bool {
+        self.kernel
+            .get_all(TOOL_GUARD)
+            .iter()
+            .any(|(_, guard)| guard.required())
+    }
+
     /// Definitions of all mounted tools; on name clashes the oldest provider
     /// wins.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -173,6 +198,10 @@ impl ToolInvoker {
     async fn decide(&self, request: &ToolRequestContext) -> Result<(), String> {
         let decision = match self.kernel.bail::<ToolBeforeInvoke>(request.clone()).await {
             Ok(Some(decision)) => decision,
+            // No handler decided: allowed only where no policy is expected.
+            Ok(None) if self.guard_required() => {
+                return Err("no tool policy is active; the call was not decided".to_owned());
+            }
             Ok(None) => ToolDecision::Allow,
             Err(error) => return Err(format!("policy failure: {error}")),
         };

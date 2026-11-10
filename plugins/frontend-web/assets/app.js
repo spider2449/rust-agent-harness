@@ -2890,11 +2890,18 @@ function agentText(status) {
   const [loop, loopTitle] = providerText("loop", status.loop);
   const parts = [`${status.tools} tools`];
   if (!status.loop || status.loop.kind !== "loop-react") parts.push(loop);
-  if (!status.guarded) parts.push("UNGUARDED");
+  // Without a policy, calls run unchecked, or are all denied when the
+  // configuration expects one (it failed or is between two starts).
+  const stopped = !status.guarded && status.guard_required;
+  if (!status.guarded) parts.push(stopped ? "NO POLICY: tools denied" : "UNGUARDED");
   const title = [
     loopTitle,
     `${status.tools} tools offered to the model`,
-    status.guarded ? "Guarded: a policy plugin decides every tool call" : "UNGUARDED: no policy plugin, tool calls run without checks",
+    status.guarded
+      ? "Guarded: a policy plugin decides every tool call"
+      : stopped
+        ? "The policy plugin is not running: every tool call is denied until it runs again"
+        : "UNGUARDED: no policy plugin, tool calls run without checks",
     "Click to see every plugin",
   ].join("\n");
   return [parts.join(" · "), title, !status.loop || !status.guarded];
