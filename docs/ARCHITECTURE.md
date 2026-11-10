@@ -50,7 +50,10 @@ rah (bin)                            distribution: reads rah.toml, mounts plugin
   `PluginStatusChanged` on every lifecycle transition.
 - Scopes: services, hooks and handlers registered in `apply` commit only if
   `apply` succeeds. On dispose, owned tasks are cancelled and drained, then
-  dispose effects run in reverse order. Nothing outlives its owner.
+  dispose effects run in reverse order. Nothing outlives its owner, unless
+  it does not stop within the kernel's limit (10 s for the tasks, and for
+  each effect): then the kernel goes on, emits `DisposeOverrun`, and the host
+  tells the user (ADR 0076).
 - Configuration: a plugin's `check_config` runs before a mount or a
   configuration change. A refused configuration fails the operation with
   `InvalidConfig` and leaves a running instance as it was (ADR 0044).

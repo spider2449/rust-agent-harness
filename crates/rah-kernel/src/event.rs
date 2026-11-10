@@ -19,6 +19,18 @@ pub struct PluginStatusChanged {
     pub status: PluginStatus,
 }
 
+/// Emitted by the kernel when the scope of a plugin was not disposed within
+/// the kernel's limit (ADR 0076). The kernel went on without waiting: what
+/// is counted here may still be running, and cleanup may be incomplete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisposeOverrun {
+    pub plugin: PluginId,
+    /// Owned tasks that had not reached an await point.
+    pub tasks: usize,
+    /// Dispose effects that had not returned.
+    pub effects: usize,
+}
+
 pub(crate) type HandlerFn<E> = Arc<dyn Fn(&E) + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

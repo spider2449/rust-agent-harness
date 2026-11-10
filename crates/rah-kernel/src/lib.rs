@@ -20,7 +20,7 @@ mod scope;
 mod service;
 
 pub use error::{HookError, KernelError, PluginError, ScopeError};
-pub use event::{Event, PluginStatusChanged, Subscription};
+pub use event::{DisposeOverrun, Event, PluginStatusChanged, Subscription};
 pub use hook::{BailHook, SerialHook, WaterfallHook};
 pub use kernel::{Kernel, KernelHandle};
 pub use manifest::{KERNEL_API, MountOptions, PluginId, PluginManifest, PluginStatus, ServiceName};

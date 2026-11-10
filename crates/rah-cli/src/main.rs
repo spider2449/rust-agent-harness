@@ -522,6 +522,8 @@ async fn serve(distribution: &Distribution, quiet: bool) -> i32 {
         }
     });
 
+    let _overruns = rah_cli::report_dispose_overruns(&kernel);
+
     let _listening = handle.subscribe(|listening: &FrontendListening| {
         eprintln!(
             "rah: {} is listening at {}",

@@ -7,14 +7,15 @@ use std::{
         Arc, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use futures::FutureExt;
 
 use crate::{
-    BailHook, BoxFuture, Event, HookError, KernelError, MountOptions, Plugin, PluginId,
-    PluginManifest, PluginStatus, PluginStatusChanged, Scope, SerialHook, ServiceKey, ServiceName,
-    Subscription, WaterfallHook,
+    BailHook, BoxFuture, DisposeOverrun, Event, HookError, KernelError, MountOptions, Plugin,
+    PluginId, PluginManifest, PluginStatus, PluginStatusChanged, Scope, SerialHook, ServiceKey,
+    ServiceName, Subscription, WaterfallHook,
     event::{HandlerEntry, HandlerFn, Owner},
     hook::{BailFn, HookEntry, SerialFn, WaterfallFn, insert_sorted},
     scope::{Binding, ScopeRuntime},
@@ -29,6 +30,29 @@ tokio::task_local! {
 
 fn in_lifecycle() -> bool {
     LIFECYCLE.try_with(|_| ()).is_ok()
+}
+
+/// Runs `future` as part of a lifecycle operation: lifecycle calls made from
+/// inside it are refused as re-entrant.
+pub(crate) fn in_lifecycle_scope<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    LIFECYCLE.scope((), future)
+}
+
+/// How long the kernel waits for the tasks of a scope, and for each of its
+/// dispose effects, before it goes on without them (ADR 0076).
+const DISPOSE_LIMIT: Duration = Duration::from_secs(10);
+
+/// Disposes the scope of `plugin` and reports what was not waited for.
+async fn dispose(inner: &Inner, plugin: &PluginId, runtime: ScopeRuntime) {
+    let left = runtime.dispose(inner.dispose_limit).await;
+    if left.tasks > 0 || left.effects > 0 {
+        let overrun = DisposeOverrun {
+            plugin: plugin.clone(),
+            tasks: left.tasks,
+            effects: left.effects,
+        };
+        emit(inner, &overrun);
+    }
 }
 
 /// Runs a handler, converting a panic (at call or during polling) into `Err`.
@@ -66,6 +90,7 @@ pub(crate) struct Inner {
     ops: tokio::sync::Mutex<bool>,
     state: Mutex<State>,
     seq: AtomicU64,
+    dispose_limit: Duration,
 }
 
 impl Inner {
@@ -145,11 +170,19 @@ impl Default for Kernel {
 
 impl Kernel {
     pub fn new() -> Self {
+        Self::with_dispose_limit(DISPOSE_LIMIT)
+    }
+
+    /// A kernel that waits at most `limit` for the tasks of a scope, and for
+    /// each of its dispose effects, when it disposes the scope (ADR 0076).
+    /// [`Kernel::new`] uses 10 seconds.
+    pub fn with_dispose_limit(limit: Duration) -> Self {
         Self {
             inner: Arc::new(Inner {
                 ops: tokio::sync::Mutex::new(false),
                 state: Mutex::new(State::default()),
                 seq: AtomicU64::new(0),
+                dispose_limit: limit,
             }),
         }
     }
@@ -692,7 +725,7 @@ async fn start(inner: &Arc<Inner>, id: &PluginId) {
         }
     };
     if let Some((runtime, message)) = failed {
-        LIFECYCLE.scope((), runtime.dispose()).await;
+        dispose(inner, id, runtime).await;
         if let Some(message) = message
             && let Some(entry) = inner.state().plugins.get_mut(id)
         {
@@ -762,15 +795,15 @@ async fn stop_cascade(inner: &Arc<Inner>, root: &PluginId) {
                 && let Some(active) = entry.active.take()
             {
                 set_status(id, entry, PluginStatus::Stopping, &mut changes);
-                victims.push((active.activation_seq, active.runtime));
+                victims.push((active.activation_seq, id.clone(), active.runtime));
             }
         }
         victims.sort_by_key(|victim| std::cmp::Reverse(victim.0));
         (stopped, victims)
     };
     emit_changes(inner, changes);
-    for (_, runtime) in victims {
-        LIFECYCLE.scope((), runtime.dispose()).await;
+    for (_, id, runtime) in victims {
+        dispose(inner, &id, runtime).await;
     }
     let mut changes = Changes::new();
     {

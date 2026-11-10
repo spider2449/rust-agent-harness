@@ -195,6 +195,7 @@ fn run(args: Args) -> Result<(), String> {
         .build()
         .map_err(|error| format!("cannot start the async runtime: {error}"))?;
     let kernel = Kernel::new();
+    let _overruns = rah_cli::report_dispose_overruns(&kernel);
     let first = match args.global.unconfigured() {
         Ok(true) => Start::Setup(setup_page(&args.global)),
         Ok(false) => launch(&runtime, &kernel, &args),

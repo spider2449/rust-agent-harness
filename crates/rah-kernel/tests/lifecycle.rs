@@ -7,8 +7,8 @@ use std::sync::{
 
 use common::{GREETER, Log, consumer, plugin, provider};
 use rah_kernel::{
-    KERNEL_API, Kernel, KernelError, MountOptions, Plugin, PluginError, PluginId, PluginManifest,
-    PluginStatus, PluginStatusChanged, Scope, ServiceName,
+    DisposeOverrun, KERNEL_API, Kernel, KernelError, MountOptions, Plugin, PluginError, PluginId,
+    PluginManifest, PluginStatus, PluginStatusChanged, Scope, ServiceName,
 };
 use serde_json::json;
 
@@ -754,4 +754,121 @@ async fn a_mount_whose_caller_goes_away_still_finishes() {
         Err(KernelError::UnknownPlugin(_))
     ));
     assert_eq!(kernel.status(&id("slow")), Some(PluginStatus::Active));
+}
+
+/// Collects the kernel's reports of disposals it did not wait for.
+fn overruns(
+    kernel: &Kernel,
+) -> (
+    rah_kernel::Subscription,
+    Arc<std::sync::Mutex<Vec<DisposeOverrun>>>,
+) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let subscription = kernel
+        .handle()
+        .subscribe(move |overrun: &DisposeOverrun| sink.lock().unwrap().push(overrun.clone()));
+    (subscription, seen)
+}
+
+#[tokio::test]
+async fn a_dispose_effect_that_never_returns_does_not_block_later_operations() {
+    let kernel = Kernel::with_dispose_limit(std::time::Duration::from_millis(50));
+    let (_subscription, seen) = overruns(&kernel);
+    let log = Log::default();
+    let stuck = {
+        let log = log.clone();
+        plugin(PluginManifest::new("stuck", "1"), move |scope| {
+            let log = log.clone();
+            scope.on_dispose(move || async move { log.push("cleanup") });
+            scope.on_dispose(std::future::pending::<()>);
+            Ok(())
+        })
+    };
+    kernel.mount(stuck, MountOptions::default()).await.unwrap();
+
+    kernel.unmount(&id("stuck")).await.unwrap();
+    // The effect registered before the stuck one still ran.
+    assert_eq!(log.take(), ["cleanup"]);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [DisposeOverrun {
+            plugin: id("stuck"),
+            tasks: 0,
+            effects: 1,
+        }]
+    );
+    assert_eq!(kernel.status(&id("stuck")), None);
+
+    // Later operations run, and a disposal within the limit reports nothing.
+    kernel
+        .mount(provider("provider", &log), MountOptions::default())
+        .await
+        .unwrap();
+    kernel.shutdown().await.unwrap();
+    assert_eq!(log.take(), ["start:provider", "dispose:provider"]);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// Synchronous work cannot be interrupted, so this needs a second thread
+/// for the kernel to go on with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn synchronous_work_in_a_scope_does_not_block_later_operations() {
+    let kernel = Kernel::with_dispose_limit(std::time::Duration::from_millis(100));
+    let (_subscription, seen) = overruns(&kernel);
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    // Ends the synchronous work when the test is over, also when it fails:
+    // the runtime waits for its threads.
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let _release = Release(release.clone());
+    let busy = {
+        let (started, release) = (started.clone(), release.clone());
+        plugin(PluginManifest::new("busy", "1"), move |scope| {
+            let block = |release: Arc<AtomicBool>| {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            let (started, in_task) = (started.clone(), release.clone());
+            scope.spawn(async move {
+                started.store(true, Ordering::SeqCst);
+                block(in_task);
+            });
+            let in_effect = release.clone();
+            scope.on_dispose(move || async move { block(in_effect) });
+            Ok(())
+        })
+    };
+    kernel.mount(busy, MountOptions::default()).await.unwrap();
+    while !started.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let unmounting = tokio::time::Instant::now();
+    kernel.unmount(&id("busy")).await.unwrap();
+    assert!(
+        unmounting.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        unmounting.elapsed()
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [DisposeOverrun {
+            plugin: id("busy"),
+            tasks: 1,
+            effects: 1,
+        }]
+    );
+    let log = Log::default();
+    let status = kernel
+        .mount(provider("provider", &log), MountOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(status, PluginStatus::Active);
 }

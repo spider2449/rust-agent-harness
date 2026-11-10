@@ -71,15 +71,3 @@ in the commit which entry it closes.
 - **Repositories owned by another account** (for example after a Windows
   reinstall) need `git config --global --add safe.directory <path>`. RAH's
   Git tools read that setting since the sandbox passes the home directory.
-
-## Open findings of the 2026-11-10 code review
-
-Low severity; none is fixed yet. The other findings of that review were
-fixed in 0.45.20 to 0.45.26, and six of
-the findings listed here in 0.45.30 to 0.45.35.
-
-- **A dispose that never returns blocks every later plugin change.**
-  `ScopeRuntime::dispose` (`crates/rah-kernel/src/scope.rs`) waits for the
-  scope's tasks to reach an await point and for its dispose effects, without
-  a time limit, while the operations lock is held. One task stuck in
-  synchronous work stops all mounting, unmounting and the shutdown.

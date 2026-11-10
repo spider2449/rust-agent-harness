@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.36 (2026-11-10)
+
+- A plugin that does not stop no longer blocks every later plugin change
+  (ADR 0076). The kernel waited without a limit for a stopping plugin's
+  tasks and cleanup, so one task stuck in blocking work stopped all
+  mounting, unmounting, settings changes and the shutdown. It now waits at
+  most 10 seconds for the tasks and for each cleanup step, goes on, and
+  tells you which plugin it left behind (in the terminal and as a notice in
+  the Web UI). Its cleanup may then be incomplete; restarting RAH ends what
+  is left.
+- This closes the last open finding of the 2026-11-10 code review.
+
 ## v0.45.35 (2026-11-10)
 
 - A plugin runs only while every service in its `requires` resolves

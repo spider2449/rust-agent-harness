@@ -2,6 +2,7 @@ use std::{
     any::TypeId,
     future::Future,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -14,7 +15,7 @@ use crate::{
     ScopeError, SerialHook, ServiceKey, ServiceName, WaterfallHook,
     event::{HandlerEntry, HandlerFn, Owner},
     hook::{BailFn, HookEntry, SerialFn, WaterfallFn},
-    kernel::{Inner, guarded},
+    kernel::{Inner, guarded, in_lifecycle_scope},
     service::{ServiceEntry, resolve},
 };
 
@@ -73,20 +74,72 @@ impl ScopeRuntime {
     }
 
     /// Cancels and drains owned tasks, then runs dispose effects in reverse
-    /// registration order. Effect panics are contained.
-    pub(crate) async fn dispose(self) {
+    /// registration order. Effect panics are contained. Neither the tasks
+    /// nor any one effect is waited for longer than `limit` (ADR 0076);
+    /// returns what was left behind.
+    pub(crate) async fn dispose(self, limit: Duration) -> Unfinished {
         let tasks = {
             let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
             self.token.cancel();
             tasks.take()
         };
-        if let Some(mut tasks) = tasks {
-            while tasks.join_next().await.is_some() {}
+        let mut left = Unfinished::default();
+        if let Some(mut tasks) = tasks.filter(|tasks| !tasks.is_empty()) {
+            let drained = within(limit, async { while tasks.join_next().await.is_some() {} });
+            if drained.await.is_none() {
+                // A task that is still here is in synchronous work. Dropping
+                // the set aborts it: it ends at its next await point, as the
+                // cancelled scope already asked.
+                left.tasks = tasks.len();
+            }
         }
         for effect in self.effects.into_iter().rev() {
-            let _ = guarded(effect).await;
+            // A task of its own, so an effect stuck in synchronous work
+            // cannot hold up the lifecycle operation that disposes it.
+            let mut running = tokio::spawn(in_lifecycle_scope(async move {
+                let _ = guarded(effect).await;
+            }));
+            if within(limit, &mut running).await.is_none() {
+                running.abort();
+                left.effects += 1;
+            }
         }
+        left
     }
+}
+
+/// Waits for `future`, at most `limit`; `None` when the time is up. The
+/// time is kept by a thread of its own, not by the runtime's timer: what
+/// this bounds may be synchronous work on the very threads that drive that
+/// timer, which then never fires. The thread ends as soon as the wait does.
+/// Without a thread to keep the time, the wait has no limit.
+async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Option<T> {
+    let (done, waiting) = std::sync::mpsc::channel::<()>();
+    let (expire, expired) = tokio::sync::oneshot::channel::<()>();
+    let timer = std::thread::Builder::new()
+        .name("rah-dispose-limit".into())
+        .spawn(move || {
+            if waiting.recv_timeout(limit) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                let _ = expire.send(());
+            }
+        });
+    if timer.is_err() {
+        return Some(future.await);
+    }
+    // Dropped when this returns, which ends the thread.
+    let _done = done;
+    tokio::select! {
+        biased;
+        value = future => Some(value),
+        Ok(()) = expired => None,
+    }
+}
+
+/// What a disposal did not wait for.
+#[derive(Default)]
+pub(crate) struct Unfinished {
+    pub tasks: usize,
+    pub effects: usize,
 }
 
 /// Spawns tasks owned by a plugin scope. Owned tasks are dropped at their next
@@ -332,7 +385,8 @@ impl Scope {
     }
 
     /// Registers cleanup run when this scope is disposed, after owned tasks
-    /// are cancelled. Effects run in reverse registration order.
+    /// are cancelled. Effects run in reverse registration order. An effect
+    /// that does not return within the kernel's limit is aborted (ADR 0076).
     pub fn on_dispose<F, Fut>(&mut self, effect: F)
     where
         F: FnOnce() -> Fut + Send + 'static,

@@ -555,6 +555,28 @@ pub const PROCESS_PLUGIN: &str = "process";
 /// component.
 pub const WASM_PLUGIN: &str = "wasm";
 
+/// Tells the user, as a [`HostNotice`](rah_api::host::HostNotice), when the
+/// kernel stopped waiting for a plugin to stop (ADR 0076). Keep the result
+/// for as long as the kernel runs.
+pub fn report_dispose_overruns(kernel: &Kernel) -> rah_api::kernel::Subscription {
+    let handle = kernel.handle();
+    kernel
+        .handle()
+        .subscribe(move |overrun: &rah_api::kernel::DisposeOverrun| {
+            handle.emit(&rah_api::host::HostNotice {
+                plugin: overrun.plugin.clone(),
+                message: dispose_overrun_message(overrun),
+            });
+        })
+}
+
+fn dispose_overrun_message(overrun: &rah_api::kernel::DisposeOverrun) -> String {
+    format!(
+        "did not stop in time ({} task(s) and {} cleanup step(s) were still running). RAH went          on without it: its cleanup may be incomplete, and restarting RAH ends what is left",
+        overrun.tasks, overrun.effects
+    )
+}
+
 /// Checks every plugin configuration first ([`check_distribution`]) and
 /// mounts nothing when one would be refused. Then mounts the `distribution`
 /// plugin and every plugin in order, and returns the resulting statuses. A

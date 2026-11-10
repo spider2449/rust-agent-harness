@@ -43,4 +43,4 @@ with a `tool.before_invoke` hook, the result was a missing guard.
 - The public kernel API, `rah-api` and `rah-protocol` are unchanged.
 - A caller cannot cancel a lifecycle operation by dropping it. An `apply` or
   dispose effect that never returns still blocks later operations; bounding
-  those is a separate problem (see `docs/KNOWN_ISSUES.md`).
+  those is a separate problem. ADR 0076 bounds the disposal.
