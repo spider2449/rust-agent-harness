@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.34 (2026-11-10)
+
+- On Unix, a program run by the sandbox no longer leaves background
+  processes behind when it exits normally. The process group was ended only
+  on a timeout, an output limit or a cancellation, so `server &` in a script
+  kept running after the tool call; on Windows closing the job already
+  ended it. A descendant that leaves the process group can still escape.
+
 ## v0.45.33 (2026-11-10)
 
 - `session-jsonl` syncs every appended line to the disk before the append

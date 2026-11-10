@@ -129,7 +129,9 @@ there is no filesystem or network isolation. It guarantees:
 - termination of the process tree (a kill-on-close Job Object on Windows, a
   process group on Unix) on timeout, output overflow, cancellation, unmount
   of the plugin or a dropped call. Descendants still holding the output pipes
-  2 s after the program exits are killed too. On Windows the child joins its
+  2 s after the program exits are killed too, and so are background
+  descendants left behind by a program that exits normally: a tool call
+  cannot leave a process running. On Windows the child joins its
   Job Object right after spawn, so a process it starts before that can
   escape; on Unix a descendant that leaves the process group can escape.
 

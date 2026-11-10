@@ -152,7 +152,8 @@ pub(crate) fn configure(command: &mut Command) {
 pub(crate) fn configure(_command: &mut Command) {}
 
 /// Owns the child's process tree until disarmed; dropping it terminates the
-/// tree. Windows assigns the child to a kill-on-close Job Object right after
+/// tree. Disarming, after the program is over, still ends the descendants it
+/// left behind. Windows assigns the child to a kill-on-close Job Object right after
 /// spawn, so a process the child starts before assignment can escape, unless
 /// the child was started suspended (`sandbox-os`).
 #[cfg(windows)]
@@ -252,7 +253,12 @@ impl ProcessTree {
         }
     }
 
+    /// Ends the members the program left behind, as closing the job does on
+    /// Windows: a background descendant does not outlive a program that
+    /// exited normally. The group id stays reserved while it has a member,
+    /// and an empty group is no error.
     pub(crate) fn disarm(&mut self) {
+        let _ = self.terminate();
         self.group.take();
     }
 }

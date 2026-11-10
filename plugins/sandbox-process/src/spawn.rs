@@ -79,7 +79,7 @@ async fn supervise(
             None
         }
     };
-    // On Windows, closing the job also ends descendants left behind.
+    // Also ends descendants left behind.
     tree.disarm();
     exit.send_replace(Some(code));
 }

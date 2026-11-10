@@ -105,6 +105,96 @@ fn helper_orphan() {
         .unwrap();
 }
 
+/// Starts a sleeping grandchild that holds none of the pipes, prints its
+/// process id and exits at once.
+#[test]
+#[ignore = "helper program"]
+#[expect(
+    clippy::zombie_processes,
+    reason = "the grandchild must outlive this helper; the sandbox under test kills it"
+)]
+fn helper_background() {
+    use std::process::Stdio;
+    let exe = std::env::current_exe().unwrap();
+    let child = std::process::Command::new(exe)
+        .args(["--ignored", "--exact", "--nocapture", "tests::helper_sleep"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    println!("pid={}", child.id());
+}
+
+/// Whether a process with this id is running.
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    // A process that was killed and not reaped yet is a zombie: over.
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+        // SAFETY: signal 0 only checks that the process exists.
+        Err(_) => unsafe { libc::kill(pid.cast_signed(), 0) == 0 },
+    }
+}
+
+/// Whether a process with this id is running.
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    // SAFETY: the handle is checked, used for one query and closed.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let known = GetExitCodeProcess(process, &raw mut code) != 0;
+        CloseHandle(process);
+        known && code == STILL_ACTIVE.cast_unsigned()
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn background_descendants_end_with_a_program_that_exits_normally() {
+    let dir = TempDir::new("background");
+    let started = Instant::now();
+    let output = env(&dir)
+        .run(
+            helper("helper_background", Duration::from_secs(60)),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.termination, None);
+    assert_eq!(output.exit_code, Some(0));
+    // Nothing held the pipes, so the call did not wait for the grandchild.
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    let text = stdout(&output);
+    let pid: u32 = text
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no process id in {text:?}"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "process {pid} outlived the program that started it"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn runs_a_program_with_a_cleared_environment_and_bounded_cwd() {
     let dir = TempDir::new("report");
