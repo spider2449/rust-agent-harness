@@ -105,6 +105,28 @@ mod tests {
     }
 
     #[test]
+    fn personal_plugin_example_and_default_use_one_plugins_directory() {
+        let data_home = home().join(".rah");
+        let expected = json!(data_home.join("plugins").display().to_string());
+        let mut example: Value =
+            serde_json::from_str(rah_plugin_plugin_builder::PluginBuilderPlugin::CONFIG_EXAMPLE)
+                .unwrap();
+        resolve_data_paths("plugin-builder", &mut example, &data_home);
+        assert_eq!(example["dir"], expected);
+
+        let mut omitted = Value::Null;
+        resolve_data_paths("plugin-builder", &mut omitted, &data_home);
+        assert_eq!(omitted["dir"], expected);
+
+        let mut custom = json!({"dir":"custom/plugins"});
+        resolve_data_paths("plugin-builder", &mut custom, &data_home);
+        assert_eq!(
+            custom["dir"],
+            json!(data_home.join("custom/plugins").display().to_string())
+        );
+    }
+
+    #[test]
     fn relative_paths_resolve_against_the_home_and_absolute_ones_stay() {
         let mut config = json!({ "dir": "kv" });
         resolve_data_paths("storage-fs", &mut config, &home());

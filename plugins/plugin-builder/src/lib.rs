@@ -59,7 +59,7 @@
 //! user's decision, taken in the view or by following `mount.toml`; the host
 //! checks the running plugin's manifest again.
 //!
-//! Configuration: `{ "dir": ".rah/plugins", "python": "python", "node":
+//! Configuration: `{ "dir": "plugins", "python": "python", "node":
 //! "node", "max_files": 16, "max_file_bytes": 131072 }`. `python` and `node`
 //! are the programs `mount.toml` starts. On each save they are looked up on
 //! `PATH` (and a Python the configuration does not name also among uv's
@@ -179,7 +179,7 @@ impl PluginBuilderPlugin {
     }
 
     /// An example configuration for reference: the defaults.
-    pub const CONFIG_EXAMPLE: &str = r#"{ "dir": ".rah/plugins", "python": "python", "node": "node", "max_files": 16, "max_file_bytes": 131072 }"#;
+    pub const CONFIG_EXAMPLE: &str = r#"{ "dir": "plugins", "python": "python", "node": "node", "max_files": 16, "max_file_bytes": 131072 }"#;
 }
 
 #[derive(Default, Deserialize)]
@@ -278,7 +278,7 @@ impl Plugin for PluginBuilderPlugin {
         let builder = Arc::new(Builder {
             kernel: scope.kernel(),
             instance: scope.id().to_string(),
-            store: Store::new(config.dir.unwrap_or_else(|| PathBuf::from(".rah/plugins"))),
+            store: Store::new(config.dir.unwrap_or_else(|| PathBuf::from("plugins"))),
             python_named: config.python.is_some(),
             python: config.python.unwrap_or_else(|| default_python.to_owned()),
             node: config.node.unwrap_or_else(|| "node".to_owned()),

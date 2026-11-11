@@ -362,6 +362,11 @@ config = { program = "python", args = ["examples/process-plugins/word_tools.py"]
 process plugin in Python or Node.js (standard library only) with
 `plugin-builder`. `plugins.save` checks it and writes it to `plugins/<name>/`
 in the data directory. Saving asks first and never mounts or runs anything.
+The builder's `dir` defaults to `plugins`; relative values are resolved against
+the data directory. With the normal `~/.rah` data home, use `dir = "plugins"`
+or omit it. `dir = ".rah/plugins"` explicitly selects `~/.rah/.rah/plugins`.
+Changing `dir` does not move saved plugins or update existing process mounts;
+back up the configuration and migrate those paths together when relocating.
 You manage them in the **My plugins** panel of the Web UI
 (`plugin-builder/plugins`, [ADR 0073](adr/0073-personal-plugins-managed-from-their-panel.md)),
 without editing `rah.toml` or restarting:
