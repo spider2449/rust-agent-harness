@@ -28,6 +28,8 @@ pub(crate) struct Settings {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
+    /// A per-request template setting for servers such as llama.cpp.
+    pub enable_thinking: Option<bool>,
     /// Whether the server is on this machine: no proxy is used.
     pub loopback: bool,
 }
@@ -155,6 +157,12 @@ impl ChatCompletionsModel {
         }
         if let Some(temperature) = self.settings.temperature {
             body.insert("temperature".into(), temperature.into());
+        }
+        if let Some(enable_thinking) = self.settings.enable_thinking {
+            body.insert(
+                "chat_template_kwargs".into(),
+                json!({"enable_thinking": enable_thinking}),
+            );
         }
         Ok(body.into())
     }

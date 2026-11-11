@@ -184,6 +184,7 @@ fn settings(server: &Server, model: Option<&str>) -> Settings {
         model: model.map(str::to_owned),
         max_tokens: None,
         temperature: None,
+        enable_thinking: None,
         loopback,
     }
 }
@@ -212,6 +213,46 @@ fn text(events: &[ModelEvent]) -> String {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn thinking_template_parameter_is_sent_only_when_configured() {
+    for mode in [None, Some(false), Some(true)] {
+        let server = Server::new(vec![Reply::Sse(text_reply("ok"))]).await;
+        let mut configured = settings(&server, Some("local-model"));
+        configured.enable_thinking = mode;
+        let events = collect(&model(configured), request(user("hello"), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(text(&events), "ok");
+        let requests = server.requests();
+        match mode {
+            Some(mode) => assert_eq!(
+                requests[0].1["chat_template_kwargs"],
+                json!({"enable_thinking": mode})
+            ),
+            None => assert!(requests[0].1.get("chat_template_kwargs").is_none()),
+        }
+    }
+}
+
+#[test]
+fn thinking_configuration_is_typed_and_preserves_the_server_default() {
+    for mode in [json!(false), json!(true)] {
+        let config: Config =
+            serde_json::from_value(json!({"provider":"llamacpp", "enable_thinking":mode})).unwrap();
+        assert_eq!(config.resolve().unwrap().0.enable_thinking, mode.as_bool());
+    }
+    let default: Config = serde_json::from_value(json!({"provider":"llamacpp"})).unwrap();
+    assert_eq!(default.resolve().unwrap().0.enable_thinking, None);
+    for invalid in [json!("false"), json!(0), json!({}), json!([])] {
+        assert!(
+            serde_json::from_value::<Config>(
+                json!({"provider":"llamacpp", "enable_thinking":invalid})
+            )
+            .is_err()
+        );
+    }
 }
 
 #[tokio::test]
@@ -434,6 +475,7 @@ async fn an_unreachable_server_is_a_transport_error() {
         model: Some("m".into()),
         max_tokens: None,
         temperature: None,
+        enable_thinking: None,
         loopback,
     });
     let error = collect(&model, request(user("x"), Vec::new()))
@@ -628,6 +670,7 @@ async fn health_reports_reachable_unauthorized_and_down_servers() {
         model: None,
         max_tokens: None,
         temperature: None,
+        enable_thinking: None,
         loopback,
     });
     assert!(matches!(

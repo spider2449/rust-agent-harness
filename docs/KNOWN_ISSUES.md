@@ -4,6 +4,53 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## llama.cpp: disabling thinking can add unnecessary tool calls
+
+- **Seen:** 2026-11-11 with ornith-1.5-35b-Q4_K_M.gguf and the optional
+  Chat Completions `enable_thinking = false` configuration.
+- **Symptom:** a synthetic read-only task explicitly asking for one `fs.read`
+  and no other tools instead requested `echo` followed by `fs.read`. The answer
+  contained the correct verification code, but the exact tool-plan assertion
+  failed in `live_loopback_thinking_mode_comparison`.
+- **Measurement:** the initial live comparison failed after 70.83 seconds at
+  that assertion. The ignored comparison now records answer correctness and
+  exact tool-plan adherence for every probe instead of stopping at a quality
+  mismatch. A completed benchmark does not mean all quality probes passed.
+- **Follow-up:** a complete rerun passed all four answer/tool-plan probes for
+  both modes. This does not erase the first observed extra tool call; it shows
+  that the behavior is not consistent across these limited live samples.
+- **Broader evaluation:** four work-like synthetic tasks in on/off/off/on
+  order (16 turns) passed all strict answer/tool/completion checks for 8/8
+  enabled samples and 0/8 disabled samples. Disabled samples included an
+  unnecessary `echo`, Markdown instead of required JSON, a wrong timeout
+  calculation and one non-timeout incomplete turn. This is a small task set,
+  not a population-wide failure rate. See
+  `docs/plans/2026-11-11-llm-task-evaluation.md`.
+- **Open:** measure representative user tasks before selecting this mode.
+  Thinking remains unchanged by default, and existing user configuration is
+  never automatically switched. Disabling it is not a guaranteed speedup.
+  See `docs/plans/2026-11-11-optional-thinking-mode.md`.
+
+## llama.cpp: model template changes cached prefixes across user turns
+
+- **Seen:** 2026-11-11 with ornith-1.5-35b-Q4_K_M.gguf on the local
+  llama-server, using RAH's Chat Completions plugin.
+- **Symptom:** a follow-up request with 5363 input tokens reused only 2454
+  tokens after the preceding tool-result request had 5331 input tokens.
+  The follow-up took 13.03 seconds despite executing no tools.
+- **Confirmed:** the served chat template inserts empty `<think>` blocks for
+  assistant messages after `last_query_index`, and omits them for messages
+  before it. Adding a user message moves this boundary. `/apply-template`
+  reproduced a prefix change at an earlier assistant tool-call message with
+  otherwise unchanged synthetic history. The exact share of elapsed time
+  attributable to this template behavior has not been isolated.
+- **Scope:** model-template/cache behavior, not evidence that RAH reordered
+  the same history. Reasoning content is deliberately not persisted by RAH.
+- **Open:** compare a user-selected template or an explicitly opted-in
+  reasoning mode for both cache reuse and answer/tool quality. Do not change
+  the server template, replay reasoning text or disable reasoning automatically.
+  Measurement: `docs/plans/2026-11-11-rah-turn-latency.md`.
+
 ## Windows: sandbox test cannot create a low-integrity token
 
 - **Seen:** 2026-11-11 in the managed Windows development environment while

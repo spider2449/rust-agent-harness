@@ -30,7 +30,9 @@ impl Sse {
             }
             if byte == b'\r' || byte == b'\n' {
                 self.cr = byte == b'\r';
-                if let Some(event) = self.end_line()? {
+                let event = self.end_line();
+                self.line.clear();
+                if let Some(event) = event? {
                     events.push(event);
                 }
             } else {
@@ -41,8 +43,7 @@ impl Sse {
     }
 
     fn end_line(&mut self) -> Result<Option<Value>, E> {
-        let bytes = std::mem::take(&mut self.line);
-        let line = std::str::from_utf8(&bytes).map_err(|_| E::Sse)?;
+        let line = std::str::from_utf8(&self.line).map_err(|_| E::Sse)?;
         if line.is_empty() {
             self.size = 0;
             if self.data.is_empty() {
@@ -89,6 +90,24 @@ impl Sse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repeated_events_reuse_buffers() {
+        let mut sse = Sse::default();
+        let body = b"event: a\ndata: {\"type\":\"a\",\"text\":\"hello\"}\n\n";
+        let expected = vec![json!({"type":"a","text":"hello"})];
+        assert_eq!(sse.push(body).unwrap(), expected);
+        let capacities = (sse.line.capacity(), sse.data.capacity());
+        assert!(capacities.0 >= body.split(|b| *b == b'\n').map(<[u8]>::len).max().unwrap());
+        assert!(capacities.1 > 0);
+        for _ in 0..100 {
+            assert_eq!(sse.push(body).unwrap(), expected);
+            assert!(sse.line.is_empty());
+            assert!(sse.data.is_empty());
+            assert_eq!((sse.line.capacity(), sse.data.capacity()), capacities);
+        }
+        sse.finish().unwrap();
+    }
 
     #[test]
     fn all_chunk_boundaries_and_line_endings_frame_identically() {

@@ -976,6 +976,50 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     assert_eq!(page.eval("shown(byId('notice'))").await, false);
 
+    // Streaming fragments remain literal text and keep the existing text node.
+    let fragments = page
+        .eval(
+            "(() => { setRunning(false); showLive('first'); \
+             const live = byId('live'); const original = live.firstChild; \
+             for (let i = 0; i < 1000; i++) showLive('中😀<b>x</b>'); \
+             const result = { exact: live.textContent === 'first' + '中😀<b>x</b>'.repeat(1000), \
+               reused: live.firstChild === original && live.childNodes.length === 1, \
+               literal: live.querySelector('b') === null }; \
+             setRunning(false); result.cleared = live.childNodes.length === 0 && live.hidden; \
+             showLive('next'); result.nextTurn = live.textContent === 'next'; \
+             setRunning(false); return result; })()",
+        )
+        .await;
+    assert_eq!(
+        fragments,
+        json!({ "exact": true, "reused": true, "literal": true, "cleared": true, "nextTurn": true })
+    );
+
+    // Compare DOM mutation cost only; timing is diagnostic, never a test gate.
+    let mutation_cost = page
+        .eval(
+            "(() => { const fragment = 'x'.repeat(64); const count = 3000; \
+             const measure = (append) => { const box = document.createElement('pre'); \
+               box.append(document.createTextNode('')); let text = ''; \
+               const start = performance.now(); \
+               for (let i = 0; i < count; i++) { \
+                 if (append) box.firstChild.appendData(fragment); \
+                 else { text += fragment; box.textContent = text; } \
+               } \
+               const ms = performance.now() - start; \
+               if (box.textContent !== fragment.repeat(count)) throw Error('lost fragment'); \
+               return ms; }; \
+             measure(false); measure(true); \
+             const replacement = []; const append = []; \
+             for (let i = 0; i < 3; i++) { \
+               if (i % 2) { append.push(measure(true)); replacement.push(measure(false)); } \
+               else { replacement.push(measure(false)); append.push(measure(true)); } \
+             } \
+             return { fragments: count, fragmentBytes: fragment.length, replacementMs: replacement, appendMs: append }; })()",
+        )
+        .await;
+    eprintln!("live output DOM mutation comparison: {mutation_cost}");
+
     // Long streaming output scrolls inside the conversation: the page does not
     // grow and the status line stays at the bottom of the window.
     let layout = page
@@ -988,12 +1032,14 @@ async fn the_web_ui_works_in_a_real_browser() {
                statusAtBottom: Math.abs(byId('status').getBoundingClientRect().bottom - innerHeight) < 2, \
                followsOutput: live.scrollHeight - live.scrollTop - live.clientHeight < 2, \
              }; \
+             live.scrollTop = 0; showLive('more\\n'); \
+             result.preservesScroll = live.scrollTop === 0; \
              setRunning(false); return result; })()",
         )
         .await;
     assert_eq!(
         layout,
-        json!({ "pageFits": true, "pageFitsWidth": true, "statusAtBottom": true, "followsOutput": true })
+        json!({ "pageFits": true, "pageFitsWidth": true, "statusAtBottom": true, "followsOutput": true, "preservesScroll": true })
     );
 
     // Add a plugin, then remove it after the confirmation.

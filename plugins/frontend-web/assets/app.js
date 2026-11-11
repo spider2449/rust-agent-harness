@@ -18,7 +18,6 @@ const state = {
   prefs: { raw_markdown: false },
   // `GET /api/groups`: the API groups (tools-http instances): `{id, label, active}`.
   groups: [],
-  liveText: "",
   retry: 500,
   // Last seen model and loop providers, to announce a switch.
   providers: {},
@@ -675,7 +674,7 @@ function setRunning(running) {
   if (running && !was) startBusy();
   if (!running) {
     stopBusy();
-    state.liveText = "";
+    $("live").replaceChildren();
     $("live").hidden = true;
   }
 }
@@ -753,11 +752,12 @@ function busyEvent(event) {
 }
 
 function showLive(text) {
-  state.liveText += text;
   const live = $("live");
   // Follow the output unless the user scrolled up to read.
   const following = live.hidden || live.scrollHeight - live.scrollTop - live.clientHeight < 24;
-  live.textContent = state.liveText;
+  // Append only the new fragment instead of copying the entire response.
+  if (live.lastChild) live.lastChild.appendData(text);
+  else live.append(document.createTextNode(text));
   live.hidden = false;
   if (following) live.scrollTop = live.scrollHeight;
 }

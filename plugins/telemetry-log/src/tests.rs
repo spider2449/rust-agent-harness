@@ -170,6 +170,48 @@ fn json_of(records: &[Record]) -> Vec<Value> {
 }
 
 #[test]
+fn repeated_progress_keeps_the_first_reasoning_and_text_times() {
+    let session = SessionId::new();
+    let model = ModelRequestId::new();
+    let events = [
+        AgentEvent::Started {
+            session_id: session.clone(),
+            request_id: RequestId::new(),
+        },
+        AgentEvent::ModelRequestStarted {
+            session_id: session.clone(),
+            model_request_id: model.clone(),
+        },
+        AgentEvent::ModelReasoningStarted {
+            session_id: session.clone(),
+            model_request_id: model.clone(),
+        },
+        AgentEvent::ModelReasoningStarted {
+            session_id: session.clone(),
+            model_request_id: model.clone(),
+        },
+        AgentEvent::ModelDelta {
+            session_id: session.clone(),
+            model_request_id: model.clone(),
+            delta: "private answer text".into(),
+        },
+        AgentEvent::ModelDelta {
+            session_id: session.clone(),
+            model_request_id: model,
+            delta: "more private text".into(),
+        },
+        AgentEvent::Cancelled {
+            session_id: session,
+        },
+    ];
+    let records = json_of(&track(false, &events));
+    assert_eq!(records[0]["first_reasoning_ms"], 10);
+    assert_eq!(records[0]["first_text_ms"], 30);
+    assert_eq!(records[0]["duration_ms"], 50);
+    assert!(!serde_json::to_string(&records).unwrap().contains("private"));
+}
+
+#[test]
 fn a_turn_yields_model_tool_and_turn_records() {
     let session = SessionId::new();
     let records = json_of(&track(false, &turn_events(&session)));
@@ -191,6 +233,7 @@ fn a_turn_yields_model_tool_and_turn_records() {
     );
     let first = &records[0];
     assert_eq!(first["reasoning"], true);
+    assert_eq!(first["first_reasoning_ms"], 10);
     assert_eq!(first["input_tokens"], 100);
     assert_eq!(first["cached_input_tokens"], 40);
     assert_eq!(first["duration_ms"], 30);
@@ -215,6 +258,7 @@ fn a_turn_yields_model_tool_and_turn_records() {
     let second = &records[5];
     assert_eq!(second["first_text_ms"], 10);
     assert_eq!(second["reasoning"], false);
+    assert!(second.get("first_reasoning_ms").is_none());
     assert!(second.get("cached_input_tokens").is_none());
 
     let turn = &records[6];

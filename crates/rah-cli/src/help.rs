@@ -217,6 +217,10 @@ pub fn fallback(kind: &str) -> Help {
             ),
             ("max_tokens", "Most tokens in one reply (8192)."),
             ("temperature", "Sampling temperature (0.7)."),
+            (
+                "enable_thinking",
+                "Optional thinking toggle for compatible templates (such as llama.cpp); unset uses the server default. Disabling can reduce answer quality.",
+            ),
         ],
         "model-llamacpp" => &[
             (

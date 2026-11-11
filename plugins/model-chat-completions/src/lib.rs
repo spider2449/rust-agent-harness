@@ -30,6 +30,11 @@
 //! Without a model, `<base_url>/models` is asked on the first request and its
 //! sole model is used.
 //!
+//! `enable_thinking`, when set, sends `chat_template_kwargs.enable_thinking`
+//! for compatible servers such as llama.cpp. Unset leaves the server default.
+//! Disabling thinking can reduce latency and answer quality; support depends
+//! on the server and model template.
+//!
 //! Requests stream with `stream_options.include_usage` and are never retried.
 //! Reasoning (`reasoning_content` or `reasoning`) is reported as a signal and
 //! not replayed, because neutral context does not carry it. Images in tool
@@ -187,6 +192,7 @@ struct Config {
     api_key_env: Option<String>,
     max_tokens: Option<u32>,
     temperature: Option<f64>,
+    enable_thinking: Option<bool>,
 }
 
 impl Config {
@@ -237,6 +243,7 @@ impl Config {
             model,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            enable_thinking: self.enable_thinking,
             loopback,
         };
         // A required key is always sent; an optional one is checked when it

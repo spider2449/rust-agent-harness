@@ -412,6 +412,10 @@ session.
 The `telemetry` feature (`telemetry-log`) writes one JSON line per turn, model request
 and tool call to `~/.rah/telemetry/<date>.jsonl`, with durations, policy
 decisions and token usage, never message text or tool output (ADR 0040).
+Model-request records include `first_text_ms` and, when reasoning is signalled,
+`first_reasoning_ms`, each measured from the request-start event. Compare them
+to distinguish time waiting for provider progress from time waiting for visible
+text. They include any request retries; they are not server-only inference times.
 
 The `lsp` feature tells a language server about every file a write tool
 changed and appends the errors to the tool's output (ADR 0048): it tries
@@ -447,6 +451,26 @@ including the local network, but a key is sent only over HTTPS or to
 loopback, so it never crosses the network in clear text. Reasoning is not sent
 back in later requests, so a thinking model that requires it between tool
 calls may reject the request.
+
+For llama.cpp or another server/template supporting
+`chat_template_kwargs.enable_thinking`, `model-chat-completions` accepts the
+optional boolean `enable_thinking`. Leave it unset to use the server's default.
+For example, explicitly opt out of thinking for local Chat Completions requests:
+
+```toml
+model = "openai-compatible"
+
+[model_options]
+base_url = "http://127.0.0.1:8080/v1"
+enable_thinking = false
+```
+
+This can reduce generated reasoning and response latency, but can lower answer
+or tool-use quality. It is not a general guarantee of a fast response and does
+not fix template-driven history/cache changes. Support depends on the server
+and model template; other servers may ignore or reject it. This option applies
+to the Chat Completions plugin, not `model = "llamacpp"` (the Responses plugin).
+It changes the individual request, not global server properties.
 
 `model-anthropic` also takes `max_tokens`, `effort` (`low` to `max`) and
 `refusal_fallback`. Without an Anthropic key it can run against

@@ -38,7 +38,9 @@ impl Sse {
             }
             if byte == b'\r' || byte == b'\n' {
                 self.cr = byte == b'\r';
-                if let Some(frame) = self.end_line()? {
+                let frame = self.end_line();
+                self.line.clear();
+                if let Some(frame) = frame? {
                     frames.push(frame);
                 }
             } else {
@@ -49,20 +51,22 @@ impl Sse {
     }
 
     fn end_line(&mut self) -> Result<Option<Frame>, E> {
-        let bytes = std::mem::take(&mut self.line);
-        let line = std::str::from_utf8(&bytes).map_err(|_| E::Sse)?;
+        let line = std::str::from_utf8(&self.line).map_err(|_| E::Sse)?;
         if line.is_empty() {
             self.size = 0;
             if self.data.is_empty() {
                 return Ok(None);
             }
-            let data = std::mem::take(&mut self.data);
-            let data = data.trim_end_matches('\n');
-            if data.trim() == "[DONE]" {
-                return Ok(Some(Frame::Done));
-            }
-            let chunk = serde_json::from_str(data).map_err(|_| E::ChunkJson)?;
-            return Ok(Some(Frame::Chunk(chunk)));
+            let data = self.data.trim_end_matches('\n');
+            let frame = if data.trim() == "[DONE]" {
+                Ok(Frame::Done)
+            } else {
+                serde_json::from_str(data)
+                    .map(Frame::Chunk)
+                    .map_err(|_| E::ChunkJson)
+            };
+            self.data.clear();
+            return frame.map(Some);
         }
         if line.starts_with(':') {
             return Ok(None);
@@ -88,6 +92,26 @@ impl Sse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repeated_events_and_done_reuse_buffers() {
+        let mut sse = Sse::default();
+        let body = b"data: {\"text\":\"hello\"}\n\n";
+        let expected = vec![Frame::Chunk(json!({"text":"hello"}))];
+        assert_eq!(sse.push(body).unwrap(), expected);
+        let capacities = (sse.line.capacity(), sse.data.capacity());
+        assert!(capacities.0 >= body.len() - 2);
+        assert!(capacities.1 > 0);
+        for _ in 0..100 {
+            assert_eq!(sse.push(body).unwrap(), expected);
+            assert!(sse.line.is_empty());
+            assert!(sse.data.is_empty());
+            assert_eq!((sse.line.capacity(), sse.data.capacity()), capacities);
+        }
+        assert_eq!(sse.push(b"data: [DONE]\n\n").unwrap(), [Frame::Done]);
+        assert_eq!((sse.line.capacity(), sse.data.capacity()), capacities);
+        sse.finish().unwrap();
+    }
 
     #[test]
     fn all_chunk_boundaries_and_line_endings_frame_identically() {

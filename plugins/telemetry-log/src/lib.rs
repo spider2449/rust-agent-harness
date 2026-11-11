@@ -6,8 +6,8 @@
 //!
 //! - `turn`: outcome (`completed`, `failed`, `cancelled`), error code and
 //!   message, duration, model requests, tool calls and summed token usage;
-//! - `model_request`: duration, time to the first text, whether the model
-//!   reasoned, and the token usage the provider reported;
+//! - `model_request`: duration, time to the first reasoning signal and text,
+//!   whether the model reasoned, and the token usage the provider reported;
 //! - `tool`: tool name, decision (`allowed`, `approved`, `denied`,
 //!   `rejected`), duration and whether the output was an error.
 //!
@@ -192,6 +192,8 @@ pub enum Record {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         first_text_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_reasoning_ms: Option<u64>,
         reasoning: bool,
         #[serde(skip_serializing_if = "is_zero")]
         retries: u32,
@@ -224,6 +226,7 @@ struct ModelState {
     id: ModelRequestId,
     started: Instant,
     first_text: Option<Duration>,
+    first_reasoning: Option<Duration>,
     reasoning: bool,
     retries: u32,
     tokens: Tokens,
@@ -298,6 +301,7 @@ impl Tracker {
             model_request: model.id,
             duration_ms: millis(now.saturating_duration_since(model.started)),
             first_text_ms: model.first_text.map(millis),
+            first_reasoning_ms: model.first_reasoning.map(millis),
             reasoning: model.reasoning,
             retries: model.retries,
             tokens: model.tokens,
@@ -335,6 +339,7 @@ impl Tracker {
                         id: model_request_id.clone(),
                         started: now,
                         first_text: None,
+                        first_reasoning: None,
                         reasoning: false,
                         retries: 0,
                         tokens: Tokens::default(),
@@ -372,6 +377,9 @@ impl Tracker {
                     .and_then(|turn| turn.model.as_mut())
                 {
                     model.reasoning = true;
+                    model
+                        .first_reasoning
+                        .get_or_insert_with(|| now.saturating_duration_since(model.started));
                 }
             }
             AgentEvent::ModelUsage {
