@@ -677,6 +677,46 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .panel-ids div { margin: 2px 0; }
 .editor-help dt { font-family: ui-monospace, Consolas, monospace;color: var(--text); margin-top: 6px; }
 .editor-help dd { margin: 2px 0 0 12px; }
+
+/* One workspace is shared by the side panel and the Settings dialog. */
+.plugin-workspace { font-size: 13px; min-width: 0; }
+.view-row-select { border: none; background: transparent; color: var(--accent); padding: 4px 0; text-align: left; font: inherit; cursor: pointer; }
+.view-row-select:hover { text-decoration: underline; }
+.view-table td:first-child:has(.view-row-select) { white-space: nowrap; }
+.plugin-layout { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr); gap: 18px; }
+.plugin-list { min-width: 0; overflow: auto; }
+#plugin-search { box-sizing: border-box; width: 100%; margin-bottom: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.plugin-detail { min-width: 0; }
+.plugin-select { border: none; background: transparent; text-align: left; color: inherit; padding: 4px; overflow-wrap: anywhere; }
+.plugin-select:hover, .plugin-select.current, tr.selected { background: var(--tool); }
+#plugin-pages { display: flex; flex-direction: column; margin-bottom: 12px; }
+.plugin-workspace table { width: 100%; border-collapse: collapse; }
+.plugin-workspace td, .plugin-workspace th { text-align: left; padding: 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#plugin-summary .row-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+#plugin-summary .row-actions button { font-size: 12px; padding: 2px 6px; }
+.plugin-field { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; }
+.editor .plugin-field-heading { display: flex; flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
+.plugin-field input[type="checkbox"] { align-self: flex-start; }
+.plugin-field > .hint { margin: 0; }
+.dialog.settings.plugin-settings { width: min(1080px, calc(100vw - 32px)); height: calc(100vh - 64px); }
+.plugin-settings #settings-body { display: flex; flex-direction: column; overflow: hidden; padding-right: 0; }
+.plugin-settings .plugin-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.plugin-settings .plugin-layout { flex: 1; min-height: 0; overflow: hidden; }
+.plugin-settings .plugin-detail { overflow-y: auto; padding-right: 4px; }
+.plugin-settings #plugin-search { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.plugin-workspace > .panel-head, #plugin-message, .plugin-workspace > details { flex-shrink: 0; }
+.plugin-settings #expand-plugins { display: none; }
+.plugins .plugin-layout { grid-template-columns: 1fr; }
+.plugins .plugin-list { max-height: 240px; }
+.plugin-workspace .kind { display: block; color: var(--muted); font-size: 12px; }
+.plugin-workspace .personal-tag { margin-left: 6px; font-size: 11px; color: var(--personal); }
+.plugin-workspace tr.personal td:first-child { border-left: 3px solid var(--personal); color: var(--personal); }
+@media (max-width: 640px) {
+  .plugin-layout { grid-template-columns: 1fr; }
+  .plugin-list { max-height: 180px; }
+  .plugin-settings .plugin-layout { grid-template-rows: minmax(80px, 160px) minmax(0, 1fr); gap: 10px; }
+  #settings-tabs { overflow-x: auto; flex-shrink: 0; }
+}
 .activity.wrap li { white-space: normal; align-items: flex-start; }
 .activity.wrap li .text { overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 button.toggle { padding: 1px 8px; font-size: 12px; }

@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0",
+  "requires": ["storage"],
+  "tools": [{
+    "name": "scratch-note.read",
+    "description": "Reads the note saved by this plugin.",
+    "input_schema": { "type": "object", "properties": {}, "additionalProperties": false },
+    "permission": "read"
+  }, {
+    "name": "scratch-note.write",
+    "description": "Replaces this plugin's saved note with a short text.",
+    "input_schema": {
+      "type": "object",
+      "properties": { "text": { "type": "string", "maxLength": 2000 } },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "permission": "write"
+  }]
+}

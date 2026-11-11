@@ -184,14 +184,14 @@ window. Nodes are objects with a `type`:
 | `heading`, `text` | `text` |
 | `markdown` | `text`; no raw HTML, no images, only `http(s)` and `mailto` links |
 | `key_value` | `items`: `[{key, value}]` |
-| `table` | `columns`: `[string]`, `rows`: `[[string]]` |
+| `table` | `columns`: `[string]`, `rows`: `[[string]]`; optional `row_actions`: `[string or null]`, aligned with rows. Selecting a row's first cell invokes its action with null input (ADR 0077). |
 | `list` | `items`: `[string]` |
 | `button` | `action`, `label` |
 | `form` | `action`, `submit` (button label), `fields`: `[{name, label, kind?, value?, options?}]`, `kind` one of `text` (default), `number`, `boolean`, `choice` |
 
 An unknown type or field makes the view malformed. The page builds a view
 with text only, never as HTML, and refuses one over 2000 nodes (each table
-cell, list item and field counts) or 256 KiB.
+cell, row-action entry, list item and field counts) or 256 KiB.
 
 ### `views/act` (request)
 

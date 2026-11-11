@@ -2,8 +2,8 @@
 // (model, context, policy, loop), and display preferences. Each form starts from the plugin's current
 // configuration, changes only its own fields and saves through
 // `/api/settings/{slot}`, so options it does not show are kept and the
-// result is written to the configuration file for the next start. Other plugins stay
-// in the Plugins panel's JSON editor.
+// result is written to the configuration file for the next start. Every plugin
+// is also available in the shared Plugins workspace.
 "use strict";
 
 const MODEL_KINDS = {
@@ -583,9 +583,13 @@ function sections(...parts) {
   return page;
 }
 
-// Four tabs: what runs (model and how it works), what it is told, what it
-// may do, and extras with the look of the page.
+// The shared plugin workspace and task-oriented shortcuts over its settings.
 const FORMS = {
+  plugins: () => {
+    const workspace = $("plugin-workspace");
+    loadCatalog().then(() => loadPlugins()).catch(report);
+    return workspace;
+  },
   model: () => sections(["Model", modelForm], ["How the assistant works", loopForm]),
   assistant: assistantForm,
   tools: toolsForm,
@@ -593,6 +597,8 @@ const FORMS = {
 };
 
 function renderSettings() {
+  restorePluginWorkspace();
+  $("settings-dialog").classList.toggle("plugin-settings", settings.tab === "plugins");
   for (const button of document.querySelectorAll("#settings-tabs button")) {
     button.classList.toggle("current", button.dataset.tab === settings.tab);
     button.setAttribute("aria-selected", String(button.dataset.tab === settings.tab));
@@ -600,6 +606,12 @@ function renderSettings() {
   // The tab's forms add their save buttons to the header again.
   $("settings-actions").replaceChildren();
   $("settings-body").replaceChildren(FORMS[settings.tab]());
+}
+
+// A single editor and draft is shared with the layout's Plugins panel.
+function restorePluginWorkspace() {
+  const workspace = $("plugin-workspace");
+  if (workspace.parentElement !== $("plugins-panel")) $("plugins-panel").append(workspace);
 }
 
 async function reloadSettings() {
@@ -633,6 +645,7 @@ async function openSettings(tab) {
 function setupSettings() {
   $("open-settings").addEventListener("click", () => openSettings());
   $("settings-close").addEventListener("click", () => $("settings-dialog").close());
+  $("settings-dialog").addEventListener("close", restorePluginWorkspace);
   for (const button of document.querySelectorAll("#settings-tabs button")) {
     button.addEventListener("click", () => {
       settings.tab = button.dataset.tab;

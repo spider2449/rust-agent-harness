@@ -126,6 +126,7 @@ impl Totals {
         ];
         if !tools.is_empty() {
             nodes.push(Node::Table {
+                row_actions: Vec::new(),
                 columns: ["Tool", "Calls", "Errors", "Not run"]
                     .map(str::to_owned)
                     .to_vec(),

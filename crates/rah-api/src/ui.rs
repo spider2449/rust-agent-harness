@@ -118,8 +118,8 @@ pub const UI_VIEWS_SERVICE: &str = "ui-views";
 /// them all with `get_all`.
 pub const UI_VIEWS: ServiceKey<dyn UiViews> = ServiceKey::new(UI_VIEWS_SERVICE);
 
-/// The most nodes a view holds, counting every table cell, list item and
-/// form field.
+/// The most nodes a view holds, counting every table cell, row action,
+/// list item and form field.
 pub const MAX_VIEW_NODES: usize = 2000;
 /// The largest view, serialized as JSON.
 pub const MAX_VIEW_BYTES: usize = 256 * 1024;
@@ -202,6 +202,10 @@ pub enum Node {
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
+        /// Optional actions aligned with rows. Selecting the first cell runs
+        /// its action with null input; `None` leaves that row as plain text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        row_actions: Vec<Option<String>>,
     },
     List {
         items: Vec<String>,
@@ -263,14 +267,18 @@ pub enum FieldKind {
 }
 
 impl View {
-    /// The number of nodes, counting every table cell, list item and field.
+    /// The number of nodes, counting every table cell, row action, list item and field.
     pub fn size(&self) -> usize {
         self.nodes
             .iter()
             .map(|node| match node {
                 Node::KeyValue { items } => 1 + items.len(),
-                Node::Table { columns, rows } => {
-                    1 + columns.len() + rows.iter().map(Vec::len).sum::<usize>()
+                Node::Table {
+                    columns,
+                    rows,
+                    row_actions,
+                } => {
+                    1 + columns.len() + rows.iter().map(Vec::len).sum::<usize>() + row_actions.len()
                 }
                 Node::List { items } => 1 + items.len(),
                 Node::Form { fields, .. } => 1 + fields.len(),
@@ -281,6 +289,28 @@ impl View {
 
     /// Refuses a view over [`MAX_VIEW_NODES`] nodes or [`MAX_VIEW_BYTES`].
     pub fn check(&self) -> Result<(), UiError> {
+        for node in &self.nodes {
+            if let Node::Table {
+                rows, row_actions, ..
+            } = node
+            {
+                if !row_actions.is_empty() && row_actions.len() != rows.len() {
+                    return Err(UiError::InvalidInput(
+                        "table row actions must match its rows".into(),
+                    ));
+                }
+                for (row, action) in rows.iter().zip(row_actions) {
+                    if let Some(action) = action
+                        && (action.trim().is_empty()
+                            || row.first().is_none_or(|name| name.trim().is_empty()))
+                    {
+                        return Err(UiError::InvalidInput(
+                            "an actionable row needs a name and action".into(),
+                        ));
+                    }
+                }
+            }
+        }
         let nodes = self.size();
         if nodes > MAX_VIEW_NODES {
             return Err(UiError::TooLarge(format!(
@@ -445,6 +475,7 @@ mod tests {
                 Node::Table {
                     columns: ids(&["tool", "calls"]),
                     rows: vec![ids(&["echo", "1"]), ids(&["fs.read", "3"])],
+                    row_actions: Vec::new(),
                 },
                 Node::Button {
                     action: "reset".into(),
@@ -483,6 +514,45 @@ mod tests {
             }],
         };
         assert!(matches!(big.check(), Err(UiError::TooLarge(_))));
+    }
+
+    #[test]
+    fn table_row_actions_are_optional_bounded_and_aligned() {
+        let plain = serde_json::json!({ "nodes": [{
+            "type": "table", "columns": ["Plugin"], "rows": [["example"]]
+        }] });
+        let view: View = serde_json::from_value(plain.clone()).unwrap();
+        assert!(view.check().is_ok());
+        assert_eq!(serde_json::to_value(view).unwrap(), plain);
+        let mut selected = plain;
+        selected["nodes"][0]["row_actions"] = serde_json::json!(["details:example"]);
+        let view: View = serde_json::from_value(selected.clone()).unwrap();
+        assert!(view.check().is_ok());
+        assert_eq!(view.size(), 4);
+        assert_eq!(serde_json::to_value(&view).unwrap(), selected);
+        for actions in [serde_json::json!(["a", "b"]), serde_json::json!([""])] {
+            selected["nodes"][0]["row_actions"] = actions;
+            assert!(matches!(
+                serde_json::from_value::<View>(selected.clone())
+                    .unwrap()
+                    .check(),
+                Err(UiError::InvalidInput(_))
+            ));
+        }
+        selected["nodes"][0]["rows"] = serde_json::json!([[]]);
+        selected["nodes"][0]["row_actions"] = serde_json::json!(["select"]);
+        assert!(matches!(
+            serde_json::from_value::<View>(selected).unwrap().check(),
+            Err(UiError::InvalidInput(_))
+        ));
+        let large = View {
+            nodes: vec![Node::Table {
+                columns: vec!["Plugin".into()],
+                rows: vec![vec!["example".into()]; MAX_VIEW_NODES / 2],
+                row_actions: vec![Some("select".into()); MAX_VIEW_NODES / 2],
+            }],
+        };
+        assert!(matches!(large.check(), Err(UiError::TooLarge(_))));
     }
 
     #[test]

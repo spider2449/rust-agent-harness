@@ -130,18 +130,37 @@
         </div>
       </div>
       <div id="plugins-panel" class="plugins" role="tabpanel" aria-label="Plugins" hidden>
+        <div id="plugin-workspace" class="plugin-workspace">
         <div class="panel-head">
           <h2>Plugins</h2>
           <span>
+            <button id="expand-plugins" type="button" class="ghost">Open settings</button>
             <button id="add-plugin" type="button" class="ghost">Add</button>
             <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
           </span>
         </div>
+        <div id="plugin-message" class="settings-message" role="status" hidden></div>
+        <div class="plugin-layout">
+        <nav class="plugin-list" aria-label="Plugin selection">
+          <input id="plugin-search" type="search" aria-label="Search plugins" placeholder="Search plugins">
+          <div id="plugin-pages"></div>
+          <table>
+            <thead><tr><th>Plugin</th><th>State</th></tr></thead>
+            <tbody id="plugins"></tbody>
+          </table>
+          <p id="plugin-empty" class="hint" hidden>No matching plugins or pages.</p>
+        </nav>
+        <div class="plugin-detail">
+        <div id="plugin-summary"></div>
         <form id="editor" class="editor" hidden>
           <h3 id="editor-title"></h3>
           <label id="editor-kind-row">Kind <select id="editor-kind"></select></label>
           <label id="editor-id-row">Name (id) <input id="editor-id" placeholder="defaults to the kind"></label>
-          <label>Configuration (JSON)
+          <label>Editor
+            <select id="editor-format"><option value="fields">Fields</option><option value="json">Advanced JSON</option></select>
+          </label>
+          <div id="editor-fields"></div>
+          <label id="editor-json-row" hidden>Configuration (JSON)
             <textarea id="editor-config" rows="6" spellcheck="false"></textarea>
           </label>
           <details id="editor-help" class="editor-help" open hidden>
@@ -154,12 +173,11 @@
             <button id="editor-save" type="submit">Save</button>
           </div>
         </form>
-        <table>
-          <thead><tr><th>Plugin</th><th>State</th></tr></thead>
-          <tbody id="plugins"></tbody>
-        </table>
-        <h2>Tools</h2>
-        <ul id="tools" class="tools"></ul>
+        <div id="plugin-page" hidden></div>
+        </div>
+        </div>
+        <details><summary>Available tools</summary><ul id="tools" class="tools"></ul></details>
+        </div>
       </div>
     </aside>
   </main>
@@ -214,6 +232,7 @@
       </div>
     </div>
     <div id="settings-tabs" class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="plugins">Plugins</button>
       <button type="button" role="tab" data-tab="model">Model</button>
       <button type="button" role="tab" data-tab="assistant">Assistant</button>
       <button type="button" role="tab" data-tab="tools">Permissions</button>

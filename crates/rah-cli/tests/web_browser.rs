@@ -271,8 +271,15 @@ window.entries = () => [...document.querySelectorAll('#transcript .entry')];
 window.transcript = () => entries().map((entry) => entry.textContent).join('\n');
 window.rowOf = (id) => [...document.querySelectorAll('#plugins tr')]
   .find((row) => row.cells[0].firstChild.textContent === id);
-window.rowAction = (id, label) => [...rowOf(id).querySelectorAll('button')]
-  .find((button) => button.textContent === label).click();
+window.rowAction = (id, label) => {
+  rowOf(id).querySelector('button').click();
+  [...byId('plugin-summary').querySelectorAll('button')]
+    .find((button) => button.textContent === label).click();
+  if (label === 'Configure' || label === 'Replace') {
+    byId('editor-format').value = 'json';
+    byId('editor-format').dispatchEvent(new Event('change'));
+  }
+};
 window.approval = () => document.querySelector('#approvals .approval');
 window.answer = (label) => [...approval().querySelectorAll('button')]
   .find((button) => button.textContent === label).click();
@@ -374,6 +381,327 @@ config = { bind = "127.0.0.1:0" }
         url,
         dir,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_share_a_settings_workspace_and_preserve_configuration_values() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start_with("web-plugin-settings", |distribution, _| {
+        distribution.set_config("model-mock", "label", json!("Before"));
+    })
+    .await;
+    let browser = Browser::launch(PathBuf::from(program), "web-plugin-settings");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("openSettings('plugins'); true").await;
+    page.wait(
+        "the shared workspace",
+        "byId('settings-body').contains(byId('plugin-workspace')) && !!rowOf('model-mock')",
+    )
+    .await;
+    page.eval("rowOf('model-mock').querySelector('button').click(); true")
+        .await;
+    assert_eq!(page.eval("byId('editor-format').value").await, "fields");
+    page.screenshot("unified-plugin-fields").await;
+    page.eval(
+        "window.format = (value) => { byId('editor-format').value = value; byId('editor-format').dispatchEvent(new Event('change')); }; \
+         window.configField = (key) => [...document.querySelectorAll('#editor-fields [data-config-key]')].find((input) => input.dataset.configKey === key); \
+         window.editField = (key, value) => { const input = configField(key); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }; true",
+    ).await;
+
+    // Round trips preserve unknown keys, nested data, false, zero, null, empty
+    // strings and prototype-like keys. Only the edited setting changes.
+    page.eval(
+        "format('json'); byId('editor-config').value = '{\"label\":\"Before\",\"unknown\":{\"nested\":[1,false,null]},\"off\":false,\"zero\":0,\"empty\":\"\",\"nil\":null,\"__proto__\":{\"safe\":true}}'; \
+         window.originalConfig = JSON.parse(byId('editor-config').value); format('fields'); editField('label', 'After'); format('json'); true",
+    ).await;
+    assert_eq!(
+        page.eval("JSON.stringify(JSON.parse(byId('editor-config').value)) === JSON.stringify({ ...originalConfig, label: 'After' })").await,
+        true
+    );
+    // Unset values stay absent; the example never becomes a value by rendering.
+    page.eval("byId('editor-config').value = '{}'; format('fields'); true")
+        .await;
+    assert_eq!(page.eval("configField('label').disabled").await, true);
+    assert_eq!(page.eval("byId('editor-config').value").await, "{}");
+    page.eval(
+        "document.querySelector('#editor-fields input[aria-label=\"Set label\"]').click(); editField('label', 'After'); byId('editor-save').click(); true",
+    ).await;
+    page.wait(
+        "the field save",
+        "byId('plugin-message').textContent.includes('configuration saved') && byId('editor').hidden",
+    ).await;
+    assert_eq!(
+        page.eval("api('/plugins').then((plugins) => plugins.find((plugin) => plugin.id === 'model-mock').config.label)").await,
+        "After"
+    );
+    page.eval("rowOf('model-mock').querySelector('button').click(); format('json'); byId('editor-config').value = '{ invalid'; format('fields'); true").await;
+    assert_eq!(page.eval("byId('editor-format').value").await, "json");
+    assert_eq!(
+        page.eval("byId('plugin-message').classList.contains('bad')")
+            .await,
+        true
+    );
+    page.eval("byId('editor-config').value = 'false'; format('fields'); true")
+        .await;
+    assert_eq!(page.eval("byId('editor-format').value").await, "json");
+    assert_eq!(page.eval("byId('editor-config').value").await, "false");
+    // Server validation is shown locally and keeps both the old config and draft.
+    page.eval("byId('editor-config').value = '{\"label\":123}'; byId('editor-save').click(); true")
+        .await;
+    page.wait("the refused configuration", "byId('plugin-message').classList.contains('bad') && byId('plugin-message').textContent.includes('string')").await;
+    assert_eq!(
+        page.eval("shown(byId('editor')) && byId('editor-config').value === '{\"label\":123}'")
+            .await,
+        true
+    );
+    assert_eq!(page.eval("api('/plugins').then((plugins) => plugins.find((plugin) => plugin.id === 'model-mock').config.label)").await, "After");
+
+    page.eval("byId('plugin-search').value = 'model-mock'; byId('plugin-search').dispatchEvent(new Event('input')); true").await;
+    assert_eq!(
+        page.eval("rowOf('policy-authority').hidden && !rowOf('model-mock').hidden")
+            .await,
+        true
+    );
+    page.screenshot("unified-plugin-settings").await;
+    page.call(
+        "Emulation.setDeviceMetricsOverride",
+        json!({ "width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": false }),
+    )
+    .await;
+    assert_eq!(
+        page.eval("document.documentElement.scrollWidth <= innerWidth")
+            .await,
+        true
+    );
+    page.screenshot("unified-plugin-settings-mobile").await;
+    // Escape/close puts the one workspace back in its layout panel.
+    page.eval("byId('settings-dialog').close(); true").await;
+    page.wait(
+        "the restored workspace",
+        "byId('plugins-panel').contains(byId('plugin-workspace'))",
+    )
+    .await;
+    // The fallback remains usable when a layout omits the Plugins panel.
+    page.eval("layout.right = layout.right.filter((id) => id !== 'plugins'); layout.left = layout.left.filter((id) => id !== 'plugins'); showPlugins(); true").await;
+    page.wait(
+        "settings without a Plugins panel",
+        "byId('settings-dialog').open && byId('settings-body').contains(byId('plugin-workspace'))",
+    )
+    .await;
+    let exceptions: Vec<_> = page
+        .errors()
+        .into_iter()
+        .filter(|event| event["method"] == "Runtime.exceptionThrown")
+        .collect();
+    assert!(exceptions.is_empty(), "page exceptions: {exceptions:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn example_personal_plugins_import_enable_configure_and_run_in_the_workspace() {
+    use rah_api::tools::{Invocation, ToolInvoker};
+    use rah_protocol::{ToolCall, ToolCallId, ToolInput, ToolName};
+
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-personal-examples").await;
+    let examples =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/personal-plugins");
+    let bundle = web.dir.0.join("examples.json");
+    let built = Command::new("node")
+        .arg(examples.join("bundle.mjs"))
+        .arg(&bundle)
+        .output()
+        .expect("Node.js builds the example bundle");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let browser = Browser::launch(PathBuf::from(program), "web-personal-examples");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("the page to connect", "connected()").await;
+    page.eval("openSettings('plugins'); true").await;
+    page.wait("My plugins in the shared workspace", "[...byId('plugin-pages').querySelectorAll('button')].some((button) => button.textContent === 'My plugins')").await;
+    page.eval(
+        "window.pickPluginPage = (title) => [...byId('plugin-pages').querySelectorAll('button')].find((button) => button.textContent === title).click(); \
+         window.pluginPageButton = (label) => [...byId('plugin-page').querySelectorAll('button')].find((button) => button.textContent === label); \
+         pickPluginPage('My plugins'); true",
+    ).await;
+    page.wait(
+        "the compact personal library",
+        "!!pluginPageButton('Import')",
+    )
+    .await;
+    assert_eq!(
+        page.eval("byId('plugin-page').querySelectorAll('form').length")
+            .await,
+        0
+    );
+    page.eval("pluginPageButton('Import').click(); true").await;
+    page.wait(
+        "the import form",
+        "!!byId('plugin-page').querySelector('input[name=file]')",
+    )
+    .await;
+    let file = serde_json::to_string(&bundle.display().to_string()).unwrap();
+    page.eval(&format!("byId('plugin-page').querySelector('input[name=file]').value = {file}; pluginPageButton('Import').click(); true")).await;
+    page.wait("the imported plugins", "!!pluginPageButton('text-lab') && !!pluginPageButton('scratch-note') && !!pluginPageButton('tally-board')").await;
+    assert_eq!(
+        page.eval("byId('plugin-page').querySelectorAll('.view-row-select').length === 3 && byId('plugin-page').querySelectorAll('form').length === 0 && !byId('plugin-page').textContent.includes('Manage:')").await,
+        true
+    );
+    page.screenshot("compact-personal-library").await;
+    page.eval("pluginPageButton('Backups & export').click(); true")
+        .await;
+    page.wait(
+        "the separate transfer page",
+        "!!pluginPageButton('Export') && !!pluginPageButton('Back to the list')",
+    )
+    .await;
+    page.eval("pluginPageButton('Back to the list').click(); true")
+        .await;
+    page.wait(
+        "the compact library again",
+        "!!pluginPageButton('text-lab')",
+    )
+    .await;
+    page.eval("byId('settings-dialog').close(); showPanel('plugin-builder/plugins'); true")
+        .await;
+    page.wait("the compact sidebar library", "views.get('plugin-builder/plugins').body.querySelectorAll('.view-row-select').length === 3 && views.get('plugin-builder/plugins').body.querySelectorAll('form').length === 0").await;
+    page.screenshot("compact-my-plugins-sidebar").await;
+    page.eval("openSettings('plugins'); true").await;
+    page.wait(
+        "the reopened workspace",
+        "byId('settings-body').contains(byId('plugin-workspace'))",
+    )
+    .await;
+    assert_eq!(
+        page.eval("!rowOf('text-lab') && !rowOf('scratch-note') && !rowOf('tally-board')")
+            .await,
+        true,
+        "Import never mounts a plugin"
+    );
+    for name in ["text-lab", "scratch-note", "tally-board"] {
+        page.eval(&format!("pluginPageButton('{name}').click(); true"))
+            .await;
+        page.wait(
+            "the enable confirmation",
+            "!!byId('plugin-page').querySelector('input[name=read]')",
+        )
+        .await;
+        page.eval("byId('plugin-page').querySelector('input[name=read]').click(); pluginPageButton('Enable').click(); true").await;
+        page.wait("the enabled plugin", &format!("!!rowOf('{name}') && rowOf('{name}').cells[1].textContent === 'active' && !!pluginPageButton('Back to the list')")).await;
+        page.eval("pluginPageButton('Back to the list').click(); true")
+            .await;
+        page.wait("the saved plugin list", "!!pluginPageButton('text-lab')")
+            .await;
+    }
+    // Personal plugins use the same field editor, including nested config.
+    page.eval("rowOf('text-lab').querySelector('button').click(); true")
+        .await;
+    page.eval(
+        "document.querySelector('#editor-fields input[aria-label=\"Set plugin\"]').click(); \
+         { const input = document.querySelector('#editor-fields [data-config-key=plugin]'); input.value = '{\"label\":\"UI test\"}'; input.dispatchEvent(new Event('input')); } \
+         byId('editor-save').click(); true",
+    ).await;
+    page.wait(
+        "the personal plugin config save",
+        "byId('plugin-message').textContent.includes('configuration saved')",
+    )
+    .await;
+    let handle = web._kernel.handle();
+    let session = common::new_session(&handle).await;
+    let invocation = |name: &str, input: Value| Invocation {
+        session: session.clone(),
+        call: ToolCall {
+            id: ToolCallId::new(),
+            name: ToolName::new(name),
+            input: ToolInput(input),
+        },
+        cancel: rah_api::CancellationToken::new(),
+    };
+    let invoker = ToolInvoker::new(handle.clone());
+    let result = invoker
+        .invoke(
+            invocation("text-lab.inspect", json!({ "text": "hello world" })),
+            || {},
+        )
+        .await;
+    assert!(!result.output.is_error, "{result:?}");
+    let result = serde_json::to_value(&result.output).unwrap();
+    assert!(result.to_string().contains("UI test"), "{result}");
+    // Writes remain behind policy: grant this exact test tool read/write
+    // levels through the existing admin configuration, never by metadata.
+    let admin = handle.get(rah_api::admin::ADMIN).unwrap();
+    let policy_id = rah_api::PluginId::new("policy-authority");
+    let mut policy = admin.instance(&policy_id).unwrap().config;
+    policy["decisions"]["scratch-note.write"] = json!("allow");
+    admin.configure(&policy_id, policy).await.unwrap();
+    let written = invoker
+        .invoke(
+            invocation("scratch-note.write", json!({ "text": "A saved test note" })),
+            || {},
+        )
+        .await;
+    assert!(!written.output.is_error, "{written:?}");
+    admin
+        .restart(&rah_api::PluginId::new("scratch-note"))
+        .await
+        .unwrap();
+    let read = invoker
+        .invoke(invocation("scratch-note.read", json!({})), || {})
+        .await;
+    assert!(!read.output.is_error, "{read:?}");
+    assert!(
+        serde_json::to_value(read.output)
+            .unwrap()
+            .to_string()
+            .contains("A saved test note")
+    );
+    page.eval("pickPluginPage('Tally board'); true").await;
+    page.wait(
+        "the personal board",
+        "byId('plugin-page').textContent.includes('Count: 0')",
+    )
+    .await;
+    page.eval("pluginPageButton('Add one').click(); true").await;
+    page.wait(
+        "the board action",
+        "byId('plugin-page').textContent.includes('Count: 1')",
+    )
+    .await;
+    assert_eq!(
+        page.eval("(() => { const count = [...byId('plugin-page').querySelectorAll('p')].find((node) => node.textContent === 'Count: 1').getBoundingClientRect(); const body = byId('settings-body').getBoundingClientRect(); return count.top >= body.top && count.bottom <= body.bottom; })()")
+            .await,
+        true,
+        "A long plugin list must not scroll the selected page out of sight"
+    );
+    page.screenshot("personal-test-plugins").await;
+    page.eval("pickPluginPage('My plugins'); true").await;
+    page.wait("the management list", "!!pluginPageButton('tally-board')")
+        .await;
+    page.eval("pluginPageButton('tally-board').click(); true")
+        .await;
+    page.wait("the disable action", "!!pluginPageButton('Disable')")
+        .await;
+    page.eval("pluginPageButton('Disable').click(); true").await;
+    page.wait(
+        "the disabled personal plugin",
+        "!rowOf('tally-board') && !!pluginPageButton('Enable')",
+    )
+    .await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -524,10 +852,12 @@ async fn the_web_ui_works_in_a_real_browser() {
         "{}",
         page.eval("byId('plugins').innerHTML").await
     );
+    page.eval("rowOf('distribution').querySelector('button').click(); true")
+        .await;
     assert_eq!(
-        page.eval("rowOf('distribution').querySelectorAll('button').length")
+        page.eval("byId('editor').hidden && byId('plugin-summary').querySelectorAll('button').length === 0")
             .await,
-        0
+        true
     );
     assert_eq!(
         page.eval(
@@ -699,7 +1029,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     .await;
     page.wait(
         "the refused example value",
-        "shown(byId('notice')) && byId('notice-text').textContent.includes('<provider model id>') \
+        "shown(byId('plugin-message')) && byId('plugin-message').textContent.includes('<provider model id>') \
          && shown(byId('editor')) && !rowOf('context-compact')",
     )
     .await;
@@ -720,13 +1050,13 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     page.wait(
         "the JSON error",
-        "shown(byId('notice')) && byId('notice-text').textContent.includes('not valid JSON')",
+        "shown(byId('plugin-message')) && byId('plugin-message').textContent.includes('not valid JSON')",
     )
     .await;
     page.eval("byId('editor-cancel').click(); true").await;
     let notices = page.eval("notices").await;
-    // The reconnect notice, the refused example value and the JSON error.
-    assert_eq!(notices.as_array().unwrap().len(), 3, "notices: {notices:#}");
+    // Editor validation stays beside the editor; only reconnect is global.
+    assert_eq!(notices.as_array().unwrap().len(), 1, "notices: {notices:#}");
 
     // A reload keeps the token for the tab, without the fragment.
     page.call("Page.reload", json!({})).await;
@@ -794,8 +1124,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     page.eval(&key("Enter")).await;
     page.wait(
         "the stopped plugin",
-        "rowOf('model-mock-2').cells[0].textContent.includes('Start') && \
-         rowOf('model-mock-2').cells[1].textContent === 'stopped' && \
+        "rowOf('model-mock-2').cells[1].textContent === 'stopped' && \
          notices.includes('model-mock-2: stopped') && byId('input').value === ''",
     )
     .await;

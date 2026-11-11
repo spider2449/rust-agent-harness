@@ -1337,12 +1337,14 @@ async function renderView(id) {
 // Shown views follow the turns: a turn may change what they show.
 function refreshViews() {
   for (const id of views.keys()) if (panelShown(id)) renderView(id);
+  refreshPluginPage();
 }
 
 // A provider said a view changed (`{type: "ui"}` on the socket). A shown
 // view renders again once the changes pause; a hidden one renders when shown.
 const viewTimers = new Map();
 function viewChanged(id) {
+  if (pluginPageSelection === id) refreshPluginPage();
   if (!views.has(id) || !panelShown(id)) return;
   clearTimeout(viewTimers.get(id));
   viewTimers.set(id, setTimeout(() => {
@@ -1358,14 +1360,23 @@ async function runAction(entry, action, input, controls) {
       method: "POST",
       body: JSON.stringify({ input, session: state.current || null }),
     });
-    entry.message.textContent = outcome.message || "";
-    entry.message.hidden = !outcome.message;
-    entry.message.classList.remove("bad");
-    if (outcome.rerender) await renderView(entry.id);
+    if (!entry.workspace || pluginPageSelection === entry.id) {
+      entry.message.textContent = outcome.message || "";
+      entry.message.hidden = !outcome.message;
+      entry.message.classList.remove("bad");
+    }
+    if (outcome.rerender) {
+      if (entry.workspace) {
+        if (pluginPageSelection === entry.id) await showPluginPage(entry, outcome.message);
+        await loadPlugins();
+      } else await renderView(entry.id);
+    }
   } catch (error) {
-    entry.message.textContent = error.message;
-    entry.message.hidden = false;
-    entry.message.classList.add("bad");
+    if (!entry.workspace || pluginPageSelection === entry.id) {
+      entry.message.textContent = error.message;
+      entry.message.hidden = false;
+      entry.message.classList.add("bad");
+    }
   } finally {
     for (const control of controls) control.disabled = false;
   }
@@ -1395,9 +1406,19 @@ function viewNode(entry, node) {
       const thead = el("thead");
       thead.append(head);
       const tbody = el("tbody");
-      for (const row of node.rows || []) {
+      for (const [index, row] of (node.rows || []).entries()) {
         const line = el("tr");
-        for (const cell of row) line.append(el("td", "", text(cell)));
+        for (const [column, cell] of row.entries()) {
+          const value = el("td", "", text(cell));
+          const action = node.row_actions?.[index];
+          if (column === 0 && action) {
+            const button = el("button", "view-row-select", text(cell));
+            button.type = "button";
+            button.addEventListener("click", () => runAction(entry, text(action), null, [button]));
+            value.replaceChildren(button);
+          }
+          line.append(value);
+        }
         tbody.append(line);
       }
       table.append(thead, tbody);
@@ -1544,11 +1565,11 @@ function toggleRight() {
   }
 }
 
-// Every plugin: the Plugins panel where the layout has it, else the
-// permissions in Settings.
+// Every plugin: the Plugins panel where the layout has it, else the same
+// workspace in Settings.
 function showPlugins() {
   if (panelRegion("plugins")) showPanel("plugins");
-  else openSettings("tools");
+  else openSettings("plugins");
 }
 
 function treeError(error) {
@@ -2503,6 +2524,204 @@ let configExamples = {};
 // Help for configuration keys by kind (`[{key, help}]`), from `/api/catalog`.
 let configHelp = {};
 
+// The catalog's examples supply control types, not values to apply. The JSON
+// editor is the canonical draft; every field change updates that same draft.
+let pluginFieldControls = [];
+let pluginSelection = null;
+let pluginPageSelection = null;
+let pluginPages = [];
+let pluginPageRequest = 0;
+
+function refreshPluginPage() {
+  const page = pluginPages.find((entry) => entry.id === pluginPageSelection);
+  if (page && ($("settings-dialog").open && settings.tab === "plugins" || panelShown("plugins"))) {
+    showPluginPage(page);
+  }
+}
+
+function configObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function pluginMessage(message, bad = false) {
+  const node = $("plugin-message");
+  node.textContent = message;
+  node.hidden = !message;
+  node.classList.toggle("bad", bad);
+}
+
+function buildPluginFields() {
+  const value = JSON.parse($("editor-config").value || "null");
+  const fields = $("editor-fields");
+  fields.replaceChildren();
+  pluginFieldControls = [];
+  if (value !== null && !configObject(value)) return false;
+  const current = value || {};
+  const example = configExamples[editorKind()];
+  const samples = configObject(example) ? example : {};
+  const help = configHelp[editorKind()] || [];
+  const keys = new Set([...help.map((entry) => entry.key), ...Object.keys(samples), ...Object.keys(current)]);
+  for (const key of keys) {
+    const present = Object.hasOwn(current, key);
+    const sample = present ? current[key] : samples[key];
+    const type = typeof sample === "boolean" ? "boolean" : typeof sample === "number" ? "number" : typeof sample === "string" ? "string" : "json";
+    const row = el("div", "plugin-field");
+    const override = el("input");
+    override.type = "checkbox";
+    override.checked = present;
+    override.setAttribute("aria-label", `Set ${key}`);
+    const heading = el("label", "plugin-field-heading");
+    heading.append(override, el("span", "", key));
+    const input = el(type === "json" || (type === "string" && String(sample).includes("\n")) ? "textarea" : "input");
+    if (input.tagName === "INPUT") input.type = type === "boolean" ? "checkbox" : type === "number" ? "number" : "text";
+    if (type === "number") input.step = "any";
+    input.dataset.configKey = key;
+    input.setAttribute("aria-label", key);
+    input.disabled = !present;
+    input.spellcheck = false;
+    if (type === "boolean") input.checked = present && sample;
+    else input.value = present ? (type === "json" ? JSON.stringify(sample, null, 2) : String(sample)) : "";
+    if (type !== "boolean") input.placeholder = Object.hasOwn(samples, key)
+      ? `Example: ${type === "json" ? JSON.stringify(samples[key]) : samples[key]}`
+      : type === "json" ? "JSON value" : "Value";
+    const hint = help.find((entry) => entry.key === key)?.help;
+    row.append(heading, input);
+    if (hint) row.append(el("small", "hint", hint));
+    fields.append(row);
+    const control = { key, type, override, input };
+    pluginFieldControls.push(control);
+    const update = () => {
+      input.disabled = !override.checked;
+      for (const field of pluginFieldControls) field.input.setCustomValidity("");
+      let invalid = input;
+      try {
+        const entries = [];
+        for (const field of pluginFieldControls) {
+          if (!field.override.checked) continue;
+          invalid = field.input;
+          let next;
+          if (field.type === "boolean") next = field.input.checked;
+          else if (field.type === "number") {
+            next = Number(field.input.value);
+            if (!field.input.value.trim() || !Number.isFinite(next)) throw new Error(`${field.key}: enter a number`);
+          } else if (field.type === "json") {
+            try { next = JSON.parse(field.input.value); }
+            catch { throw new Error(`${field.key}: enter valid JSON`); }
+          } else next = field.input.value;
+          entries.push([field.key, next]);
+        }
+        const next = Object.fromEntries(entries);
+        $("editor-config").value = entries.length || value !== null ? JSON.stringify(next, null, 2) : "";
+        pluginMessage("");
+      } catch (error) {
+        invalid.setCustomValidity(error.message);
+        pluginMessage(error.message, true);
+      }
+    };
+    override.addEventListener("change", update);
+    input.addEventListener("input", update);
+  }
+  if (!keys.size) fields.append(el("p", "hint", "No described settings. Use Advanced JSON to add configuration keys."));
+  fields.prepend(el("p", "hint", "Check a setting to set its value. Unchecked settings use the plugin's defaults; examples are not applied."));
+  return true;
+}
+
+function setPluginEditorFormat(format) {
+  if (format === "json" && !$("editor-fields").hidden) {
+    const invalid = pluginFieldControls.find((field) => !field.input.disabled && !field.input.validity.valid);
+    if (invalid) {
+      $("editor-format").value = "fields";
+      invalid.input.reportValidity();
+      return;
+    }
+  }
+  try {
+    if (format === "fields" && !buildPluginFields()) format = "json";
+  } catch (error) {
+    pluginMessage(`The configuration is not valid JSON: ${error.message}`, true);
+    format = "json";
+  }
+  $("editor-format").value = format;
+  $("editor-fields").hidden = format !== "fields";
+  $("editor-json-row").hidden = format !== "json";
+  // Hidden fields must not block an advanced JSON save.
+  for (const field of pluginFieldControls) {
+    field.input.disabled = format !== "fields" || !field.override.checked;
+  }
+}
+
+function filterPluginList() {
+  const query = $("plugin-search").value.trim().toLowerCase();
+  for (const row of $("plugins").querySelectorAll("tr:not(.group)")) {
+    row.hidden = !row.dataset.search.includes(query);
+  }
+  for (const group of $("plugins").querySelectorAll("tr.group")) {
+    let row = group.nextElementSibling;
+    let visible = false;
+    while (row && !row.classList.contains("group")) {
+      visible ||= !row.hidden;
+      row = row.nextElementSibling;
+    }
+    group.hidden = !visible;
+  }
+  for (const button of $("plugin-pages").querySelectorAll("button")) {
+    button.hidden = !button.dataset.search.includes(query);
+  }
+  const visiblePages = [...$("plugin-pages").querySelectorAll("button")].some((button) => !button.hidden);
+  const heading = $("plugin-pages").querySelector("h3");
+  if (heading) heading.hidden = !visiblePages;
+  $("plugin-empty").hidden = visiblePages || [...$("plugins").querySelectorAll("tr:not(.group)")].some((row) => !row.hidden);
+}
+
+async function showPluginPage(page, message = "") {
+  const request = ++pluginPageRequest;
+  const changed = pluginPageSelection !== page.id;
+  pluginPageSelection = page.id;
+  pluginSelection = null;
+  for (const row of $("plugins").querySelectorAll("tr")) row.classList.remove("selected");
+  for (const button of $("plugin-pages").querySelectorAll("button")) {
+    button.classList.toggle("current", button.dataset.page === page.id);
+    if (changed && button.dataset.page === page.id) button.scrollIntoView({ block: "nearest" });
+  }
+  if (changed) $("plugin-page").parentElement.scrollTop = 0;
+  $("editor").hidden = true;
+  $("plugin-summary").replaceChildren(el("h3", "", page.title));
+  const body = $("plugin-page");
+  body.hidden = false;
+  body.replaceChildren(el("p", "hint", "Loading…"));
+  pluginMessage(message);
+  const entry = { ...page, body, message: $("plugin-message"), workspace: true };
+  try {
+    const session = state.current ? `?session=${encodeURIComponent(state.current)}` : "";
+    const content = await api(`${viewPath(entry)}${session}`);
+    if (request !== pluginPageRequest) return;
+    body.replaceChildren(...(content.nodes || []).map((node) => viewNode(entry, node)).filter(Boolean));
+  } catch (error) {
+    if (request === pluginPageRequest) pluginMessage(error.message, true);
+  }
+}
+
+function selectPlugin(plugin) {
+  ++pluginPageRequest;
+  pluginPageSelection = null;
+  pluginSelection = plugin.id;
+  for (const button of $("plugin-pages").querySelectorAll("button")) button.classList.remove("current");
+  $("plugin-page").hidden = true;
+  pluginMessage("");
+  renderPluginSummary(plugin);
+  if (plugin.kind && !plugin.locked && plugin.state !== "stopped") openEditor("configure", plugin);
+  else $("editor").hidden = true;
+  for (const row of $("plugins").querySelectorAll("tr")) row.classList.toggle("selected", row.dataset.plugin === plugin.id);
+}
+
+function renderPluginSummary(plugin) {
+  const summary = $("plugin-summary");
+  summary.replaceChildren(el("h3", "", plugin.id), el("p", "hint", `${plugin.kind || "Unknown kind"} · ${plugin.state}${plugin.detail ? `: ${plugin.detail}` : ""}`));
+  summary.append(pluginActions(plugin));
+  if (plugin.locked) summary.append(el("p", "hint", "This plugin is managed by the host and cannot be changed here."));
+  if (plugin.state === "stopped") summary.append(el("p", "hint", "Start this plugin to edit its configuration."));
+}
+
 function isEmptyConfig(config) {
   return config == null || (typeof config === "object" && !Array.isArray(config) && Object.keys(config).length === 0);
 }
@@ -2576,13 +2795,15 @@ function fillConfigExample() {
   if (textarea.value.trim() && !window.confirm("Replace the current configuration with the example?")) return;
   textarea.value = JSON.stringify(example, null, 2);
   showConfigExample();
+  setPluginEditorFormat($("editor-format").value);
   const missing = placeholderValues(example);
-  showNotice(missing.length ? `Replace ${missing.join(", ")} before saving.` : "");
+  pluginMessage(missing.length ? `Replace ${missing.join(", ")} before saving.` : "", missing.length > 0);
   textarea.focus();
 }
 
 function report(error) {
   showNotice(error.message);
+  pluginMessage(error.message, true);
 }
 
 // Help: the documentation built into the server (`/api/docs`) and, last in
@@ -2724,6 +2945,14 @@ function showIdHint() {
 }
 
 function openEditor(mode, plugin) {
+  ++pluginPageRequest;
+  pluginPageSelection = null;
+  $("plugin-page").hidden = true;
+  pluginMessage("");
+  if (mode === "add") {
+    pluginSelection = null;
+    $("plugin-summary").replaceChildren();
+  }
   editor.mode = mode;
   editor.target = plugin;
   const titles = { add: "Add plugin", configure: `Configure ${plugin?.id}`, replace: `Replace ${plugin?.id}` };
@@ -2735,10 +2964,11 @@ function openEditor(mode, plugin) {
   const config = mode === "add" ? null : plugin?.config;
   $("editor-config").value = isEmptyConfig(config) ? "" : JSON.stringify(config, null, 2);
   showConfigExample();
+  setPluginEditorFormat("fields");
   showIdHint();
   $("editor").hidden = false;
-  $("editor").scrollIntoView({ block: "nearest" });
-  $("editor-id").focus();
+  $("editor").parentElement.scrollTop = 0;
+  (mode === "configure" ? $("editor-format") : $("editor-id")).focus();
 }
 
 async function saveEditor(event) {
@@ -2747,18 +2977,18 @@ async function saveEditor(event) {
   try {
     config = JSON.parse($("editor-config").value || "null");
   } catch (error) {
-    showNotice(`The configuration is not valid JSON: ${error.message}`);
+    pluginMessage(`The configuration is not valid JSON: ${error.message}`, true);
     return;
   }
   const missing = placeholderValues(config);
   if (missing.length) {
-    showNotice(`Replace ${missing.join(", ")} before saving.`);
+    pluginMessage(`Replace ${missing.join(", ")} before saving.`, true);
     return;
   }
   const kind = $("editor-kind").value;
   const id = $("editor-id").value.trim() || null;
   if (editor.mode === "add" && kind === "tools-http" && !id) {
-    showNotice("Name this API group (for example http-ddt) so its button can be told apart.");
+    pluginMessage("Name this API group (for example http-ddt) so its button can be told apart.", true);
     $("editor-id").focus();
     return;
   }
@@ -2769,6 +2999,7 @@ async function saveEditor(event) {
     else if (editor.mode === "configure") await manage(`/plugins/${target}/config`, "PUT", { config });
     else await manage(`/plugins/${target}/replace`, "POST", request);
     $("editor").hidden = true;
+    pluginMessage(`${editor.target?.id || id || kind}: configuration saved.`);
   } catch (error) {
     report(error);
   }
@@ -2806,7 +3037,14 @@ function pluginGroup(label, className) {
 function pluginRow(plugin) {
   const personal = isPersonal(plugin);
   const row = el("tr", personal ? "personal" : "");
-  const name = el("td", "", plugin.id);
+  row.dataset.plugin = plugin.id;
+  row.dataset.search = `${plugin.id} ${plugin.kind || ""} ${plugin.state} ${personal ? "personal" : ""}`.toLowerCase();
+  row.classList.toggle("selected", pluginSelection === plugin.id);
+  const name = el("td");
+  const choose = el("button", "plugin-select", plugin.id);
+  choose.type = "button";
+  choose.addEventListener("click", () => selectPlugin(plugin));
+  name.append(choose);
   if (personal) {
     const tag = el("span", "personal-tag", "Personal");
     tag.title = "A plugin you wrote, or had written, for yourself";
@@ -2815,8 +3053,13 @@ function pluginRow(plugin) {
   if (plugin.kind && plugin.kind !== plugin.id) name.append(el("span", "kind", plugin.kind));
   const cell = el("td", `state-${plugin.state}`, plugin.state);
   if (plugin.detail) cell.title = plugin.detail;
+  row.append(name, cell);
+  return row;
+}
+
+function pluginActions(plugin) {
+  const actions = el("div", "row-actions");
   if (plugin.kind && !plugin.locked) {
-    const actions = el("div", "row-actions");
     const action = (label, handler) => {
       const button = el("button", "ghost", label);
       button.type = "button";
@@ -2834,14 +3077,13 @@ function pluginRow(plugin) {
       action("Replace", () => openEditor("replace", plugin));
     }
     action("Remove", () => removePlugin(plugin));
-    name.append(actions);
   }
-  row.append(name, cell);
-  return row;
+  return actions;
 }
 
 async function loadCatalog() {
   try {
+    const selected = $("editor-kind").value;
     const catalog = await api("/catalog");
     configExamples = catalog.examples || {};
     configHelp = catalog.help || {};
@@ -2850,6 +3092,7 @@ async function loadCatalog() {
       option.value = kind;
       return option;
     }));
+    if (catalog.kinds.includes(selected)) $("editor-kind").value = selected;
     $("add-plugin").hidden = false;
   } catch {
     $("add-plugin").hidden = true;
@@ -2857,7 +3100,8 @@ async function loadCatalog() {
 }
 
 async function loadPlugins() {
-  const [plugins, info] = await Promise.all([api("/plugins"), api("/info")]);
+  const [plugins, info, ui] = await Promise.all([api("/plugins"), api("/info"), api("/ui")]);
+  pluginPages = ui.views || [];
   // Personal plugins are listed apart, after the distribution's own.
   const personal = plugins.filter(isPersonal);
   const rows = plugins.filter((plugin) => !isPersonal(plugin)).map(pluginRow);
@@ -2866,6 +3110,33 @@ async function loadPlugins() {
     rows.push(pluginGroup("Personal plugins", "personal"), ...personal.map(pluginRow));
   }
   $("plugins").replaceChildren(...rows);
+  $("plugin-pages").replaceChildren(...pluginPages.map((page) => {
+    const button = el("button", "plugin-select", page.title);
+    button.type = "button";
+    button.title = `${page.instance}/${page.view}`;
+    button.dataset.page = page.id;
+    button.classList.toggle("current", page.id === pluginPageSelection);
+    button.dataset.search = `${page.title} ${page.instance} ${page.view}`.toLowerCase();
+    button.addEventListener("click", () => showPluginPage(page));
+    return button;
+  }));
+  if (pluginPages.length) $("plugin-pages").prepend(el("h3", "", "Plugin pages"));
+  filterPluginList();
+  const selected = plugins.find((plugin) => plugin.id === pluginSelection);
+  if (selected) {
+    renderPluginSummary(selected);
+    if (selected.state === "stopped" || selected.locked) $("editor").hidden = true;
+  }
+  else if (pluginSelection || pluginPageSelection && !pluginPages.some((page) => page.id === pluginPageSelection)) {
+    pluginSelection = null;
+    pluginPageSelection = null;
+    ++pluginPageRequest;
+    $("editor").hidden = true;
+    $("plugin-page").hidden = true;
+    $("plugin-summary").replaceChildren(el("p", "hint", "Select a plugin to view its settings, or open a plugin page."));
+  } else if (!pluginPageSelection && $("editor").hidden) {
+    $("plugin-summary").replaceChildren(el("p", "hint", "Select a plugin to view its settings, or open a plugin page."));
+  }
   $("tools").replaceChildren(...info.tools.map((tool) => el("li", "", `${tool.name} (${tool.permission})`)));
 }
 
@@ -3361,11 +3632,15 @@ async function start() {
   renderFile();
   renderGit();
   $("refresh-plugins").addEventListener("click", () => loadPlugins().catch(report));
+  $("expand-plugins").addEventListener("click", () => openSettings("plugins"));
+  $("plugin-search").addEventListener("input", filterPluginList);
+  $("editor-format").addEventListener("change", () => setPluginEditorFormat($("editor-format").value));
   $("add-plugin").addEventListener("click", () => openEditor("add", null));
   $("editor").addEventListener("submit", saveEditor);
   $("editor-kind").addEventListener("change", () => {
     showConfigExample();
     showIdHint();
+    setPluginEditorFormat($("editor-format").value);
   });
   $("editor-example").addEventListener("click", fillConfigExample);
   $("editor-cancel").addEventListener("click", () => {

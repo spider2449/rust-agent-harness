@@ -592,28 +592,32 @@ async fn a_saved_plugin_can_be_listed_read_changed_and_mounted_by_the_user() {
     assert_eq!(manifest["version"], json!("0.2.0"));
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
 
-    // The view lists the plugins; the details show on a plugin's button.
+    // One selectable table replaces the separate per-plugin buttons.
     let nodes = render(&kernel).await.nodes;
     assert!(matches!(
         &nodes[1],
-        Node::Table { rows, .. } if rows == &[vec![
+        Node::Table { rows, row_actions, .. } if rows == &[vec![
             "greeter".to_owned(),
             "not enabled".to_owned(),
-            "python".to_owned(),
-            "Greets people by name.".to_owned(),
-        ]]
+        ]] && row_actions == &[Some("details:greeter".to_owned())]
     ));
     assert_eq!(
         nodes[2],
         Node::Button {
-            action: "details:greeter".into(),
-            label: "Manage: greeter".into(),
+            action: "show-import".into(),
+            label: "Import".into(),
         }
     );
     assert!(
         !nodes
             .iter()
             .any(|node| matches!(node, Node::Markdown { .. }))
+    );
+    assert!(!nodes.iter().any(|node| matches!(node, Node::Form { .. })));
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| matches!(node, Node::Button { label, .. } if label.starts_with("Manage:")))
     );
     let shown = act(&kernel, "details:greeter", Value::Null).await.unwrap();
     assert!(shown.rerender);
@@ -691,8 +695,8 @@ async fn a_directory_the_builder_did_not_write_is_never_replaced() {
     // It is not listed either.
     assert!(matches!(
         render(&kernel).await.nodes.as_slice(),
-        [_, Node::Text { text }, Node::Heading { .. }, Node::Form { action, .. }]
-            if text == "No personal plugins yet." && action == IMPORT_ACTION
+        [_, Node::Text { text }, Node::Button { action, .. }, Node::Button { .. }]
+            if text == "No personal plugins yet." && action == "show-import"
     ));
 }
 
@@ -736,6 +740,7 @@ async fn ticked_plugins_are_exported_to_a_bundle_that_imports_elsewhere() {
     assert!(!invoke(&kernel, SAVE_TOOL, other).await.is_error);
 
     // The export form has a check box per plugin and a file field.
+    act(&kernel, "show-transfer", Value::Null).await.unwrap();
     let nodes = render(&kernel).await.nodes;
     let Some(Node::Form { fields, .. }) = nodes
         .iter()

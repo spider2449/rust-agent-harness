@@ -2,8 +2,8 @@
 //! (ADR 0062, ADR 0073).
 //!
 //! The list shows every saved plugin with its state. A plugin's details hold
-//! the actions on it: enable, reload, disable and delete. Under the list are
-//! the backups, and export and import for another machine. Every action runs
+//! the actions on it: enable, reload, disable and delete. Separate pages hold
+//! backups, export and import. Every action runs
 //! only on the user's click; the model cannot reach a view.
 
 use std::{
@@ -33,12 +33,29 @@ use crate::{
 
 /// The restore form's field that names the backup.
 const BACKUP_FIELD: &str = "backup";
+const SHOW_IMPORT: &str = "show-import";
+const SHOW_TRANSFER: &str = "show-transfer";
 
-/// The view lists the saved plugins; a plugin's details show on its button.
+#[derive(Clone)]
+enum Page {
+    Library,
+    Plugin(String),
+    Import,
+    Transfer,
+}
+
+fn back_to_list() -> Node {
+    Node::Button {
+        action: LIST_ACTION.to_owned(),
+        label: "Back to the list".to_owned(),
+    }
+}
+
+/// A compact library with selected-plugin details and utility pages.
 pub(crate) struct BuilderViews {
     builder: Arc<Builder>,
-    /// The plugin whose details are shown instead of the list.
-    shown: Mutex<Option<String>>,
+    /// The library, a selected plugin, or a utility page.
+    shown: Mutex<Page>,
 }
 
 fn done(message: String) -> ActionOutcome {
@@ -89,53 +106,71 @@ impl UiViews for BuilderViews {
         let builder = &self.builder;
         let store = &builder.store;
         let saved = store.list().await;
-        let how = if builder.manages() {
-            "Nothing runs until you enable it here, after reading its files."
-        } else {
-            "It is never mounted for you. Read its files, then add its mount.toml entry to \
-             rah.toml."
-        };
+        let page = self.shown();
         let mut nodes = vec![Node::Text {
-            text: format!(
-                "Plugins the model wrote for you, in {}. Describe what you need and the model \
-                 writes one. {how}",
-                store.dir().display()
-            ),
+            text: match &page {
+                Page::Library => "Select a plugin to view its settings and permissions.",
+                Page::Plugin(_) => "Review this plugin before enabling or reloading it.",
+                Page::Import => "Import a bundle. Imported plugins stay disabled.",
+                Page::Transfer => "Back up or move your saved plugins.",
+            }
+            .to_owned(),
         }];
-        let backups = store.backups().await;
-        if saved.is_empty() {
-            nodes.push(Node::Text {
-                text: "No personal plugins yet.".to_owned(),
-            });
-            nodes.extend(restore_form(&backups));
-            nodes.extend(import_form());
-            return Ok(View { nodes });
-        }
-        let shown = self.shown();
-        if let Some(plugin) = shown.and_then(|name| saved.iter().find(|p| p.about.name == name)) {
+        if let Page::Plugin(name) = &page
+            && let Some(plugin) = saved.iter().find(|plugin| plugin.about.name == *name)
+        {
             nodes.extend(self.details(plugin).await);
             return Ok(View { nodes });
         }
-        nodes.push(Node::Table {
-            columns: ["Plugin", "Status", "Runtime", "Description"]
-                .map(str::to_owned)
-                .to_vec(),
-            rows: saved
-                .iter()
-                .map(|plugin| {
-                    vec![
-                        plugin.about.name.clone(),
-                        builder.state(&plugin.about.name).label(),
-                        plugin.about.runtime.label().to_owned(),
-                        plugin.about.description.clone(),
-                    ]
-                })
-                .collect(),
-        });
-        nodes.extend(saved.iter().map(|plugin| Node::Button {
-            action: format!("{DETAILS_PREFIX}{}", plugin.about.name),
-            label: format!("Manage: {}", plugin.about.name),
-        }));
+        if matches!(page, Page::Import) {
+            nodes.push(back_to_list());
+            nodes.extend(import_form());
+            return Ok(View { nodes });
+        }
+        if !matches!(page, Page::Transfer) {
+            if saved.is_empty() {
+                nodes.push(Node::Text {
+                    text: "No personal plugins yet.".to_owned(),
+                });
+            } else {
+                nodes.push(Node::Table {
+                    columns: ["Plugin", "Status"].map(str::to_owned).to_vec(),
+                    rows: saved
+                        .iter()
+                        .map(|plugin| {
+                            vec![
+                                plugin.about.name.clone(),
+                                builder.state(&plugin.about.name).label(),
+                            ]
+                        })
+                        .collect(),
+                    row_actions: saved
+                        .iter()
+                        .map(|plugin| Some(format!("{DETAILS_PREFIX}{}", plugin.about.name)))
+                        .collect(),
+                });
+            }
+            nodes.push(Node::Button {
+                action: SHOW_IMPORT.to_owned(),
+                label: "Import".to_owned(),
+            });
+            nodes.push(Node::Button {
+                action: SHOW_TRANSFER.to_owned(),
+                label: "Backups & export".to_owned(),
+            });
+            return Ok(View { nodes });
+        }
+        nodes.push(back_to_list());
+        let backups = store.backups().await;
+        if saved.is_empty() {
+            nodes.extend(restore_form(&backups));
+            if backups.is_empty() {
+                nodes.push(Node::Text {
+                    text: "No backups yet.".to_owned(),
+                });
+            }
+            return Ok(View { nodes });
+        }
         nodes.push(Node::Heading {
             text: "Backup".to_owned(),
         });
@@ -182,7 +217,6 @@ impl UiViews for BuilderViews {
             submit: "Export".to_owned(),
             fields,
         });
-        nodes.extend(import_form());
         Ok(View { nodes })
     }
 
@@ -195,6 +229,17 @@ impl UiViews for BuilderViews {
     ) -> Result<ActionOutcome, UiError> {
         if view != VIEW {
             return Err(UiError::UnknownView(view.to_owned()));
+        }
+        if action == SHOW_IMPORT || action == SHOW_TRANSFER {
+            self.navigate(if action == SHOW_IMPORT {
+                Page::Import
+            } else {
+                Page::Transfer
+            });
+            return Ok(ActionOutcome {
+                message: None,
+                rerender: true,
+            });
         }
         if action == LIST_ACTION {
             self.show(None);
@@ -308,8 +353,13 @@ impl UiViews for BuilderViews {
                     return Err(UiError::InvalidInput("name the bundle file".to_owned()));
                 }
                 let path = self.builder.store.bundle_path(&file);
-                self.owned(move |builder| async move { import(&builder, &path, replace).await })
-                    .await
+                let result = self
+                    .owned(move |builder| async move { import(&builder, &path, replace).await })
+                    .await?;
+                if result.rerender {
+                    self.show(None);
+                }
+                Ok(result)
             }
             other => Err(UiError::UnknownAction(other.to_owned())),
         }
@@ -320,12 +370,12 @@ impl BuilderViews {
     pub(crate) fn new(builder: Arc<Builder>) -> Self {
         Self {
             builder,
-            shown: Mutex::new(None),
+            shown: Mutex::new(Page::Library),
         }
     }
 
-    /// The plugin whose details the view shows, if any.
-    fn shown(&self) -> Option<String> {
+    /// The page the view currently shows.
+    fn shown(&self) -> Page {
         self.shown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -333,7 +383,11 @@ impl BuilderViews {
     }
 
     fn show(&self, name: Option<String>) {
-        *self.shown.lock().unwrap_or_else(PoisonError::into_inner) = name;
+        self.navigate(name.map_or(Page::Library, Page::Plugin));
+    }
+
+    fn navigate(&self, page: Page) {
+        *self.shown.lock().unwrap_or_else(PoisonError::into_inner) = page;
     }
 
     /// Runs `work` as a task of the builder's scope and waits for it. A

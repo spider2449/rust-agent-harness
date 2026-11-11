@@ -1,0 +1,14 @@
+{
+  "version": "0.1.0",
+  "tools": [{
+    "name": "text-lab.inspect",
+    "description": "Counts words and characters in a short text without saving it.",
+    "input_schema": {
+      "type": "object",
+      "properties": { "text": { "type": "string", "maxLength": 10000 } },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "permission": "none"
+  }]
+}

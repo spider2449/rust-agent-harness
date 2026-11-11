@@ -550,6 +550,7 @@ async fn a_backup_is_restored_from_the_list_and_enables_nothing() {
     );
     // A second backup in the same second gets its own file.
     act(&kernel, BACKUP_ACTION, Value::Null).await.unwrap();
+    act(&kernel, "show-transfer", Value::Null).await.unwrap();
     let view = render(&kernel).await;
     let Some(Node::Form { fields, .. }) = view
         .nodes
