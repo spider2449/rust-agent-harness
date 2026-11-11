@@ -4,6 +4,15 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Windows: sandbox test cannot create a low-integrity token
+
+- **Seen:** 2026-11-11 in the managed Windows development environment while
+  running `cargo test --offline -p rah-desktop -p rah-cli --no-fail-fast`.
+- **Test:** `sandbox_os::shell_exec_cannot_write_outside_the_workspace`.
+- **Symptom:** Windows returns error 87 while setting up the low-integrity
+  token. The sandbox plugin fails to start, leaving the shell tool unavailable.
+- **Open:** Whether the failure reproduces in a regular Windows terminal.
+
 ## Intermittent: "edit and resend" times out in the session browser test
 
 - **Test:** `crates/rah-cli/tests/web_browser.rs`,

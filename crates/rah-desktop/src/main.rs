@@ -130,10 +130,13 @@ const TITLE: &str = concat!("RAH ", env!("CARGO_PKG_VERSION"));
 /// A page that shows why RAH did not start; a GUI program has no console.
 fn failure_page(message: &str) -> String {
     let escaped = first_start::escape(message);
+    let css = first_start::APP_CSS;
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>{TITLE}</title>\
-         <body style=\"font:15px system-ui,sans-serif;margin:32px\">\
-         <h1 style=\"font-size:20px\">{TITLE} did not start</h1><pre style=\"white-space:pre-wrap\">{escaped}</pre>"
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{TITLE}</title><style>{css}</style>\
+         <body class=\"startup-page\"><main class=\"startup-card\">\
+         <h1>{TITLE} did not start</h1><pre>{escaped}</pre></main></body></html>"
     )
 }
 

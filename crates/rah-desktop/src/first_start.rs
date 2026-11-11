@@ -10,6 +10,8 @@ use rah_cli::{
 };
 use serde_json::Value;
 
+pub(crate) const APP_CSS: &str = include_str!("../../../plugins/frontend-web/assets/app.css");
+
 /// `text` safe inside HTML text and double-quoted attributes.
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -52,16 +54,10 @@ pub fn page(title: &str, environment: &Environment<'_>, root: &str) -> String {
     let title = escape(title);
     let root = escape(root);
     format!(
-        r#"<!doctype html><meta charset="utf-8"><title>{title}</title>
-<style>
-body{{font:15px system-ui,sans-serif;margin:32px;max-width:640px;color:#1f2328;background:#fff}}
-@media (prefers-color-scheme:dark){{body{{color:#e6e6e6;background:#1e1f22}}input,select{{color:inherit;background:#2b2d31;border-color:#555}}}}
-h1{{font-size:20px}} .choice{{display:block;margin:4px 0}} .choice span{{opacity:.7}}
-fieldset{{border:0;padding:0;margin:0 0 16px}} legend{{font-weight:600;margin-bottom:6px}}
-input[type=text],select{{width:100%;box-sizing:border-box;padding:6px;font:inherit;border:1px solid #bbb;border-radius:4px}}
-.hint{{font-size:13px;opacity:.7;margin:4px 0 0}} #error{{color:#d1242f;white-space:pre-wrap}}
-button{{font:inherit;padding:8px 20px}}
-</style>
+        r#"<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title><style>{APP_CSS}</style>
+<body class="startup-page"><main class="startup-card">
 <h1>Welcome to {title}</h1>
 <p>RAH needs a model. These answers are written to <code>rah.toml</code>; Settings can change them later.</p>
 <form id="setup">
@@ -75,9 +71,10 @@ button{{font:inherit;padding:8px 20px}}
 <fieldset><legend>Permissions</legend><select name="permissions">{permissions}</select>
 <p class="hint">read-only: tools only read · ask: every change asks · auto-edit: edits run, programs ask · full: nothing asks</p></fieldset>
 <fieldset><legend>Workspace folder</legend><input type="text" name="root" value="{root}"></fieldset>
-<p id="error"></p>
+<p id="error" role="alert"></p>
 <button id="start" type="submit">Start</button>
 </form>
+</main>
 <script>
 const form = document.getElementById("setup");
 const compatible = document.getElementById("compatible");
@@ -96,7 +93,7 @@ function setupFailed(message) {{
   document.getElementById("error").textContent = message;
   document.getElementById("start").disabled = false;
 }}
-</script>"#
+</script></body></html>"#
     )
 }
 

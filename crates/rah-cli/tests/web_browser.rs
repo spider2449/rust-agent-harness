@@ -444,7 +444,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     assert_eq!(
         kinds,
-        json!(["you", "tool call · echo", "tool result", "assistant"])
+        json!(["You", "tool call · echo", "tool result", "Assistant"])
     );
     assert_eq!(page.eval("byId('input').value").await, "");
     // model-mock reports usage for both model requests of the turn.
@@ -654,6 +654,7 @@ async fn the_web_ui_works_in_a_real_browser() {
              const live = byId('live'); \
              const result = { \
                pageFits: document.documentElement.scrollHeight <= innerHeight, \
+               pageFitsWidth: document.documentElement.scrollWidth <= innerWidth, \
                statusAtBottom: Math.abs(byId('status').getBoundingClientRect().bottom - innerHeight) < 2, \
                followsOutput: live.scrollHeight - live.scrollTop - live.clientHeight < 2, \
              }; \
@@ -662,7 +663,7 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     assert_eq!(
         layout,
-        json!({ "pageFits": true, "statusAtBottom": true, "followsOutput": true })
+        json!({ "pageFits": true, "pageFitsWidth": true, "statusAtBottom": true, "followsOutput": true })
     );
 
     // Add a plugin, then remove it after the confirmation.
@@ -1987,7 +1988,7 @@ const PLACES: &str = r#"({
   left: [...byId('left-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
   right: [...byId('side-tabs').querySelectorAll('[data-view]')].map((b) => b.textContent),
   leftTabs: shown(byId('left-tabs')),
-  sideButton: shown(byId('toggle-side')) && byId('toggle-side').textContent,
+  sideButton: shown(byId('toggle-side')) && byId('toggle-side').getAttribute('aria-label'),
 })"#;
 
 #[tokio::test(flavor = "multi_thread")]

@@ -601,12 +601,12 @@ function entryNode(record) {
   switch (entry.kind) {
     case "turn_started":
       node.classList.add("user");
-      meta.append(el("span", "", "you"));
+      meta.append(el("span", "message-role", "You"));
       body.textContent = entry.input;
       break;
     case "assistant_message":
       node.classList.add("assistant");
-      meta.append(el("span", "", "assistant"));
+      meta.append(el("span", "message-role", "Assistant"));
       if (state.prefs.raw_markdown) {
         body.textContent = entry.text;
       } else {
@@ -1197,12 +1197,17 @@ function applyLayout(given) {
   // after the workspace when that is there.
   const side = $("toggle-side");
   side.hidden = layout.right.length === 0;
-  side.textContent = layout.right.includes("files") ? "Workspace" : "Panel";
+  const sideLabel = layout.right.includes("files") ? "Workspace" : "Side panel";
+  side.setAttribute("aria-label", sideLabel);
+  side.title = sideLabel;
   // One left panel needs no tabs; an empty left column is not shown.
   $("left-tabs").hidden = layout.left.length < 2;
   $("left").hidden = layout.left.length === 0;
   $("sessions-splitter").hidden = layout.left.length === 0;
-  if (layout.right.length === 0) $("side").hidden = true;
+  if (layout.right.length === 0) {
+    $("side").hidden = true;
+    side.setAttribute("aria-expanded", "false");
+  }
   selectLeft();
 }
 
@@ -1269,6 +1274,7 @@ function showPanel(view) {
   if (!region) return;
   if (region === "right") {
     $("side").hidden = false;
+    $("toggle-side").setAttribute("aria-expanded", "true");
     saveSidePrefs({ open: true, view });
   }
   selectTab(region, view);
@@ -1458,6 +1464,7 @@ function viewForm(entry, node) {
 
 function hideSide() {
   $("side").hidden = true;
+  $("toggle-side").setAttribute("aria-expanded", "false");
   saveSidePrefs({ open: false });
 }
 
