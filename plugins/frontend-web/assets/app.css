@@ -741,3 +741,27 @@ button.toggle[aria-pressed="true"] { background: var(--accent); color: var(--acc
 .tok-deleted { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .tok-hunk { color: var(--tok-attr); }
 .tok-meta { color: var(--muted); font-weight: 600; }
+
+.sessions .search-snippet { margin-top: 4px; overflow-wrap: anywhere; white-space: pre-wrap; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+
+/* One row of question anchors, with a distinct color for each neighboring card. */
+.message-nav { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px var(--conversation-gutter); border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+.message-nav-actions { flex: none; display: flex; gap: 4px; }
+.message-nav-actions button { padding: 0; width: 24px; height: 24px; font-size: 14px; line-height: 1; background: var(--panel); }
+.message-nav-actions button:disabled { opacity: .35; }
+.message-anchors { flex: 1; display: flex; gap: 6px; overflow-x: auto; min-width: 0; padding: 1px 2px; scrollbar-width: none; }
+.message-anchor { --question-color: #14b8a6; flex: 0 0 170px; display: flex; align-items: center; gap: 6px; min-width: 0; height: 24px; padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--question-color) 30%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--question-color) 8%, var(--panel)); color: var(--text); text-align: left; }
+.message-anchor[data-tone="1"] { --question-color: #f59e0b; }
+.message-anchor[data-tone="2"] { --question-color: #a78bfa; }
+.message-anchor[data-tone="3"] { --question-color: #fb7185; }
+.message-anchor[data-tone="4"] { --question-color: #38bdf8; }
+.message-anchor[data-tone="5"] { --question-color: #a3b854; }
+.message-anchor-number { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 3px; background: color-mix(in srgb, var(--question-color) 20%, var(--panel)); color: var(--text); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.message-anchor-text { flex: 1; min-width: 0; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 18px; }
+.message-anchors::-webkit-scrollbar { display: none; }
+.message-anchor:hover { border-color: var(--question-color); background: color-mix(in srgb, var(--question-color) 15%, var(--panel)); }
+.message-anchor[aria-current="location"] { background: color-mix(in srgb, var(--question-color) 23%, var(--panel)); border-color: var(--question-color); box-shadow: inset 3px 0 var(--question-color); }
+.message-anchor:focus-visible { outline: 2px solid var(--question-color); outline-offset: 1px; }
+@media (max-width: 600px) {
+  .message-anchor { flex-basis: 145px; }
+}

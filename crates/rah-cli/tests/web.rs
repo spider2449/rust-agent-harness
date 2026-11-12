@@ -2532,3 +2532,95 @@ async fn a_plugin_change_that_alters_the_layout_reaches_every_window() {
     assert_eq!(next_layout(&mut socket).await, json!({ "type": "layout" }));
     assert_eq!(web.json(web.get("/api/layout")).await["source"], "standard");
 }
+
+#[tokio::test]
+async fn history_search_finds_later_messages_and_record_positions() {
+    let web = start("web-history-search", |_| {}).await;
+    let session = web.json(web.post("/api/sessions")).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut socket = web.socket().await;
+    run_turn(&mut socket, &session, "initial greeting", None).await;
+    run_turn(&mut socket, &session, "later SQLite decision", None).await;
+    let hits = web.json(web.get("/api/sessions/search?q=SQLITE")).await;
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["id"], session);
+    assert!(hits[0]["snippet"].as_str().unwrap().contains("SQLite"));
+    assert!(hits[0]["seq"].as_u64().unwrap() > 1);
+    assert_eq!(
+        web.json(web.get("/api/sessions/search?q=absent-query"))
+            .await,
+        json!([])
+    );
+    assert_eq!(
+        web.json(web.get("/api/sessions/search?q=%20")).await,
+        json!([])
+    );
+    web.kernel.shutdown().await.unwrap();
+}
+
+/// Repeatable local measurement; not a timing assertion in the normal suite.
+#[tokio::test]
+#[ignore = "synthetic history performance measurement"]
+async fn history_search_large_history_latency() {
+    let web = start("web-history-search-latency", |_| {}).await;
+    let corpus_start = std::time::Instant::now();
+    let mut bytes = 0;
+    for index in 0..500 {
+        let id = rah_protocol::SessionId::new();
+        let mut lines = vec![
+            json!({"type":"header", "version":1, "session":id, "parent":null, "created":index + 1})
+                .to_string(),
+        ];
+        for seq in 1..=80 {
+            let text = if index == 0 && seq == 80 {
+                "oldest-history-needle".to_owned()
+            } else {
+                format!("ordinary history message {}", "context ".repeat(64))
+            };
+            lines.push(
+                json!({"type":"record", "seq":seq, "entry":{
+                    "kind":"assistant_message", "turn":rah_protocol::RequestId::new(), "text":text
+                }})
+                .to_string(),
+            );
+        }
+        let data = lines.join("\n") + "\n";
+        bytes += data.len();
+        let path = web.dir.sessions().join(format!("{id}.jsonl"));
+        std::fs::write(&path, data).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + index),
+            )
+            .unwrap();
+    }
+    eprintln!(
+        "corpus: 500 sessions, 40000 messages, {bytes} bytes; setup {:?}",
+        corpus_start.elapsed()
+    );
+    for query in [
+        "missing-history-needle",
+        "oldest-history-needle",
+        "missing-history-needle",
+    ] {
+        let start = std::time::Instant::now();
+        let hits = web
+            .json(web.get(&format!("/api/sessions/search?q={query}")))
+            .await;
+        eprintln!(
+            "query={query}: {:?}, {} hits",
+            start.elapsed(),
+            hits.as_array().unwrap().len()
+        );
+        assert_eq!(
+            hits.as_array().unwrap().len(),
+            usize::from(query == "oldest-history-needle")
+        );
+    }
+    web.kernel.shutdown().await.unwrap();
+}

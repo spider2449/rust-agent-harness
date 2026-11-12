@@ -1275,6 +1275,17 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     assert_eq!(page.eval("headTitle()").await, "Kyoto trip");
     let original = page.eval("state.current").await;
 
+    // Find a later message even though the title and first-message preview differ.
+    page.eval("byId('session-search').value = 'SECOND'; byId('session-search').dispatchEvent(new Event('input')); true").await;
+    page.wait("a full-history result", "!historySearchPending && document.querySelector('.search-snippet')?.textContent.includes('second')").await;
+    page.eval("sessionItems()[0].click(); true").await;
+    page.wait(
+        "the matching message opens",
+        "!byId('input').disabled && entries().length > 2",
+    )
+    .await;
+    page.eval("byId('session-search').value = ''; byId('session-search').dispatchEvent(new Event('input')); true").await;
+
     // Regenerate the last answer: a new branch with the same title.
     assert_eq!(page.eval("metaAction('regenerate').length").await, 1);
     page.eval("metaAction('regenerate')[0].click(); true").await;
@@ -1307,6 +1318,8 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
          byId('session-search').dispatchEvent(new Event('input')); true",
     )
     .await;
+    page.wait("history search completes", "!historySearchPending")
+        .await;
     assert_eq!(page.eval("sessionItems().length").await, 0);
     assert_eq!(
         page.eval("byId('sessions').textContent.includes('No matching sessions')")
@@ -2871,4 +2884,154 @@ async fn an_approval_with_large_input_keeps_its_buttons_in_view() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
     let errors = page.errors();
     assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
+#[tokio::test]
+async fn user_message_navigation_tracks_scroll_and_session_changes() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-message-navigation").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-message-navigation");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "empty session",
+        "!!state.current && !byId('input').disabled",
+    )
+    .await;
+    assert_eq!(page.eval("byId('message-nav').hidden").await, true);
+    let original = page.eval("state.current").await;
+    for index in 1..=4 {
+        let topic = [
+            "Find an older conversation by its contents",
+            "Jump to a question without scrolling through every reply",
+            "Measure search performance with a larger history",
+            "Make the conversation map clearer and easier to use",
+        ][index - 1];
+        let message = format!(
+            "{topic}. {} <img src=x onerror=alert(1)>",
+            "Additional detail for this question. ".repeat(45)
+        );
+        page.send_message(&message).await;
+        page.wait(
+            "navigation includes the completed turn",
+            &format!("idle() && byId('message-anchors').children.length === {index}"),
+        )
+        .await;
+    }
+    assert_eq!(
+        page.eval("byId('message-anchors').querySelectorAll('img').length")
+            .await,
+        0
+    );
+    assert_eq!(
+        page.eval("byId('message-anchors').firstChild.title.includes('<img src=x')")
+            .await,
+        true
+    );
+    page.eval("byId('message-anchors').firstChild.focus(); true")
+        .await;
+    page.call("Input.dispatchKeyEvent", json!({"type":"keyDown", "key":"Enter", "code":"Enter", "windowsVirtualKeyCode":13, "text":"\r"})).await;
+    page.call(
+        "Input.dispatchKeyEvent",
+        json!({"type":"keyUp", "key":"Enter", "code":"Enter", "windowsVirtualKeyCode":13}),
+    )
+    .await;
+    page.wait(
+        "first message selected",
+        "byId('message-anchors').firstChild.getAttribute('aria-current') === 'location'",
+    )
+    .await;
+    assert_eq!(page.eval("Math.abs(document.querySelector('#transcript .user').getBoundingClientRect().top - byId('transcript').getBoundingClientRect().top - 12) < 2").await, true);
+    assert_eq!(
+        page.eval(
+            "!byId('message-nav-count') && byId('message-nav').getBoundingClientRect().height <= 35 && getComputedStyle(byId('message-nav')).flexDirection === 'row'"
+        )
+        .await,
+        true
+    );
+    assert_eq!(page.eval("{ const text = document.querySelector('.message-anchor-text'); getComputedStyle(text).whiteSpace === 'nowrap' && getComputedStyle(text).textOverflow === 'ellipsis' && text.scrollWidth > text.clientWidth && text.getBoundingClientRect().height <= 18 }").await, true);
+    assert_eq!(page.eval("{ const cards = byId('message-anchors').children; getComputedStyle(cards[0]).getPropertyValue('--question-color') !== getComputedStyle(cards[1]).getPropertyValue('--question-color') }").await, true);
+    assert_eq!(page.eval("getComputedStyle(byId('message-anchors').firstChild).backgroundColor !== getComputedStyle(document.querySelector('#transcript .user')).backgroundColor").await, true);
+    assert_eq!(page.eval("byId('message-nav-prev').disabled").await, true);
+    page.eval("byId('message-nav-next').click(); true").await;
+    page.wait(
+        "next question selected",
+        "byId('message-anchors').children[1].hasAttribute('aria-current')",
+    )
+    .await;
+    page.eval("byId('message-nav-prev').click(); true").await;
+    page.wait(
+        "previous question selected",
+        "byId('message-anchors').firstChild.hasAttribute('aria-current')",
+    )
+    .await;
+
+    page.eval("byId('message-anchors').lastChild.click(); true")
+        .await;
+    page.wait(
+        "last message selected",
+        "byId('message-anchors').lastChild.getAttribute('aria-current') === 'location'",
+    )
+    .await;
+    assert_eq!(page.eval("byId('message-nav-next').disabled").await, true);
+    page.eval("byId('transcript').scrollTop = 0; true").await;
+    page.wait(
+        "manual scroll updates selection",
+        "byId('message-anchors').firstChild.getAttribute('aria-current') === 'location'",
+    )
+    .await;
+    page.screenshot("message-navigation-desktop").await;
+    page.eval("document.documentElement.dataset.theme = 'dark'; true")
+        .await;
+    page.screenshot("message-navigation-dark").await;
+    page.eval("document.documentElement.dataset.theme = 'light'; true")
+        .await;
+
+    page.call(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":480,"height":800,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .await;
+    page.eval("hideSide(); true").await;
+    page.wait("navigation is visible on a narrow screen", "byId('message-nav').getBoundingClientRect().height > 0 && byId('message-anchors').clientWidth > 0").await;
+    assert_eq!(
+        page.eval("byId('message-anchors').scrollWidth > byId('message-anchors').clientWidth")
+            .await,
+        true
+    );
+    assert_eq!(
+        page.eval("document.documentElement.scrollWidth <= innerWidth")
+            .await,
+        true
+    );
+    page.eval("byId('message-anchors').lastChild.focus(); byId('message-anchors').lastChild.click(); true").await;
+    page.wait("last summary visible on a narrow screen", "byId('message-anchors').lastChild.getBoundingClientRect().right <= byId('message-anchors').getBoundingClientRect().right + 1").await;
+    assert_eq!(page.eval("byId('message-nav').getBoundingClientRect().height <= 35 && document.querySelector('.message-anchor-text').getBoundingClientRect().height <= 18").await, true);
+    page.screenshot("message-navigation-narrow").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait(
+        "new session clears navigation",
+        "byId('message-nav').hidden && !byId('input').disabled",
+    )
+    .await;
+    page.eval(&format!("openSession({original}).then(() => true)"))
+        .await;
+    page.wait(
+        "restored session restores navigation",
+        "byId('message-anchors').children.length === 4",
+    )
+    .await;
+    page.eval("closeSession(); true").await;
+    assert_eq!(
+        page.eval("byId('message-nav').hidden && byId('message-anchors').children.length === 0")
+            .await,
+        true
+    );
+    assert!(page.errors().is_empty(), "{:?}", page.errors());
+    web._kernel.shutdown().await.unwrap();
 }

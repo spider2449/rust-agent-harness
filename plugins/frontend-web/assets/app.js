@@ -266,13 +266,49 @@ The logs are moved to the sessions' deleted folder. The folder and its files are
   }
 }
 
+let historySearchTimer;
+let historySearchVersion = 0;
+let historySearchController;
+let historySearchHits = new Map();
+let historySearchQuery = "";
+let historySearchPending = false;
+let historySearchError = "";
+
+function searchSessions() {
+  clearTimeout(historySearchTimer);
+  historySearchController?.abort();
+  historySearchController = new AbortController();
+  const signal = historySearchController.signal;
+  const version = ++historySearchVersion;
+  const query = $("session-search").value.trim().toLowerCase();
+  historySearchQuery = query;
+  historySearchHits = new Map();
+  historySearchPending = !!query;
+  historySearchError = "";
+  renderSessions();
+  if (!query) return;
+  historySearchTimer = setTimeout(async () => {
+    try {
+      const hits = await api(`/sessions/search?q=${encodeURIComponent(query)}`, { signal });
+      if (version !== historySearchVersion) return;
+      historySearchHits = new Map(hits.map((hit) => [hit.id, hit]));
+    } catch (error) {
+      if (version !== historySearchVersion) return;
+      historySearchError = `History search failed: ${error.message}`;
+    }
+    if (version !== historySearchVersion) return;
+    historySearchPending = false;
+    renderSessions();
+  }, 250);
+}
+
 function renderSessions() {
   const query = $("session-search").value.trim().toLowerCase();
   const list = $("sessions");
   list.replaceChildren();
   const visible = state.sessions.filter((info) => {
     const haystack = `${info.title || ""} ${info.preview || ""} ${info.id} ${info.workspace || ""}`.toLowerCase();
-    return !query || haystack.includes(query);
+    return !query || haystack.includes(query) || (query === historySearchQuery && historySearchHits.has(info.id));
   });
   const expanded = state.expandedFolders || (state.expandedFolders = new Set());
   for (const group of sessionGroups(visible)) {
@@ -301,6 +337,9 @@ function renderSessions() {
       list.append(more);
     }
   }
+  if (query && historySearchPending) list.append(el("li", "group", "Searching message history..."));
+  if (query && historySearchError) list.append(el("li", "group", historySearchError));
+  if (query && historySearchHits.size >= 100) list.append(el("li", "group", "Showing up to 100 history matches. Refine your search for more."));
   if (!list.children.length) list.append(el("li", "group", query ? "No matching sessions" : "No sessions yet"));
 }
 
@@ -346,7 +385,18 @@ function sessionItem(info) {
     actions.append(button);
   }
   item.append(name, actions, el("small", "", meta.join(" · ")));
-  item.addEventListener("click", () => openSession(info.id).catch(report));
+  const hit = $("session-search").value.trim().toLowerCase() === historySearchQuery ? historySearchHits.get(info.id) : null;
+  if (hit?.snippet) item.append(el("small", "search-snippet", hit.snippet));
+  item.addEventListener("click", async () => {
+    try {
+      await openSession(info.id);
+      if (hit?.seq && state.current === info.id) {
+        const entry = $("transcript").querySelector(`[data-seq="${Number(hit.seq)}"]`);
+        entry?.scrollIntoView({ block: "center" });
+        entry?.animate([{ outline: "2px solid currentColor" }, { outline: "2px solid transparent" }], 2000);
+      }
+    } catch (error) { report(error); }
+  });
   return item;
 }
 
@@ -395,6 +445,7 @@ function closeSession() {
   renderUsage();
   refreshViews();
   $("transcript").replaceChildren();
+  renderMessageNavigation();
   $("activity").replaceChildren();
   $("input").disabled = true;
   $("send").disabled = true;
@@ -476,6 +527,11 @@ function awaitTitle() {
 }
 
 async function openSession(id) {
+  if (state.current !== id) {
+    messageNavigationEntries = [];
+    $("message-anchors").replaceChildren();
+    $("message-nav").hidden = true;
+  }
   state.current = id;
   renderUsage();
   // Views are rendered for the open session.
@@ -647,9 +703,72 @@ function entryNode(record) {
   return node;
 }
 
+// The navigation uses recorded user messages only, never model-generated HTML.
+let messageNavigationFrame = null;
+let messageNavigationEntries = [];
+
+function renderMessageNavigation() {
+  const host = $("message-anchors");
+  host.replaceChildren();
+  messageNavigationEntries = [...$("transcript").querySelectorAll(".entry.user")].map((entry, index) => {
+    const text = entry.querySelector("pre").textContent.replace(/\s+/gu, " ").trim();
+    const summary = text || "Empty message";
+    const button = el("button", "message-anchor");
+    const number = el("span", "message-anchor-number", String(index + 1).padStart(2, "0"));
+    number.setAttribute("aria-hidden", "true");
+    button.append(number, el("span", "message-anchor-text", summary));
+    button.setAttribute("aria-label", `Question ${index + 1}: ${summary}`);
+    button.type = "button";
+    button.dataset.tone = index % 6;
+    button.title = text;
+    button.dataset.seq = entry.dataset.seq;
+    button.setAttribute("aria-controls", "transcript");
+    button.addEventListener("click", () => {
+      const list = $("transcript");
+      list.scrollTop += entry.getBoundingClientRect().top - list.getBoundingClientRect().top - 12;
+      updateMessageNavigation(entry);
+      entry.animate([{ outline: "2px solid var(--accent)" }, { outline: "2px solid transparent" }], 1200);
+    });
+    host.append(button);
+    return { entry, button };
+  });
+  $("message-nav").hidden = !messageNavigationEntries.length;
+  updateMessageNavigation();
+}
+
+function updateMessageNavigation(preferred = null) {
+  if (!messageNavigationEntries.length) return;
+  const list = $("transcript");
+  const top = list.getBoundingClientRect().top + 24;
+  let current = messageNavigationEntries[0];
+  for (const item of messageNavigationEntries) {
+    if (item.entry.getBoundingClientRect().top > top) break;
+    current = item;
+  }
+  if (list.scrollHeight > list.clientHeight && list.scrollTop + list.clientHeight >= list.scrollHeight - 2) {
+    current = messageNavigationEntries[messageNavigationEntries.length - 1];
+  }
+  if (preferred) current = messageNavigationEntries.find((item) => item.entry === preferred) || current;
+  for (const { button } of messageNavigationEntries) {
+    if (button === current.button) button.setAttribute("aria-current", "location");
+    else button.removeAttribute("aria-current");
+  }
+  const index = messageNavigationEntries.indexOf(current);
+  $("message-nav-prev").disabled = index === 0;
+  $("message-nav-next").disabled = index === messageNavigationEntries.length - 1;
+  // Reveal the active summary without scrolling the conversation or page.
+  const host = $("message-anchors");
+  const bounds = host.getBoundingClientRect();
+  const active = current.button.getBoundingClientRect();
+  if (active.left < bounds.left) host.scrollLeft += active.left - bounds.left;
+  else if (active.right > bounds.right) host.scrollLeft += active.right - bounds.right;
+}
+
 async function loadTranscript() {
   if (!state.current) return;
-  const records = await api(`/sessions/${state.current}`);
+  const session = state.current;
+  const records = await api(`/sessions/${session}`);
+  if (state.current !== session) return;
   const list = $("transcript");
   list.replaceChildren(...records.map(entryNode).filter(Boolean));
   seedActivity(records);
@@ -661,6 +780,7 @@ async function loadTranscript() {
     answer.querySelector(".meta").insertBefore(button, answer.querySelector(".meta .fork"));
   }
   list.scrollTop = list.scrollHeight;
+  renderMessageNavigation();
 }
 
 // ---- Turns ----------------------------------------------------------------
@@ -3555,7 +3675,20 @@ async function start() {
     // Older servers have no preferences; the defaults apply.
   }
   applyTheme();
-  $("session-search").addEventListener("input", renderSessions);
+  $("session-search").addEventListener("input", searchSessions);
+  for (const [id, direction] of [["message-nav-prev", -1], ["message-nav-next", 1]]) {
+    $(id).addEventListener("click", () => {
+      const index = messageNavigationEntries.findIndex(({ button }) => button.hasAttribute("aria-current"));
+      messageNavigationEntries[index + direction]?.button.click();
+    });
+  }
+  $("transcript").addEventListener("scroll", () => {
+    if (messageNavigationFrame !== null) return;
+    messageNavigationFrame = requestAnimationFrame(() => {
+      messageNavigationFrame = null;
+      updateMessageNavigation();
+    });
+  }, { passive: true });
   $("status-root").addEventListener("click", () => openWorkspacePicker().catch(report));
   $("git-branch").addEventListener("click", (event) => {
     event.stopPropagation();

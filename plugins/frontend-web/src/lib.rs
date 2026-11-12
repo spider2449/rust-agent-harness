@@ -78,6 +78,9 @@
 //!   configuration file (see [`panel`]).
 //! - With a `scheduler` service: `GET|POST /api/jobs {input, session,
 //!   delay_secs, every_secs}` and `DELETE /api/jobs/{id}`.
+//! - `GET /api/sessions/search?q=...`: case-insensitive title, metadata and
+//!   user/assistant message search, up to 100 sessions (newest first), with
+//!   `{id, seq, snippet}` for the first matching message.
 //! - `GET|POST /api/sessions`, `GET|DELETE /api/sessions/{id}`,
 //!   `POST /api/sessions/delete {ids}` (several at once, such as a folder of
 //!   the session list: forks before the sessions they came from),
@@ -122,6 +125,7 @@ mod jobs;
 mod layout;
 mod manage;
 mod panel;
+mod session_search;
 mod settings;
 mod status;
 mod undo;
@@ -363,6 +367,7 @@ fn router(shared: AppState) -> Router {
         .route("/plugins/{id}/config", put(manage::configure))
         .route("/plugins/{id}/replace", post(manage::replace))
         .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/search", get(session_search::search))
         .route("/sessions/delete", post(delete_sessions))
         .route("/sessions/{id}", get(read_session).delete(delete_session))
         .route("/sessions/{id}/fork", post(fork_session))

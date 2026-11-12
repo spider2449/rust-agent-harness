@@ -39,7 +39,7 @@
       <div id="left-tabs" class="tabs side-tabs" role="tablist" hidden></div>
       <div id="sessions-panel" class="sessions-panel" role="tabpanel" aria-label="Sessions">
         <button id="new-session" type="button">New session</button>
-        <input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions">
+        <input id="session-search" type="search" maxlength="256" placeholder="Search titles and messages" aria-label="Search titles and messages">
         <ul id="sessions" class="sessions"></ul>
       </div>
     </nav>
@@ -65,6 +65,13 @@
         <span id="notice-text" class="notice-text"></span>
         <button id="notice-close" type="button" class="ghost icon" title="Dismiss" aria-label="Dismiss">✕</button>
       </div>
+      <nav id="message-nav" class="message-nav" aria-label="User messages" hidden>
+        <div id="message-anchors" class="message-anchors"></div>
+        <div class="message-nav-actions">
+          <button id="message-nav-prev" type="button" class="ghost" aria-label="Previous question" title="Previous question">&#8592;</button>
+          <button id="message-nav-next" type="button" class="ghost" aria-label="Next question" title="Next question">&#8594;</button>
+        </div>
+      </nav>
       <ol id="transcript" class="transcript"></ol>
       <div id="live" class="live" hidden></div>
       <div id="busy" class="busy" role="status" aria-live="polite" hidden>
