@@ -82,6 +82,18 @@ impl Plugin {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == "--assert-no-console") {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        // A background plugin must not own or inherit a console window.
+        assert!(
+            unsafe { GetConsoleWindow() }.is_null(),
+            "plugin has a console window"
+        );
+    }
     let flag = |name: &str| {
         args.windows(2)
             .filter(|pair| pair[0] == name)

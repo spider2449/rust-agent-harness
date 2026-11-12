@@ -137,6 +137,9 @@ impl ProcessConfig {
 
     fn spawn(&self) -> Result<Child, String> {
         let mut command = Command::new(&self.program);
+        // Keep console runtimes hidden while preserving the JSON-RPC pipes.
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command.args(&self.args).env_clear();
         let inherit: Vec<String> = self.inherit_env.clone().unwrap_or_else(|| {
             DEFAULT_INHERIT_ENV

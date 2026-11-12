@@ -108,6 +108,15 @@ async fn mount_process(kernel: &Kernel, config: Value) -> PluginStatus {
         .unwrap()
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn discovery_and_mount_do_not_attach_a_console() {
+    let kernel = Kernel::new();
+    let status = mount_process(&kernel, config(&["--assert-no-console"], Value::Null)).await;
+    assert_eq!(status, PluginStatus::Active);
+    kernel.unmount(&PluginId::new("fixture")).await.unwrap();
+}
+
 async fn call(kernel: &Kernel, name: &str, input: Value) -> (ToolOutput, ToolEffect) {
     let outcome = ToolInvoker::new(kernel.handle())
         .invoke(
