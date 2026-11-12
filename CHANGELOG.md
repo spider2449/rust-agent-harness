@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.37 (2026-11-12)
+
+- Windows process plugins run in the background without opening console windows,
+  including during manifest discovery.
+- Plugin settings use a shared editor, and My plugins uses compact selectable rows.
+- Personal plugins resolve under a single data directory.
+- The Web UI supports full-history search and compact message navigation.
+- Refresh the shared Web and desktop interface.
+- Reduce LLM streaming overhead and add local latency evaluation tooling.
+
 ## v0.45.36 (2026-11-10)
 
 - A plugin that does not stop no longer blocks every later plugin change
