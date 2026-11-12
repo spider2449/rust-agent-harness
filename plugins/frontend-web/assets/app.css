@@ -257,6 +257,16 @@ button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
   border-radius: 4px; cursor: pointer; white-space: nowrap;
 }
 .status button.link:hover { background: var(--tool); color: var(--accent); }
+.status-plugins { display: inline-flex; align-items: center; gap: 8px; max-width: 30%; flex-shrink: 0; overflow: hidden; }
+.status-indicator { display: inline-flex; align-items: center; gap: 5px; min-width: 18px; }
+.status-indicator .indicator-label { overflow: hidden; text-overflow: ellipsis; }
+.status-indicator svg { width: 15px; height: 15px; flex: none; }
+.status-indicator[data-state="ready"] svg { color: var(--good); }
+.status-indicator[data-state="error"] svg { color: var(--bad); }
+.status-indicator[data-state="warning"] svg { color: var(--warn); }
+.status-indicator[data-state="busy"] svg { color: var(--accent); animation: status-pulse 1.2s ease-in-out infinite; }
+@keyframes status-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .status-indicator[data-state="busy"] svg { animation: none; } }
 
 .dialog {
   width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 16px;

@@ -68,12 +68,16 @@ pub(crate) async fn list(State(shared): State<AppState>) -> ApiResult {
     let views: Vec<Value> = listed(&shared.kernel)
         .into_iter()
         .map(|view| {
-            json!({
+            let mut item = json!({
                 "id": view.id,
                 "instance": view.instance,
                 "view": view.spec.id,
                 "title": view.spec.title,
-            })
+            });
+            if view.spec.status_bar {
+                item["status_bar"] = json!(true);
+            }
+            item
         })
         .collect();
     Ok(Json(json!({ "views": views })))

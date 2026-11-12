@@ -408,6 +408,9 @@ Behind the same token and checks, and likewise unreachable from tools:
   mounted code and trusted like any plugin, so an action may do whatever its
   plugin can. The `usage` view of `telemetry-log` shows counts only, never
   message text, tool output or arguments.
+  Opted-in footer indicators (ADR 0078) use closed icon/state enums and bounded
+  labels/tooltips, with at most four visible. Clicking only opens the contributing
+  view. They cannot replace built-in status items or inject browser code or URLs.
 - The Web UI writes `rah.toml` (ADR 0067). Successful changes through
   `/api/plugins` (except stop and start), the web search and feature switches, the
   Settings forms and "Always allow this command" are kept there through the

@@ -211,3 +211,6 @@ tab at the end of the right column; `Layout::standard()` is unchanged.
 Not done yet: the `SessionAction` and `HeaderBadge` slots and `order`, a
 `Progress` node and views in `frontend-cli` (decision 9). Views from process
 plugins (decision 8) are protocol 4, ADR 0063.
+
+ADR 0078 adds optional, bounded footer indicators through the same views and
+change events. The built-in status bar remains frontend-owned.

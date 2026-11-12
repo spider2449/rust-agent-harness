@@ -339,6 +339,126 @@ struct Web {
     dir: TempDir,
 }
 
+#[derive(Clone)]
+struct FooterStatus {
+    manifest: rah_api::PluginManifest,
+    state: Arc<Mutex<rah_api::ui::StatusState>>,
+}
+
+#[rah_api::async_trait]
+impl rah_api::Plugin for FooterStatus {
+    fn manifest(&self) -> &rah_api::PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
+        let provider: Arc<dyn rah_api::ui::UiViews> = Arc::new(self.clone());
+        scope.provide(rah_api::ui::UI_VIEWS, provider)?;
+        Ok(())
+    }
+}
+
+#[rah_api::async_trait]
+impl rah_api::ui::UiViews for FooterStatus {
+    fn views(&self) -> Vec<rah_api::ui::ViewSpec> {
+        let mut spec = rah_api::ui::ViewSpec::new("status", "Graphify");
+        spec.status_bar = true;
+        vec![spec]
+    }
+
+    async fn render(
+        &self,
+        _: &str,
+        _: &rah_api::ui::ViewContext,
+    ) -> Result<rah_api::ui::View, rah_api::ui::UiError> {
+        Ok(rah_api::ui::View {
+            nodes: vec![
+                rah_api::ui::Node::Text {
+                    text: "Automatic graph indexing".into(),
+                },
+                rah_api::ui::Node::Status {
+                    icon: rah_api::ui::StatusIcon::Graph,
+                    state: *self.state.lock().unwrap(),
+                    label: "Graphify 1/3".into(),
+                    detail: "Graphify: indexing workspace".into(),
+                },
+            ],
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn footer_indicators_update_open_details_and_disappear_on_unmount() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-footer").await;
+    let id = rah_api::PluginId::new("graph-status");
+    let state = Arc::new(Mutex::new(rah_api::ui::StatusState::Busy));
+    web._kernel
+        .mount(
+            Arc::new(FooterStatus {
+                manifest: rah_api::PluginManifest::new(id.clone(), "0")
+                    .provides([rah_api::ui::UI_VIEWS_SERVICE]),
+                state: state.clone(),
+            }),
+            rah_api::MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-footer");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("the page to connect", "connected()").await;
+    page.wait(
+        "busy footer indicator",
+        "byId('status-plugins').querySelector('[data-state=busy] svg') !== null",
+    )
+    .await;
+    assert_eq!(
+        page.eval("byId('status-plugins').textContent").await,
+        "Graphify 1/3"
+    );
+    for (value, expected) in [
+        (rah_api::ui::StatusState::Ready, "ready"),
+        (rah_api::ui::StatusState::Error, "error"),
+    ] {
+        *state.lock().unwrap() = value;
+        web._kernel.handle().emit(&rah_api::ui::UiChanged {
+            instance: "graph-status".into(),
+            view: "status".into(),
+        });
+        page.wait(
+            "pushed footer state",
+            &format!("byId('status-plugins').querySelector('[data-state={expected}]') !== null"),
+        )
+        .await;
+    }
+    page.screenshot("graphify-status-bar").await;
+    page.eval("byId('status-plugins').querySelector('button').click(); true")
+        .await;
+    page.wait(
+        "Graphify details",
+        "shown(byId('plugin-page')) && byId('plugin-page').textContent.includes('Automatic graph indexing')",
+    )
+    .await;
+    web._kernel.unmount(&id).await.unwrap();
+    page.wait(
+        "removed footer indicator",
+        "byId('status-plugins').hidden && !byId('status-plugins').children.length",
+    )
+    .await;
+    assert_eq!(
+        page.eval("!!byId('status-root') && !!byId('status-model')")
+            .await,
+        true
+    );
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
 async fn start(name: &str) -> Web {
     start_with(name, |_, _| {}).await
 }

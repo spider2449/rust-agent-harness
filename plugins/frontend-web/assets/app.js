@@ -1362,6 +1362,7 @@ async function loadLayout() {
     // Older servers have no layout.
   }
   applyLayout(given);
+  loadStatusIndicators().catch(() => {});
 }
 
 // A plugin change altered the layout (`{type: "layout"}` on the socket):
@@ -1456,6 +1457,7 @@ async function renderView(id) {
 
 // Shown views follow the turns: a turn may change what they show.
 function refreshViews() {
+  for (const entry of statusIndicators.values()) refreshStatusIndicator(entry);
   for (const id of views.keys()) if (panelShown(id)) renderView(id);
   refreshPluginPage();
 }
@@ -1464,6 +1466,11 @@ function refreshViews() {
 // view renders again once the changes pause; a hidden one renders when shown.
 const viewTimers = new Map();
 function viewChanged(id) {
+  const indicator = statusIndicators.get(id);
+  if (indicator) {
+    clearTimeout(indicator.timer);
+    indicator.timer = setTimeout(() => refreshStatusIndicator(indicator), 150);
+  }
   if (pluginPageSelection === id) refreshPluginPage();
   if (!views.has(id) || !panelShown(id)) return;
   clearTimeout(viewTimers.get(id));
@@ -2592,6 +2599,8 @@ function connect() {
   const socket = new WebSocket(`ws://${location.host}/api/ws?token=${state.token}`);
   state.socket = socket;
   socket.addEventListener("open", () => {
+    statusIndicatorsConnected = true;
+    loadStatusIndicators().catch(() => {});
     state.retry = 500;
     // Shown only while the link to the local RAH process is down.
     $("connection").textContent = "connected";
@@ -2626,6 +2635,11 @@ function connect() {
     }
   });
   socket.addEventListener("close", () => {
+    statusIndicatorsConnected = false;
+    for (const entry of statusIndicators.values()) {
+      ++entry.request;
+      paintStatusIndicator(entry, { state: "warning", label: entry.title, detail: `${entry.title}: connection lost` });
+    }
     $("connection").textContent = "disconnected";
     $("connection").hidden = false;
     setRunning(false);
@@ -3222,6 +3236,7 @@ async function loadCatalog() {
 async function loadPlugins() {
   const [plugins, info, ui] = await Promise.all([api("/plugins"), api("/info"), api("/ui")]);
   pluginPages = ui.views || [];
+  loadStatusIndicators().catch(() => {});
   // Personal plugins are listed apart, after the distribution's own.
   const personal = plugins.filter(isPersonal);
   const rows = plugins.filter((plugin) => !isPersonal(plugin)).map(pluginRow);
@@ -3261,6 +3276,99 @@ async function loadPlugins() {
 }
 
 // ---- Status line ----------------------------------------------------------
+
+// Providers opt in through UiViews; this footer knows no integration ids/files.
+const statusIndicators = new Map();
+let statusIndicatorsRequest = 0;
+let statusIndicatorsConnected = true;
+
+function indicatorIcon(kind) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  const line = document.createElementNS(ns, "path");
+  line.setAttribute("d", kind === "graph" ? "M4 4L12 4L8 12Z" : "M1 8h3l2-5 4 10 2-5h3");
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "1.3");
+  svg.append(line);
+  if (kind === "graph") {
+    for (const [x, y] of [[4, 4], [12, 4], [8, 12]]) {
+      const circle = document.createElementNS(ns, "circle");
+      circle.setAttribute("cx", String(x)); circle.setAttribute("cy", String(y));
+      circle.setAttribute("r", "2"); circle.setAttribute("fill", "currentColor");
+      svg.append(circle);
+    }
+  }
+  return svg;
+}
+
+function paintStatusIndicator(entry, value) {
+  const states = ["idle", "busy", "ready", "warning", "error"];
+  const state = states.includes(value.state) ? value.state : "warning";
+  entry.icon = value.icon || entry.icon || "activity";
+  const label = String(value.label || entry.title).slice(0, 64);
+  const detail = String(value.detail || entry.title).slice(0, 1024);
+  entry.node.dataset.state = state;
+  entry.node.title = `${detail}\nClick to open ${entry.title}`;
+  entry.node.setAttribute("aria-label", detail.split("\n")[0] || label);
+  entry.node.replaceChildren(indicatorIcon(entry.icon), el("span", "indicator-label", label));
+}
+
+async function refreshStatusIndicator(entry) {
+  if (!statusIndicatorsConnected) return;
+  const request = ++entry.request;
+  const current = state.current;
+  const workspace = state.workspace;
+  try {
+    const session = current ? `?session=${encodeURIComponent(current)}` : "";
+    const content = await api(`${viewPath(entry)}${session}`);
+    if (statusIndicators.get(entry.id) !== entry || request !== entry.request || !statusIndicatorsConnected
+      || current !== state.current || (workspace !== undefined && workspace !== state.workspace)) return;
+    const item = (content.nodes || []).find((node) => node.type === "status");
+    paintStatusIndicator(entry, item || { state: "warning", label: entry.title, detail: `${entry.title}: no status reported` });
+  } catch (error) {
+    if (statusIndicators.get(entry.id) === entry && request === entry.request) {
+      paintStatusIndicator(entry, { state: "warning", label: entry.title, detail: `${entry.title}: status unavailable\n${error.message}` });
+    }
+  }
+}
+
+async function loadStatusIndicators() {
+  const request = ++statusIndicatorsRequest;
+  let specs;
+  try { specs = (await api("/ui")).views.filter((view) => view.status_bar).slice(0, 4); }
+  catch (error) {
+    if (request !== statusIndicatorsRequest) return;
+    for (const entry of statusIndicators.values()) {
+      ++entry.request;
+      paintStatusIndicator(entry, { state: "warning", label: entry.title, detail: `${entry.title}: status unavailable\n${error.message}` });
+    }
+    return;
+  }
+  if (request !== statusIndicatorsRequest) return;
+  for (const [id, entry] of statusIndicators) {
+    if (!specs.some((view) => view.id === id)) {
+      clearTimeout(entry.timer); entry.node.remove(); statusIndicators.delete(id);
+    }
+  }
+  const container = $("status-plugins");
+  for (const spec of specs) {
+    let entry = statusIndicators.get(spec.id);
+    if (!entry) {
+      const button = el("button", "item link status-indicator");
+      button.type = "button"; button.dataset.indicator = spec.id;
+      entry = { ...spec, node: button, request: 0 };
+      button.addEventListener("click", () => { showPlugins(); showPluginPage(entry); });
+      statusIndicators.set(spec.id, entry);
+      paintStatusIndicator(entry, { state: "idle", label: spec.title, detail: `${spec.title}: loading status` });
+    }
+    container.append(entry.node);
+    refreshStatusIndicator(entry);
+  }
+  container.hidden = statusIndicators.size === 0;
+}
 
 function statusItem(id, text, title, className) {
   const node = $(id);
@@ -3395,6 +3503,7 @@ async function loadStatus() {
   announceProvider("loop", status.loop);
   const [text, title, bad] = agentText(status);
   statusItem("status-agent", text, title, bad ? "bad" : "");
+  for (const entry of statusIndicators.values()) refreshStatusIndicator(entry);
 }
 
 // The loop, the tools and the policy in one status item: the tool count,

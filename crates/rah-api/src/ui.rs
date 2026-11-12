@@ -135,6 +135,9 @@ pub struct ViewSpec {
     pub id: String,
     /// The tab label.
     pub title: String,
+    /// Whether this view also contributes a bounded footer indicator.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_bar: bool,
 }
 
 impl ViewSpec {
@@ -142,6 +145,7 @@ impl ViewSpec {
         Self {
             id: id.into(),
             title: title.into(),
+            status_bar: false,
         }
     }
 
@@ -184,6 +188,13 @@ pub struct View {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
+    /// One frontend-owned footer indicator; clicking opens this view.
+    Status {
+        icon: StatusIcon,
+        label: String,
+        state: StatusState,
+        detail: String,
+    },
     Heading {
         text: String,
     },
@@ -222,6 +233,29 @@ pub enum Node {
         fields: Vec<Field>,
     },
 }
+
+/// Built-in icons; providers cannot supply markup or image URLs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusIcon {
+    Activity,
+    Graph,
+}
+
+/// Presentation only; this state never grants permission or changes policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusState {
+    Idle,
+    Busy,
+    Ready,
+    Warning,
+    Error,
+}
+
+pub const MAX_STATUS_ITEMS: usize = 4;
+pub const MAX_STATUS_LABEL_CHARS: usize = 64;
+pub const MAX_STATUS_DETAIL_CHARS: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -289,7 +323,18 @@ impl View {
 
     /// Refuses a view over [`MAX_VIEW_NODES`] nodes or [`MAX_VIEW_BYTES`].
     pub fn check(&self) -> Result<(), UiError> {
+        let mut indicators = 0;
         for node in &self.nodes {
+            if let Node::Status { label, detail, .. } = node {
+                indicators += 1;
+                if indicators > 1
+                    || label.trim().is_empty()
+                    || label.chars().count() > MAX_STATUS_LABEL_CHARS
+                    || detail.chars().count() > MAX_STATUS_DETAIL_CHARS
+                {
+                    return Err(UiError::InvalidInput("a view may have one status indicator with a short, nonempty label and bounded detail".into()));
+                }
+            }
             if let Node::Table {
                 rows, row_actions, ..
             } = node
@@ -561,5 +606,43 @@ mod tests {
             serde_json::from_value(serde_json::json!({"name": "q", "label": "Query"})).unwrap();
         assert_eq!(field.kind, FieldKind::Text);
         assert!(field.value.is_empty() && field.options.is_empty());
+    }
+
+    #[test]
+    fn footer_metadata_is_optional_and_status_nodes_are_bounded() {
+        let legacy = serde_json::json!({"id":"status", "title":"Graphify"});
+        let spec: ViewSpec = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!spec.status_bar);
+        assert_eq!(serde_json::to_value(spec).unwrap(), legacy);
+        let node = serde_json::json!({"type":"status", "icon":"graph", "state":"busy",
+            "label":"Graphify 1/2", "detail":"Indexing"});
+        let mut value = serde_json::json!({"nodes":[node.clone()]});
+        assert!(
+            serde_json::from_value::<View>(value.clone())
+                .unwrap()
+                .check()
+                .is_ok()
+        );
+        value["nodes"] = serde_json::json!([node.clone(), node.clone()]);
+        assert!(
+            serde_json::from_value::<View>(value)
+                .unwrap()
+                .check()
+                .is_err()
+        );
+        for (field, invalid) in [
+            ("label", "".to_owned()),
+            ("label", "x".repeat(MAX_STATUS_LABEL_CHARS + 1)),
+            ("detail", "x".repeat(MAX_STATUS_DETAIL_CHARS + 1)),
+        ] {
+            let mut invalid_node = node.clone();
+            invalid_node[field] = invalid.into();
+            let view: View =
+                serde_json::from_value(serde_json::json!({"nodes":[invalid_node]})).unwrap();
+            assert!(view.check().is_err());
+        }
+        let mut invalid = node;
+        invalid["icon"] = "https://example.com/icon.svg".into();
+        assert!(serde_json::from_value::<View>(serde_json::json!({"nodes":[invalid]})).is_err());
     }
 }

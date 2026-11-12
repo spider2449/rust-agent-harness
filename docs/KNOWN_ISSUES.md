@@ -4,6 +4,68 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Graphify 0.9.107: unchanged extraction drops package metadata
+
+- **Seen:** 2026-11-12 during the optional AST-only Graphify evaluation on
+  Windows. This is an external evaluation-tool issue, not a RAH runtime failure.
+- **Symptom:** repeating `graphify extract` with `--code-only --cargo
+  --no-cluster` against unchanged RAH source removed 39 `pkg_*` nodes and
+  reduced the edge count by 105. The separate 39 `crate:*` nodes and their
+  104 `crate_depends_on` edges remained present.
+- **Evidence:** retained exploratory graph snapshots and the result field
+  `unchanged_build_drift` are documented in
+  [the evaluation report](plans/2026-11-12-graphify-evaluation.md).
+  The standalone Python runner has been replaced by
+  [native RAH evaluation](plans/2026-11-12-graphify-rah-evaluation.md).
+- **Minimal reproduction:** a one-package Cargo fixture loses its `pkg_*`
+  node on the second unchanged scan with `--cargo`; the control without that
+  flag preserves it. Function replacement and its call edge still update.
+- **Open:** determine the affected manifest metadata and upstream cause before
+  relying on incremental graphs for dependency analysis. Use source and
+  existing architecture tests as the authority; do not infer removed
+  dependencies from this graph shrinkage.
+- **RAH mitigation:** the managed Graphify MCP launcher builds in fresh staging
+  directories and publishes only validated graphs. Native RAH tests confirm
+  package metadata survives updates. The upstream incremental issue remains
+  reproducible when using Graphify's incremental extraction directly. See
+  [automatic indexing](plans/2026-11-12-graphify-auto-index.md).
+
+## Graphify status: current desktop visual verification unavailable
+
+- **Seen:** 2026-11-12 while adding the automatic indexing status page.
+- **Environment limit:** Windows Computer Use returned a missing native pipe
+  (OS error 2), and no connected browser surfaces were available. An isolated
+  background start/stop verification command was rejected by automatic approval
+  review (`blocked by policy`) and did not execute.
+- **Verified instead:** Node status/protocol tests and the native RAH integration
+  test pass, including the authenticated frontend page API, progress, errors,
+  notifications, workspace switching and stopped-publisher state. This is not
+  a known frontend failure, but current-window pixel verification is pending.
+- **Status-bar follow-up:** the real headless Edge test now verifies busy/ready/error
+  footer updates, visible click-through and provider removal, with an inspected
+  screenshot. Direct inspection of the user's existing desktop window remains
+  unavailable. See [the footer report](plans/2026-11-12-graphify-status-bar.md).
+- **Follow-up:** restart the existing app to load the installed status-view
+  mount, then inspect **Plugins > Plugin pages > Graphify** when UI control is
+  available. See [the status implementation report](plans/2026-11-12-graphify-status.md).
+
+## Local repo evaluation: JSON formatting and bounded task completion
+
+- **Seen:** 2026-11-12 in the native RAH Graphify comparison with local
+  `ornith-1.5-35b-Q4_K_M.gguf`, thinking enabled, a 1024-token per-request
+  output limit and a 120-second turn limit.
+- **Symptom:** six completed repo-inspection answers contained correct JSON
+  fields inside Markdown fences despite a JSON-only prompt. Two baseline
+  authorization turns timed out after reading the correct source. Graphify
+  completed four of four turns and baseline two of four, but both methods
+  scored zero of four on the strict answer/all-checks rubric. No tool errors
+  were recorded; this is not an MCP transport failure.
+- **Evidence:** [native evaluation results](plans/2026-11-12-graphify-rah-evaluation.md)
+  and the ignored `live_graphify_workspace_evaluation` integration test.
+- **Open:** improve output-format compliance and evaluate more representative
+  bounded repo tasks before making Graphify a default. Successful harness
+  execution is not a quality pass. Model settings and user defaults are unchanged.
+
 ## llama.cpp: disabling thinking can add unnecessary tool calls
 
 - **Seen:** 2026-11-11 with ornith-1.5-35b-Q4_K_M.gguf and the optional

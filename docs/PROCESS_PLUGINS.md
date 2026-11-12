@@ -96,6 +96,12 @@ Result, the plugin's manifest:
   most 32, ids unique, lowercase letters, digits, `-` and `_` (at most 64
   bytes). The Web UI shows each as a panel `<plugin id>/<id>` with `title`
   as its tab label.
+  On hosts implementing ADR 0078, `status_bar: true` also opts the view into
+  a footer indicator. Its render must include one `status` node with `icon`
+  (`activity` or `graph`), `state` (`idle`, `busy`, `ready`, `warning`, `error`),
+  `label` (1–64 characters) and `detail` (up to 1024 characters). At most four
+  indicators are shown; clicking opens the view. Omit this metadata and node
+  for older hosts. No URLs, markup or custom footer actions are accepted.
 - `requires` and `optional` may contain only `session` and `storage`. A required service
   must be mounted before the plugin starts; `optional` services cannot be
   called.

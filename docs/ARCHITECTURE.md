@@ -198,6 +198,8 @@ Implemented:
   provider on the user's click. Not a tool, so the model cannot reach it.
   A provider emits `UiChanged` when a view changed, and windows showing it
   render it again. `telemetry-log` offers a `usage` view, `todo` a `list` view.
+  Opted-in views can contribute a bounded footer status indicator (ADR 0078),
+  refreshed on the same events even while the detail page is closed.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate
