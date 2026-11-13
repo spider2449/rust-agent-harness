@@ -3118,6 +3118,33 @@ async fn an_approval_with_large_input_keeps_its_buttons_in_view() {
 }
 
 #[tokio::test]
+async fn composer_recovers_focus_and_preserves_ime_confirmation() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-composer-focus").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-composer-focus");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait("composer", "!!state.current && !byId('input').disabled")
+        .await;
+    assert_eq!(page.eval("byId('input').blur(); window.dispatchEvent(new Event('focus')); document.activeElement === byId('input')").await, true);
+    assert_eq!(page.eval("byId('session-search').focus(); window.dispatchEvent(new Event('focus')); document.activeElement === byId('session-search')").await, true);
+    assert_eq!(page.eval("byId('help-dialog').showModal(); const active = document.activeElement; window.dispatchEvent(new Event('focus')); document.activeElement === active").await, true);
+    page.eval(
+        "byId('help-dialog').close(); byId('input').focus(); byId('input').value = '中文'; true",
+    )
+    .await;
+    for options in ["isComposing: true", "keyCode: 229"] {
+        assert_eq!(page.eval(&format!("byId('input').dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true, cancelable: true, {options}}})); byId('input').value === '中文' && !state.busy")).await, true);
+    }
+    assert!(page.errors().is_empty());
+}
+
+#[tokio::test]
 async fn user_message_navigation_tracks_scroll_and_session_changes() {
     let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
         return;

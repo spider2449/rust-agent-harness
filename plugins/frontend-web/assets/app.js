@@ -3766,6 +3766,15 @@ function saveWorkspaceName() {
   });
 }
 
+function restoreComposerFocus() {
+  const input = $("input");
+  const active = document.activeElement;
+  if (document.hidden || input.disabled || document.querySelector("dialog[open]")) return;
+  if (active === input || active === document.body || active === document.documentElement) {
+    input.focus({ preventScroll: true });
+  }
+}
+
 async function start() {
   state.token = readToken();
   if (!state.token) {
@@ -3773,7 +3782,10 @@ async function start() {
     return;
   }
   $("composer").addEventListener("submit", submit);
+  window.addEventListener("focus", restoreComposerFocus);
   $("input").addEventListener("keydown", (event) => {
+    // IME confirmation belongs to the editor, including legacy WebView events.
+    if (event.isComposing || event.keyCode === 229) return;
     if (slashKey(event)) return;
     if (event.key === "Enter" && !event.shiftKey) submit(event);
   });
@@ -3897,7 +3909,10 @@ async function start() {
     if (!document.hidden) refreshStatus();
   }, 30000);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refreshStatus();
+    if (!document.hidden) {
+      restoreComposerFocus();
+      refreshStatus();
+    }
   });
   await loadLayout();
   await loadGroups();
