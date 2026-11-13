@@ -167,6 +167,7 @@ use crate::approvals::Approvals;
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
+const GRAPH_JS: &str = include_str!("../assets/graph.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
 const SETTINGS_JS: &str = include_str!("../assets/settings.js");
 const HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
@@ -388,6 +389,10 @@ fn router(shared: AppState) -> Router {
         .route(
             "/app.js",
             get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }),
+        )
+        .route(
+            "/graph.js",
+            get(|| async { asset("text/javascript; charset=utf-8", GRAPH_JS) }),
         )
         .route(
             "/settings.js",

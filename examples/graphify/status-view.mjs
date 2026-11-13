@@ -2,6 +2,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hostStatusFile, readStatus } from './status.mjs';
+import { GraphView } from './graph-view.mjs';
 
 const text = (value, max = 1500) => typeof value === 'string' ? value.slice(0, max) : '';
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('en-US') : '—';
@@ -52,7 +53,15 @@ export function renderStatus(data, { now = Date.now(), owner = process.ppid, isA
 }
 
 export async function loadView(directory, options = {}) {
-  try { return renderStatus(await readStatus(hostStatusFile(directory, options.owner ?? process.ppid)), options); }
+  try {
+    const data = await readStatus(hostStatusFile(directory, options.owner ?? process.ppid));
+    const view = renderStatus(data, options);
+    if (options.graph) {
+      const ready = view.nodes.find(node => node.type === 'key_value')?.items.find(item => item.key === 'Status')?.value === 'Ready';
+      view.nodes.splice(1, 0, ...await options.graph.render(data ? { ...data, state: ready ? 'ready' : 'unavailable' } : null, options.session));
+    }
+    return view;
+  }
   catch (error) {
     const nodes = [{ type: 'heading', text: 'Graphify' }, { type: 'text', text: `Status unavailable: ${text(error.message)}` }];
     if (options.statusBar) nodes.push({ type: 'status', icon: 'graph', label: 'Graphify', state: 'warning', detail: [...`Graphify: status unavailable\n${error.message}`].slice(0, 1024).join('') });
@@ -85,13 +94,19 @@ export function serveStatusView() {
         directory = configured;
         const enabled = message.params?.config?.status_bar;
         if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('status_bar must be boolean');
-        options = { statusBar: enabled === true };
+        const graphEnabled = message.params?.config?.graph_view;
+        if (graphEnabled !== undefined && typeof graphEnabled !== 'boolean') throw new Error('graph_view must be boolean');
+        options = { statusBar: enabled === true, graph: graphEnabled ? new GraphView() : undefined };
         result = { protocol: 4, version: '0.1.0', provides: ['ui-views'], requires: [], tools: [], views: [{ id: 'status', title: 'Graphify' }] };
         if (options.statusBar) result.views[0].status_bar = true;
         if (!timer) timer = setInterval(() => { void poll(); }, 1000);
       } else if (message.method === 'views/render' && message.params?.view === 'status') {
         if (!directory) throw new Error('Plugin has not initialized');
-        result = await loadView(directory, options);
+        result = await loadView(directory, { ...options, session: message.params?.session });
+      } else if (message.method === 'views/act' && message.params?.view === 'status' && options.graph) {
+        const data = await readStatus(hostStatusFile(directory));
+        renderStatus(data, options);
+        result = await options.graph.act(data, message.params?.session, message.params?.action, message.params?.input);
       } else if (message.method === 'shutdown') {
         stop();
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }) + '\n', () => process.exit(0));

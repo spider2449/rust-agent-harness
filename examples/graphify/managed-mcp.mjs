@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { StatusReporter } from './status.mjs';
+import { readArtifact, queryArguments, describeTools, queryEvidence, responseStream } from './artifact.mjs';
 
 const PACKAGE = 'graphifyy[mcp]==0.9.107';
 const SKIP = new Set(['.git', '.rah', 'graphify-out', 'node_modules', 'target',
@@ -27,9 +28,9 @@ async function terminate(child) {
   }
 }
 
-export function run(program, args, { cwd, signal, owned, onLine, timeout = 180000, limit = 4 * 1024 * 1024 } = {}) {
+export function run(program, args, { cwd, signal, owned, onLine, env = process.env, timeout = 180000, limit = 4 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(program, args, { cwd, env: process.env, windowsHide: true,
+    const child = spawn(program, args, { cwd, env, windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'] });
     owned?.add(child);
     const output = [], errors = [];
@@ -129,15 +130,14 @@ export async function prepareGraph(root) {
   const file = path.join(output, 'graph.json');
   let prior;
   try {
-    const stat = await fs.lstat(file);
-    if (stat.isFile()) {
-      const graph = JSON.parse(await fs.readFile(file, 'utf8'));
-      if (graph && Array.isArray(graph.nodes) && Array.isArray(graph.edges ?? graph.links)) {
-        prior = graph.graph?.rah_placeholder ? {} : { node_count: graph.nodes.length,
-          edge_count: (graph.edges ?? graph.links).length, last_success_at: stat.mtime.toISOString() };
-      }
-    }
-  } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    const { graph } = await readArtifact(file, root);
+    const stat = await fs.stat(file);
+    prior = { node_count: graph.nodes.length,
+      edge_count: (graph.edges ?? graph.links).length, last_success_at: stat.mtime.toISOString() };
+  } catch (error) {
+    // A corrupt or unsupported prior graph must not prevent MCP initialization.
+    if (error.code && error.code !== 'ENOENT') throw error;
+  }
   if (!prior) {
     const temporary = path.join(output, `placeholder-${randomUUID()}.tmp`);
     try {
@@ -188,19 +188,21 @@ export class ManagedIndex {
         this.log('building workspace graph');
         const generated = await this.build(stage, signal);
         if (signal.aborted) throw new Error('Graphify index stopped');
-        const graph = JSON.parse(await fs.readFile(generated, 'utf8'));
-        if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges ?? graph.links)) {
-          throw new Error('Graphify returned an invalid graph');
-        }
+        const { graph, validation } = await readArtifact(generated, this.root);
         if (before !== await this.scan(this.root, signal)) continue;
+        const evidence = { workspace: this.root, generated_at: new Date().toISOString(),
+          fingerprint: before, fingerprint_kind: 'source-path-size-mtime-ctime-sha256',
+          validation, source_verification_required: true };
+        graph.graph = { ...graph.graph, rah: evidence };
         await this.report({ stage: 'Publishing graph' });
         temporary = path.join(output, `graph-${randomUUID()}.tmp`);
-        await fs.copyFile(generated, temporary);
+        await fs.writeFile(temporary, JSON.stringify(graph));
         if (signal.aborted) throw new Error('Graphify index stopped');
         await fs.rename(temporary, path.join(output, 'graph.json'));
         temporary = undefined;
         this.published = await stamp(path.join(output, 'graph.json'));
         this.signature = before;
+        this.evidence = evidence;
         await this.report({ state: 'ready', stage: 'Watching for changes', node_count: graph.nodes.length,
           edge_count: (graph.edges ?? graph.links).length, last_success_at: new Date().toISOString(),
           duration_ms: Date.now() - started, error: null });
@@ -243,16 +245,19 @@ export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500
   const status = new StatusReporter(root, { directory: process.env.RAH_GRAPHIFY_STATUS_DIR, local: false, log });
   const prefix = ['--offline', '--from', PACKAGE];
   const index = new ManagedIndex(root, async (stage, signal) => {
-    const args = [...prefix, 'graphify', 'extract', root, '--code-only', '--no-cluster',
+    const args = [...prefix, 'python', fileURLToPath(new URL('./extract.py', import.meta.url)), 'extract', root, '--code-only', '--no-cluster',
       '--max-workers', '4', '--exclude', '.rah/', '--out', stage];
     if (await fs.stat(path.join(root, 'Cargo.toml')).then(s => s.isFile(), error => {
       if (error.code === 'ENOENT') return false; throw error;
     })) args.push('--cargo');
-    await run(uvx, args, { cwd: root, signal, owned: children, onLine: line => { void status.progress(line); } });
+    await run(uvx, args, { cwd: root, signal, owned: children,
+      env: { ...process.env, PYTHONHASHSEED: process.env.PYTHONHASHSEED ?? '0' },
+      onLine: line => { void status.progress(line); } });
     return path.join(stage, 'graphify-out', 'graph.json');
   }, { log, report: fields => status.update(fields), scan: (workspace, signal) => fingerprint(workspace, signal, children) });
   let server, stopping = false;
   const pending = new Map();
+  const forwarded = new Map();
   let pendingBytes = 0;
   async function stop() {
     if (stopping) return;
@@ -275,7 +280,21 @@ export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500
     server = spawn(uvx, [...prefix, 'graphify-mcp', '--graph', '.rah/graphify-out/graph.json'],
       { cwd: root, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     children.add(server);
-    server.stdout.pipe(process.stdout);
+    server.stdout.setEncoding('utf8');
+    const responses = responseStream(async message => {
+      const request = forwarded.get(message.id);
+      if (!request) return message;
+      forwarded.delete(message.id);
+      if (request.method === 'tools/list') return describeTools(message);
+      if (request.method === 'tools/call' && !message.error && !message.result?.isError) {
+        const fresh = request.signature === await index.scan(root, index.controller.signal)
+          && request.published === await stamp(path.join(root, '.rah/graphify-out/graph.json'));
+        return queryEvidence(message, request.evidence, fresh);
+      }
+      return message;
+    });
+    responses.on('error', error => { log(error.message); onSignal(); });
+    server.stdout.pipe(responses).pipe(process.stdout, { end: false });
     server.stderr.pipe(process.stderr);
     index.watch(interval);
     // Initialization stays responsive; model requests below still await refresh.
@@ -306,15 +325,30 @@ export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500
           const request = pending.get(message.params?.requestId);
           if (request) request.cancelled = true;
         }
-        if (message.method !== 'tools/call') { send(raw); continue; }
-        if (pending.size >= 32 || pendingBytes + Buffer.byteLength(raw) > 4 * 1024 * 1024 || pending.has(message.id)) {
+        if (message.method !== 'tools/call') {
+          if (message.id !== undefined) {
+            if (forwarded.size >= 32 || forwarded.has(message.id) || pending.has(message.id)) {
+              failure(message.id, 'too many outstanding requests or duplicate id'); continue;
+            }
+            forwarded.set(message.id, { method: message.method });
+          }
+          send(raw); continue;
+        }
+        try { queryArguments(message.params); }
+        catch (error) { failure(message.id, error.message); continue; }
+        if (pending.size + forwarded.size >= 32 || pendingBytes + Buffer.byteLength(raw) > 4 * 1024 * 1024
+          || pending.has(message.id) || forwarded.has(message.id)) {
           failure(message.id, 'too many queued requests or duplicate id'); continue;
         }
         const request = { cancelled: false };
         pendingBytes += Buffer.byteLength(raw);
         pending.set(message.id, request);
         void index.refresh().then(() => {
-          if (!request.cancelled) send(raw);
+          if (!request.cancelled) {
+            forwarded.set(message.id, { method: message.method, signature: index.signature,
+              published: index.published, evidence: index.evidence });
+            send(raw);
+          }
         }, error => {
           if (!request.cancelled && !stopping) failure(message.id, error.message);
         }).finally(() => {

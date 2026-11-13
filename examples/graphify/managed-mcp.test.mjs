@@ -147,6 +147,13 @@ test('subprocess output and time are bounded', { timeout: 10000 }, async () => {
   await assert.rejects(run(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeout: 50 }), /timed out/);
 });
 
+test('extraction environment overrides stay in the owned child', async () => {
+  const before = process.env.PYTHONHASHSEED;
+  assert.equal(await run(process.execPath, ['-e', 'process.stdout.write(process.env.PYTHONHASHSEED)'],
+    { env: { ...process.env, PYTHONHASHSEED: '0' } }), '0');
+  assert.equal(process.env.PYTHONHASHSEED, before);
+});
+
 test('subprocess cancellation terminates the owned command', { timeout: 10000 }, async () => {
   const controller = new AbortController();
   const owned = new Set();

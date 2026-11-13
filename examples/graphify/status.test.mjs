@@ -149,6 +149,20 @@ test('the process view advertises UiViews, not tools, and notifies live updates'
   while (notifications.length === before) await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(values((await call('views/render', { view: 'status' })).result).Status, 'Ready');
   assert.equal(notifications.at(-1).method, 'ui/changed');
+  await fs.mkdir(path.join(root, '.rah/graphify-out'), { recursive: true });
+  await fs.writeFile(path.join(root, '.rah/graphify-out/graph.json'), JSON.stringify({
+    nodes: [{ id: 'entry', label: 'Entry' }], edges: [],
+  }));
+  await fs.writeFile(file, JSON.stringify({ ...data, state: 'ready', workspace: root }));
+  await call('initialize', { protocol: 4, config: { status_dir: root, status_bar: true, graph_view: true } });
+  const graphPage = await call('views/render', { view: 'status', session: 'first' });
+  assert.equal(graphPage.result.nodes.find(node => node.type === 'graph').vertices[0].id, 'entry');
+  const searched = await call('views/act', { view: 'status', action: 'graph_search', session: 'first',
+    input: { query: 'Entry', group: 'All groups' } });
+  assert.equal(searched.result.rerender, true);
+  const focused = await call('views/act', { view: 'status', action: 'graph_focus', session: 'first', input: { node: 'entry' } });
+  assert.equal(focused.result.rerender, true);
+  assert.ok((await call('views/act', { view: 'status', action: 'graph_focus', input: { node: 'missing' } })).error);
   const exited = new Promise(resolve => child.once('exit', resolve));
   assert.ok((await call('shutdown')).result);
   assert.equal(await exited, 0);

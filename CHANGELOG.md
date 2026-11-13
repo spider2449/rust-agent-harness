@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.38 (2026-11-13)
+
+- Graphify builds and refreshes workspace-local graphs automatically, with live
+  indexing status in the plugin page and status bar.
+- Validate graph artifacts and source references, attach workspace/freshness
+  evidence to bounded MCP queries, and reject alternate workspace selection.
+- Add an interactive relationship view with workspace search, source-group
+  filters, node details, neighbor expansion, pan and zoom. Plugins can reuse
+  the bounded declarative graph node (ADR 0079).
+- Accept UTF-8 BOM Cargo manifests without changing source files, preserve
+  package metadata, and distinguish Node built-in imports from file paths.
+
 ## v0.45.37 (2026-11-12)
 
 - Windows process plugins run in the background without opening console windows,

@@ -200,6 +200,9 @@ Implemented:
   render it again. `telemetry-log` offers a `usage` view, `todo` a `list` view.
   Opted-in views can contribute a bounded footer status indicator (ADR 0078),
   refreshed on the same events even while the detail page is closed.
+  Relationship graphs are bounded data-only nodes (ADR 0079); the frontend
+  owns SVG layout and interaction, while providers own corpus search and
+  projections. Graphs carry no markup, executable code or navigable URLs.
 - `admin` service (`rah-api::admin::PluginAdmin`): runtime plugin management
   (mount, unmount, configure, restart, replace, stop, start) and an example
   configuration per mountable kind (`config_example`; each plugin crate

@@ -323,7 +323,7 @@ async fn graphify_managed_workspace_updates() {
     let root = dir.workspace();
     std::fs::write(
         root.join("Cargo.toml"),
-        "[package]\nname = \"graphify-managed\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "\u{feff}[package]\nname = \"graphify-managed\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
     std::fs::write(root.join("lib.rs"), "pub fn initial_symbol() {}\n").unwrap();
@@ -335,7 +335,7 @@ async fn graphify_managed_workspace_updates() {
         serde_json::from_value(json!({
             "use":"process", "id":"graphify-status", "config": {
                 "program":"node", "args":[repository().join("examples/graphify/status-view.mjs")],
-                "plugin":{"status_dir":status_dir,"status_bar":true},
+                "plugin":{"status_dir":status_dir,"status_bar":true,"graph_view":true},
             }
         }))
         .unwrap(),
@@ -372,6 +372,21 @@ async fn graphify_managed_workspace_updates() {
             *seen.lock().unwrap() = Some(event.url.clone());
         });
     rah_cli::boot(&k, &d).await.unwrap();
+    let definition = rah_api::tools::ToolInvoker::new(k.handle())
+        .definitions()
+        .into_iter()
+        .find(|tool| tool.name.as_str() == QUERY)
+        .unwrap();
+    assert!(
+        definition
+            .description
+            .contains("Read cited workspace source")
+    );
+    assert!(
+        definition.input_schema["properties"]
+            .get("project_path")
+            .is_none()
+    );
     let url = listening.lock().unwrap().clone().unwrap();
     let (base, token) = url.split_once("/#token=").unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -418,6 +433,31 @@ async fn graphify_managed_workspace_updates() {
             .any(|(name, _)| *name == QUERY)
     );
     assert!(reply(&events).contains("initial_symbol"));
+    assert!(reply(&events).contains("RAH workspace graph evidence:"));
+    assert!(reply(&events).contains("source_verification_required"));
+    assert!(reply(&events).contains("lib.rs"));
+    let artifact: Value = serde_json::from_slice(&std::fs::read(&graph).unwrap()).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(artifact["graph"]["rah"]["workspace"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&root).unwrap()
+    );
+    assert_eq!(
+        artifact["graph"]["rah"]["validation"]["missing_source_files"],
+        0
+    );
+    // Graph navigation is followed by an ordinary policy-checked source read.
+    let (events, timed_out, _) =
+        bounded_turn(&k.handle(), "/call fs.read {\"path\":\"lib.rs\"}").await;
+    assert!(!timed_out);
+    assert!(reply(&events).contains("pub fn initial_symbol()"));
+    let (events, timed_out, _) = bounded_turn(
+        &k.handle(),
+        &format!("/call {QUERY} {{\"question\":\"initial_symbol\",\"project_path\":\"../other\"}}"),
+    )
+    .await;
+    assert!(!timed_out);
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::ToolFinished {output, ..} if output.is_error)));
     let status = displayed_graphify_status(&k.handle()).await;
     assert_eq!(status["Status"], "Ready");
     assert_ne!(status["Last indexed"], "—");
@@ -445,6 +485,66 @@ async fn graphify_managed_workspace_updates() {
     assert!(page["nodes"].as_array().unwrap().iter().any(|node| {
         node["type"] == "status" && node["icon"] == "graph" && node["state"] == "ready"
     }));
+    assert!(
+        page["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["type"] == "graph")
+    );
+    let searched: Value = client
+        .post(format!(
+            "{base}/api/ui/graphify-status/status/actions/graph_search"
+        ))
+        .bearer_auth(token)
+        .json(&json!({"input":{"query":"initial_symbol", "group":"All groups"}}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(searched["rerender"], true);
+    let rendered: Value = client
+        .get(format!("{base}/api/ui/graphify-status/status"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let graph_node = rendered["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "graph")
+        .unwrap();
+    let selected = graph_node["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["label"].as_str().unwrap().contains("initial_symbol"))
+        .unwrap();
+    let focused: Value = client
+        .post(format!(
+            "{base}/api/ui/graphify-status/status/actions/graph_focus"
+        ))
+        .bearer_auth(token)
+        .json(&json!({"input":{"node":selected["id"]}}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(focused["rerender"], true);
     std::fs::write(root.join("lib.rs"), "pub fn replacement_symbol() {}\n").unwrap();
     // No query: the owned watcher must publish the edit by itself.
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -550,6 +650,12 @@ async fn graphify_managed_workspace_updates() {
     .await;
     assert!(!timed_out);
     assert!(reply(&events).contains("other_workspace_symbol"));
+    let artifact: Value = serde_json::from_slice(&std::fs::read(&other_graph).unwrap()).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(artifact["graph"]["rah"]["workspace"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&other).unwrap()
+    );
+    assert!(!reply(&events).contains("initial_symbol"));
     let status = displayed_graphify_status(&k.handle()).await;
     assert_eq!(status["Status"], "Ready");
     assert!(status["Workspace"].ends_with("other-workspace"));

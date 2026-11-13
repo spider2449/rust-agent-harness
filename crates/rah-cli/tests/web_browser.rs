@@ -463,6 +463,117 @@ async fn start(name: &str) -> Web {
     start_with(name, |_, _| {}).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-relationship-graph").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-relationship-graph");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("the page to connect", "connected()").await;
+    let data = json!({"type":"graph", "title":"Workspace relationships", "select_action":"expand",
+        "vertices":[
+            {"id":"a", "label":"ToolInvoker", "group":"rah-api", "detail":"crates/rah-api/src/tools.rs L1"},
+            {"id":"b", "label":"Loop", "group":"loop-react", "detail":"plugins/loop-react/src/lib.rs L1"},
+            {"id":"c", "label":"<img src=x onerror=alert(1)>", "group":"rah-api", "detail":"Untrusted source text"}],
+        "edges":[{"source":"b", "target":"a", "label":"uses · EXTRACTED"},
+            {"source":"a", "target":"c", "label":"calls · INFERRED"}]});
+    page.eval(&format!(r#"(() => {{
+      const graph = viewNode({{}}, {data});
+      const panel = document.createElement('div'); panel.id = 'graph-test';
+      panel.style.cssText = 'position:fixed;inset:20px;z-index:1200;background:white;padding:12px;overflow:auto';
+      panel.append(graph); document.body.append(panel);
+      return true;
+    }})()"#)).await;
+    page.wait(
+        "graph vertices",
+        "document.querySelectorAll('#graph-test .graph-vertex').length === 3",
+    )
+    .await;
+    page.eval("document.querySelector('#graph-test .graph-vertex[data-node-id=a]').dispatchEvent(new MouseEvent('click')); true").await;
+    assert!(page.eval("document.querySelector('#graph-test .graph-detail').textContent.includes('crates/rah-api/src/tools.rs')").await.as_bool().unwrap());
+    assert!(
+        page.eval(
+            "document.querySelector('#graph-test .graph-detail').textContent.includes('INFERRED')"
+        )
+        .await
+        .as_bool()
+        .unwrap()
+    );
+    assert_eq!(
+        page.eval("document.querySelectorAll('#graph-test img').length")
+            .await,
+        0
+    );
+    page.eval("document.querySelector('#graph-test .graph-toolbar button').click(); true")
+        .await;
+    assert!(page.eval("document.querySelector('#graph-test svg > g').getAttribute('transform').includes('scale(1.25)')").await.as_bool().unwrap());
+    let rect = page.eval("(() => {const r=document.querySelector('#graph-test .graph-stage > svg').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})()").await;
+    let x = rect["x"].as_f64().unwrap();
+    let y = rect["y"].as_f64().unwrap();
+    let before_pan = page
+        .eval("document.querySelector('#graph-test svg > g').getAttribute('transform')")
+        .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mousePressed","x":x,"y":y,"button":"left","clickCount":1}),
+    )
+    .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mouseMoved","x":x+40.0,"y":y+20.0,"button":"left","buttons":1}),
+    )
+    .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mouseReleased","x":x+40.0,"y":y+20.0,"button":"left","clickCount":1}),
+    )
+    .await;
+    assert_ne!(
+        page.eval("document.querySelector('#graph-test svg > g').getAttribute('transform')")
+            .await,
+        before_pan
+    );
+    page.eval("document.querySelector('#graph-test .graph-legend input').click(); true")
+        .await;
+    assert_eq!(
+        page.eval("document.querySelectorAll('#graph-test .graph-vertex.graph-hidden').length")
+            .await,
+        1
+    );
+    page.eval("document.querySelector('#graph-test input[type=search]').value='ToolInvoker'; document.querySelector('#graph-test input[type=search]').dispatchEvent(new Event('input')); true").await;
+    assert_eq!(
+        page.eval("document.querySelector('#graph-test .graph-node-list').options.length")
+            .await,
+        1
+    );
+    page.eval("[...document.querySelectorAll('#graph-test button')].find(b=>b.textContent==='Expand view').click(); true").await;
+    page.screenshot("graphify-relationship-view").await;
+    page.eval("document.querySelector('#graph-test .relationship-graph').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); true").await;
+    assert_eq!(page.eval("document.querySelector('#graph-test .relationship-graph').classList.contains('graph-expanded')").await, false);
+    // The generic component invokes expansion only on an explicit click.
+    page.eval(&format!(r#"(() => {{ const root=document.querySelector('#graph-test'); root.replaceChildren(RelationshipGraph.render({data}, (action,input) => window.graphAction={{action,input}})); root.querySelector('.graph-vertex').dispatchEvent(new MouseEvent('click')); return true; }})()"#)).await;
+    page.eval("[...document.querySelectorAll('#graph-test button')].find(b=>b.textContent==='Explore connections').click(); true").await;
+    assert_eq!(
+        page.eval("window.graphAction").await,
+        json!({"action":"expand","input":{"node":"a"}})
+    );
+    if let Some(file) = std::env::var_os("RAH_TEST_GRAPH_PREVIEW") {
+        let preview: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        page.eval(&format!(
+            "document.querySelector('#graph-test').replaceChildren(viewNode({{}}, {preview})); true"
+        ))
+        .await;
+        page.eval("[...document.querySelectorAll('#graph-test button')].find(b=>b.textContent==='Expand view').click(); true").await;
+        page.screenshot("graphify-workspace-relations").await;
+    }
+    assert!(page.errors().is_empty(), "{:?}", page.errors());
+}
+
 /// Like [`start`]; `adjust` changes the distribution first (it gets the
 /// test's directory too).
 async fn start_with(name: &str, adjust: impl FnOnce(&mut Distribution, &TempDir)) -> Web {

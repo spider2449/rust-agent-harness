@@ -188,6 +188,14 @@ pub struct View {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
+    /// A bounded, frontend-rendered relationship graph; all fields are text.
+    Graph {
+        title: String,
+        vertices: Vec<GraphVertex>,
+        edges: Vec<GraphEdge>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        select_action: Option<String>,
+    },
     /// One frontend-owned footer indicator; clicking opens this view.
     Status {
         icon: StatusIcon,
@@ -257,6 +265,26 @@ pub const MAX_STATUS_ITEMS: usize = 4;
 pub const MAX_STATUS_LABEL_CHARS: usize = 64;
 pub const MAX_STATUS_DETAIL_CHARS: usize = 1024;
 
+pub const MAX_GRAPH_VERTICES: usize = 250;
+pub const MAX_GRAPH_EDGES: usize = 750;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphVertex {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub label: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyValue {
@@ -306,6 +334,9 @@ impl View {
         self.nodes
             .iter()
             .map(|node| match node {
+                Node::Graph {
+                    vertices, edges, ..
+                } => 1 + vertices.len() + edges.len(),
                 Node::KeyValue { items } => 1 + items.len(),
                 Node::Table {
                     columns,
@@ -325,6 +356,43 @@ impl View {
     pub fn check(&self) -> Result<(), UiError> {
         let mut indicators = 0;
         for node in &self.nodes {
+            if let Node::Graph {
+                title,
+                vertices,
+                edges,
+                select_action,
+            } = node
+            {
+                let bounded = |text: &str, max| text.chars().count() <= max;
+                let ids: HashSet<_> = vertices.iter().map(|v| v.id.as_str()).collect();
+                if vertices.len() > MAX_GRAPH_VERTICES || edges.len() > MAX_GRAPH_EDGES {
+                    return Err(UiError::TooLarge(
+                        "graph exceeds 250 vertices or 750 edges".into(),
+                    ));
+                }
+                if !bounded(title, 128)
+                    || ids.len() != vertices.len()
+                    || select_action
+                        .as_ref()
+                        .is_some_and(|action| action.trim().is_empty() || !bounded(action, 128))
+                    || vertices.iter().any(|v| {
+                        v.id.is_empty()
+                            || !bounded(&v.id, 512)
+                            || !bounded(&v.label, 128)
+                            || !bounded(&v.group, 128)
+                            || !bounded(&v.detail, 512)
+                    })
+                    || edges.iter().any(|edge| {
+                        !ids.contains(edge.source.as_str())
+                            || !ids.contains(edge.target.as_str())
+                            || !bounded(&edge.label, 128)
+                    })
+                {
+                    return Err(UiError::InvalidInput(
+                        "graph needs unique bounded vertices and valid edge endpoints".into(),
+                    ));
+                }
+            }
             if let Node::Status { label, detail, .. } = node {
                 indicators += 1;
                 if indicators > 1
@@ -444,6 +512,65 @@ mod tests {
         let mut all = ids(&panels::BUILT_IN);
         all.sort();
         assert_eq!(placed, all);
+    }
+
+    #[test]
+    fn relationship_graphs_validate_structure_text_and_resource_bounds() {
+        let vertex = serde_json::json!({"id":"a", "label":"<source>", "group":"crate", "detail":"file.rs L1"});
+        let valid = serde_json::json!({"nodes":[{"type":"graph", "title":"Relationships",
+            "vertices":[vertex.clone(), {"id":"b", "label":"B", "group":"crate", "detail":""}],
+            "edges":[{"source":"a", "target":"b", "label":"calls · INFERRED"}], "select_action":"expand"}]});
+        let view: View = serde_json::from_value(valid.clone()).unwrap();
+        assert!(view.check().is_ok());
+        assert_eq!(view.size(), 4);
+        assert_eq!(serde_json::to_value(view).unwrap(), valid);
+        for (field, value) in [
+            (
+                "vertices",
+                serde_json::json!([vertex.clone(), vertex.clone()]),
+            ),
+            (
+                "vertices",
+                serde_json::json!([{ "id":"", "label":"", "group":"", "detail":"" }]),
+            ),
+            (
+                "edges",
+                serde_json::json!([{"source":"a", "target":"missing", "label":""}]),
+            ),
+            ("select_action", serde_json::json!("")),
+            ("title", serde_json::json!("x".repeat(129))),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["nodes"][0][field] = value;
+            assert!(
+                serde_json::from_value::<View>(invalid)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
+        for (field, limit) in [("id", 512), ("label", 128), ("group", 128), ("detail", 512)] {
+            let mut invalid = valid.clone();
+            invalid["nodes"][0]["vertices"][0][field] = "x".repeat(limit + 1).into();
+            assert!(
+                serde_json::from_value::<View>(invalid)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
+        let mut large = valid;
+        large["nodes"][0]["vertices"] = serde_json::json!(
+            (0..=MAX_GRAPH_VERTICES)
+                .map(
+                    |i| serde_json::json!({"id":i.to_string(), "label":"", "group":"", "detail":""})
+                )
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            serde_json::from_value::<View>(large).unwrap().check(),
+            Err(UiError::TooLarge(_))
+        ));
     }
 
     #[test]

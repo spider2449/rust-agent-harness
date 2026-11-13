@@ -1512,6 +1512,11 @@ async function runAction(entry, action, input, controls) {
 function viewNode(entry, node) {
   const text = (value) => String(value ?? "");
   switch (node.type) {
+    case "graph": {
+      const previous = [...(entry.body?.querySelectorAll(".relationship-graph") || [])]
+        .find((graph) => graph.graphData === JSON.stringify(node));
+      return previous || RelationshipGraph.render(node, (action, input, button) => runAction(entry, action, input, [button]));
+    }
     case "heading":
       return el("h3", "", text(node.text));
     case "text":
@@ -2822,7 +2827,7 @@ async function showPluginPage(page, message = "") {
   $("plugin-summary").replaceChildren(el("h3", "", page.title));
   const body = $("plugin-page");
   body.hidden = false;
-  body.replaceChildren(el("p", "hint", "Loading…"));
+  if (changed || !body.children.length) body.replaceChildren(el("p", "hint", "Loading…"));
   pluginMessage(message);
   const entry = { ...page, body, message: $("plugin-message"), workspace: true };
   try {

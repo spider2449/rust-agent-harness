@@ -4,6 +4,21 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Graphify 0.9.107: UTF-8 BOM Cargo manifests need a compatibility reader
+
+- **Seen:** 2026-11-13 in image-viewer. A leading EF BB BF in Cargo.toml
+  makes upstream cargo_introspect's binary tomllib.load fail at line 1,
+  column 1; the separate manifest-ingestion path also silently omits pkg_ nodes.
+- **Mitigation:** the managed extraction child uses examples/graphify/extract.py
+  to read Cargo manifests with utf-8-sig and strip a leading BOM for package
+  ingestion. Default child-local PYTHONHASHSEED=0 prevents Graphify re-executing
+  itself without the compatibility reader. No source or cached package is edited.
+- **Verified:** BOM root/member parser tests, retained pkg_/crate: nodes, the
+  RAH managed integration (including invalid TOML rejection), and an installed
+  launcher query against image-viewer. Upstream direct CLI calls remain affected;
+  recheck both paths before removing the shim after a package upgrade. See
+  [the repair report](plans/2026-11-13-graphify-workspace-compatibility.md).
+
 ## Graphify 0.9.107: unchanged extraction drops package metadata
 
 - **Seen:** 2026-11-12 during the optional AST-only Graphify evaluation on
