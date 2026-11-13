@@ -66,6 +66,8 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
 
 enum UserEvent {
     Exit(i32),
+    /// A user clicked the embedded page and needs native window activation.
+    Activate,
     /// The setup form's answers, as JSON.
     Setup(String),
 }
@@ -213,7 +215,7 @@ fn run(args: Args) -> Result<(), String> {
             .unwrap_or_else(PoisonError::into_inner)
             .send_event(UserEvent::Exit(exit.code));
     });
-    let setup_proxy = event_loop.create_proxy();
+    let page_proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title(TITLE)
         .with_window_icon(window_icon())
@@ -225,16 +227,19 @@ fn run(args: Args) -> Result<(), String> {
     let builder = match &first {
         Start::Running(url) => WebViewBuilder::new().with_url(url),
         Start::Failed(message) => WebViewBuilder::new().with_html(failure_page(message)),
-        // Only the setup form posts messages; the event loop ignores any
-        // that arrive once it is answered.
-        Start::Setup(page) => {
-            WebViewBuilder::new()
-                .with_html(page)
-                .with_ipc_handler(move |request| {
-                    let _ = setup_proxy.send_event(UserEvent::Setup(request.body().clone()));
-                })
-        }
+        Start::Setup(page) => WebViewBuilder::new().with_html(page),
     };
+    let builder = builder.with_ipc_handler(move |request| {
+        let event = if request.body() == "rah:activate" {
+            UserEvent::Activate
+        } else {
+            // Only the setup state accepts form answers.
+            UserEvent::Setup(request.body().clone())
+        };
+        let _ = page_proxy.send_event(event);
+    });
+    #[cfg(target_os = "windows")]
+    let builder = builder.with_initialization_script(include_str!("activate.js"));
     let view =
         webview(&window, builder).map_err(|error| format!("cannot create the WebView: {error}"))?;
 
@@ -276,6 +281,16 @@ fn run(args: Args) -> Result<(), String> {
                 ..
             } => 0,
             Event::UserEvent(UserEvent::Exit(code)) => code,
+            Event::UserEvent(UserEvent::Activate) => {
+                if let Some((view, window)) = &shown {
+                    // DOM focus alone cannot activate the top-level HWND for IME.
+                    // Do this only in response to pointer input, never on a timer.
+                    window.set_focus();
+                    focus_owed = true;
+                    give_focus(view, window, &mut focus_owed);
+                }
+                return;
+            }
             Event::UserEvent(UserEvent::Setup(body)) if awaiting_setup => {
                 let Some((view, _)) = &shown else { return };
                 if let Err(message) = configure(&args.global, &body) {
