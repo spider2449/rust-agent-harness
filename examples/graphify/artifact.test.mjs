@@ -122,6 +122,10 @@ test('tool discovery and results carry usage guidance, provenance and bounded gr
     properties: { question: { type: 'string' }, project_path: { type: 'string' } } } }, { name: 'ingest' }] } });
   assert.equal(listed.result.tools.length, 1);
   assert.match(listed.result.tools[0].description, /Read cited workspace source/);
+  assert.match(listed.result.tools[0].description, /use this tool first before broad source searches/);
+  assert.match(listed.result.tools[0].description, /do not wait for the user to ask for Graphify/);
+  assert.match(listed.result.tools[0].description, /Skip it for a known-file edit/);
+  assert.match(listed.result.tools[0].description, /unavailable graph requires source search/);
   assert.equal(listed.result.tools[0].inputSchema.properties.project_path, undefined);
   assert.equal(listed.result.tools[0].inputSchema.additionalProperties, false);
   const result = queryEvidence({ result: { content: [{ type: 'text', text: '界'.repeat(50000) }] } },
