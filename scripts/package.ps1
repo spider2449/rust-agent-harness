@@ -94,7 +94,9 @@ Copy-Item (Join-Path $repo "packaging\windows\rah-web.ps1") -Destination $stage
 Copy-Item (Join-Path $repo "packaging\windows\rah.ico") -Destination $stage
 Copy-Item (Join-Path $repo "README.md") -Destination $stage
 if ($GraphifyRuntime) {
+    Copy-Item -LiteralPath (Join-Path $repo 'packaging/windows/README-graphify-bundled.md') -Destination (Join-Path $stage 'README.md') -Force
     Copy-Item -LiteralPath $GraphifyRuntime -Destination (Join-Path $stage 'graphify-runtime') -Recurse
+    Copy-Item -LiteralPath (Join-Path $stage 'README.md') -Destination (Join-Path $dist "rah-$version$suffix-README.md") -Force
 }
 
 $zip = Join-Path $dist "rah-$version$suffix-portable.zip"

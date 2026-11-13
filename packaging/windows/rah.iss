@@ -44,6 +44,7 @@ Source: "{#StageDir}\graphify-runtime\*"; DestDir: "{app}\graphify-runtime"; Fla
 #endif
 
 [Icons]
+Name: "{group}\RAH README"; Filename: "{app}\README.md"
 Name: "{group}\RAH Web"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\rah-web.ps1"""; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\rah.ico"; Comment: "RAH Web UI in the default browser"
 Name: "{group}\RAH Desktop"; Filename: "{app}\rah-desktop.exe"; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\rah.ico"; Comment: "RAH Web UI in a native window"
 Name: "{group}\Uninstall RAH"; Filename: "{uninstallexe}"
