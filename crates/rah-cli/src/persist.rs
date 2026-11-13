@@ -150,7 +150,7 @@ fn compose(text: &str) -> Result<Distribution, String> {
     Ok(distribution)
 }
 
-fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -426,7 +426,7 @@ fn difference(base: &Value, new: &Value) -> Option<Value> {
 }
 
 /// A JSON value as a TOML value; `None` for null, which TOML cannot say.
-fn to_toml(value: &Value) -> Option<toml_edit::Value> {
+pub(crate) fn to_toml(value: &Value) -> Option<toml_edit::Value> {
     Some(match value {
         Value::Null => return None,
         Value::Bool(flag) => (*flag).into(),

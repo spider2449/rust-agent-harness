@@ -31,6 +31,122 @@ fn repository() -> PathBuf {
         .to_owned()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Node, uvx and cached Graphify; validates a copied executable and clean profile offline"]
+async fn graphify_portable_installation_has_no_checkout_dependency() {
+    let dir = TempDir::new("graphify-portable-install");
+    let home = dir.0.join("new profile data");
+    let config = dir.0.join("new-computer.toml");
+    std::fs::write(
+        &config,
+        "# Portable user\nmodel = \"mock\"\npermissions = \"read-only\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.workspace().join("lib.rs"),
+        "pub fn portable_symbol() {}\n",
+    )
+    .unwrap();
+    let binary = dir.0.join(if cfg!(windows) {
+        "copied-rah.exe"
+    } else {
+        "copied-rah"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_rah"), &binary).unwrap();
+    let empty_cache = std::process::Command::new(&binary)
+        .current_dir(dir.workspace())
+        .arg("--data-dir")
+        .arg(&home)
+        .arg("--config")
+        .arg(&config)
+        .env("UV_CACHE_DIR", dir.0.join("empty-cache"))
+        .env("UV_PYTHON_INSTALL_DIR", dir.0.join("empty-python"))
+        .args(["graphify", "install", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!empty_cache.status.success());
+    assert!(String::from_utf8_lossy(&empty_cache.stderr).contains("without --offline"));
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "# Portable user\nmodel = \"mock\"\npermissions = \"read-only\"\n"
+    );
+    assert!(!home.exists());
+    let copied = binary.clone();
+    let selected_home = home.clone();
+    let selected_config = config.clone();
+    let cwd = dir.workspace();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(copied)
+            .current_dir(cwd)
+            .arg("--data-dir")
+            .arg(selected_home)
+            .arg("--config")
+            .arg(selected_config)
+            .args(["graphify", "install", "--offline"])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Graphify installed"));
+    let text = std::fs::read_to_string(&config).unwrap();
+    let mut d = Distribution::parse(&text).unwrap();
+    d.data_home = Some(home.clone());
+    d.set_root(&dir.workspace());
+    let mount = d
+        .plugin
+        .iter()
+        .find(|p| p.plugin_id().as_str() == "graphify")
+        .unwrap();
+    let launcher = PathBuf::from(mount.config["args"][0].as_str().unwrap());
+    assert!(launcher.starts_with(&home));
+    assert!(launcher.with_file_name("extract.py").is_file());
+    assert!(!text.contains(&repository().display().to_string()));
+    let k = kernel(&d).await;
+    let tool = rah_api::tools::ToolInvoker::new(k.handle())
+        .definitions()
+        .into_iter()
+        .find(|tool| tool.name.as_str() == QUERY)
+        .unwrap();
+    assert!(tool.description.contains("active workspace"));
+    let (events, timed_out, _) = bounded_turn(
+        &k.handle(),
+        &format!("/call {QUERY} {{\"question\":\"portable_symbol\",\"depth\":1}}"),
+    )
+    .await;
+    assert!(!timed_out);
+    assert!(reply(&events).contains("portable_symbol"));
+    assert!(reply(&events).contains("RAH workspace graph evidence:"));
+    let provider = k
+        .handle()
+        .get_all(rah_api::ui::UI_VIEWS)
+        .into_iter()
+        .find(|(id, _)| id == "graphify-status")
+        .unwrap()
+        .1;
+    let rendered = provider
+        .render("status", &rah_api::ui::ViewContext::default())
+        .await
+        .unwrap();
+    rendered.check().unwrap();
+    assert!(
+        rendered
+            .nodes
+            .iter()
+            .any(|node| matches!(node, rah_api::ui::Node::Graph { .. }))
+    );
+    assert_eq!(
+        displayed_graphify_status(&k.handle()).await["Status"],
+        "Ready"
+    );
+    k.shutdown().await.unwrap();
+}
+
 fn distribution(dir: &TempDir, graph: Option<&Path>) -> Distribution {
     let mut d = headless(dir);
     d.plugin.retain(|spec| {
@@ -81,6 +197,96 @@ fn distribution(dir: &TempDir, graph: Option<&Path>) -> Distribution {
         policy.config["tools"][QUERY] = json!("read");
     }
     d
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires RAH_TEST_GRAPHIFY_RUNTIME prepared for this platform; relocates a real bundle with PATH hidden"]
+async fn graphify_bundled_python_works_without_uv_or_system_runtimes() {
+    fn copy_tree(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let source = PathBuf::from(
+        std::env::var_os("RAH_TEST_GRAPHIFY_RUNTIME").expect("set RAH_TEST_GRAPHIFY_RUNTIME"),
+    );
+    let dir = TempDir::new("graphify-no-uv");
+    let copied_runtime = dir.0.join("graphify-runtime");
+    copy_tree(&source, &copied_runtime);
+    let binary = dir.0.join(if cfg!(windows) { "rah.exe" } else { "rah" });
+    std::fs::copy(env!("CARGO_BIN_EXE_rah"), &binary).unwrap();
+    let config = dir.0.join("rah.toml");
+    std::fs::write(&config, "model = \"mock\"\npermissions = \"read-only\"\n").unwrap();
+    let home = dir.home();
+    let selected_config = config.clone();
+    let selected_home = home.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(binary)
+            .arg("--data-dir")
+            .arg(selected_home)
+            .arg("--config")
+            .arg(selected_config)
+            .args(["graphify", "install", "--offline"])
+            .env("PATH", "")
+            .env("PYTHONHOME", "not-a-python-installation")
+            .env("PYTHONPATH", "not-a-python-installation")
+            .env("UV_CACHE_DIR", "not-a-uv-cache")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(!text.contains("--uvx") && !text.contains("UV_CACHE_DIR"));
+    assert!(text.contains("--python"));
+    let mut d = Distribution::parse(&text).unwrap();
+    d.data_home = Some(home);
+    d.set_root(&dir.workspace());
+    d.set_config(
+        "sandbox-process",
+        "inherit_env",
+        json!(["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE"]),
+    );
+    std::fs::write(
+        dir.workspace().join("Cargo.toml"),
+        "\u{feff}[package]\nname = \"no-uv\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.workspace().join("lib.rs"),
+        "pub fn bundled_runtime_symbol() {}\n",
+    )
+    .unwrap();
+    let k = kernel(&d).await;
+    let (events, timed_out, _) = bounded_turn(
+        &k.handle(),
+        &format!("/call {QUERY} {{\"question\":\"bundled_runtime_symbol\",\"depth\":1}}"),
+    )
+    .await;
+    assert!(!timed_out);
+    assert!(
+        successful_calls(&events)
+            .iter()
+            .any(|(name, _)| *name == QUERY)
+    );
+    assert!(reply(&events).contains("bundled_runtime_symbol"));
+    assert_eq!(
+        displayed_graphify_status(&k.handle()).await["Status"],
+        "Ready"
+    );
+    k.shutdown().await.unwrap();
 }
 
 async fn build_graph(dir: &TempDir) -> PathBuf {

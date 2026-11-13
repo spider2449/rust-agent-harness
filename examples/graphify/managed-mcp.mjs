@@ -238,19 +238,30 @@ export class ManagedIndex {
   }
 }
 
-export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500 } = {}) {
+export function backendCommands({ uvx = 'uvx', python } = {}) {
+  if (python) return {
+    program: python,
+    extract: ['-I', fileURLToPath(new URL('./extract.py', import.meta.url))],
+    server: ['-I', '-m', 'graphify.serve'],
+  };
+  const prefix = ['--offline', '--from', PACKAGE];
+  return { program: uvx, extract: [...prefix, 'python', fileURLToPath(new URL('./extract.py', import.meta.url))],
+    server: [...prefix, 'graphify-mcp'] };
+}
+
+export async function serve({ root = process.cwd(), uvx = 'uvx', python, interval = 2500 } = {}) {
   root = await fs.realpath(root);
   const children = new Set();
   const log = message => process.stderr.write(`[graphify] ${message}\n`);
   const status = new StatusReporter(root, { directory: process.env.RAH_GRAPHIFY_STATUS_DIR, local: false, log });
-  const prefix = ['--offline', '--from', PACKAGE];
+  const backend = backendCommands({ uvx, python });
   const index = new ManagedIndex(root, async (stage, signal) => {
-    const args = [...prefix, 'python', fileURLToPath(new URL('./extract.py', import.meta.url)), 'extract', root, '--code-only', '--no-cluster',
+    const args = [...backend.extract, 'extract', root, '--code-only', '--no-cluster',
       '--max-workers', '4', '--exclude', '.rah/', '--out', stage];
     if (await fs.stat(path.join(root, 'Cargo.toml')).then(s => s.isFile(), error => {
       if (error.code === 'ENOENT') return false; throw error;
     })) args.push('--cargo');
-    await run(uvx, args, { cwd: root, signal, owned: children,
+    await run(backend.program, args, { cwd: root, signal, owned: children,
       env: { ...process.env, PYTHONHASHSEED: process.env.PYTHONHASHSEED ?? '0' },
       onLine: line => { void status.progress(line); } });
     return path.join(stage, 'graphify-out', 'graph.json');
@@ -277,7 +288,7 @@ export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500
     await status.update({ ...prior, state: 'waiting', stage: 'Starting automatic indexing' });
     status.startHeartbeat();
     if (stopping) return;
-    server = spawn(uvx, [...prefix, 'graphify-mcp', '--graph', '.rah/graphify-out/graph.json'],
+    server = spawn(backend.program, [...backend.server, '--graph', '.rah/graphify-out/graph.json'],
       { cwd: root, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     children.add(server);
     server.stdout.setEncoding('utf8');
@@ -371,7 +382,9 @@ export async function serve({ root = process.cwd(), uvx = 'uvx', interval = 2500
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  if (args.length && !(args[0] === '--uvx' && args.length === 2)) throw new Error('Usage: node managed-mcp.mjs [--uvx PATH]');
-  const uvx = args.length ? args[1] : 'uvx';
-  serve({ uvx }).catch(error => { process.stderr.write(`[graphify] ${error.message}\n`); process.exitCode = 1; });
+  if (args.length && !(['--uvx', '--python'].includes(args[0]) && args.length === 2 && args[1])) {
+    throw new Error('Usage: node managed-mcp.mjs [--uvx PATH | --python PATH]');
+  }
+  const backend = args[0] === '--python' ? { python: args[1] } : { uvx: args[1] || 'uvx' };
+  serve(backend).catch(error => { process.stderr.write(`[graphify] ${error.message}\n`); process.exitCode = 1; });
 }

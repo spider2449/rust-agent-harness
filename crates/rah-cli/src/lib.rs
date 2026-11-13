@@ -10,6 +10,7 @@ mod data;
 pub mod doctor;
 mod extend;
 mod features;
+pub mod graphify;
 mod help;
 pub mod persist;
 pub mod setup;

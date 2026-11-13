@@ -96,6 +96,9 @@ if [ "$mode" = source ]; then
 else
     if [ "$only" != desktop ]; then install -m 755 "$here/bin/rah" "$bin/rah"; fi
     if [ "$only" != web ]; then install -m 755 "$here/bin/rah-desktop" "$bin/rah-desktop"; fi
+    if [ -d "$here/bin/graphify-runtime" ]; then
+        cp -R "$here/bin/graphify-runtime" "$bin/"
+    fi
 fi
 if [ "$only" != desktop ]; then install -m 755 "$launcher" "$bin/rah-web"; fi
 

@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { ManagedIndex, fingerprint, run, prepareGraph } from './managed-mcp.mjs';
+import { ManagedIndex, fingerprint, run, prepareGraph, backendCommands } from './managed-mcp.mjs';
 import { StatusReporter, readStatus } from './status.mjs';
 
 async function fixture(t, build) {
@@ -30,6 +30,17 @@ test('first use generates a graph; unchanged scans do not rebuild or self-trigge
   await f.index.refresh();
   assert.equal(f.count(), 1);
   assert.deepEqual(await fs.readdir(path.join(f.root, '.rah/graphify-staging')), []);
+});
+
+test('direct Python backend uses isolated module execution and never invokes uv', () => {
+  const python = backendCommands({ python: 'portable/python.exe' });
+  assert.equal(python.program, 'portable/python.exe');
+  assert.equal(python.extract[0], '-I');
+  assert.ok(python.extract[1].endsWith('extract.py'));
+  assert.deepEqual(python.server, ['-I', '-m', 'graphify.serve']);
+  const uvx = backendCommands({ uvx: 'custom/uvx.exe' });
+  assert.equal(uvx.program, 'custom/uvx.exe');
+  assert.ok(uvx.server.includes('graphify-mcp'));
 });
 
 test('source edits, additions, deletion and renames invalidate the graph', async t => {

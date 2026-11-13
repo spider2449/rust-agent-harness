@@ -41,6 +41,20 @@ checkout:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/spider2449/rust-agent-harness/master/scripts/update.ps1)))
 ```
 
+Graphify is enabled separately on each computer. Run `rah graphify install`
+once, then reopen RAH and click the Graphify
+status icon (or **Plugins > Plugin pages > Graphify**). This explicit command
+prepares the pinned Python package in uv's user cache, installs the integration
+scripts embedded in RAH, backs up your configuration and adds the read-only
+tools/page. A `graphify-bundled` package includes Node, Python and Graphify and
+works offline without installing uv or any separate runtime. The lightweight
+package instead requires Node.js 20+ and uv on PATH. Both work without a source checkout;
+do not copy another computer's absolute plugin paths or Python cache settings.
+Use `--python` for an existing prepared Python environment, or `--runtime-dir`
+for a bundle outside the executable directory. In uv mode, `--offline` requires
+the pinned environment to be cached. Normal startup never downloads dependencies.
+See [Graphify packaging](docs/GRAPHIFY_PACKAGING.md) to build the no-uv variant.
+
 ## Documentation
 
 - [Configuring and running RAH](docs/CONFIGURATION.md): the configuration

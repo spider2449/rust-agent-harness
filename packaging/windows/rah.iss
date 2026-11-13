@@ -39,6 +39,9 @@ Source: "{#StageDir}\rah-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\rah-web.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\rah.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+#if FileExists(AddBackslash(StageDir) + "graphify-runtime\runtime.json")
+Source: "{#StageDir}\graphify-runtime\*"; DestDir: "{app}\graphify-runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{group}\RAH Web"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\rah-web.ps1"""; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\rah.ico"; Comment: "RAH Web UI in the default browser"

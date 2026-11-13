@@ -42,6 +42,23 @@ fn write_home_config(dir: &TempDir, text: &str) {
     std::fs::write(dir.home().join("rah.toml"), text).unwrap();
 }
 
+#[test]
+fn graphify_install_explains_missing_runtimes_without_touching_the_profile() {
+    let dir = TempDir::new("graphify-missing-runtime");
+    write_home_config(&dir, "# Existing profile\nmodel = \"mock\"\n");
+    let config = dir.home().join("rah.toml");
+    let before = std::fs::read(&config).unwrap();
+    let output = rah(&dir)
+        .env("PATH", "")
+        .args(["graphify", "install", "--offline"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(text(&output.stderr).contains("Node.js 20+ and uv"));
+    assert_eq!(std::fs::read(config).unwrap(), before);
+    assert!(!dir.home().join("integrations").exists());
+}
+
 fn jsonl_files(dir: &std::path::Path) -> usize {
     std::fs::read_dir(dir)
         .map(|entries| {

@@ -78,6 +78,31 @@ enum Command {
     },
     /// List the opt-in features (`--with` or `features = [...]`).
     Features,
+    /// Install the bundled workspace graph integration on this computer.
+    Graphify {
+        #[command(subcommand)]
+        command: GraphifyCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GraphifyCommand {
+    /// Prepare Graphify and add its tools, relationship page and status indicator.
+    /// Uses a bundled runtime when present, otherwise Node.js 20+ and uv.
+    Install {
+        /// Never download; uv mode requires an already cached environment.
+        #[arg(long)]
+        offline: bool,
+        /// Use a prepared Python environment instead of uv (Graphify must be installed).
+        #[arg(long, value_name = "EXE", conflicts_with = "runtime_dir")]
+        python: Option<PathBuf>,
+        /// Use this Node executable instead of discovering it on PATH.
+        #[arg(long, value_name = "EXE")]
+        node: Option<PathBuf>,
+        /// Use this prepared graphify-runtime bundle instead of the one beside RAH.
+        #[arg(long, value_name = "DIR", conflicts_with = "python")]
+        runtime_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -230,7 +255,7 @@ fn frontend(
                 .retain(|spec| !is_model_kind(&spec.kind));
             Ok(true)
         }
-        Some(Command::Config { .. } | Command::Features) => Ok(false),
+        Some(Command::Config { .. } | Command::Features | Command::Graphify { .. }) => Ok(false),
     }
 }
 
@@ -387,6 +412,44 @@ async fn run(cli: Cli) -> i32 {
     }
     let global = &cli.global;
     match &cli.command {
+        Some(Command::Graphify {
+            command:
+                GraphifyCommand::Install {
+                    offline,
+                    python,
+                    node,
+                    runtime_dir,
+                },
+        }) => {
+            let (home, file) = match global
+                .home()
+                .and_then(|home| global.config_path().map(|file| (home, file)))
+            {
+                Ok(paths) => paths,
+                Err(error) => return fail(error),
+            };
+            let options = rah_cli::graphify::InstallOptions {
+                python: python.clone(),
+                node: node.clone(),
+                runtime_dir: runtime_dir.clone(),
+            };
+            return match rah_cli::graphify::install_with_options(&home, &file, *offline, &options)
+                .await
+            {
+                Ok(installed) => {
+                    println!("Graphify installed for `{}`", installed.config.display());
+                    println!("Bundled integration: `{}`", installed.assets.display());
+                    if let Some(backup) = installed.backup {
+                        println!("Configuration backup: `{}`", backup.display());
+                    }
+                    println!(
+                        "Reopen RAH, then click Graphify in the status bar or Plugins > Plugin pages > Graphify."
+                    );
+                    0
+                }
+                Err(error) => fail(error),
+            };
+        }
         Some(Command::Features) => {
             print!("{}", rah_cli::list_features());
             return 0;

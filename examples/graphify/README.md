@@ -1,5 +1,39 @@
 # Managed Graphify MCP
 
+## Install on another computer
+
+A `graphify-bundled` package includes Node/Python/Graphify. Run
+`rah graphify install` from that package: it discovers graphify-runtime beside
+the executable and works offline without uv or other runtime installations.
+See [packaging instructions](../../docs/GRAPHIFY_PACKAGING.md). `--runtime-dir`
+selects a bundle elsewhere; `--python` and `--node` select prepared programs.
+
+For the lightweight package:
+
+Use a RAH build that lists `graphify` in `rah --help`. Install Node.js 20+ and
+uv, reopen the terminal so both are on PATH, initialize your usual RAH config,
+then run:
+
+```powershell
+rah graphify install
+```
+
+Reopen RAH. Click Graphify in the footer, or Plugins > Plugin pages > Graphify.
+Each computer needs its own installation; developer-user paths and an existing
+Python cache are not part of the release. RAH embeds all six integration modules,
+so no repository checkout or copying scripts is required. The install command
+prepares the pinned environment in uv's user cache and creates the MCP/status
+mounts and explicit read assignment. It backs up configuration before changes,
+preserves unrelated settings and stricter policy, and is safe to run again.
+
+`--data-dir` and `--config` select a separate profile. `--offline` requires an
+already cached pinned environment and never downloads. An installation failure
+leaves RAH settings unchanged. Normal startup remains offline. Runtime paths
+are discovered on the target computer, and copied managed mounts are relocated.
+Custom mounts using Graphify's IDs are refused rather than overwritten.
+
+## Managed runtime
+
 `managed-mcp.mjs` runs as the existing `tools-mcp` instance's program. It needs
 Node.js and the cached `graphifyy[mcp]==0.9.107` package. RAH's sandbox supervises
 the launcher and its complete process tree; there is no detached watcher or

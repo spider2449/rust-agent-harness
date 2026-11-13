@@ -20,13 +20,19 @@ or name ISCC.exe with -Iscc. Without it the script still produces the zip.
 .EXAMPLE
 .\scripts\package.ps1 -SkipBuild
 Package the existing release build.
+
+.EXAMPLE
+.\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-runtime'
+Build a separate bundled package whose target computer needs no uv, Python or Node installation.
 #>
 [CmdletBinding()]
 param(
     # Path of ISCC.exe when it is not found automatically.
     [string]$Iscc,
     # Reuse target\release instead of building.
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # Prepared relocatable Node/Python/Graphify bundle; target machines need no uv.
+    [string]$GraphifyRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +41,13 @@ $repo = Split-Path -Parent $PSScriptRoot
 $manifest = Get-Content -LiteralPath (Join-Path $repo "Cargo.toml") -Raw
 if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "No workspace version in Cargo.toml." }
 $version = $Matches[1]
+$suffix = if ($GraphifyRuntime) { '-graphify-bundled' } else { '' }
+if ($GraphifyRuntime) {
+    $GraphifyRuntime = (Resolve-Path -LiteralPath $GraphifyRuntime).Path
+    $runtimePython = Join-Path $GraphifyRuntime 'python/python.exe'
+    & $runtimePython -I (Join-Path $repo 'scripts/prepare-graphify-runtime.py') --check $GraphifyRuntime
+    if ($LASTEXITCODE -ne 0) { throw 'Graphify runtime validation failed' }
+}
 
 if (-not $SkipBuild) {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -56,21 +69,36 @@ if (-not $SkipBuild) {
 
 $release = Join-Path $repo "target\release"
 $dist = Join-Path $repo "dist"
-$stage = Join-Path $dist "stage"
+$stage = Join-Path $dist "stage$suffix"
 foreach ($exe in "rah.exe", "rah-desktop.exe") {
     if (-not (Test-Path -LiteralPath (Join-Path $release $exe))) { throw "$exe was not found in $release; build first." }
 }
+if ($GraphifyRuntime) {
+    $runtimeHelp = & (Join-Path $release 'rah.exe') graphify install --help
+    if ($LASTEXITCODE -ne 0 -or ($runtimeHelp -join "`n") -notmatch '--runtime-dir') { throw 'Rebuild RAH with bundled-runtime support before packaging' }
+}
 
-# dist\ holds only generated files, so it is safe to start clean.
-Remove-Item -LiteralPath $dist -Recurse -Force -ErrorAction SilentlyContinue
+# Keep other package variants; only replace this generated staging directory.
+$resolvedDist = [IO.Path]::GetFullPath($dist)
+$resolvedStage = [IO.Path]::GetFullPath($stage)
+if ([IO.Path]::GetDirectoryName($resolvedStage) -ne $resolvedDist) { throw 'Staging directory escapes dist' }
+if ((Test-Path -LiteralPath $dist) -and ((Get-Item -LiteralPath $dist).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'dist must not be a link' }
+if ($GraphifyRuntime -and ($GraphifyRuntime -eq $resolvedStage -or $GraphifyRuntime.StartsWith($resolvedStage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) { throw 'Runtime source must be outside the staging directory' }
+if (Test-Path -LiteralPath $stage) {
+    if ((Get-Item -LiteralPath $stage).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Staging directory must not be a link' }
+    Remove-Item -LiteralPath $stage -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item (Join-Path $release "rah.exe"), (Join-Path $release "rah-desktop.exe") -Destination $stage
 Copy-Item (Join-Path $repo "packaging\windows\rah-web.ps1") -Destination $stage
 Copy-Item (Join-Path $repo "packaging\windows\rah.ico") -Destination $stage
 Copy-Item (Join-Path $repo "README.md") -Destination $stage
+if ($GraphifyRuntime) {
+    Copy-Item -LiteralPath $GraphifyRuntime -Destination (Join-Path $stage 'graphify-runtime') -Recurse
+}
 
-$zip = Join-Path $dist "rah-$version-portable.zip"
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
+$zip = Join-Path $dist "rah-$version$suffix-portable.zip"
+Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
 Write-Host "Portable zip: $zip"
 
 if (-not $Iscc) {
@@ -89,6 +117,6 @@ if (-not $Iscc) {
     exit 1
 }
 
-& $Iscc "/DAppVersion=$version" "/DStageDir=$stage" (Join-Path $repo "packaging\windows\rah.iss")
+& $Iscc "/DAppVersion=$version" "/DStageDir=$stage" "/Frah-$version$suffix-setup" (Join-Path $repo "packaging\windows\rah.iss")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "Installer: $(Join-Path $dist "rah-$version-setup.exe")"
+Write-Host "Installer: $(Join-Path $dist "rah-$version$suffix-setup.exe")"

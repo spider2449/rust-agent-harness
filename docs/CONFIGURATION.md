@@ -9,6 +9,7 @@ prints what would run and where each value comes from.
 - [Getting started](#getting-started)
 - [The configuration file](#the-configuration-file)
 - [Commands](#commands)
+- [Graphify on another computer](#graphify-on-another-computer)
 - [The terminal REPL](#the-terminal-repl)
 - [The Web UI](#the-web-ui)
 - [Features](#features)
@@ -20,6 +21,37 @@ prints what would run and where each value comes from.
 - [Data directory](#data-directory)
 - [Advanced: plugin entries](#advanced-plugin-entries)
 - [Scripts](#scripts)
+
+## Graphify on another computer
+
+Graphify is an optional per-computer integration, not a default mounted plugin.
+The RAH binary embeds its scripts. A `graphify-bundled` distribution also contains
+Node/Python/Graphify and needs no uv, separate runtimes or downloads on the target.
+The lightweight package requires Node.js 20+ and uv on PATH. After `rah config init`, run `rah graphify install` and
+reopen RAH. The command prefers graphify-runtime beside the executable; in uv
+mode it prepares the pinned environment in uv's user cache. It installs versioned integration files under the data home, backs up
+rah.toml and adds the MCP query tool, Graphify relationship page/footer and
+explicit read assignment. Existing models, workspace, permissions, plugins and
+stricter tool policy are preserved. Repeating the command updates the managed
+paths without duplicating mounts.
+
+```powershell
+rah graphify install
+rah --data-dir "D:\RAH profile" graphify install --offline
+```
+
+`--python PATH` selects an already prepared Python environment without uv;
+`--node PATH` selects its Node executable. `--runtime-dir DIR` selects a bundle
+explicitly. Direct Python mode runs in isolation and never installs packages.
+`--offline` uses an already cached pinned environment in uv mode. A missing runtime or
+cache produces an actionable error and leaves RAH settings unchanged. Dependency
+preparation has bounded output, timeout and process supervision; interrupted
+downloads may leave uv cache data, and are never automatically replayed.
+Starting RAH itself never downloads Graphify. Do not copy the developer's
+absolute plugin/Python/cache paths to another computer. Build instructions are
+in [Graphify packaging](GRAPHIFY_PACKAGING.md). Use a build containing
+this command; a source commit that has not been published is not included in
+an older downloaded installer.
 
 ## Getting started
 

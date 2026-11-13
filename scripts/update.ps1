@@ -209,6 +209,10 @@ try {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item -LiteralPath $files -Destination $InstallDir -Force
+    $graphifyBundle = Join-Path (Split-Path -Parent $files[0]) 'graphify-runtime'
+    if (Test-Path -LiteralPath (Join-Path $graphifyBundle 'runtime.json')) {
+        Copy-Item -LiteralPath $graphifyBundle -Destination $InstallDir -Recurse -Force
+    }
 } finally {
     if ($work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
