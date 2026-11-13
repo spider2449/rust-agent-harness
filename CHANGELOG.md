@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.45.39 (2026-11-13)
+
+- Activate the Windows Desktop host when clicking its embedded page so Chinese
+  IME returns to the input area after switching applications.
+- Restore composer focus on reactivation and preserve IME confirmation keys.
+- Include a bundled Graphify quick-start README, a Start menu README shortcut,
+  and explicit packaging commands for the offline runtime variant.
+
 ## v0.45.38 (2026-11-13)
 
 - Graphify builds and refreshes workspace-local graphs automatically, with live
