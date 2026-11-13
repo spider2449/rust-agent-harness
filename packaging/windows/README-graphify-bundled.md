@@ -48,6 +48,31 @@ custom profile, pass the same `--data-dir` and `--config` options you normally u
 Uninstalling asks whether to delete user data; keeping it preserves settings
 and sessions. The bundled runtime is part of the application installation.
 
+## Build this package from source
+
+On the build computer, run these commands from a RAH source checkout. Include
+`-GraphifyRuntime` to bundle Graphify; omitting it builds the lightweight package.
+The path below is this checkout's prepared runtime directory, not a directory
+created automatically by the packaging command.
+
+```powershell
+.\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+```
+
+To reuse existing release executables instead of rebuilding them:
+
+```powershell
+.\scripts\package.ps1 -SkipBuild -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+```
+
+On another build computer, prepare a portable runtime first using
+`scripts/prepare-graphify-runtime.py` as described in `docs/GRAPHIFY_PACKAGING.md`
+in the source repository, and pass that output directory to `-GraphifyRuntime`.
+The script validates and copies the runtime into the installer and portable ZIP.
+Outputs in `dist` have `graphify-bundled` in their names. These build commands
+require the source checkout; package users only need the activation command
+`rah graphify install --offline` described above.
+
 ## Troubleshooting
 
 - **Command not found:** reopen PowerShell after installation, or run `.\rah.exe`

@@ -55,6 +55,30 @@ for a bundle outside the executable directory. In uv mode, `--offline` requires
 the pinned environment to be cached. Normal startup never downloads dependencies.
 See [Graphify packaging](docs/GRAPHIFY_PACKAGING.md) to build the no-uv variant.
 
+## Build a Windows package with Graphify
+
+Pass `-GraphifyRuntime` to include a prepared portable Node/Python/Graphify
+runtime. Without this option, packaging produces the lightweight variant.
+From the repository root, using this checkout's prepared runtime:
+
+```powershell
+.\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+```
+
+Add `-SkipBuild` to reuse existing release executables:
+
+```powershell
+.\scripts\package.ps1 -SkipBuild -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+```
+
+The runtime directory must already exist and pass validation; it is not created
+by packaging. For another build machine, follow
+[runtime preparation](docs/GRAPHIFY_PACKAGING.md#prepare-a-runtime) and pass its
+output directory instead. Output files are
+`dist/rah-VERSION-graphify-bundled-setup.exe` and
+`dist/rah-VERSION-graphify-bundled-portable.zip`. After installing the package,
+run `rah graphify install --offline` once and reopen Desktop to enable Graphify.
+
 ## Documentation
 
 - [Configuring and running RAH](docs/CONFIGURATION.md): the configuration
