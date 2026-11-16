@@ -4,6 +4,17 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Desktop Chinese IME after title-bar activation: manual verification pending
+
+- **Seen:** 2026-11-16. The user reports Chinese composition outside the input
+  after losing focus; clicking page content recovers it, but the title bar does not.
+- **Mitigation:** defer native WebView focus recovery until the event batch ends,
+  retaining recovery across minimize/restore and cancelling it on deactivation.
+- **Pending:** real Windows Chinese IME validation after Alt+Tab, title-bar clicks,
+  dragging the title bar, and minimize/restore. Deterministic recovery tests do
+  not validate the system IME candidate window. See
+  [the focus recovery plan](plans/2026-11-16-desktop-activation-focus.md).
+
 ## Graphify 0.9.107: UTF-8 BOM Cargo manifests need a compatibility reader
 
 - **Seen:** 2026-11-13 in image-viewer. A leading EF BB BF in Cargo.toml

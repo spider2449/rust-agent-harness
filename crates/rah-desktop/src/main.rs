@@ -26,6 +26,7 @@ use rah_api::{
 use rah_cli::{Distribution, boot, cli::GlobalArgs, setup};
 
 mod first_start;
+mod focus;
 use serde_json::Value;
 use tao::{
     dpi::LogicalSize,
@@ -115,14 +116,6 @@ fn webview(window: &Window, builder: WebViewBuilder<'_>) -> wry::Result<WebView>
         use wry::WebViewBuilderExtUnix;
         let vbox = window.default_vbox().ok_or(wry::Error::MessageSender)?;
         builder.build_gtk(vbox)
-    }
-}
-
-/// Moves keyboard focus into the WebView when the window owes it one and can
-/// give it: a minimized window cannot, and stays in debt until it is restored.
-fn give_focus(view: &WebView, window: &Window, owed: &mut bool) {
-    if *owed && !window.is_minimized() && view.focus().is_ok() {
-        *owed = false;
     }
 }
 
@@ -246,33 +239,23 @@ fn run(args: Args) -> Result<(), String> {
     // The WebView lives as long as the event loop, and goes before the window
     // it is in.
     let mut shown = Some((view, window));
-    // Set while the window has keyboard focus that the WebView has not taken.
-    let mut focus_owed = false;
+    let mut focus_recovery = focus::Recovery::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let code = match event {
-            // Keyboard focus that stays on the window instead of the WebView
-            // sends IME composition to a floating system window, away from
-            // the input box. wry hands focus over as the window gains it,
-            // but WebView2 refuses while the window is minimized, so the
-            // hand-over is repeated here and again once the window is
-            // restored.
+            // Native activation can precede the default title-bar handling.
+            // Wait until the native event batch finishes before handing focus
+            // to WebView2, so later window handling cannot overwrite it.
             Event::WindowEvent {
                 event: WindowEvent::Focused(focused),
                 ..
             } => {
-                focus_owed = focused;
-                if let Some((view, window)) = &shown {
-                    give_focus(view, window, &mut focus_owed);
-                }
+                focus_recovery.changed(focused);
                 return;
             }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(_),
-                ..
-            } => {
+            Event::MainEventsCleared => {
                 if let Some((view, window)) = &shown {
-                    give_focus(view, window, &mut focus_owed);
+                    focus_recovery.settle(window.is_minimized(), || view.focus().is_ok());
                 }
                 return;
             }
@@ -282,12 +265,11 @@ fn run(args: Args) -> Result<(), String> {
             } => 0,
             Event::UserEvent(UserEvent::Exit(code)) => code,
             Event::UserEvent(UserEvent::Activate) => {
-                if let Some((view, window)) = &shown {
+                if let Some((_, window)) = &shown {
                     // DOM focus alone cannot activate the top-level HWND for IME.
                     // Do this only in response to pointer input, never on a timer.
                     window.set_focus();
-                    focus_owed = true;
-                    give_focus(view, window, &mut focus_owed);
+                    focus_recovery.changed(true);
                 }
                 return;
             }
