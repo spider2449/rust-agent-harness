@@ -464,6 +464,100 @@ async fn start(name: &str) -> Web {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn lsp_status_coexists_with_graphify_and_opens_live_details() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        eprintln!("skipped: set RAH_TEST_BROWSER to run this test");
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-lsp-status").await;
+    let id = rah_api::PluginId::new("lsp-diagnostics");
+    web._kernel
+        .mount(
+            Arc::new(rah_plugin_lsp_diagnostics::LspDiagnosticsPlugin::new(
+                id.clone(),
+            )),
+            rah_api::MountOptions::with_config(json!({
+                "root": web.dir.workspace(), "defaults": false,
+                "servers": { "missing-test-server": {
+                    "command": [web.dir.workspace().join("missing-lsp.exe")], "extensions": [".rs"]
+                }}
+            })),
+        )
+        .await
+        .unwrap();
+    web._kernel
+        .mount(
+            Arc::new(FooterStatus {
+                manifest: rah_api::PluginManifest::new("graph-status", "0")
+                    .provides([rah_api::ui::UI_VIEWS_SERVICE]),
+                state: Arc::new(Mutex::new(rah_api::ui::StatusState::Ready)),
+            }),
+            rah_api::MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let browser = Browser::launch(PathBuf::from(program), "web-lsp-status");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url": web.url})).await;
+    page.wait("page connection", "connected()").await;
+    let button =
+        "byId('status-plugins').querySelector('[data-indicator=\"lsp-diagnostics/status\"]')";
+    page.wait(
+        "LSP and Graphify indicators",
+        &format!(
+            "byId('status-plugins').children.length === 2 && {button}?.textContent === 'LSP idle'"
+        ),
+    )
+    .await;
+    page.screenshot("lsp-status-idle").await;
+    page.eval(&format!("{button}.click(); true")).await;
+    page.wait("LSP detail page", "shown(byId('plugin-page')) && byId('plugin-page').textContent.includes('missing-test-server')").await;
+    // Deliver a completed-write hook fixture; no model or live server required.
+    std::fs::write(web.dir.workspace().join("example.rs"), "fn main() {}\n").unwrap();
+    web._kernel
+        .handle()
+        .waterfall::<rah_api::hooks::ToolAfterInvoke>(rah_api::hooks::ToolCompletion {
+            request: rah_api::hooks::ToolRequestContext {
+                session: rah_protocol::SessionId::new(),
+                call: rah_protocol::ToolCall {
+                    id: rah_protocol::ToolCallId::new(),
+                    name: rah_protocol::ToolName::new("repo.create-file"),
+                    input: rah_protocol::ToolInput(json!({"path": "example.rs"})),
+                },
+                definition: rah_protocol::ToolDefinition {
+                    name: rah_protocol::ToolName::new("repo.create-file"),
+                    description: String::new(),
+                    input_schema: json!({}),
+                    permission: rah_protocol::PermissionLevel::Write,
+                },
+            },
+            output: rah_protocol::ToolOutput {
+                content: vec![],
+                is_error: false,
+            },
+            effect: rah_protocol::ToolEffect::Completed,
+        })
+        .await
+        .unwrap();
+    page.wait(
+        "pushed LSP failure",
+        &format!("{button}?.dataset.state === 'error' && {button}.textContent === 'LSP failed'"),
+    )
+    .await;
+    page.wait(
+        "updated details",
+        "byId('plugin-page').textContent.includes('Failed')",
+    )
+    .await;
+    page.screenshot("lsp-status-failed").await;
+    web._kernel.unmount(&id).await.unwrap();
+    page.wait("LSP removed, Graphify retained", &format!("!{button} && byId('status-plugins').children.length === 1 && byId('status-plugins').textContent.includes('Graphify')")).await;
+    let errors = page.errors();
+    assert!(errors.is_empty(), "page errors: {errors:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() {
     let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
         eprintln!("skipped: set RAH_TEST_BROWSER to run this test");

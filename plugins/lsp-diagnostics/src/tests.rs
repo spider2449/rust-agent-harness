@@ -36,10 +36,15 @@ enum Mode {
     Staged,
     /// Ends the connection when it is asked to initialize.
     Crash,
+    /// Leaves initialize unanswered so the UI can observe startup/cancellation.
+    Initializing,
 }
 
 /// What the fixture server observed.
 struct Seen {
+    initialized: tokio::sync::Notify,
+    opened: tokio::sync::Notify,
+    disconnect: CancellationToken,
     mode: Mode,
     messages: Mutex<Vec<(String, Value)>>,
     spawns: AtomicUsize,
@@ -51,6 +56,9 @@ struct Seen {
 impl Seen {
     fn new(mode: Mode) -> Arc<Self> {
         Arc::new(Self {
+            initialized: tokio::sync::Notify::new(),
+            opened: tokio::sync::Notify::new(),
+            disconnect: CancellationToken::new(),
             mode,
             messages: Mutex::new(Vec::new()),
             spawns: AtomicUsize::new(0),
@@ -125,10 +133,12 @@ impl ExecEnv for FakeSandbox {
         let stop = CancellationToken::new();
         let done = CancellationToken::new();
         let (server_stop, server_done, seen) = (stop.clone(), done.clone(), self.0.clone());
+        let disconnect = seen.disconnect.clone();
         tokio::spawn(async move {
             tokio::select! {
                 () = serve(server_in, server_out, seen) => {}
                 () = server_stop.cancelled() => {}
+                () = disconnect.cancelled() => {}
             }
             server_done.cancel();
         });
@@ -209,8 +219,12 @@ async fn serve(
                 .push((method.clone(), params.clone()));
             match method.as_str() {
                 "initialize" => {
+                    seen.initialized.notify_one();
                     if seen.mode == Mode::Crash {
                         return;
+                    }
+                    if seen.mode == Mode::Initializing {
+                        continue;
                     }
                     send(
                         &mut output,
@@ -227,6 +241,7 @@ async fn serve(
                     .await;
                 }
                 "textDocument/didOpen" | "textDocument/didChange" => {
+                    seen.opened.notify_one();
                     let document = &params["textDocument"];
                     let uri = document["uri"].clone();
                     let version = document["version"].clone();
@@ -243,7 +258,7 @@ async fn serve(
                         })
                     };
                     match seen.mode {
-                        Mode::Silent | Mode::Crash => {}
+                        Mode::Silent | Mode::Crash | Mode::Initializing => {}
                         Mode::Normal => {
                             send(&mut output, publish(version, diagnose(&text))).await;
                         }
@@ -409,6 +424,143 @@ fn appended(completion: &ToolCompletion) -> Option<String> {
         Some(other) => panic!("unexpected content: {other:?}"),
         None => None,
     }
+}
+
+async fn status_view(fixture: &Fixture) -> rah_api::ui::View {
+    let providers = fixture.handle().get_all(rah_api::ui::UI_VIEWS);
+    assert_eq!(providers.len(), 1);
+    assert!(providers[0].1.views()[0].status_bar);
+    let view = providers[0]
+        .1
+        .render("status", &rah_api::ui::ViewContext::default())
+        .await
+        .unwrap();
+    view.check().unwrap();
+    view
+}
+
+fn indicator(view: &rah_api::ui::View) -> (rah_api::ui::StatusState, &str) {
+    view.nodes
+        .iter()
+        .find_map(|node| match node {
+            rah_api::ui::Node::Status { state, label, .. } => Some((*state, label.as_str())),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn status_is_idle_then_reports_diagnostics_and_clean_publications() {
+    use rah_api::ui::{StatusState, UiChanged};
+    let fixture = mount(Mode::Normal, json!({})).await;
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let sink = updates.clone();
+    let _subscription = fixture
+        .handle()
+        .subscribe(move |event: &UiChanged| sink.lock().unwrap().push(event.clone()));
+    assert_eq!(
+        indicator(&status_view(&fixture).await),
+        (StatusState::Idle, "LSP idle")
+    );
+    fixture.write("src/a.rs", "ERROR\nWARN");
+    fixture.created("src/a.rs").await;
+    let view = status_view(&fixture).await;
+    assert_eq!(indicator(&view), (StatusState::Warning, "LSP diagnostics"));
+    assert!(
+        serde_json::to_string(&view)
+            .unwrap()
+            .contains("2 diagnostic(s)")
+    );
+    fixture.write("src/a.rs", "clean");
+    fixture.created("src/a.rs").await;
+    assert_eq!(
+        indicator(&status_view(&fixture).await),
+        (StatusState::Ready, "LSP ready")
+    );
+    assert!(
+        updates
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.instance == "lsp" && event.view == "status")
+    );
+    assert!(updates.lock().unwrap().len() >= 6);
+    fixture.kernel.unmount(&PluginId::new("lsp")).await.unwrap();
+    assert!(fixture.handle().get_all(rah_api::ui::UI_VIEWS).is_empty());
+}
+
+#[tokio::test]
+async fn status_exposes_busy_and_cancellation_without_leaving_a_spinner() {
+    use rah_api::ui::StatusState;
+    for mode in [Mode::Initializing, Mode::Silent] {
+        let fixture = mount(mode, json!({"wait_ms": 10000})).await;
+        fixture.write("a.rs", "ERROR");
+        let mut check = Box::pin(fixture.created("a.rs"));
+        let signal = if mode == Mode::Initializing {
+            &fixture.seen.initialized
+        } else {
+            &fixture.seen.opened
+        };
+        tokio::select! {
+            _ = signal.notified() => {}
+            _ = &mut check => panic!("fixture should remain pending"),
+        }
+        assert_eq!(
+            indicator(&status_view(&fixture).await),
+            (
+                StatusState::Busy,
+                if mode == Mode::Initializing {
+                    "LSP starting"
+                } else {
+                    "LSP checking"
+                }
+            )
+        );
+        drop(check);
+        assert_eq!(
+            indicator(&status_view(&fixture).await),
+            (StatusState::Warning, "LSP interrupted")
+        );
+        fixture.kernel.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn status_distinguishes_timeout_start_failure_and_later_disconnect() {
+    use rah_api::ui::{StatusState, UiChanged};
+    let silent = mount(Mode::Silent, json!({"wait_ms": 1})).await;
+    silent.write("a.rs", "ERROR");
+    silent.created("a.rs").await;
+    assert_eq!(
+        indicator(&status_view(&silent).await),
+        (StatusState::Warning, "LSP timed out")
+    );
+    silent.kernel.shutdown().await.unwrap();
+    let broken = mount(Mode::Crash, json!({})).await;
+    broken.write("a.rs", "ERROR");
+    broken.created("a.rs").await;
+    assert_eq!(
+        indicator(&status_view(&broken).await),
+        (StatusState::Error, "LSP failed")
+    );
+    broken.kernel.shutdown().await.unwrap();
+    let fixture = mount(Mode::Normal, json!({})).await;
+    fixture.write("a.rs", "clean");
+    fixture.created("a.rs").await;
+    let changed = Arc::new(tokio::sync::Notify::new());
+    let sink = changed.clone();
+    let _subscription = fixture
+        .handle()
+        .subscribe(move |_: &UiChanged| sink.notify_one());
+    fixture.seen.disconnect.cancel();
+    tokio::time::timeout(Duration::from_secs(2), changed.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        indicator(&status_view(&fixture).await),
+        (StatusState::Warning, "LSP disconnected")
+    );
+    fixture.kernel.shutdown().await.unwrap();
 }
 
 #[tokio::test]

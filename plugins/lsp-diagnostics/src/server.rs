@@ -4,7 +4,7 @@
 use std::{
     collections::BTreeMap,
     path::Path,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::{
     ServerConfig,
     client::{Client, Diagnostic, Shared},
+    status::{Changes, ConnectionWatch, Phase, ServerStatus},
 };
 
 /// How long a server that could not start or ended is left alone.
@@ -44,6 +45,7 @@ const DEFAULTS: [(&str, &[&str], &[&str]); 5] = [
 ];
 
 pub(crate) struct Server {
+    pub status: Arc<ServerStatus>,
     pub name: String,
     /// Whether the user wrote this server, so that a failure to start it is
     /// worth saying.
@@ -64,6 +66,7 @@ enum Slot {
 
 struct Connection {
     client: Client,
+    closed: Arc<AtomicBool>,
     /// One check at a time per server keeps the publications of different
     /// files apart.
     gate: Mutex<()>,
@@ -180,6 +183,7 @@ fn build_with_bundle(
                 ));
             }
             Ok(Server {
+                status: ServerStatus::new(&name),
                 name,
                 explicit,
                 command,
@@ -193,6 +197,7 @@ fn build_with_bundle(
 }
 
 pub(crate) struct Servers {
+    changes: Changes,
     servers: Vec<Server>,
     sandbox: Arc<dyn ExecEnv>,
     spawner: Spawner,
@@ -207,8 +212,10 @@ impl Servers {
         spawner: Spawner,
         root: &Path,
         start_timeout: Duration,
+        changes: Changes,
     ) -> Self {
         Self {
+            changes,
             servers,
             sandbox,
             spawner,
@@ -242,6 +249,36 @@ impl Servers {
     ) -> Result<Checked, String> {
         let connection = self.connection(server).await?;
         let _turn = connection.gate.lock().await;
+        let activity = server
+            .status
+            .checking(
+                &self.changes,
+                &connection.closed,
+                &format!(
+                    "Checking {}",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            )
+            .ok_or_else(|| "the language server connection was replaced or ended".to_owned())?;
+        let result = self.check_connected(&connection, file, text, wait).await;
+        match &result {
+            Ok(Checked::Diagnostics(diagnostics)) => activity.finish(
+                if diagnostics.is_empty() { Phase::Reported } else { Phase::Issues },
+                &format!("{}: {} diagnostic(s) in the latest publication. This is not a project-wide check.", file.file_name().unwrap_or_default().to_string_lossy(), diagnostics.len()),
+            ),
+            Ok(Checked::NoReport) => activity.finish(Phase::Timeout, &format!("No diagnostic publication within {} ms; result unknown.", wait.as_millis())),
+            Err(error) => activity.finish(Phase::Failed, error),
+        }
+        result
+    }
+
+    async fn check_connected(
+        &self,
+        connection: &Connection,
+        file: &Path,
+        text: &str,
+        wait: Duration,
+    ) -> Result<Checked, String> {
         let uri = path_to_uri(file);
         let shared = &connection.client.shared;
         let baseline = shared.generation(&uri);
@@ -317,12 +354,22 @@ impl Servers {
             }
             _ => {}
         }
+        let activity = server.status.begin(
+            &self.changes,
+            Phase::Starting,
+            "Starting language server and initializing the connection.",
+        );
         match self.start(server).await {
             Ok(connection) => {
+                activity.finish(
+                    Phase::Reported,
+                    "Connection initialized; waiting for a file check.",
+                );
                 *slot = Slot::Ready(connection.clone());
                 Ok(connection)
             }
             Err(message) => {
+                activity.finish(Phase::Failed, &message);
                 *slot = Slot::Failed {
                     at: Instant::now(),
                     message: message.clone(),
@@ -345,7 +392,16 @@ impl Servers {
             .await
             .map_err(|error| error.to_string())?;
         let (client, actor) = Client::new(spawned, self.root_uri.clone(), Shared::new());
-        if !self.spawner.spawn(actor) {
+        let closed = Arc::new(AtomicBool::new(false));
+        server.status.watch(closed.clone());
+        let watch = ConnectionWatch {
+            closed: closed.clone(),
+            changes: self.changes.clone(),
+        };
+        if !self.spawner.spawn(async move {
+            let _watch = watch;
+            actor.await;
+        }) {
             return Err("the plugin is stopping".into());
         }
         let mut params = json!({
@@ -382,6 +438,7 @@ impl Servers {
             .map_err(|error| error.to_string())?;
         Ok(Arc::new(Connection {
             client,
+            closed,
             gate: Mutex::new(()),
         }))
     }

@@ -477,6 +477,15 @@ config = { formatters = { zig = { command = ["zig", "fmt", "$FILE"], extensions 
 The optional [offline LSP bundle](LSP_PACKAGING.md) supplies Rust, TS/JS,
 Python and C/C++ servers beside RAH, without changing explicit server commands.
 
+When `lsp` is enabled, Web and Desktop also show an **LSP** status-bar indicator.
+Hover for a server summary; click it to open the per-server status page. States
+include idle, starting, checking, ready, diagnostics, timed out, failed,
+interrupted and disconnected. Servers start only after a matching RAH write;
+idle does not mean the language server was tested or found on PATH. Ready means
+a server replied, not that the entire project passed validation. Results cover
+the most recent file check per server across sessions in that workspace. A
+timeout remains an unknown result. Unmounting the plugin removes its indicator.
+
 ## Model providers
 
 `model-chat-completions` speaks `<base_url>/chat/completions`, served by

@@ -33,10 +33,15 @@
 //! When present, `lsp-runtime` beside the host executable supplies the default
 //! Rust, TS/JS, Python and C/C++ commands. Explicit commands still win; setting
 //! `defaults` to false also disables bundle discovery.
+//!
+//! Provides a read-only `ui-views` status page and footer indicator. Status is
+//! scoped to this plugin/workspace, never interpreted as tool permission or a
+//! successful project build. Frontends refresh it through `UiChanged` events.
 
 mod bundle;
 mod client;
 mod server;
+mod status;
 
 use std::{
     collections::BTreeMap,
@@ -50,6 +55,7 @@ use rah_api::{
     hooks::{ToolAfterInvoke, ToolCompletion},
     host::NoticeOnce,
     sandbox::{ExecEnv, SANDBOX},
+    ui::{UI_VIEWS, UI_VIEWS_SERVICE, UiViews},
 };
 use rah_protocol::{PermissionLevel, ToolContent, ToolEffect};
 use serde::Deserialize;
@@ -77,7 +83,9 @@ pub struct LspDiagnosticsPlugin {
 impl LspDiagnosticsPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")).requires(["sandbox"]),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .requires(["sandbox"])
+                .provides([UI_VIEWS_SERVICE]),
         }
     }
 
@@ -183,6 +191,17 @@ impl Plugin for LspDiagnosticsPlugin {
         let root = tokio::fs::canonicalize(&requested).await.map_err(|error| {
             PluginError::from(format!("root `{}`: {error}", requested.display()))
         })?;
+        let changes = status::Changes {
+            kernel: scope.kernel(),
+            instance: scope.id().to_string(),
+        };
+        scope.provide(
+            UI_VIEWS,
+            Arc::new(status::StatusView {
+                workspace: root.display().to_string(),
+                servers: servers.iter().map(|server| server.status.clone()).collect(),
+            }) as Arc<dyn UiViews>,
+        )?;
         let checker = Arc::new(Checker {
             servers: Servers::new(
                 servers,
@@ -190,6 +209,7 @@ impl Plugin for LspDiagnosticsPlugin {
                 scope.spawner(),
                 &root,
                 settings.start_timeout,
+                changes,
             ),
             root,
             settings,

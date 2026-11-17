@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Show LSP server startup, checks, diagnostics, timeouts and failures in the
+  Web/Desktop status bar, with a read-only per-server detail page.
+
 ## v0.45.40 (2026-11-17)
 
 - Add readable directed Graphify views with draggable nodes, configurable UI
