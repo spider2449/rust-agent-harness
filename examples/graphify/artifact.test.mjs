@@ -122,9 +122,14 @@ test('tool discovery and results carry usage guidance, provenance and bounded gr
     properties: { question: { type: 'string' }, project_path: { type: 'string' } } } }, { name: 'ingest' }] } });
   assert.equal(listed.result.tools.length, 1);
   assert.match(listed.result.tools[0].description, /Read cited workspace source/);
-  assert.match(listed.result.tools[0].description, /use this tool first before broad source searches/);
-  assert.match(listed.result.tools[0].description, /do not wait for the user to ask for Graphify/);
-  assert.match(listed.result.tools[0].description, /Skip it for a known-file edit/);
+  assert.match(listed.result.tools[0].description, /optional experimental graph reference/);
+  assert.match(listed.result.tools[0].description, /source inspection as the primary workflow/);
+  assert.doesNotMatch(listed.result.tools[0].description, /use this tool first|do not wait for the user/);
+  assert.match(listed.result.tools[0].description, /missing member reads\/writes/);
+  assert.match(listed.result.tools[0].description, /properties classified as methods/);
+  assert.match(listed.result.tools[0].description, /Qt signal\/slot connect wiring/);
+  assert.match(listed.result.tools[0].description, /calls through instance attributes/);
+  assert.match(listed.result.tools[0].description, /empty caller list or missing edge does not prove absence/);
   assert.match(listed.result.tools[0].description, /unavailable graph requires source search/);
   assert.equal(listed.result.tools[0].inputSchema.properties.project_path, undefined);
   assert.equal(listed.result.tools[0].inputSchema.additionalProperties, false);
@@ -132,7 +137,8 @@ test('tool discovery and results carry usage guidance, provenance and bounded gr
     { workspace: 'workspace', fingerprint: 'abc' });
   const text = result.result.content[0].text;
   assert.match(text, /workspace.*fingerprint/);
-  assert.match(text, /untrusted navigation/);
+  assert.match(text, /untrusted experimental data/);
+  assert.match(text, /Missing edges or callers do not prove absence of use/);
   assert.match(text, /truncated/);
   assert.ok(Buffer.byteLength(text) < 64 * 1024);
   const error = { result: { isError: true } };

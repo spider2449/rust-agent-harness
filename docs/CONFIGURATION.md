@@ -24,6 +24,11 @@ prints what would run and where each value comes from.
 
 ## Graphify on another computer
 
+Graphify is an optional experimental graph reference. Its positioning as a
+reliable code navigation capability has been withdrawn. Use source search and
+source inspection as the primary workflow; graph relationships are incomplete.
+See [known limitations](KNOWN_ISSUES.md#graphify-incomplete-python-and-qt-relationships).
+
 Graphify is an optional per-computer integration, not a default mounted plugin.
 The RAH binary embeds its scripts. A `graphify-bundled` distribution also contains
 Node/Python/Graphify and needs no uv, separate runtimes or downloads on the target.

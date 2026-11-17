@@ -59,6 +59,11 @@ instead of a known stale answer. The last good graph is preserved for recovery.
 Query output still needs source verification: this does not fix AST resolution
 limits or make model answers authoritative.
 
+Graphify is an optional experimental graph reference. Its positioning as a
+reliable code navigation capability has been withdrawn. Use source search and
+source inspection as the primary workflow; graph relationships are incomplete.
+See [known limitations](../../docs/KNOWN_ISSUES.md#graphify-incomplete-python-and-qt-relationships).
+
 ## Reading and using workspace artifacts
 
 The managed output is `.rah/graphify-out/graph.json` in the selected workspace.

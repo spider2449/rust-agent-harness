@@ -41,6 +41,11 @@ checkout:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/spider2449/rust-agent-harness/master/scripts/update.ps1)))
 ```
 
+Graphify is an optional experimental graph reference. Its positioning as a
+reliable code navigation capability has been withdrawn. Use source search and
+source inspection as the primary workflow; graph relationships are incomplete.
+See [known limitations](docs/KNOWN_ISSUES.md#graphify-incomplete-python-and-qt-relationships).
+
 Graphify is enabled separately on each computer. Run `rah graphify install`
 once, then reopen RAH and click the Graphify
 status icon (or **Plugins > Plugin pages > Graphify**). This explicit command

@@ -25,6 +25,29 @@ in the commit which entry it closes.
   tests cover focus decisions, not native WebView selection behavior. See
   [the selection plan](plans/2026-11-17-transcript-text-selection.md).
 
+## Graphify: incomplete Python and Qt relationships
+
+- **Reported:** 2026-11-17 in user practical evaluation; these observations
+  were supplied by the user and were not independently reproduced in RAH.
+- **Missing member access:** the evaluated graph has no reads/writes/attribute
+  edges. `mainPage.py:139` reads `switchValue` but has no corresponding edge;
+  accesses such as `self.isSetKey` and `partI.swCtl` are also absent.
+- **Property classification:** `switchValue` appears as callable
+  `.switchValue()` rather than a property, making caller queries misleading.
+- **Qt wiring:** `released.connect(self.infoI.selSwCtl_trd)` and
+  `triggered.connect(self.menuHelp_triggered)` do not link signals to slots.
+  The reported ten connect-related edges point to connect method nodes instead.
+- **Indirect calls:** calls through instance attributes, including
+  `self.ik2fk(partI)` and object chains involving `charI.partIs[...]`, are
+  largely unresolved. The reported 254 calls concentrate on same-file
+  `self.method` and direct calls; counts are specific to that evaluated graph.
+- **Decision:** withdraw the reliable code navigation positioning and graph-first
+  tool guidance. Retain the integration only as an optional experimental graph
+  reference. Use source search and inspection for navigation and verification;
+  missing callers or edges never establish absence of use. No extractor fix is
+  claimed. Reassessment requires representative member-access, property,
+  signal/slot and cross-file instance-call fixtures with source-verified results.
+
 ## Graphify 0.9.107: UTF-8 BOM Cargo manifests need a compatibility reader
 
 - **Seen:** 2026-11-13 in image-viewer. A leading EF BB BF in Cargo.toml

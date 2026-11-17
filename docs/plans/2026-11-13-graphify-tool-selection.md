@@ -1,5 +1,8 @@
 # Graphify tool selection guidance
 
+> Superseded on 2026-11-17: graph-first navigation guidance is withdrawn.
+> See [the withdrawal plan](2026-11-17-graphify-navigation-withdrawal.md).
+
 ## Problem and scope
 
 Automatic indexing does not imply automatic model tool selection. The managed
