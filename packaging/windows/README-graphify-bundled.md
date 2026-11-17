@@ -50,24 +50,25 @@ and sessions. The bundled runtime is part of the application installation.
 
 ## Build this package from source
 
-On the build computer, run these commands from a RAH source checkout. Include
-`-GraphifyRuntime` to bundle Graphify; omitting it builds the lightweight package.
-The path below is this checkout's prepared runtime directory, not a directory
-created automatically by the packaging command.
+On the build computer, run these commands from a RAH source checkout. The
+default package includes both Graphify and LSP, discovered under `.rah`.
+Prepare the runtimes first; packaging does not download them automatically.
 
 ```powershell
-.\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+.\scripts\package.ps1
 ```
 
 To reuse existing release executables instead of rebuilding them:
 
 ```powershell
-.\scripts\package.ps1 -SkipBuild -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+.\scripts\package.ps1 -SkipBuild
 ```
 
 On another build computer, prepare a portable runtime first using
 `scripts/prepare-graphify-runtime.py` as described in `docs/GRAPHIFY_PACKAGING.md`
 in the source repository, and pass that output directory to `-GraphifyRuntime`.
+Prepare LSP as described in `docs/LSP_PACKAGING.md`; `-LspRuntime` overrides its
+location. Use `-Lightweight` only when deliberately omitting both runtimes.
 The script validates and copies the runtime into the installer and portable ZIP.
 Outputs in `dist` have `graphify-bundled` in their names. These build commands
 require the source checkout; package users only need the activation command

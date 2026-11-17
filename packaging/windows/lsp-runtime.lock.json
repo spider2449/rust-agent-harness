@@ -1,0 +1,76 @@
+{
+  "versions": {
+    "node": "26.13.1",
+    "rust-analyzer": "2026-11-16",
+    "clangd": "23.1.0",
+    "typescript-language-server": "6.1.0",
+    "typescript": "5.9.3",
+    "pyright": "1.1.414"
+  },
+  "assets": [
+    {
+      "file": "node-v26.13.1-win-x64.zip",
+      "url": "https://nodejs.org/dist/v26.13.1/node-v26.13.1-win-x64.zip",
+      "algorithm": "sha256",
+      "digest": "e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7",
+      "destination": "node",
+      "prefix": "node-v26.13.1-win-x64/"
+    },
+    {
+      "file": "rust-analyzer-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-16/rust-analyzer-x86_64-pc-windows-msvc.zip",
+      "algorithm": "sha256",
+      "digest": "dbf0c36ec54cf727d34cc40c9994fe71b7d52e3c28a3112c3deca1aba46fbc8f",
+      "destination": "rust-temp",
+      "prefix": ""
+    },
+    {
+      "file": "clangd-windows-23.1.0.zip",
+      "url": "https://github.com/clangd/clangd/releases/download/23.1.0/clangd-windows-23.1.0.zip",
+      "algorithm": "sha256",
+      "digest": "23412a240756a162e7b98a282f36aa2a23a88db5ce16a0cbc4fef7253768c810",
+      "destination": "clangd",
+      "prefix": "clangd_23.1.0/"
+    },
+    {
+      "file": "typescript-language-server-6.1.0.tgz",
+      "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.1.0.tgz",
+      "algorithm": "sha512",
+      "digest": "fcefddaf609bbc34b55bd8ca25c050c64e166a0510f7ba016fc93f7aaf5c3ac96c6ed02e0b60433e991c50bc44d9211988f209bd534b78d8cb65ef61425d7309",
+      "destination": "node_modules/typescript-language-server",
+      "prefix": "package/"
+    },
+    {
+      "file": "typescript-5.9.3.tgz",
+      "url": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
+      "algorithm": "sha512",
+      "digest": "8e5d6f6733c38a72ebf5e52ddc9feded5e8580d130f508ef04f772b33f4a7d00c3e357d0ac2d98e2f290762694a454f86d795bd511e12e9a7cc2d9ba3394e04b",
+      "destination": "node_modules/typescript",
+      "prefix": "package/"
+    },
+    {
+      "file": "pyright-1.1.414.tgz",
+      "url": "https://registry.npmjs.org/pyright/-/pyright-1.1.414.tgz",
+      "algorithm": "sha512",
+      "digest": "14f6596f9d637a90d7e1e3fb4c460378d16d984dd683092411c269bc7dff426512b23d04032dcb5eefb10784ff1560de8edb179427c5affadb5858f0bb0b97c3",
+      "destination": "node_modules/pyright",
+      "prefix": "package/"
+    },
+    {
+      "file": "rust-analyzer-LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-11-16/LICENSE-MIT",
+      "algorithm": "sha256",
+      "digest": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "destination": "licenses/rust-analyzer-LICENSE-MIT",
+      "raw": true
+    },
+    {
+      "file": "rust-analyzer-LICENSE-APACHE",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-11-16/LICENSE-APACHE",
+      "algorithm": "sha256",
+      "digest": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "destination": "licenses/rust-analyzer-LICENSE-APACHE",
+      "raw": true
+    }
+  ]
+}

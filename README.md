@@ -10,15 +10,17 @@ the core. RAH orchestrates inference providers; it is not an inference engine.
 ## Quick start
 
 ```powershell
-.\scripts\update.ps1           # build and install (run it again after every pull)
-rah config init                # pick a model, permissions and workspace
+.\scripts\update.ps1           # install/update RAH, LSP and Graphify
+rah config edit                # select model, permissions and workspace
 rah                            # terminal REPL
 rah web                        # Web UI in the browser
 rah-desktop                    # the same Web UI in a native window
 ```
 
-`rah config init` asks a few questions and writes `rah.toml` in the data
-directory (`~/.rah`). A small one looks like this:
+The updater creates a profile when missing and enables LSP and Graphify without
+choosing a model. Use Desktop setup or `rah config edit` to select your model.
+For installations made without the updater, `rah config init` asks a few
+questions and creates `rah.toml`. A small profile looks like this:
 
 ```toml
 model       = "anthropic/claude-sonnet-5-5"   # anthropic, openai, deepseek, openai-compatible, llamacpp, mock
@@ -31,11 +33,14 @@ without a model or key: `rah --model mock`. Options such as `--model`,
 `--permissions` and `--root` override the file for one run, and settings saved
 in the Web UI are written to it. `rah config show` prints what would run.
 
-`.\scripts\update.ps1` is the only command needed to install or update: it
-downloads the latest release (checked against its SHA256 sums) and replaces
-the installed `rah` and `rah-desktop` (the Start Menu entries follow); in a
-checkout newer than the release it builds the checkout instead. Without a
-checkout:
+`.\scripts\update.ps1` installs or updates RAH together with LSP and Graphify,
+backs up changed configuration and enables both integrations. A source build
+uses prepared `.rah/lsp-runtime` and `.rah/graphify-no-uv-runtime` (or
+`.rah/graphify-runtime`); `-LspRuntime` and `-GraphifyRuntime` select other
+directories. See [runtime preparation](docs/LSP_PACKAGING.md#update-an-installed-copy).
+Release mode requires a combined `graphify-bundled-lsp-bundled` ZIP listed in
+`SHA256SUMS.txt`. Auto mode builds the checkout if the release lacks that package.
+Without a checkout, a combined release must have been published first:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/spider2449/rust-agent-harness/master/scripts/update.ps1)))
@@ -46,7 +51,8 @@ reliable code navigation capability has been withdrawn. Use source search and
 source inspection as the primary workflow; graph relationships are incomplete.
 See [known limitations](docs/KNOWN_ISSUES.md#graphify-incomplete-python-and-qt-relationships).
 
-Graphify is enabled separately on each computer. Run `rah graphify install`
+The updater enables Graphify on this computer automatically using the bundled
+runtime. For other installation methods, run `rah graphify install`
 once, then reopen RAH and click the Graphify
 status icon (or **Plugins > Plugin pages > Graphify**). This explicit command
 prepares the pinned Python package in uv's user cache, installs the integration
@@ -60,28 +66,28 @@ for a bundle outside the executable directory. In uv mode, `--offline` requires
 the pinned environment to be cached. Normal startup never downloads dependencies.
 See [Graphify packaging](docs/GRAPHIFY_PACKAGING.md) to build the no-uv variant.
 
-## Build a Windows package with Graphify
+## Build a Windows package with LSP and Graphify
 
-Pass `-GraphifyRuntime` to include a prepared portable Node/Python/Graphify
-runtime. Without this option, packaging produces the lightweight variant.
-From the repository root, using this checkout's prepared runtime:
+From the repository root, the default command discovers the prepared LSP and
+Graphify runtimes under `.rah` and packages both:
 
 ```powershell
-.\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+.\scripts\package.ps1
 ```
 
 Add `-SkipBuild` to reuse existing release executables:
 
 ```powershell
-.\scripts\package.ps1 -SkipBuild -GraphifyRuntime '.rah\graphify-no-uv-runtime'
+.\scripts\package.ps1 -SkipBuild
 ```
 
-The runtime directory must already exist and pass validation; it is not created
-by packaging. For another build machine, follow
-[runtime preparation](docs/GRAPHIFY_PACKAGING.md#prepare-a-runtime) and pass its
-output directory instead. Output files are
-`dist/rah-VERSION-graphify-bundled-setup.exe` and
-`dist/rah-VERSION-graphify-bundled-portable.zip`. After installing the package,
+Both runtime directories must already exist and pass validation; packaging
+does not create them. For another build machine, follow [LSP preparation](docs/LSP_PACKAGING.md)
+and [Graphify preparation](docs/GRAPHIFY_PACKAGING.md#prepare-a-runtime).
+`-LspRuntime` and `-GraphifyRuntime` override the default locations; use
+`-Lightweight` to explicitly omit both. Output files are
+`dist/rah-VERSION-graphify-bundled-lsp-bundled-setup.exe` and
+`dist/rah-VERSION-graphify-bundled-lsp-bundled-portable.zip`. After installing the package,
 run `rah graphify install --offline` once and reopen Desktop to enable Graphify.
 
 ## Documentation

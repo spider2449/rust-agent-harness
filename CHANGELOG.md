@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## v0.45.40 (2026-11-17)
+
+- Add readable directed Graphify views with draggable nodes, configurable UI
+  scale and a wider conversation layout.
+- Preserve Desktop transcript text selection and defer WebView focus recovery
+  after activation; native Windows IME verification remains pending.
+- Document Graphify's incomplete relationships and withdraw its positioning as
+  reliable code navigation; source search remains the primary workflow.
+- Bundle offline language servers for Rust, TypeScript/JavaScript, Python and
+  C/C++, including Node.js, pinned downloads, checksums and runtime validation.
+- Discover bundled LSP servers beside RAH while preserving explicit server
+  settings; disable automatic type-package acquisition for bundled TS/JS.
+- Make Windows packaging include both LSP and Graphify by default, with
+  automatic runtime discovery and an explicit lightweight option.
+- Install and enable both integrations through the Windows updater, preserving
+  existing profile settings and backing up configuration changes.
+- Record the unresolved initial Rust diagnostic result through RAH; use an
+  explicit offline Cargo check rather than treating absent diagnostics as a
+  successful compilation.
+
 ## v0.45.39 (2026-11-13)
 
 - Activate the Windows Desktop host when clicking its embedded page so Chinese

@@ -80,6 +80,19 @@ pub(crate) fn build(
     defaults: bool,
     configured: Option<&BTreeMap<String, ServerConfig>>,
 ) -> Result<Vec<Server>, String> {
+    let bundled = if defaults {
+        crate::bundle::discover()?
+    } else {
+        BTreeMap::new()
+    };
+    build_with_bundle(defaults, configured, &bundled)
+}
+
+fn build_with_bundle(
+    defaults: bool,
+    configured: Option<&BTreeMap<String, ServerConfig>>,
+    bundled: &BTreeMap<String, ServerConfig>,
+) -> Result<Vec<Server>, String> {
     let mut table: BTreeMap<String, (ServerConfig, bool)> = BTreeMap::new();
     if defaults {
         for (name, command, extensions) in DEFAULTS {
@@ -87,8 +100,16 @@ pub(crate) fn build(
                 name.to_owned(),
                 (
                     ServerConfig {
-                        command: Some(command.iter().map(|part| (*part).to_owned()).collect()),
+                        command: bundled
+                            .get(name)
+                            .and_then(|entry| entry.command.clone())
+                            .or_else(|| {
+                                Some(command.iter().map(|part| (*part).to_owned()).collect())
+                            }),
                         extensions: Some(extensions.iter().map(|ext| (*ext).to_owned()).collect()),
+                        initialization: bundled
+                            .get(name)
+                            .and_then(|entry| entry.initialization.clone()),
                         ..ServerConfig::default()
                     },
                     false,
@@ -107,6 +128,8 @@ pub(crate) fn build(
         let (merged, _) = table.entry(name.clone()).or_default();
         if entry.command.is_some() {
             merged.command = entry.command.clone();
+            // Bundle-specific initialization must not leak into a custom server.
+            merged.initialization = None;
         }
         if entry.extensions.is_some() {
             merged.extensions = entry.extensions.clone();
@@ -402,4 +425,73 @@ pub(crate) fn path_to_uri(path: &Path) -> String {
         }
     }
     uri
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_commands_and_disabled_servers_override_bundled_defaults() {
+        let bundled = BTreeMap::from([(
+            "rust-analyzer".into(),
+            ServerConfig {
+                command: Some(vec!["bundled-rust".into()]),
+                initialization: Some(json!({"bundled": true})),
+                ..ServerConfig::default()
+            },
+        )]);
+        let defaults = build_with_bundle(true, None, &bundled).unwrap();
+        assert_eq!(
+            defaults
+                .iter()
+                .find(|s| s.name == "rust-analyzer")
+                .unwrap()
+                .command,
+            ["bundled-rust"]
+        );
+        assert_eq!(
+            defaults
+                .iter()
+                .find(|s| s.name == "rust-analyzer")
+                .unwrap()
+                .initialization,
+            json!({"bundled": true})
+        );
+        let configured = BTreeMap::from([
+            (
+                "rust-analyzer".into(),
+                ServerConfig {
+                    command: Some(vec!["custom-rust".into()]),
+                    ..ServerConfig::default()
+                },
+            ),
+            (
+                "clangd".into(),
+                ServerConfig {
+                    disabled: Some(true),
+                    ..ServerConfig::default()
+                },
+            ),
+        ]);
+        let servers = build_with_bundle(true, Some(&configured), &bundled).unwrap();
+        assert_eq!(
+            servers
+                .iter()
+                .find(|s| s.name == "rust-analyzer")
+                .unwrap()
+                .command,
+            ["custom-rust"]
+        );
+        assert!(!servers.iter().any(|s| s.name == "clangd"));
+        assert!(
+            servers
+                .iter()
+                .find(|s| s.name == "rust-analyzer")
+                .unwrap()
+                .initialization
+                .is_null()
+        );
+        assert!(build_with_bundle(false, None, &bundled).unwrap().is_empty());
+    }
 }

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Builds the Windows installer `rah-<version>-setup.exe` (and a portable zip).
+Builds RAH with LSP and Graphify (Windows installer and portable ZIP).
 
 .DESCRIPTION
 Builds `rah` and `rah-desktop` in release mode, stages them with the Web
@@ -8,7 +8,10 @@ launcher under `dist\stage`, zips the stage as `rah-<version>-portable.zip`,
 and compiles `packaging\windows\rah.iss` with Inno Setup (ISCC.exe) into
 `dist\rah-<version>-setup.exe`. The installer is per-user (no administrator
 rights), adds Start Menu entries and optionally the PATH, and has an
-uninstaller that keeps the data directory (`~\.rah`).
+uninstaller that keeps the data directory (`~\.rah`). By default both prepared
+runtimes are discovered under .rah and included in a combined package named
+`rah-<version>-graphify-bundled-lsp-bundled-*`. -Lightweight explicitly builds
+the original package without either runtime. Missing runtimes fail before build.
 
 Inno Setup 6 is a build-time tool only: install it yourself
 (https://jrsoftware.org/isinfo.php, or `winget install JRSoftware.InnoSetup`),
@@ -23,7 +26,11 @@ Package the existing release build.
 
 .EXAMPLE
 .\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-runtime'
-Build a separate bundled package whose target computer needs no uv, Python or Node installation.
+Override Graphify's location; LSP is still discovered automatically.
+
+.EXAMPLE
+.\scripts\package.ps1 -Lightweight
+Build without either runtime.
 #>
 [CmdletBinding()]
 param(
@@ -32,16 +39,54 @@ param(
     # Reuse target\release instead of building.
     [switch]$SkipBuild,
     # Prepared relocatable Node/Python/Graphify bundle; target machines need no uv.
-    [string]$GraphifyRuntime
+    [string]$GraphifyRuntime,
+    # Prepared Windows x64 language servers and Node; see docs/LSP_PACKAGING.md.
+    [string]$LspRuntime,
+    # Explicitly omit both runtimes (for the original lightweight release).
+    [switch]$Lightweight
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 
+function Resolve-PackageRuntimes([string]$Root, [string]$Graphify, [string]$Lsp, [bool]$Minimal) {
+    if ($Minimal) {
+        if ($Graphify -or $Lsp) { throw '-Lightweight cannot be combined with runtime paths.' }
+        return @{ Graphify = ''; Lsp = '' }
+    }
+    $selected = @{}
+    foreach ($entry in @(
+        @{ Name = 'Graphify'; Explicit = $Graphify; Defaults = @('.rah/graphify-no-uv-runtime', '.rah/graphify-runtime') },
+        @{ Name = 'Lsp'; Explicit = $Lsp; Defaults = @('.rah/lsp-runtime') }
+    )) {
+        $paths = if ($entry.Explicit) { @($entry.Explicit) } else { @($entry.Defaults | ForEach-Object { Join-Path $Root $_ }) }
+        $foundPath = $null
+        foreach ($path in $paths) {
+            if (Test-Path -LiteralPath (Join-Path $path 'runtime.json')) {
+                $foundPath = (Resolve-Path -LiteralPath $path).Path
+                break
+            }
+        }
+        if (-not $foundPath) { throw "Missing $($entry.Name) runtime. Prepare it first or pass -$($entry.Name)Runtime DIR; use -Lightweight to omit both. See docs/LSP_PACKAGING.md and docs/GRAPHIFY_PACKAGING.md." }
+        $selected[$entry.Name] = $foundPath
+    }
+    return $selected
+}
+
+$runtimes = Resolve-PackageRuntimes $repo $GraphifyRuntime $LspRuntime ([bool]$Lightweight)
+$GraphifyRuntime = $runtimes.Graphify
+$LspRuntime = $runtimes.Lsp
+
 $manifest = Get-Content -LiteralPath (Join-Path $repo "Cargo.toml") -Raw
 if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "No workspace version in Cargo.toml." }
 $version = $Matches[1]
 $suffix = if ($GraphifyRuntime) { '-graphify-bundled' } else { '' }
+if ($LspRuntime) {
+    $suffix += '-lsp-bundled'
+    $LspRuntime = (Resolve-Path -LiteralPath $LspRuntime).Path
+    & (Join-Path $GraphifyRuntime 'python/python.exe') -I (Join-Path $repo 'scripts/prepare-lsp-runtime.py') --check $LspRuntime
+    if ($LASTEXITCODE -ne 0) { throw 'LSP runtime validation failed' }
+}
 if ($GraphifyRuntime) {
     $GraphifyRuntime = (Resolve-Path -LiteralPath $GraphifyRuntime).Path
     $runtimePython = Join-Path $GraphifyRuntime 'python/python.exe'
@@ -84,6 +129,7 @@ $resolvedStage = [IO.Path]::GetFullPath($stage)
 if ([IO.Path]::GetDirectoryName($resolvedStage) -ne $resolvedDist) { throw 'Staging directory escapes dist' }
 if ((Test-Path -LiteralPath $dist) -and ((Get-Item -LiteralPath $dist).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'dist must not be a link' }
 if ($GraphifyRuntime -and ($GraphifyRuntime -eq $resolvedStage -or $GraphifyRuntime.StartsWith($resolvedStage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) { throw 'Runtime source must be outside the staging directory' }
+if ($LspRuntime -and ($LspRuntime -eq $resolvedStage -or $LspRuntime.StartsWith($resolvedStage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) { throw 'LSP runtime source must be outside the staging directory' }
 if (Test-Path -LiteralPath $stage) {
     if ((Get-Item -LiteralPath $stage).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Staging directory must not be a link' }
     Remove-Item -LiteralPath $stage -Recurse -Force
@@ -96,6 +142,14 @@ Copy-Item (Join-Path $repo "README.md") -Destination $stage
 if ($GraphifyRuntime) {
     Copy-Item -LiteralPath (Join-Path $repo 'packaging/windows/README-graphify-bundled.md') -Destination (Join-Path $stage 'README.md') -Force
     Copy-Item -LiteralPath $GraphifyRuntime -Destination (Join-Path $stage 'graphify-runtime') -Recurse
+    Copy-Item -LiteralPath (Join-Path $stage 'README.md') -Destination (Join-Path $dist "rah-$version$suffix-README.md") -Force
+}
+
+if ($LspRuntime) {
+    Copy-Item -LiteralPath $LspRuntime -Destination (Join-Path $stage 'lsp-runtime') -Recurse
+    $lspReadme = Get-Content -LiteralPath (Join-Path $repo 'packaging/windows/README-lsp-bundled.md') -Raw
+    $existingReadme = Get-Content -LiteralPath (Join-Path $stage 'README.md') -Raw
+    [IO.File]::WriteAllText((Join-Path $stage 'README.md'), $lspReadme + "`r`n`r`n" + $existingReadme, [Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $stage 'README.md') -Destination (Join-Path $dist "rah-$version$suffix-README.md") -Force
 }
 

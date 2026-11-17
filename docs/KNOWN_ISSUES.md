@@ -4,6 +4,24 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Bundled Rust diagnostics: initial RAH write can finish without an error report
+
+- **Seen:** 2026-11-17, Windows x64, bundled rust-analyzer 2026-11-16.
+  Direct LSP smoke checks return syntax errors, including with host tools
+  removed from PATH. Through RAH, a detached file without a toolchain timed
+  out at 15 and 30 seconds. A new dependency-free Cargo project with the
+  installed toolchain and Cargo offline mode returned an empty initial
+  diagnostic result despite a deliberate return-type mismatch.
+- **Scope:** the runtime starts and the deterministic LSP tests pass. TS,
+  Python and C++ errors were verified through RAH's write hook. These results
+  do not establish Rust project diagnosis through that hook. Initial indexing
+  and the current 250 ms publication settle window are possible contributors;
+  the root cause is not established.
+- **Workaround:** use an explicit offline `cargo check` for Rust verification;
+  do not treat absence of an appended diagnostic as successful compilation.
+- **Pending:** investigate Rust initialization/configuration and publication
+  timing with a persistent session. See [offline packaging](LSP_PACKAGING.md).
+
 ## Directed Graphify views: native Desktop inspection pending
 
 - **Seen:** 2026-11-17. The directed renderer is shared by Web and Desktop.

@@ -474,6 +474,9 @@ use = "format-on-write"
 config = { formatters = { zig = { command = ["zig", "fmt", "$FILE"], extensions = [".zig"] } } }
 ```
 
+The optional [offline LSP bundle](LSP_PACKAGING.md) supplies Rust, TS/JS,
+Python and C/C++ servers beside RAH, without changing explicit server commands.
+
 ## Model providers
 
 `model-chat-completions` speaks `<base_url>/chat/completions`, served by
@@ -606,7 +609,7 @@ Windows PowerShell 5.1 or later; if scripts are blocked, run them as
 
 | Script | Does |
 |---|---|
-| `scripts\update.ps1` | **The one to use.** Downloads the latest GitHub release (the portable zip, checked against `SHA256SUMS.txt`) and installs `rah` and `rah-desktop` into `%LOCALAPPDATA%\Programs\RAH`, the installer's directory, so existing Start Menu entries and PATH run the new version; on a new machine it adds them. In a checkout newer than the latest release it builds the checkout instead; `-Source release\|build` chooses. RAH may keep running during the download or build; before copying, a running `rah` or `rah-desktop` is closed after asking (`-Force`: without asking) and RAH Desktop is reopened afterwards. Prints the old and new version, warns when another `rah` comes first on PATH, and after a build trims the debug build cache when `target` passes 30 GB (`-MaxTargetGB`). Never touches `~\.rah`. |
+| `scripts\update.ps1` | Installs RAH, LSP and Graphify into `%LOCALAPPDATA%\Programs\RAH`. Uses a checksum-verified combined release ZIP, or a checkout build with prepared runtimes (`-LspRuntime`, `-GraphifyRuntime`). Auto mode builds when the release is older or lacks the combined package. Enables LSP and runs `graphify install --offline`, preserving existing settings and backing up configuration changes; sessions stay untouched. `-DataDir` / `-Config` select another profile. `-Force` closes a running RAH without asking; `-NoShortcuts` avoids PATH/Start Menu changes on a new install. See [preparation and update details](LSP_PACKAGING.md#update-an-installed-copy). |
 | `scripts\start.ps1` | For development: runs `rah` from the checkout without installing: the Web UI (opening its URL), `-Cli` for the REPL, `-Desktop` for the window, `-InitConfig` to write `rah.toml`. Options: `-Model`, `-Permissions`, `-Config`, `-Root`, `-DataDir`, `-Bind`, `-Mode`, `-Release`, `-NoBrowser`. |
 | `scripts\install.ps1` | Alternative to `update.ps1`: `cargo install` into `~\.cargo\bin`; `-Only Web\|Desktop`, `-Shortcuts` for Start Menu entries, `-Uninstall`. |
 | `scripts/install.sh` | Linux: installs `rah`, `rah-desktop` and `rah-web`, menu entries and icon; `--only`, `--prefix`, `--no-menu`, `--uninstall [--purge]`. `rah-desktop` needs `libwebkit2gtk-4.1`. |

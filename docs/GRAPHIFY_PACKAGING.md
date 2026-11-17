@@ -1,6 +1,6 @@
 # Graphify packages without uv
 
-There are two package variants. The normal/lightweight package prepares Graphify
+There are two package variants. The lightweight package prepares Graphify
 through uv when the user explicitly runs `rah graphify install`. A bundled
 package contains Node, a portable Python interpreter and Graphify dependencies.
 Its target computer needs no uv, separate Python/Node installation, pip or
@@ -43,10 +43,12 @@ Use the matching Node distribution's LICENSE, not npm's separate license.
 
 ## Package variants
 
-Windows `package.ps1 -GraphifyRuntime DIR` produces both:
+Windows `package.ps1` now includes both prepared Graphify and LSP runtimes by
+default. `-GraphifyRuntime DIR` and `-LspRuntime DIR` override their locations;
+`-Lightweight` explicitly omits both. The default produces:
 
-- dist/rah-VERSION-graphify-bundled-portable.zip
-- dist/rah-VERSION-graphify-bundled-setup.exe
+- dist/rah-VERSION-graphify-bundled-lsp-bundled-portable.zip
+- dist/rah-VERSION-graphify-bundled-lsp-bundled-setup.exe
 
 The installer includes the runtime directory. Normal package names remain
 unchanged and coexist with these artifacts. `-SkipBuild` requires a current RAH

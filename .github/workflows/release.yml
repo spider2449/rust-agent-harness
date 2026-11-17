@@ -39,7 +39,8 @@ jobs:
 
       - name: Build packages
         shell: pwsh
-        run: ./scripts/package.ps1
+        # This job does not prepare offline runtimes; keep its existing variant.
+        run: ./scripts/package.ps1 -Lightweight
 
       - name: Write checksums
         shell: pwsh

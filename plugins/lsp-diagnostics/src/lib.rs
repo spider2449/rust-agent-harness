@@ -30,7 +30,11 @@
 //! `defaults` adds `rust-analyzer`, `typescript-language-server`,
 //! `pyright-langserver`, `gopls` and `clangd`; an entry with the name of a
 //! default overrides its fields, and `{ "disabled": true }` removes it.
+//! When present, `lsp-runtime` beside the host executable supplies the default
+//! Rust, TS/JS, Python and C/C++ commands. Explicit commands still win; setting
+//! `defaults` to false also disables bundle discovery.
 
+mod bundle;
 mod client;
 mod server;
 
