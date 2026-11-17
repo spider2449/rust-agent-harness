@@ -524,6 +524,39 @@ function displayForm() {
   });
   themes.append(select, el("small", "", "Follow the system, or pick a theme. It applies to every window of this rah, in the browser and on the desktop."));
   form.append(themes);
+  const scale = el("select");
+  scale.id = "ui-scale";
+  const currentScale = currentUiScale();
+  const scales = [...new Set([75, 90, 100, 110, 125, 150, 175, 200, currentScale])].sort((a, b) => a - b);
+  for (const value of scales) {
+    const option = el("option", "", value === 100 ? "100% (original size)" : `${value}%`);
+    option.value = String(value);
+    scale.append(option);
+  }
+  scale.value = String(currentScale);
+  scale.addEventListener("change", async () => {
+    if (!scale.reportValidity()) return;
+    const before = currentUiScale();
+    state.prefs.ui_scale = Number(scale.value);
+    applyUiScale();
+    scale.disabled = true;
+    settingsMessage("");
+    try {
+      const result = await api("/preferences", { method: "PUT", body: JSON.stringify(state.prefs) });
+      if (!result.remembered) throw new Error("UI scale could not be saved. Please try again.");
+      delete result.remembered;
+      state.prefs = { ...state.prefs, ...result };
+    } catch (error) {
+      state.prefs.ui_scale = before;
+      applyUiScale();
+      scale.value = before;
+      settingsMessage(error.message, true);
+    } finally {
+      scale.disabled = false;
+    }
+  });
+  scale.required = true;
+  form.append(field("UI scale (%)", scale, "75-200%. Default: 100% (original size). Scales text, controls and spacing. Saved for the browser and desktop; restored when a window opens."));
   return form;
 }
 

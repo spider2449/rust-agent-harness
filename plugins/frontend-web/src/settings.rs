@@ -365,6 +365,9 @@ pub(crate) struct Preferences {
     /// following the system for one it does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// Overall UI scale as a percentage of the original 14px default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ui_scale: Option<u16>,
     /// Sizes of the other draggable dividers by name (pixels, or a share
     /// between 0 and 1), so a new divider needs no change here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -490,6 +493,12 @@ impl Preferences {
         {
             return bad("`theme` must be a short lowercase name");
         }
+        if self
+            .ui_scale
+            .is_some_and(|scale| !(75..=200).contains(&scale))
+        {
+            return bad("`ui_scale` must be between 75 and 200 percent");
+        }
         if self.layout.len() > MAX_LAYOUT
             || self.layout.keys().any(|name| name.len() > MAX_LAYOUT_NAME)
             || !self
@@ -540,7 +549,23 @@ pub(crate) async fn set_preferences(
 mod tests {
     use serde_json::json;
 
-    use super::{remembered, with_command};
+    use super::{Preferences, remembered, with_command};
+
+    #[test]
+    fn ui_scale_accepts_old_preferences_and_round_trips_valid_values() {
+        let old: Preferences = serde_json::from_value(json!({})).unwrap();
+        assert!(old.checked().ok().unwrap().ui_scale.is_none());
+        for scale in [75, 100, 125, 200] {
+            let prefs: Preferences = serde_json::from_value(json!({"ui_scale": scale})).unwrap();
+            let saved = serde_json::to_value(prefs.checked().ok().unwrap()).unwrap();
+            let restored: Preferences = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.ui_scale, Some(scale));
+        }
+        for scale in [0, 74, 201] {
+            let prefs: Preferences = serde_json::from_value(json!({"ui_scale": scale})).unwrap();
+            assert!(prefs.checked().is_err());
+        }
+    }
 
     #[test]
     fn a_command_rule_is_added_once() {

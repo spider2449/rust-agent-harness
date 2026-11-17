@@ -2047,6 +2047,15 @@ function applyTheme() {
   else document.documentElement.dataset.theme = theme;
 }
 
+function currentUiScale() {
+  const scale = state.prefs.ui_scale;
+  return Number.isInteger(scale) && scale >= 75 && scale <= 200 ? scale : 100;
+}
+
+function applyUiScale() {
+  document.documentElement.style.fontSize = `${14 * currentUiScale() / 100}px`;
+}
+
 function toggleWrap() {
   const wrap = !state.prefs.wrap_files;
   state.prefs.wrap_files = wrap;
@@ -3802,6 +3811,7 @@ async function start() {
     // Older servers have no preferences; the defaults apply.
   }
   applyTheme();
+  applyUiScale();
   $("session-search").addEventListener("input", searchSessions);
   for (const [id, direction] of [["message-nav-prev", -1], ["message-nav-next", 1]]) {
     $(id).addEventListener("click", () => {
