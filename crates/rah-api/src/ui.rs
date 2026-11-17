@@ -195,6 +195,9 @@ pub enum Node {
         edges: Vec<GraphEdge>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         select_action: Option<String>,
+        /// Opaque provider context; changing it invalidates local graph state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
     },
     /// One frontend-owned footer indicator; clicking opens this view.
     Status {
@@ -283,6 +286,28 @@ pub struct GraphEdge {
     pub source: String,
     pub target: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<GraphEdgeMetadata>,
+}
+
+/// Text-only relationship explanation supplied by the view provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEdgeMetadata {
+    pub relation: String,
+    pub provenance: String,
+    pub direction: GraphDirection,
+    pub sentence: String,
+    pub detail: String,
+}
+
+/// Whether an arrow describes semantics or merely stored endpoint order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDirection {
+    Directed,
+    Symmetric,
+    Unverified,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +386,7 @@ impl View {
                 vertices,
                 edges,
                 select_action,
+                revision,
             } = node
             {
                 let bounded = |text: &str, max| text.chars().count() <= max;
@@ -371,6 +397,7 @@ impl View {
                     ));
                 }
                 if !bounded(title, 128)
+                    || revision.as_ref().is_some_and(|value| !bounded(value, 128))
                     || ids.len() != vertices.len()
                     || select_action
                         .as_ref()
@@ -386,6 +413,12 @@ impl View {
                         !ids.contains(edge.source.as_str())
                             || !ids.contains(edge.target.as_str())
                             || !bounded(&edge.label, 128)
+                            || edge.metadata.as_ref().is_some_and(|m| {
+                                !bounded(&m.relation, 128)
+                                    || !bounded(&m.provenance, 128)
+                                    || !bounded(&m.sentence, 512)
+                                    || !bounded(&m.detail, 512)
+                            })
                     })
                 {
                     return Err(UiError::InvalidInput(
@@ -539,6 +572,7 @@ mod tests {
             ),
             ("select_action", serde_json::json!("")),
             ("title", serde_json::json!("x".repeat(129))),
+            ("revision", serde_json::json!("x".repeat(129))),
         ] {
             let mut invalid = valid.clone();
             invalid["nodes"][0][field] = value;
@@ -571,6 +605,40 @@ mod tests {
             serde_json::from_value::<View>(large).unwrap().check(),
             Err(UiError::TooLarge(_))
         ));
+    }
+
+    #[test]
+    fn graph_metadata_is_optional_bounded_and_typed() {
+        let old = serde_json::json!({"source":"a", "target":"b", "label":"calls"});
+        let edge: GraphEdge = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(edge).unwrap(), old);
+        let metadata = serde_json::json!({"relation":"calls", "provenance":"EXTRACTED",
+            "direction":"directed", "sentence":"A calls B", "detail":"Edge evidence unavailable"});
+        let mut payload = old;
+        payload["metadata"] = metadata.clone();
+        assert!(serde_json::from_value::<GraphEdge>(payload.clone()).is_ok());
+        payload["metadata"]["direction"] = "sideways".into();
+        assert!(serde_json::from_value::<GraphEdge>(payload.clone()).is_err());
+        payload["metadata"] = metadata;
+        payload["metadata"]["url"] = "file:///outside".into();
+        assert!(serde_json::from_value::<GraphEdge>(payload).is_err());
+        for (field, limit) in [
+            ("relation", 128),
+            ("provenance", 128),
+            ("sentence", 512),
+            ("detail", 512),
+        ] {
+            let mut value = serde_json::json!({"nodes":[{"type":"graph", "title":"test", "vertices":[
+                {"id":"a","label":"A","group":"","detail":""}], "edges":[{"source":"a","target":"a","label":"",
+                    "metadata":{"relation":"calls","provenance":"EXTRACTED","direction":"directed","sentence":"A calls A","detail":""}}]}]});
+            value["nodes"][0]["edges"][0]["metadata"][field] = "\u{754c}".repeat(limit + 1).into();
+            assert!(
+                serde_json::from_value::<View>(value)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

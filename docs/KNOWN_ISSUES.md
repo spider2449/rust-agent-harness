@@ -4,6 +4,20 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Directed Graphify views: native Desktop inspection pending
+
+- **Seen:** 2026-11-17. The directed renderer is shared by Web and Desktop.
+  Headless Edge checks and screenshots cover arrow shapes, keyboard details,
+  filters, multiple instances and maximum-size graphs; they do not establish
+  native WebView2 inspection.
+- **Pending:** inspect the rebuilt Desktop Graphify page for zoom/pan, keyboard
+  access, source text copying, level changes and workspace switching. No installed
+  application was refreshed. Dense overview graphs remain crowded; use selection,
+  relation filters and bounded expansion. Module-only views are unavailable
+  without a verified module hierarchy; file summaries omit endpoints lacking a
+  source file and disclose their counts. See
+  [the directed-view plan](plans/2026-11-17-graphify-readable-directed-views.md).
+
 ## Desktop Chinese IME after title-bar activation: manual verification pending
 
 - **Seen:** 2026-11-16. The user reports Chinese composition outside the input

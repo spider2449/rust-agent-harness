@@ -138,31 +138,61 @@ status-view.mjs and status.mjs. The same **Plugins > Plugin pages > Graphify**
 page (or the footer Graphify icon) then opens the workspace relationship view
 above detailed indexing status. Web and Desktop share this renderer.
 
-The first view shows crate dependency relationships when available, otherwise
-high-degree symbols. **Search workspace graph** searches the entire artifact
-by symbol, source file or keyword, with an optional source-group filter.
-Search results include a bounded set of direct neighbors. Clearing the query
-restores the overview. Each projection reports shown/total node and edge counts;
-it is not the entire graph. Displays are limited to 250 nodes and 750 edges,
-and can be reduced further to stay within the view's byte limit.
+The first view shows emitted package dependencies when available, otherwise
+aggregated files or mixed artifact nodes, with the fallback stated. Choose
+packages, files, callable symbols or the mixed artifact view where supported.
+There is no module-only view without a verified module hierarchy. File edges
+aggregate source/target file, raw relation and provenance, preserving direction
+and same-file loops; their counts describe underlying artifact relationships.
+They do not turn calls into dependencies or supply fabricated call-site lines.
 
-Use Zoom in/out, the mouse wheel, drag to pan, Reset view and Expand view for
-navigation. Escape closes an expanded view. Group checkboxes hide/show source
-groups. **Find visible nodes** filters the accessible node list within the
-current projection; it does not search omitted nodes. Select a circle or a node
-in that list for source details and stored edge direction/confidence. Click
-**Explore connections** to request that node's direct neighborhood from the
-full artifact. Workspace changes reset the selection; sessions keep separate
-search/focus state. There are no provider-supplied HTML, script or file links.
+**Search workspace graph** searches the entire artifact by symbol, file or
+keyword (with the source-group filter), overriding the overview level. Results
+include bounded direct neighbors. Each projection reports artifact and level
+counts, matching seeds, filtered edges and rendered counts. Caps are 80 fallback
+overview seeds, 160 search seeds, 250 vertices, 750 edges and 140 KiB graph bytes.
+There are at most 100 group/relation choices; relation names over 128 characters
+are unavailable as choices. Node IDs over 512 characters cannot be displayed.
 
-The graph can show the last valid snapshot during a rebuild or indexing error,
-with an explicit warning and generation time. The status/footer health checks
-still apply. Graph rendering does not make inferred relationships authoritative;
-verify original source. MCP queries continue to reject known stale data.
+Use zoom, wheel, pan and Expand view; Escape closes expansion. Select a node
+or drag it to adjust its position; connected paths and arrows follow immediately,
+including after zoom/pan. Dragging does not select or expand the node. Manual
+positions survive selection and filtering within the current graph; **Reset
+positions** restores automatic placement. A changed graph or workspace clears
+manual positions. Select a node
+with the mouse or keyboard to highlight its direct relationships. Verified
+incoming neighbors prefer the left and outgoing neighbors the right; a neighbor
+with both roles appears once above the selected node. Group, relation and
+direction controls filter the rendered subset. Incoming/outgoing details are
+grouped by raw relation; symmetric relationships have a separate list. Each
+list shows at most 30 relationships and discloses omissions. Definitions and
+edge evidence are distinct, copyable text. No source-opening action is provided.
 
-Older hosts must leave graph_view unset/false; otherwise they cannot deserialize
-the new node vocabulary. Updating only scripts does not add the renderer to an
-old RAH binary.
+Filled arrows describe verified endpoint conventions, hollow arrows indicate
+unverified stored orientation, and symmetric relations have no arrow. Select,
+hover or keyboard-focus an edge for wording; edge details retain raw relation,
+provenance and endpoint information. INFERRED edges are dashed and labeled.
+Neither INFERRED nor EXTRACTED proves correctness. Missing edges never prove
+absence of use; known Python/Qt extraction gaps remain in the page warning.
+
+**Explore connections** explicitly changes the projection; selecting alone does
+not. Exploring a file summary searches its source path in the full artifact.
+Full-artifact relationship filters run before projection caps. **Back expansion**
+and **Reset graph query** navigate queries; **Back selection** and **Reset
+selection** navigate local inspection. Histories retain at most 32 entries;
+provider state retains at most 32 sessions. Workspace changes reset state and
+snapshot changes clear history and reconcile deleted nodes/unsupported levels.
+The last valid snapshot remains viewable during indexing failure, clearly marked
+with readiness and snapshot time. MCP queries still reject known stale data.
+
+New hosts enable `plugin.graph_metadata = true` as well as `graph_view`. It adds
+bounded optional explanation metadata and an opaque context revision (ADR 0079).
+This flag defaults false: existing graph-capable hosts must leave it false to
+receive their original schema. Hosts predating graph support must also leave
+`graph_view` false for status-only mode. Updating scripts cannot add a renderer
+to an old binary. The compatible installer enables both flags. Source edits
+require a new RAH build for embedded assets, installation refresh and restart;
+this change does not update an installed application.
 
 ## Live status page
 

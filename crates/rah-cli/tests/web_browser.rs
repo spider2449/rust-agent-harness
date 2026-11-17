@@ -509,7 +509,7 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
             .await,
         0
     );
-    page.eval("document.querySelector('#graph-test .graph-toolbar button').click(); true")
+    page.eval("[...document.querySelectorAll('#graph-test .graph-toolbar button')].find(b=>b.textContent==='Zoom in').click(); true")
         .await;
     assert!(page.eval("document.querySelector('#graph-test svg > g').getAttribute('transform').includes('scale(1.25)')").await.as_bool().unwrap());
     let rect = page.eval("(() => {const r=document.querySelector('#graph-test .graph-stage > svg').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})()").await;
@@ -538,6 +538,50 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
             .await,
         before_pan
     );
+    let drag_start = page
+        .eval(
+            r#"(() => {
+      const root=document.querySelector('#graph-test');
+      const vertex=root.querySelector('[data-node-id=b]');
+      const rect=vertex.querySelector('circle').getBoundingClientRect();
+      window.dragBefore={node:vertex.getAttribute('transform'),
+        path:root.querySelector('.graph-edge > path').getAttribute('d'),
+        pan:root.querySelector('svg > g').getAttribute('transform')};
+      return {x:rect.x+rect.width/2,y:rect.y+rect.height/2};
+    })()"#,
+        )
+        .await;
+    let dx = drag_start["x"].as_f64().unwrap();
+    let dy = drag_start["y"].as_f64().unwrap();
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mousePressed","x":dx,"y":dy,"button":"left","clickCount":1}),
+    )
+    .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mouseMoved","x":dx-60.0,"y":dy+35.0,"button":"left","buttons":1}),
+    )
+    .await;
+    page.call(
+        "Input.dispatchMouseEvent",
+        json!({"type":"mouseReleased","x":dx-60.0,"y":dy+35.0,"button":"left","clickCount":1}),
+    )
+    .await;
+    assert_eq!(page.eval(r#"(() => {
+      const root=document.querySelector('#graph-test'), vertex=root.querySelector('[data-node-id=b]');
+      const moved=vertex.getAttribute('transform');
+      const changed=moved!==dragBefore.node && root.querySelector('.graph-edge > path').getAttribute('d')!==dragBefore.path
+        && root.querySelector('svg > g').getAttribute('transform')===dragBefore.pan
+        && root.querySelector('[data-node-id=a]').classList.contains('graph-selected');
+      vertex.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+      const retained=vertex.getAttribute('transform')===moved;
+      [...root.querySelectorAll('button')].find(b=>b.textContent==='Reset positions').click();
+      const reset=vertex.getAttribute('transform')!==moved;
+      root.querySelector('[data-node-id=a]').dispatchEvent(new MouseEvent('click'));
+      return changed && retained && reset && !root.querySelector('.graph-dragging');
+    })()"#).await, true);
+    page.screenshot("graphify-node-drag").await;
     page.eval("document.querySelector('#graph-test .graph-legend input').click(); true")
         .await;
     assert_eq!(
@@ -562,6 +606,50 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
         page.eval("window.graphAction").await,
         json!({"action":"expand","input":{"node":"a"}})
     );
+    // Single, reciprocal, parallel, self, symmetric, unknown and coincident routes.
+    assert_eq!(page.eval(r#"(() => {
+      const vertices = [{id:'a',label:'A '+ 'long '.repeat(20),group:'one',detail:'Definition: a.rs L1'},
+        {id:'b',label:'B',group:'two',detail:'Definition: b.rs L2'}];
+      const edge = (source,target,relation,direction='directed') => ({source,target,label:relation,
+        metadata:{relation, direction, provenance:'INFERRED', sentence:`${source} ${relation} ${target}`, detail:'Edge evidence unavailable'}});
+      const edges=[edge('a','b','calls'),edge('b','a','calls'),edge('a','b','imports'),edge('a','a','calls'),
+        edge('a','b','similar','symmetric'),edge('a','b','unknown','unverified')];
+      const root=document.querySelector('#graph-test');
+      const payload={type:'graph',vertices,edges};
+      root.replaceChildren(RelationshipGraph.render(payload,()=>{}),RelationshipGraph.render(payload,()=>{}));
+      root.replaceChildren(...viewNodes({body:root},[payload,payload]));
+      if(root.querySelectorAll('.relationship-graph').length!==2) return false;
+      const ids=[...root.querySelectorAll('marker')].map(n=>n.id);
+      const paths=[...root.querySelector('.relationship-graph').querySelectorAll('.graph-edge > path:not(.graph-edge-hit)')];
+      root.querySelector('.graph-edge').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+      const a={x:100,y:100,degree:4}, b={x:100,y:100,degree:4};
+      const overlap=RelationshipGraph.routes([{source:'x',target:'y',a,b}]);
+      return ids.length===new Set(ids).size && new Set(paths.map(p=>p.getAttribute('d'))).size===6
+        && !paths[4].hasAttribute('marker-end') && paths[5].getAttribute('marker-end').includes('unverified')
+        && root.querySelector('.graph-detail').textContent.includes('Edge evidence unavailable')
+        && [...overlap.values()].every(p=>!p.d.includes('NaN'));
+    })()"#).await, true);
+    assert_eq!(page.eval(r#"(() => {
+      const root=document.querySelector('#graph-test .relationship-graph');
+      root.querySelector('[data-node-id=a]').dispatchEvent(new MouseEvent('click'));
+      const selects=root.querySelectorAll('.graph-controls > label > select');
+      selects[0].value='incoming'; selects[0].dispatchEvent(new Event('change'));
+      const incoming=[...root.querySelectorAll('.graph-edge:not(.graph-hidden)')].map(e=>e.getAttribute('aria-label'));
+      const text=root.querySelector('.graph-detail').textContent;
+      selects[0].value='all'; selects[0].dispatchEvent(new Event('change'));
+      root.querySelector('[data-node-id=b]').dispatchEvent(new MouseEvent('click'));
+      [...root.querySelectorAll('button')].find(b=>b.textContent==='Back selection').click();
+      return incoming.length===2 && incoming.every(t=>t.endsWith(' a')) && text.includes('Incoming:') && text.includes('Outgoing:')
+        && text.includes('rendered subset') && root.querySelector('[data-node-id=a]').classList.contains('graph-selected');
+    })()"#).await, true);
+    page.screenshot("graphify-directed-shapes").await;
+    assert_eq!(page.eval(r#"(() => {
+      const vertices=Array.from({length:250},(_,i)=>({id:String(i),label:'Node '+i,group:String(i%8),detail:'<img src=x>'}));
+      const edges=Array.from({length:750},(_,i)=>({source:String(i%250),target:String((i*7+1)%250),label:'relation '+i}));
+      document.querySelector('#graph-test').replaceChildren(RelationshipGraph.render({vertices,edges},()=>{}));
+      return document.querySelectorAll('#graph-test .graph-edge').length===750 && !document.querySelector('#graph-test img');
+    })()"#).await, true);
+    page.screenshot("graphify-directed-maximum").await;
     if let Some(file) = std::env::var_os("RAH_TEST_GRAPH_PREVIEW") {
         let preview: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
         page.eval(&format!(

@@ -1448,7 +1448,7 @@ async function renderView(id) {
     const content = await api(`${viewPath(entry)}${session}`);
     // Another session was opened meanwhile; its own render shows it.
     if (current !== state.current) return;
-    entry.body.replaceChildren(...(content.nodes || []).map((node) => viewNode(entry, node)).filter(Boolean));
+    entry.body.replaceChildren(...viewNodes(entry, content.nodes));
   } catch (error) {
     if (current !== state.current) return;
     entry.body.replaceChildren(el("p", "note", error.message));
@@ -1509,12 +1509,18 @@ async function runAction(entry, action, input, controls) {
   }
 }
 
-function viewNode(entry, node) {
+function viewNodes(entry, nodes) {
+  const reusedGraphs = new Set();
+  return (nodes || []).map(node => viewNode(entry, node, reusedGraphs)).filter(Boolean);
+}
+
+function viewNode(entry, node, reusedGraphs = new Set()) {
   const text = (value) => String(value ?? "");
   switch (node.type) {
     case "graph": {
       const previous = [...(entry.body?.querySelectorAll(".relationship-graph") || [])]
-        .find((graph) => graph.graphData === JSON.stringify(node));
+        .find((graph) => !reusedGraphs.has(graph) && graph.graphData === JSON.stringify(node));
+      if (previous) reusedGraphs.add(previous);
       return previous || RelationshipGraph.render(node, (action, input, button) => runAction(entry, action, input, [button]));
     }
     case "heading":
@@ -2843,7 +2849,7 @@ async function showPluginPage(page, message = "") {
     const session = state.current ? `?session=${encodeURIComponent(state.current)}` : "";
     const content = await api(`${viewPath(entry)}${session}`);
     if (request !== pluginPageRequest) return;
-    body.replaceChildren(...(content.nodes || []).map((node) => viewNode(entry, node)).filter(Boolean));
+    body.replaceChildren(...viewNodes(entry, content.nodes));
   } catch (error) {
     if (request === pluginPageRequest) pluginMessage(error.message, true);
   }

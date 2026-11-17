@@ -809,3 +809,14 @@ button.toggle[aria-pressed="true"] { background: var(--accent); color: var(--acc
 @media (max-width: 42.857143rem) {
   .message-anchor { flex-basis: 10.357143rem; }
 }
+
+.graph-edge { cursor: pointer; outline: none; }
+.graph-edge > path:not(.graph-edge-hit) { stroke-opacity: .65; stroke-width: 1.5; }
+.graph-edge.graph-connected > path:not(.graph-edge-hit), .graph-edge:focus > path:not(.graph-edge-hit), .graph-edge:hover > path:not(.graph-edge-hit) { stroke-opacity: 1; stroke-width: 2.5; }
+.graph-edge-label { display: none; fill: #e1e5f0; stroke: #10131e; stroke-width: 3px; paint-order: stroke; font: 11px system-ui; pointer-events: none; }
+.graph-edge-selected .graph-edge-label, .graph-edge:focus .graph-edge-label, .graph-edge:hover .graph-edge-label { display: block; }
+.graph-dim { opacity: .18; }
+.graph-direction-legend { font-size: .8rem; }
+.graph-controls > label > select { display: block; width: 100%; margin: .4rem 0; }
+.graph-vertex { cursor: grab; }
+.graph-vertex.graph-dragging { cursor: grabbing; }

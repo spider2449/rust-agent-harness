@@ -96,7 +96,9 @@ export function serveStatusView() {
         if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('status_bar must be boolean');
         const graphEnabled = message.params?.config?.graph_view;
         if (graphEnabled !== undefined && typeof graphEnabled !== 'boolean') throw new Error('graph_view must be boolean');
-        options = { statusBar: enabled === true, graph: graphEnabled ? new GraphView() : undefined };
+        const metadata = message.params?.config?.graph_metadata;
+        if (metadata !== undefined && typeof metadata !== 'boolean') throw new Error('graph_metadata must be boolean');
+        options = { statusBar: enabled === true, graph: graphEnabled ? new GraphView({ metadata: metadata === true }) : undefined };
         result = { protocol: 4, version: '0.1.0', provides: ['ui-views'], requires: [], tools: [], views: [{ id: 'status', title: 'Graphify' }] };
         if (options.statusBar) result.views[0].status_bar = true;
         if (!timer) timer = setInterval(() => { void poll(); }, 1000);

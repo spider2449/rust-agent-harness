@@ -151,12 +151,19 @@ test('the process view advertises UiViews, not tools, and notifies live updates'
   assert.equal(notifications.at(-1).method, 'ui/changed');
   await fs.mkdir(path.join(root, '.rah/graphify-out'), { recursive: true });
   await fs.writeFile(path.join(root, '.rah/graphify-out/graph.json'), JSON.stringify({
-    nodes: [{ id: 'entry', label: 'Entry' }], edges: [],
+    nodes: [{ id: 'entry', label: 'Entry' }], edges: [{source:'entry',target:'entry',relation:'calls',confidence:'EXTRACTED'}],
   }));
   await fs.writeFile(file, JSON.stringify({ ...data, state: 'ready', workspace: root }));
   await call('initialize', { protocol: 4, config: { status_dir: root, status_bar: true, graph_view: true } });
   const graphPage = await call('views/render', { view: 'status', session: 'first' });
   assert.equal(graphPage.result.nodes.find(node => node.type === 'graph').vertices[0].id, 'entry');
+  const legacyGraph=graphPage.result.nodes.find(node => node.type === 'graph');
+  assert.deepEqual(Object.keys(legacyGraph.edges[0]).sort(),['label','source','target']);
+  assert.equal(legacyGraph.revision,undefined);
+  await call('initialize', {protocol:4,config:{status_dir:root,graph_view:true,graph_metadata:true}});
+  const modernGraph=(await call('views/render',{view:'status',session:'first'})).result.nodes.find(n=>n.type==='graph');
+  assert.equal(modernGraph.edges[0].metadata.direction,'directed');
+  assert.match(modernGraph.revision,/^[a-f0-9]{64}$/);
   const searched = await call('views/act', { view: 'status', action: 'graph_search', session: 'first',
     input: { query: 'Entry', group: 'All groups' } });
   assert.equal(searched.result.rerender, true);

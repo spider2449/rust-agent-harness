@@ -327,7 +327,7 @@ fn configuration(
         "process",
         &json!({
             "program":programs.node, "args":[assets.join("status-view.mjs")],
-            "plugin":{"status_dir":runtime, "status_bar":true, "graph_view":true},
+            "plugin":{"status_dir":runtime, "status_bar":true, "graph_view":true, "graph_metadata":true},
         }),
     )?;
     let assigned = policy.config["tools"].as_object().is_some_and(|tools| {

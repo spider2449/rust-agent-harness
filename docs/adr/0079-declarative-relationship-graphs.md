@@ -36,3 +36,27 @@ Graphs are reusable by other plugins and have fixed rendering/resource bounds.
 Large corpora must expose bounded projections and disclose omitted data; they
 cannot silently imply the whole workspace is visible. Browser and API tests
 cover interaction, text safety, bounds and view lifecycle.
+
+## Directed relationship explanations (2026-11-17)
+
+Edges may optionally contain `metadata`: relation and provenance (128 characters
+each), direction (`directed`, `symmetric`, `unverified`), sentence and detail
+(512 characters each). All are text-only explanations; source references remain
+copyable text with no navigation capability. No permission or protocol method
+changes. Graph and enclosing view resource limits still apply.
+
+Absent metadata means unverified stored endpoint order. Filled arrowheads mean
+provider-verified endpoint semantics, hollow arrows mean unverified stored order,
+and symmetric edges have no arrows. This does not verify an extracted fact.
+Providers interpret relation names; renderers never parse labels for semantics.
+
+Older graph hosts reject unknown fields. Graphify's `graph_metadata` flag defaults
+false independently of `graph_view`; only installations built with this extension
+enable it. Leaving it false emits the old edge schema. Hosts predating graph
+support must also leave `graph_view` false. This is explicit configuration gating,
+not automatic capability negotiation.
+
+The graph may also carry an optional opaque `revision` (128 characters). Providers
+change it across workspace, session or snapshot changes to invalidate local
+selection/filter/history state, even when the projected vertices are identical.
+It follows the same compatibility gate as edge metadata.
