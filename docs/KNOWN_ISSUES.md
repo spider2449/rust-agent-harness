@@ -15,6 +15,16 @@ in the commit which entry it closes.
   not validate the system IME candidate window. See
   [the focus recovery plan](plans/2026-11-16-desktop-activation-focus.md).
 
+## Desktop transcript selection: native verification pending
+
+- **Seen:** 2026-11-17. The user cannot select and copy center-pane text.
+- **Mitigation:** limit pointer-triggered native activation to editable elements,
+  and preserve selections during automatic composer focus restoration.
+- **Pending:** verify drag selection and Ctrl+C in the rebuilt Desktop window,
+  including after Alt+Tab, together with Chinese IME recovery. Deterministic
+  tests cover focus decisions, not native WebView selection behavior. See
+  [the selection plan](plans/2026-11-17-transcript-text-selection.md).
+
 ## Graphify 0.9.107: UTF-8 BOM Cargo manifests need a compatibility reader
 
 - **Seen:** 2026-11-13 in image-viewer. A leading EF BB BF in Cargo.toml

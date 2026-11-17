@@ -3770,6 +3770,7 @@ function restoreComposerFocus() {
   const input = $("input");
   const active = document.activeElement;
   if (document.hidden || input.disabled || document.querySelector("dialog[open]")) return;
+  if (window.getSelection()?.isCollapsed === false) return;
   if (active === input || active === document.body || active === document.documentElement) {
     input.focus({ preventScroll: true });
   }
