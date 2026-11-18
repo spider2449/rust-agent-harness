@@ -67,6 +67,22 @@ export function levelGraph(graph, requested = 'auto') {
   return {graph:{nodes,edges:selected},level,note:level==='packages' ? 'Package dependencies emitted by the extractor; other relation types excluded.' : 'Callable symbol definitions marked by the extractor; other nodes excluded. This is not a complete symbol inventory.'};
 }
 
+function searchNodes(candidates, query) {
+  const term = query.toLowerCase();
+  const pathTerm = term.replaceAll('\\', '/');
+  const exactSymbols = [], exactPaths = [], filenames = [], partial = [];
+  for (const node of candidates) {
+    const id = node.id.toLowerCase();
+    const label = String(node.label ?? '').toLowerCase();
+    const file = (node.source_file ?? '').toLowerCase().replaceAll('\\', '/');
+    if (id === term || label === term) exactSymbols.push(node);
+    else if (file === pathTerm) exactPaths.push(node);
+    else if (file.slice(file.lastIndexOf('/') + 1) === pathTerm) filenames.push(node);
+    else if (id.includes(term) || label.includes(term) || file.includes(pathTerm)) partial.push(node);
+  }
+  return exactSymbols.concat(exactPaths, filenames, partial);
+}
+
 export function projectGraph(graph, { query = '', group = 'All groups', focus = '', metadata = false, direction = 'all', relation = 'all' } = {}) {
   const all = graph.nodes, artifactEdges = graph.edges ?? graph.links;
   const edges = artifactEdges.filter(edge => (relation === 'all' || String(edge.relation || 'related') === relation)
@@ -79,11 +95,11 @@ export function projectGraph(graph, { query = '', group = 'All groups', focus = 
   }
   const groups = [...new Set(all.map(groupOf))].sort();
   const inGroup = node => group === 'All groups' || groupOf(node) === group;
-  const q = query.toLocaleLowerCase();
+  const q = query.trim();
   let candidates = all.filter(inGroup);
   let seeds;
   if (focus && byId.has(focus)) seeds = [byId.get(focus)];
-  else if (q) seeds = candidates.filter(node => `${node.id} ${node.label} ${node.source_file}`.toLocaleLowerCase().includes(q));
+  else if (q) seeds = searchNodes(candidates, q);
   else {
     // Prefer the architectural layer, then the most connected symbols.
     seeds = candidates.filter(node => node.id.startsWith('crate:'));

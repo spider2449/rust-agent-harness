@@ -147,8 +147,11 @@ and same-file loops; their counts describe underlying artifact relationships.
 They do not turn calls into dependencies or supply fabricated call-site lines.
 
 **Search workspace graph** searches the entire artifact by symbol, file or
-keyword (with the source-group filter), overriding the overview level. Results
-include bounded direct neighbors. Each projection reports artifact and level
+keyword (with the source-group filter), overriding the overview level. Search
+ignores case and accepts either path separator for source files. Exact node IDs
+and labels come first, followed by exact source paths, exact filenames and
+partial matches. Ties retain artifact order. Results include bounded direct
+neighbors. Each projection reports artifact and level
 counts, matching seeds, filtered edges and rendered counts. Caps are 80 fallback
 overview seeds, 160 search seeds, 250 vertices, 750 edges and 140 KiB graph bytes.
 There are at most 100 group/relation choices; relation names over 128 characters

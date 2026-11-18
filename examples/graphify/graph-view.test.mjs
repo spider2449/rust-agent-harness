@@ -43,6 +43,29 @@ test('overview, full-artifact search, source groups and selected-node neighbors 
   assert.deepEqual(projectGraph(data, { focus: 'other' }).node.vertices.map(n => n.id), ['other', 'entry']);
 });
 
+test('search ranks exact symbols, paths and filenames before truncating partial matches', () => {
+  const nodes = Array.from({ length: 170 }, (_, i) => ({ id: `parser.rs:${i}` }));
+  nodes.push(
+    { id: 'nested', source_file: 'src/utils/parser.rs' },
+    { id: 'root', source_file: 'parser.rs' },
+    { id: 'symbol', label: 'Parser.rs' },
+    { id: 'parser.rs' },
+  );
+  const data = { nodes, edges: [] };
+  const ranked = projectGraph(data, { query: 'PARSER.RS' });
+  assert.equal(ranked.matches, 174);
+  assert.equal(ranked.node.vertices.length, 160);
+  assert.deepEqual(ranked.node.vertices.slice(0, 5).map(n => n.id),
+    ['symbol', 'parser.rs', 'root', 'nested', 'parser.rs:0']);
+  assert.equal(projectGraph(data, { query: 'undefined' }).matches, 0);
+  for (const source of ['src/utils/parser.rs', 'src\\utils\\parser.rs']) {
+    nodes[170].source_file = source;
+    for (const query of ['SRC/UTILS/PARSER.RS', 'src\\utils\\parser.rs']) {
+      assert.deepEqual(projectGraph(data, { query }).node.vertices.map(n => n.id), ['nested']);
+    }
+  }
+});
+
 test('large graph projections disclose totals and preserve valid endpoints within bounds', () => {
   const data = { nodes: Array.from({ length: 1200 }, (_, i) => ({ id: `node${i}`, label: `Node ${i}` })), edges: [] };
   for (let i = 1; i < 1200; i++) data.edges.push({ source: 'node0', target: `node${i}` });

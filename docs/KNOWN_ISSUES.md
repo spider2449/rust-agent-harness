@@ -76,8 +76,17 @@ in the commit which entry it closes.
 - **Decision:** withdraw the reliable code navigation positioning and graph-first
   tool guidance. Retain the integration only as an optional experimental graph
   reference. Use source search and inspection for navigation and verification;
-  missing callers or edges never establish absence of use. No extractor fix is
-  claimed. Reassessment requires representative member-access, property,
+  missing callers or edges never establish absence of use.
+- **Partial mitigation:** the managed Python extractor recognizes a direct
+  constructor assignment such as `self.callback = self.handle` and emits an
+  `INFERRED` call to the same class's method for `self.callback()`. It retains
+  the call-site line and skips attributes with multiple observed writes.
+  For cross-file calls such as `self.worker.run()` after `self.worker = W()`,
+  the managed extractor also handles an unambiguous top-level import such as
+  `from worker import Worker as W`. Graphify still requires a unique class,
+  an import edge and a matching method. Dynamic dispatch, runtime rebinding
+  and more complex receiver chains remain unresolved. Reassessment
+  requires representative member-access, property,
   signal/slot and cross-file instance-call fixtures with source-verified results.
 
 ## Graphify 0.9.107: UTF-8 BOM Cargo manifests need a compatibility reader
