@@ -29,12 +29,12 @@ pub(crate) fn load(root: &Path) -> Result<BTreeMap<String, ServerConfig>, String
         return Err("Bundled LSP runtime format or platform does not match this executable".into());
     }
     let root = root.canonicalize().map_err(|error| error.to_string())?;
-    let resolve = |relative: &str| -> Result<String, String> {
+    let resolve_within = |relative: &str, boundary: &Path| -> Result<String, String> {
         let file = root
             .join(relative)
             .canonicalize()
             .map_err(|error| format!("Bundled LSP file `{relative}` is missing: {error}"))?;
-        if !file.starts_with(&root) || !file.is_file() {
+        if !file.starts_with(boundary) || !file.is_file() {
             return Err(format!("Bundled LSP file `{relative}` escapes its runtime"));
         }
         let text = file.to_string_lossy().into_owned();
@@ -45,7 +45,18 @@ pub(crate) fn load(root: &Path) -> Result<BTreeMap<String, ServerConfig>, String
             text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
         })
     };
-    let node = resolve("node.exe")?;
+    let resolve = |relative: &str| resolve_within(relative, &root);
+    let node = match manifest.get("node") {
+        None => resolve("node.exe")?,
+        Some(Value::String(name)) if name == "node.exe" => resolve(name)?,
+        Some(Value::String(name)) if name == "../runtime/bin/node.exe" => {
+            let parent = root
+                .parent()
+                .ok_or("LSP runtime has no installation directory")?;
+            resolve_within(name, &parent.join("runtime"))?
+        }
+        _ => return Err("Unsupported bundled LSP Node path".into()),
+    };
     let tsserver = resolve("node_modules/typescript/lib/tsserver.js")?;
     let mut result = BTreeMap::new();
     for (name, command) in [
@@ -114,6 +125,45 @@ mod tests {
         assert!(Path::new(&command[0]).is_absolute());
         assert!(command[1].ends_with("cli.mjs"));
         assert_eq!(command[2], "--stdio");
+        // A combined distribution explicitly selects the distribution's shared Node.
+        // Merely losing the local binary must never silently change runtimes.
+        let install = root.join("relocated install");
+        std::fs::create_dir_all(&install).unwrap();
+        let lsp = install.join("lsp-runtime");
+        std::fs::create_dir_all(&lsp).unwrap();
+        for relative in [
+            "runtime.json",
+            "node.exe",
+            "rust-analyzer.exe",
+            "node_modules",
+            "clangd",
+        ] {
+            std::fs::rename(root.join(relative), lsp.join(relative)).unwrap();
+        }
+        std::fs::remove_file(lsp.join("node.exe")).unwrap();
+        assert!(load(&lsp).is_err());
+        let shared = install.join("runtime/bin");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("node.exe"), "fixture").unwrap();
+        assert!(load(&lsp).is_err());
+        let mut manifest = manifest;
+        manifest["node"] = "../runtime/bin/node.exe".into();
+        std::fs::write(lsp.join("runtime.json"), manifest.to_string()).unwrap();
+        let servers = load(&lsp).unwrap();
+        for name in ["typescript", "pyright"] {
+            let command = servers[name].command.as_ref().unwrap();
+            assert_eq!(
+                Path::new(&command[0]).canonicalize().unwrap(),
+                shared.join("node.exe").canonicalize().unwrap()
+            );
+        }
+        manifest["node"] = "../../node.exe".into();
+        std::fs::write(lsp.join("runtime.json"), manifest.to_string()).unwrap();
+        assert!(load(&lsp).is_err());
+        manifest["node"] = "../runtime/bin/node.exe".into();
+        std::fs::write(lsp.join("runtime.json"), manifest.to_string()).unwrap();
+        std::fs::remove_file(shared.join("node.exe")).unwrap();
+        assert!(load(&lsp).is_err());
         std::fs::write(root.join("runtime.json"), r#"{"format":2}"#).unwrap();
         assert!(load(&root).is_err());
         std::fs::remove_dir_all(root).unwrap();

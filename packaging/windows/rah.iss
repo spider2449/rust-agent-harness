@@ -47,6 +47,17 @@ Source: "{#StageDir}\graphify-runtime\*"; DestDir: "{app}\graphify-runtime"; Fla
 Source: "{#StageDir}\lsp-runtime\*"; DestDir: "{app}\lsp-runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 
+#if FileExists(AddBackslash(StageDir) + "runtime\bin\node.exe")
+Source: "{#StageDir}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
+
+; Remove the obsolete private copy when upgrading to the shared layout.
+#if FileExists(AddBackslash(StageDir) + "runtime\bin\node.exe") && !FileExists(AddBackslash(StageDir) + "lsp-runtime\node.exe") && !FileExists(AddBackslash(StageDir) + "graphify-runtime\node.exe")
+[InstallDelete]
+Type: files; Name: "{app}\lsp-runtime\node.exe"
+Type: files; Name: "{app}\graphify-runtime\node.exe"
+#endif
+
 [Icons]
 Name: "{group}\RAH README"; Filename: "{app}\README.md"
 Name: "{group}\RAH Web"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\rah-web.ps1"""; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\rah.ico"; Comment: "RAH Web UI in the default browser"

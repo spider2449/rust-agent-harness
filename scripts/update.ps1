@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Installs or updates RAH: the one command to get the current version onto
 this machine.
@@ -244,8 +244,8 @@ foreach ($file in $files) {
 # never npm, pip or a global interpreter on the target machine.
 $bundlePython = Join-Path $GraphifyRuntime 'python/python.exe'
 $validateBundles = @'
-import hashlib, importlib.metadata, json, pathlib, platform, sys
-graph, lsp = (pathlib.Path(p).resolve(strict=True) for p in sys.argv[1:])
+import hashlib, importlib.metadata, json, pathlib, platform, shutil, sys
+graph, lsp = (pathlib.Path(p).resolve(strict=True) for p in sys.argv[1:3])
 assert sys.version_info >= (3, 11), 'Updater needs bundled Python 3.11+'
 assert pathlib.Path(sys.base_prefix).resolve().is_relative_to(graph), 'Python is not portable'
 assert importlib.metadata.version('graphifyy') == '0.9.107', 'Graphify version mismatch'
@@ -255,21 +255,81 @@ for root in (graph, lsp):
     manifest = json.loads((root / 'runtime.json').read_text(encoding='utf-8'))
     assert (manifest['format'], manifest['platform'], manifest['arch']) == (1, 'windows', 'x86_64'), 'Unsupported runtime'
     assert platform.machine().lower() in ('amd64', 'x86_64'), 'Windows x64 required'
-for root, names in ((graph, ['node.exe', 'python/python.exe']), (lsp, ['node.exe', 'rust-analyzer.exe', 'clangd/bin/clangd.exe', 'node_modules/typescript/lib/tsserver.js', 'node_modules/typescript-language-server/lib/cli.mjs', 'node_modules/pyright/langserver.index.js'])):
+for root, names in ((graph, ['python/python.exe']), (lsp, ['rust-analyzer.exe', 'clangd/bin/clangd.exe', 'node_modules/typescript/lib/tsserver.js', 'node_modules/typescript-language-server/lib/cli.mjs', 'node_modules/pyright/langserver.index.js'])):
     for name in names:
         path = (root / name).resolve(strict=True)
         assert path.is_file() and path.is_relative_to(root), 'Missing or escaped runtime program'
 manifest = json.loads((lsp / 'runtime.json').read_text(encoding='utf-8'))
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+def node_path(root, metadata):
+    name = metadata.get('node', 'node.exe')
+    assert name in ('node.exe', '../runtime/bin/node.exe'), 'Unsupported Node path'
+    node = (root / name).resolve(strict=True)
+    boundary = root if name == 'node.exe' else root.parent / 'runtime'
+    assert node.is_file() and node.is_relative_to(boundary), 'Node escapes bundle'
+    if name != 'node.exe':
+        assert digest(node) == metadata.get('node_sha256'), 'Shared Node checksum mismatch'
+    return node
+graph_manifest = json.loads((graph / 'runtime.json').read_text(encoding='utf-8'))
+node = node_path(lsp, manifest)
+graph_node = node_path(graph, graph_manifest)
 for name, expected in manifest['sha256'].items():
     path = (lsp / name).resolve(strict=True)
     assert path.is_relative_to(lsp), 'Runtime path escapes bundle'
     with path.open('rb') as stream:
         assert hashlib.file_digest(stream, 'sha256').hexdigest() == expected, f'Checksum mismatch: {name}'
+if '--stage' in sys.argv[3:]:
+    stage = pathlib.Path(sys.argv[sys.argv.index('--stage') + 1]).resolve()
+    # Materialize standalone copies first; the sources may already share Node.
+    for root, metadata, source_node in ((lsp, manifest, node), (graph, graph_manifest, graph_node)):
+        destination = stage / ('lsp-runtime' if root == lsp else 'graphify-runtime')
+        shutil.copytree(root, destination)
+        shutil.copy2(source_node, destination / 'node.exe')
+        metadata['node'] = 'node.exe'
+        metadata.pop('node_sha256', None)
+        if root == lsp:
+            metadata['sha256']['node.exe'] = digest(source_node)
+        (destination / 'runtime.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+    lsp, graph = stage / 'lsp-runtime', stage / 'graphify-runtime'
+    node, graph_node = lsp / 'node.exe', graph / 'node.exe'
+if '--share-node' in sys.argv[3:] and digest(node) == digest(graph_node):
+    assert graph == lsp.parent / 'graphify-runtime', 'Runtimes must be siblings'
+    shared = lsp.parent / 'runtime/bin/node.exe'
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    assert shared.parent.resolve().is_relative_to(lsp.parent), 'Shared runtime escapes installation'
+    if shared.exists():
+        assert digest(shared) == digest(node), 'Shared Node conflicts with prepared binaries'
+    else:
+        shutil.copy2(node, shared)
+    for root, metadata in ((lsp, manifest), (graph, graph_manifest)):
+        metadata['node'] = '../runtime/bin/node.exe'
+        metadata['node_sha256'] = digest(shared)
+        metadata.get('sha256', {}).pop('node.exe', None)
+        (root / 'runtime.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+        (root / 'node.exe').unlink(missing_ok=True)
 '@
 $validateBundles | & $bundlePython -I - $GraphifyRuntime $LspRuntime
 if ($LASTEXITCODE -ne 0) { throw 'Runtime validation failed; nothing was installed.' }
 
+if (-not $work) {
+    $work = Join-Path ([IO.Path]::GetTempPath()) "rah-update-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $work | Out-Null
+}
 try {
+    $runtimeStage = Join-Path $work 'runtime-stage'
+    # Older release executables understand only their original private Node layout.
+    $shareNodeArgs = @()
+    if ($Source -eq 'build' -or ((Get-Content -LiteralPath (Join-Path $LspRuntime 'runtime.json') -Raw | ConvertFrom-Json).node -eq '../runtime/bin/node.exe')) {
+        $shareNodeArgs = @('--share-node')
+    }
+    $validateBundles | & $bundlePython -I - $GraphifyRuntime $LspRuntime --stage $runtimeStage @shareNodeArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Runtime staging failed; nothing was installed.' }
+    $GraphifyRuntime = Join-Path $runtimeStage 'graphify-runtime'
+    $LspRuntime = Join-Path $runtimeStage 'lsp-runtime'
+    $SharedRuntime = Join-Path $runtimeStage 'runtime'
+
     # A running copy keeps its files locked. RAH may keep running until now;
     # it is closed after asking (or at once with -Force).
     $running = @(Get-Process -Name rah, rah-desktop -ErrorAction SilentlyContinue |
@@ -301,8 +361,11 @@ try {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     if ((Get-Item -LiteralPath $InstallDir).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Install directory must not be a link' }
+    if (Test-Path -LiteralPath $SharedRuntime) { Install-UpdateRuntime $SharedRuntime $InstallDir 'runtime' }
     Install-UpdateRuntime $LspRuntime $InstallDir 'lsp-runtime'
     Install-UpdateRuntime $GraphifyRuntime $InstallDir 'graphify-runtime'
+    $validateBundles | & (Join-Path $InstallDir 'graphify-runtime/python/python.exe') -I - (Join-Path $InstallDir 'graphify-runtime') (Join-Path $InstallDir 'lsp-runtime')
+    if ($LASTEXITCODE -ne 0) { throw 'Installed runtime validation/deduplication failed.' }
     Copy-Item -LiteralPath $files -Destination $InstallDir -Force
 } finally {
     if ($work) {

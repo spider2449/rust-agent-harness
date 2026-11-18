@@ -1,5 +1,10 @@
 # Graphify packages without uv
 
+Combined Windows distributions put Node in `runtime/bin/node.exe` when LSP and
+Graphify's binary SHA-256 hashes match. Both explicitly reference this neutral
+location; see [the shared layout](LSP_PACKAGING.md). Keep the shared runtime and
+both plugin runtime directories together. Older private-Node bundles still work.
+
 There are two package variants. The lightweight package prepares Graphify
 through uv when the user explicitly runs `rah graphify install`. A bundled
 package contains Node, a portable Python interpreter and Graphify dependencies.
@@ -16,13 +21,15 @@ when dependencies are supplied separately; its relative import-path file is
 configured in the generated bundle. No system interpreter or environment is
 modified.
 
-For a portable Python distribution that includes pip:
+For a portable Python distribution that includes pip, prepare the
+[LSP runtime](LSP_PACKAGING.md) first and reuse its Node and license so the
+combined package can deduplicate them:
 
 ```powershell
 & 'C:\build\python\python.exe' scripts/prepare-graphify-runtime.py `
   --python-root 'C:\build\python' `
-  --node 'C:\build\node\node.exe' `
-  --node-license 'C:\build\node\LICENSE' `
+  --node '.rah\lsp-runtime\node.exe' `
+  --node-license '.rah\lsp-runtime\licenses\node-LICENSE.txt' `
   --out '.rah\graphify-runtime'
 
 .\scripts\package.ps1 -GraphifyRuntime '.rah\graphify-runtime'

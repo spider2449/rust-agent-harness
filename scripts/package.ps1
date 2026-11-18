@@ -121,6 +121,7 @@ foreach ($exe in "rah.exe", "rah-desktop.exe") {
 if ($GraphifyRuntime) {
     $runtimeHelp = & (Join-Path $release 'rah.exe') graphify install --help
     if ($LASTEXITCODE -ne 0 -or ($runtimeHelp -join "`n") -notmatch '--runtime-dir') { throw 'Rebuild RAH with bundled-runtime support before packaging' }
+    if (($runtimeHelp -join "`n") -notmatch 'runtime/bin/node.exe') { throw 'Rebuild RAH with shared Node support before packaging' }
 }
 
 # Keep other package variants; only replace this generated staging directory.
@@ -147,6 +148,8 @@ if ($GraphifyRuntime) {
 
 if ($LspRuntime) {
     Copy-Item -LiteralPath $LspRuntime -Destination (Join-Path $stage 'lsp-runtime') -Recurse
+    & $runtimePython -I (Join-Path $repo 'scripts/prepare-lsp-runtime.py') --share-node (Join-Path $stage 'lsp-runtime') --node-sources $LspRuntime $GraphifyRuntime
+    if ($LASTEXITCODE -ne 0) { throw 'Shared Node staging validation failed' }
     $lspReadme = Get-Content -LiteralPath (Join-Path $repo 'packaging/windows/README-lsp-bundled.md') -Raw
     $existingReadme = Get-Content -LiteralPath (Join-Path $stage 'README.md') -Raw
     [IO.File]::WriteAllText((Join-Path $stage 'README.md'), $lspReadme + "`r`n`r`n" + $existingReadme, [Text.UTF8Encoding]::new($false))

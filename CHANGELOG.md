@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Share identical LSP/Graphify Node executables from the distribution-owned
+  `runtime/bin` directory in Windows packages and updates, preserving standalone
+  runtimes and separate binaries when hashes differ.
+
 - Show LSP server startup, checks, diagnostics, timeouts and failures in the
   Web/Desktop status bar, with a read-only per-server detail page.
 

@@ -87,15 +87,24 @@ fn bundle_programs(root: &Path) -> Result<Programs, String> {
                 .as_str()
                 .ok_or("Runtime program path must be text")?,
         );
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        let shared_node = key == "node" && path == Path::new("../runtime/bin/node.exe");
+        if !shared_node
+            && (path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_))))
         {
             return Err("Runtime program path escapes its bundle".into());
         }
         let program = fs::canonicalize(root.join(path)).map_err(|error| error.to_string())?;
-        if !program.starts_with(&root) || !program.is_file() {
+        let boundary = if shared_node {
+            root.parent()
+                .ok_or("Runtime has no installation directory")?
+                .join("runtime")
+        } else {
+            root.clone()
+        };
+        if !program.starts_with(&boundary) || !program.is_file() {
             return Err("Runtime program escapes its bundle or is missing".into());
         }
         // Other programs should receive normal Windows paths rather than verbatim paths.
@@ -775,6 +784,25 @@ config = { server = "graphify", program = "old-node", args = ["old/managed-mcp.m
         )
         .unwrap();
         assert!(configured.contains("--python") && !configured.contains("--uvx"));
+        let common = p.root.join("runtime/bin/node.exe");
+        fs::create_dir_all(common.parent().unwrap()).unwrap();
+        fs::write(&common, "fixture").unwrap();
+        manifest["node"] = "../runtime/bin/node.exe".into();
+        fs::remove_file(root.join("node")).unwrap();
+        fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
+        let selected = bundle_programs(&root).unwrap();
+        assert_eq!(
+            selected.node.canonicalize().unwrap(),
+            common.canonicalize().unwrap()
+        );
+        manifest["node"] = "../other/node.exe".into();
+        fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
+        assert!(bundle_programs(&root).is_err());
+        manifest["node"] = "../runtime/bin/node.exe".into();
+        fs::remove_file(&common).unwrap();
+        fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
+        assert!(bundle_programs(&root).is_err());
+        fs::write(&common, "fixture").unwrap();
         manifest["python"] = "../outside".into();
         fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
         assert!(bundle_programs(&root).is_err());

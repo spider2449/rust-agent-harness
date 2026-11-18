@@ -27,6 +27,8 @@ def smoke(bundle, name, extension, language, source):
         file = workspace / ("example" + extension)
         file.write_text(source, encoding="utf-8")
         argv = [str(bundle / arg) if not arg.startswith("--") else arg for arg in runtime.PROGRAMS[name]]
+        if runtime.PROGRAMS[name][0] == "node.exe":
+            argv[0] = str(runtime.node_path(bundle, json.loads((bundle / "runtime.json").read_text(encoding="utf-8"))))
         env = {key: value for key, value in os.environ.items() if key.upper() not in {"PATH", "NODE_PATH", "NODE_OPTIONS", "PYTHONPATH", "VIRTUAL_ENV"}}
         env["PATH"] = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32")
         env["CARGO_NET_OFFLINE"] = "true"

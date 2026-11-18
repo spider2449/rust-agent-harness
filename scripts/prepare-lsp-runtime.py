@@ -21,6 +21,66 @@ PROGRAMS = {
     "pyright": ["node.exe", "node_modules/pyright/langserver.index.js", "--stdio"],
     "clangd": ["clangd/bin/clangd.exe"],
 }
+SHARED_NODE = "../runtime/bin/node.exe"
+
+
+def node_path(root, manifest):
+    name = manifest.get("node", "node.exe")
+    if name == "node.exe":
+        path = contained(root, name)
+        if not path.is_file():
+            raise ValueError("Missing runtime program: node.exe")
+        return path
+    if name != SHARED_NODE:
+        raise ValueError("Unsupported LSP Node path")
+    path = (root / name).resolve(strict=True)
+    if not path.is_relative_to(root.resolve().parent / "runtime") or not path.is_file():
+        raise ValueError("Shared Node escapes installation")
+    if digest(path) != manifest.get("node_sha256"):
+        raise ValueError("Shared Node checksum mismatch")
+    return path
+
+
+def share_node(root):
+    manifest = check(root)
+    graph = root.parent / "graphify-runtime"
+    graph_manifest = json.loads((graph / "runtime.json").read_text(encoding="utf-8"))
+    local = node_path(root, manifest)
+    graph_node = node_path(graph, graph_manifest)
+    expected = digest(local)
+    if expected != digest(graph_node):
+        print("Node binaries differ; retaining separate versions")
+        return
+    shared = root.parent / "runtime/bin/node.exe"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    if not shared.parent.resolve().is_relative_to(root.parent.resolve()):
+        raise ValueError("Shared runtime escapes installation")
+    if shared.exists():
+        if digest(shared) != expected:
+            raise ValueError("Shared Node conflicts with prepared binaries")
+    else:
+        shutil.copy2(local, shared)
+    for bundle, metadata in ((root, manifest), (graph, graph_manifest)):
+        metadata["node"] = SHARED_NODE
+        metadata["node_sha256"] = expected
+        metadata.get("sha256", {}).pop("node.exe", None)
+        (bundle / "runtime.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        (bundle / "node.exe").unlink(missing_ok=True)
+    check(root)
+
+
+def materialize_node(source, destination, lsp):
+    metadata = json.loads((source / "runtime.json").read_text(encoding="utf-8"))
+    node = node_path(source, metadata)
+    expected = digest(node)
+    if metadata.get("node") == SHARED_NODE and expected != metadata.get("node_sha256"):
+        raise ValueError("Shared Node checksum mismatch")
+    shutil.copy2(node, destination / "node.exe")
+    metadata["node"] = "node.exe"
+    metadata.pop("node_sha256", None)
+    if lsp:
+        metadata["sha256"]["node.exe"] = expected
+    (destination / "runtime.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def digest(path, algorithm="sha256"):
@@ -91,8 +151,11 @@ def check(root):
     for name, expected in hashes.items():
         if digest(contained(root, name)) != expected:
             raise ValueError(f"Runtime checksum mismatch: {name}")
+    node_path(root, manifest)
     for argv in PROGRAMS.values():
         for name in argv:
+            if name == "node.exe":
+                continue
             if not name.startswith("--") and not contained(root, name).is_file():
                 raise ValueError(f"Missing runtime program: {name}")
     if not (root / "node_modules/typescript/lib/tsserver.js").is_file():
@@ -143,8 +206,16 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path(".rah/lsp-downloads"))
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--check", type=Path)
+    parser.add_argument("--share-node", type=Path, help="Deduplicate a staged LSP bundle against its Graphify sibling")
+    parser.add_argument("--node-sources", type=Path, nargs=2, metavar=("LSP", "GRAPHIFY"),
+                        help="Materialize Node from prepared inputs before sharing staged copies")
     args = parser.parse_args()
-    if args.check:
+    if args.share_node:
+        if args.node_sources:
+            materialize_node(args.node_sources[0], args.share_node, True)
+            materialize_node(args.node_sources[1], args.share_node.parent / "graphify-runtime", False)
+        share_node(args.share_node.resolve(strict=True))
+    elif args.check:
         print(json.dumps(check(args.check)["versions"]))
     elif args.out:
         prepare(args)

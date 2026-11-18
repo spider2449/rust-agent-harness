@@ -7,6 +7,7 @@ a portable interpreter and is refused. Targets never need pip or uv.
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,7 +50,7 @@ def check(root):
     system, arch = host()
     if (manifest.get("format"), manifest.get("graphify_version"), manifest.get("platform"), manifest.get("arch")) != (1, VERSION, system, arch):
         raise ValueError("Runtime format, Graphify version or platform does not match")
-    node = contained(root, manifest["node"])
+    node = node_path(root, manifest)
     python = contained(root, manifest["python"])
     node_version = run([node, "--version"], 10)
     if int(node_version.lstrip("v").split(".")[0]) < 20:
@@ -67,6 +68,18 @@ def check(root):
     )
     details = json.loads(run([python, "-I", "-c", code, root]))
     return {**manifest, **details, "node_version": node_version}
+
+
+def node_path(root, manifest):
+    if manifest["node"] != "../runtime/bin/node.exe":
+        return contained(root, manifest["node"])
+    node = (root / manifest["node"]).resolve(strict=True)
+    if not node.is_file() or not node.is_relative_to(root.resolve().parent / "runtime"):
+        raise ValueError("Shared Node escapes installation")
+    with node.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != manifest.get("node_sha256"):
+            raise ValueError("Shared Node checksum mismatch")
+    return node
 
 
 def prepare(args):

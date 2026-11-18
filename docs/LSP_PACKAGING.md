@@ -1,5 +1,38 @@
 # Offline LSP distribution (Windows x64)
 
+Combined Windows packages and source updates deduplicate identical Node binaries
+by SHA-256 into a distribution-owned directory, independent of any plugin:
+
+```text
+rah.exe
+runtime/bin/node.exe
+lsp-runtime/runtime.json       # node = ../runtime/bin/node.exe
+graphify-runtime/runtime.json  # node = ../runtime/bin/node.exe
+```
+
+Both manifests explicitly select this path and record its checksum; neither
+consumer searches the other plugin's directory or PATH. Keep all three runtime
+directories together when relocating the package. Different Node binaries remain
+separate until prepared with the same version. Standalone inputs and older
+manifests still use their own `node.exe`. Preparation inputs are not modified.
+Node licenses remain in the runtime bundles. The updater stages and validates
+copies before installation; older releases retain their private Node layout so
+older executables continue to work. Shared-layout releases retain sharing.
+
+Local shared-runtime validation (2026-11-17): the prepared Graphify runtime was
+aligned to LSP's Node v26.13.1, preserving the old Node, license and manifest in
+`.rah/runtime-backups/node-unification-20261117-160131`. The staged distribution
+contains exactly one `node.exe` (100,089,160 bytes), saving that amount of
+uncompressed duplication. Graphify's 36 Node tests pass; an isolated offline
+Graphify installation with an empty PATH selects the shared executable. Direct
+LSP smoke checks report intentional diagnostics for TS, JS, Python, C++, C and
+Rust from the shared distribution. The Rust-through-RAH limitation below remains.
+Workspace validation passed: `cargo fmt --check`, `cargo check --workspace`,
+`cargo test --workspace --no-fail-fast` (794 passed, 18 ignored),
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
+`git diff --check`. The rebuilt portable ZIP passes CRC verification and contains
+only `runtime/bin/node.exe`; both manifests record its matching SHA-256.
+
 The optional distribution contains Rust, TypeScript/JavaScript, Python, and
 C/C++ language servers plus Node.js. `lsp-diagnostics` selects the fixed bundle
 layout beside the running executable when its default servers are enabled.
