@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.41 (2026-11-18)
+
+- Refresh the RAH logo, browser favicon and Windows icons with a modular R
+  design; generate raster assets directly from the SVG source.
+- Use consistent SVG icons for common Web/Desktop actions, with tooltips,
+  accessible names and text retained for permission decisions and settings.
+- Add independent sidebar and transcript collapse controls and user-message
+  navigation; preserve keyboard operation and narrow-window layouts.
+- Improve Rust LSP readiness handling and add Rust MCP queries.
+
 - Share identical LSP/Graphify Node executables from the distribution-owned
   `runtime/bin` directory in Windows packages and updates, preserving standalone
   runtimes and separate binaries when hashes differ.

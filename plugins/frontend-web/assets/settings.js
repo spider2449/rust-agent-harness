@@ -128,6 +128,7 @@ async function savePlugin(slot, plugin, kind, config, label, done) {
 
 function saveButton(label, handler) {
   const button = el("button", "", label);
+  setButtonIcon(button, "save", label, true);
   button.type = "button";
   button.addEventListener("click", async () => {
     button.disabled = true;

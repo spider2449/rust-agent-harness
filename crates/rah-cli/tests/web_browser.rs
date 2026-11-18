@@ -291,7 +291,7 @@ window.changeButton = (path) => document.querySelector(`#git-body .changes butto
 window.treeNames = () => [...document.querySelectorAll('#tree button')].map((button) => button.dataset.path);
 window.headTitle = () => byId('session-title').textContent;
 window.metaAction = (label) => [...document.querySelectorAll('#transcript .meta button')]
-  .filter((button) => button.textContent === label);
+  .filter((button) => button.dataset.action === label);
 // Every notice the page shows, even one that is replaced right away.
 window.notices = [];
 // The last requests the page made, with their status or how long they have
@@ -1715,7 +1715,7 @@ async fn sessions_are_named_renamed_branched_exported_and_deleted_in_the_browser
     page.eval(
         "{ const editor = document.querySelector('#transcript .edit'); \
          editor.querySelector('textarea').value = '/notool edited'; \
-         [...editor.querySelectorAll('button')].find((b) => b.textContent === 'Send').click(); true }",
+         [...editor.querySelectorAll('button')].find((b) => b.getAttribute('aria-label')?.startsWith('Send the edited message')).click(); true }",
     )
     .await;
     page.wait(
@@ -3338,6 +3338,7 @@ async fn left_panel_and_transcript_entries_collapse_independently() {
     page.call("Page.navigate", json!({"url":web.url})).await;
     page.wait("connected", "connected() && layout.left.length > 0")
         .await;
+    assert_eq!(page.eval("[...document.querySelectorAll('button[data-icon]')].every(b => b.querySelector('svg[aria-hidden=\"true\"] path') && b.getAttribute('aria-label') && b.title) && !shown(byId('cancel')) && !shown(byId('close-all'))").await, true);
     page.eval("window.originalConversationWidth = document.querySelector('.conversation').clientWidth; byId('toggle-left').click(); true").await;
     assert_eq!(page.eval("byId('left').hidden && byId('sessions-splitter').hidden && byId('toggle-left').getAttribute('aria-expanded') === 'false' && document.querySelector('.conversation').clientWidth > originalConversationWidth").await, true);
     page.eval("reloadLayout().then(() => true)").await;
@@ -3349,6 +3350,7 @@ async fn left_panel_and_transcript_entries_collapse_independently() {
     page.send_message("hello").await;
     page.wait("completed entries", "idle() && entries().length >= 4")
         .await;
+    assert_eq!(page.eval("entries().every(e => [...e.querySelectorAll('.entry-toggle, .fork')].every(b => b.querySelector('svg') && b.getAttribute('aria-label') && b.title))").await, true);
     assert_eq!(page.eval("entries().filter(e => e.classList.contains('collapsed')).length === 1 && entries().find(e => e.classList.contains('collapsed')).querySelector('.meta span').textContent.startsWith('tool call')").await, true);
     page.eval("entries().find(e => e.classList.contains('collapsed')).querySelector('.entry-toggle').click(); true").await;
     page.eval("loadTranscript().then(() => true)").await;
@@ -3359,6 +3361,7 @@ async fn left_panel_and_transcript_entries_collapse_independently() {
     );
     page.eval("entries()[0].querySelector('.entry-toggle').click(); true")
         .await;
+    assert_eq!(page.eval("entries()[0].querySelector('.entry-toggle').getAttribute('aria-label').startsWith('Expand record ')").await, true);
     assert_eq!(page.eval("!shown(entries()[0].querySelector('pre')) && entries()[0].querySelector('.entry-toggle').getAttribute('aria-expanded') === 'false' && entries().slice(1).every(e => !e.classList.contains('collapsed'))").await, true);
     page.eval("loadTranscript().then(() => true)").await;
     assert_eq!(

@@ -442,8 +442,6 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .transcript { flex: 1; list-style: none; margin: 0; padding: 1.428571rem var(--conversation-gutter); overflow-y: auto; display: flex; flex-direction: column; gap: 0.857143rem; }
 .entry { padding: 0.857143rem 1rem; border-radius: 0.857143rem; background: var(--panel); border: 1px solid var(--line); position: relative; }
 .entry.collapsed > :not(.meta) { display: none; }
-.entry .entry-toggle::before { content: "▾ "; }
-.entry.collapsed .entry-toggle::before { content: "▸ "; }
 .entry.user {
   align-self: flex-end; width: fit-content; min-width: min(20rem, 100%);
   max-width: max(88%, min(20rem, 100%)); background: var(--user);
@@ -823,3 +821,9 @@ button.toggle[aria-pressed="true"] { background: var(--accent); color: var(--acc
 .graph-controls > label > select { display: block; width: 100%; margin: .4rem 0; }
 .graph-vertex { cursor: grab; }
 .graph-vertex.graph-dragging { cursor: grabbing; }
+
+/* Shared action icons inherit each theme's text and disabled colors. */
+.action-icon { width: 1.142857rem; height: 1.142857rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+button.action-button { display: inline-flex; align-items: center; justify-content: center; gap: 0.428571rem; }
+button.action-button.icon-only { min-width: 2rem; min-height: 2rem; padding: 0.357143rem; }
+button.action-button[hidden] { display: none; }

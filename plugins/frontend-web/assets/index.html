@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RAH</title>
-  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="/logo.svg?v=modular-r" sizes="any">
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="app-shell">
   <header class="bar">
-    <button id="toggle-left" type="button" aria-label="Hide left panel" aria-controls="left" aria-expanded="true" title="Hide left panel">☰</button>
+    <button id="toggle-left" type="button" aria-controls="left" aria-expanded="true" data-icon="panels" title="Hide left panel" aria-label="Hide left panel">☰</button>
     <strong class="brand"><img class="logo" src="/logo.svg" alt="" width="20" height="20">RAH</strong>
     <span id="connection" class="badge bad" title="This window lost its link to the local RAH process; it retries automatically" hidden>connecting</span>
     <span class="spacer"></span>
@@ -39,7 +39,7 @@
     <nav id="left" class="sidebar" aria-label="Sessions">
       <div id="left-tabs" class="tabs side-tabs" role="tablist" hidden></div>
       <div id="sessions-panel" class="sessions-panel" role="tabpanel" aria-label="Sessions">
-        <button id="new-session" type="button">New session</button>
+        <button id="new-session" type="button" data-icon="plus" title="New session" aria-label="New session">New session</button>
         <input id="session-search" type="search" maxlength="256" placeholder="Search titles and messages" aria-label="Search titles and messages">
         <ul id="sessions" class="sessions"></ul>
       </div>
@@ -64,13 +64,13 @@
       </div>
       <div id="notice" class="notice" hidden>
         <span id="notice-text" class="notice-text"></span>
-        <button id="notice-close" type="button" class="ghost icon" title="Dismiss" aria-label="Dismiss">✕</button>
+        <button id="notice-close" type="button" class="ghost icon" data-icon="close" title="Dismiss" aria-label="Dismiss">✕</button>
       </div>
       <nav id="message-nav" class="message-nav" aria-label="User messages" hidden>
         <div id="message-anchors" class="message-anchors"></div>
         <div class="message-nav-actions">
-          <button id="message-nav-prev" type="button" class="ghost" aria-label="Previous question" title="Previous question">&#8592;</button>
-          <button id="message-nav-next" type="button" class="ghost" aria-label="Next question" title="Next question">&#8594;</button>
+          <button id="message-nav-prev" type="button" class="ghost" data-icon="left" title="Previous question" aria-label="Previous question">&#8592;</button>
+          <button id="message-nav-next" type="button" class="ghost" data-icon="right" title="Next question" aria-label="Next question">&#8594;</button>
         </div>
       </nav>
       <ol id="transcript" class="transcript"></ol>
@@ -89,8 +89,8 @@
         <ul id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></ul>
         <textarea id="input" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line, / for commands)" disabled aria-controls="slash-menu"></textarea>
         <div class="actions">
-          <button id="send" type="submit" disabled>Send</button>
-          <button id="cancel" type="button" class="ghost" hidden>Cancel</button>
+          <button id="send" type="submit" disabled data-icon="send" title="Send" aria-label="Send">Send</button>
+          <button id="cancel" type="button" class="ghost" hidden data-icon="stop" title="Stop response" aria-label="Stop response">Cancel</button>
         </div>
       </form>
     </section>
@@ -99,15 +99,15 @@
       <div id="side-resizer" class="resizer" title="Drag to resize" aria-hidden="true"></div>
       <div id="side-tabs" class="tabs side-tabs" role="tablist">
         <span class="spacer"></span>
-        <button id="side-close" type="button" class="ghost icon" title="Hide the panel" aria-label="Hide the panel">✕</button>
+        <button id="side-close" type="button" class="ghost icon" data-icon="close" title="Hide the panel" aria-label="Hide the panel">✕</button>
       </div>
       <div id="files-view" class="files-view" role="tabpanel" aria-label="Workspace files">
         <div id="tree-pane" class="tree-pane">
           <div class="tree-section">
             <div class="pane-head">
               <span id="tree-root" class="pane-title">Files</span>
-              <button id="tree-add" type="button" class="ghost icon" title="Open a folder or add one to the workspace" aria-label="Open a folder or add one to the workspace">+</button>
-              <button id="tree-refresh" type="button" class="ghost icon" title="Reload the files" aria-label="Reload the files">⟳</button>
+              <button id="tree-add" type="button" class="ghost icon" data-icon="plus" title="Open a folder or add one to the workspace" aria-label="Open a folder or add one to the workspace">+</button>
+              <button id="tree-refresh" type="button" class="ghost icon" data-icon="refresh" title="Reload the files" aria-label="Reload the files">⟳</button>
             </div>
             <ul id="tree" class="tree" role="tree" aria-label="Files"></ul>
           </div>
@@ -116,7 +116,7 @@
             <div class="pane-head">
               <span class="pane-title">Source control</span>
               <button id="git-branch" type="button" class="git-branch" aria-haspopup="listbox" title="Switch branch"></button>
-              <button id="git-refresh" type="button" class="ghost icon" title="Reload the Git state" aria-label="Reload the Git state">⟳</button>
+              <button id="git-refresh" type="button" class="ghost icon" data-icon="refresh" title="Reload the Git state" aria-label="Reload the Git state">⟳</button>
             </div>
             <div id="git-body" class="git-body"></div>
           </div>
@@ -125,14 +125,14 @@
         <div id="viewer-pane" class="viewer-pane">
           <div class="file-tabs">
             <div id="file-tabs" class="file-tab-list" role="tablist" aria-label="Open files"></div>
-            <button id="wrap-files" type="button" class="ghost toggle" aria-pressed="false" title="Wrap long lines in the file and in the activity log">Wrap</button>
-            <button id="close-all" type="button" class="ghost" hidden>Close all</button>
+            <button id="wrap-files" type="button" class="ghost toggle" aria-pressed="false" data-icon="wrap" title="Wrap long lines in the file and in the activity log" aria-label="Wrap long lines in the file and in the activity log">Wrap</button>
+            <button id="close-all" type="button" class="ghost" hidden data-icon="close" title="Close all files" aria-label="Close all files">Close all</button>
           </div>
           <div id="file-view" class="file-view"></div>
           <div id="view-splitter" class="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize the file view and the activity log" tabindex="0" title="Drag to resize" hidden></div>
           <div class="pane-head activity-head">
             <button id="activity-toggle" type="button" class="pane-title fold" aria-expanded="false" aria-controls="activity" title="Show or hide the activity log">Activity</button>
-            <button id="activity-clear" type="button" class="ghost icon" title="Clear the activity log" aria-label="Clear the activity log">✕</button>
+            <button id="activity-clear" type="button" class="ghost icon" data-icon="clear" title="Clear the activity log" aria-label="Clear the activity log">✕</button>
           </div>
           <ol id="activity" class="activity" aria-live="polite" hidden></ol>
         </div>
@@ -142,9 +142,9 @@
         <div class="panel-head">
           <h2>Plugins</h2>
           <span>
-            <button id="expand-plugins" type="button" class="ghost">Open settings</button>
-            <button id="add-plugin" type="button" class="ghost">Add</button>
-            <button id="refresh-plugins" type="button" class="ghost">Refresh</button>
+            <button id="expand-plugins" type="button" class="ghost" data-icon="settings" title="Open plugin settings" aria-label="Open plugin settings">Open settings</button>
+            <button id="add-plugin" type="button" class="ghost" data-icon="plus" title="Add plugin" aria-label="Add plugin">Add</button>
+            <button id="refresh-plugins" type="button" class="ghost" data-icon="refresh" title="Refresh plugins" aria-label="Refresh plugins">Refresh</button>
           </span>
         </div>
         <div id="plugin-message" class="settings-message" role="status" hidden></div>
@@ -213,10 +213,10 @@
     </div>
     <div class="path-row">
       <input id="ws-path" aria-label="Folder path" spellcheck="false">
-      <button id="ws-go" type="button" class="ghost">Go</button>
+      <button id="ws-go" type="button" class="ghost" data-icon="right" title="Go to folder" aria-label="Go to folder">Go</button>
     </div>
     <div class="ws-nav">
-      <button id="ws-up" type="button" class="ghost">↑ Up</button>
+      <button id="ws-up" type="button" class="ghost" data-icon="up" title="Parent folder" aria-label="Parent folder">↑ Up</button>
       <span id="ws-roots"></span>
     </div>
     <div id="ws-error" class="notice" hidden></div>
@@ -237,7 +237,7 @@
       <h2 id="settings-title">Settings</h2>
       <div class="dialog-actions">
         <span id="settings-actions"></span>
-        <button id="settings-close" type="button" class="ghost" aria-label="Close settings">Close</button>
+        <button id="settings-close" type="button" class="ghost" data-icon="close" title="Close settings" aria-label="Close settings">Close</button>
       </div>
     </div>
     <div id="settings-tabs" class="tabs" role="tablist">
@@ -253,7 +253,7 @@
   <dialog id="help-dialog" class="dialog help" aria-labelledby="help-title">
     <div class="dialog-head">
       <h2 id="help-title">Help</h2>
-      <button id="help-close" type="button" class="ghost" aria-label="Close help">Close</button>
+      <button id="help-close" type="button" class="ghost" data-icon="close" title="Close help" aria-label="Close help">Close</button>
     </div>
     <div class="help-layout">
       <nav id="help-nav" class="help-nav" aria-label="Documents"></nav>

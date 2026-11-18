@@ -47,6 +47,43 @@ function el(tag, className, text) {
   return node;
 }
 
+// Local SVG geometry only; labels and provider content never become markup.
+const ACTION_ICONS = {
+  "plus": "M12 5v14M5 12h14",
+  "close": "m6 6 12 12M18 6 6 18",
+  "refresh": "M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-2l3 4M4 15l3 4a7 7 0 0 0 11-2",
+  "send": "m4 4 17 8-17 8 3-8-3-8Zm3 8h14",
+  "stop": "M6 6h12v12H6Z",
+  "left": "m14 6-6 6 6 6",
+  "right": "m10 6 6 6-6 6",
+  "up": "m6 14 6-6 6 6",
+  "down": "m6 10 6 6 6-6",
+  "edit": "m15 4 5 5M4 20l5-1L21 7l-5-5L4 14v6Z",
+  "fork": "M6 3v12a5 5 0 0 0 5 5h7M6 9h7a5 5 0 0 0 5-5V3m-3 14 3 3-3 3",
+  "wrap": "M3 5h18M3 10h14a4 4 0 0 1 0 8h-5m3-3-3 3 3 3M3 15h4",
+  "panels": "M3 4h18v16H3ZM9 4v16",
+  "clear": "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7M14 10v7",
+  "save": "M4 3h13l4 4v14H3V3ZM7 3v6h10V3M7 21v-8h10v8",
+  "settings": "M4 6h7m4 0h5M4 12h3m4 0h9M4 18h10m4 0h2M11 3v6M7 9v6M14 15v6"
+};
+
+function setButtonIcon(button, name, label, keepText = false) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("class", "action-icon");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS(svg.namespaceURI, "path");
+  path.setAttribute("d", ACTION_ICONS[name]);
+  svg.append(path);
+  button.replaceChildren(svg);
+  if (keepText) button.append(document.createTextNode(label));
+  button.classList.add("action-button");
+  button.classList.toggle("icon-only", !keepText);
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
 function showNotice(text) {
   $("notice-text").textContent = text;
   $("notice").hidden = !text;
@@ -622,10 +659,11 @@ function editMessage(node, seq, input) {
   const buttons = el("div", "buttons");
   const cancel = el("button", "ghost", "Cancel");
   cancel.type = "button";
+  setButtonIcon(cancel, "close", "Cancel editing");
   cancel.addEventListener("click", () => editor.replaceWith(body));
   const save = el("button", "", "Send");
   save.type = "button";
-  save.title = "Send the edited message in a new branch; this session is kept";
+  setButtonIcon(save, "send", "Send the edited message in a new branch; this session is kept");
   save.addEventListener("click", () => {
     const text = area.value.trim();
     if (text) resend(seq, text).catch(report);
@@ -639,7 +677,8 @@ function editMessage(node, seq, input) {
 function metaButton(label, title, handler) {
   const button = el("button", "ghost fork", label);
   button.type = "button";
-  button.title = title;
+  button.dataset.action = label;
+  setButtonIcon(button, { edit: "edit", "fork here": "fork", regenerate: "refresh" }[label], title);
   button.addEventListener("click", () => {
     Promise.resolve()
       .then(handler)
@@ -654,7 +693,7 @@ function setEntryCollapsed(node, collapsed) {
   node.classList.toggle("collapsed", collapsed);
   const toggle = node.querySelector(".entry-toggle");
   toggle.setAttribute("aria-expanded", String(!collapsed));
-  toggle.textContent = collapsed ? "Expand" : "Collapse";
+  setButtonIcon(toggle, collapsed ? "down" : "up", `${collapsed ? "Expand" : "Collapse"} record ${node.dataset.seq}`);
   collapsedEntries.set(node.dataset.seq, collapsed);
   if (node.isConnected) updateMessageNavigation();
 }
@@ -3979,6 +4018,10 @@ async function start() {
     showNotice(error.message);
   }
   connect();
+}
+
+for (const button of document.querySelectorAll("button[data-icon]")) {
+  setButtonIcon(button, button.dataset.icon, button.getAttribute("aria-label"));
 }
 
 start();

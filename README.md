@@ -1,5 +1,7 @@
 # RAH — Rust Agent Harness
 
+<img src="plugins/frontend-web/assets/logo.svg" alt="RAH — modular R logo" width="96" height="96">
+
 RAH is a Rust agent harness built around a plugin kernel: **everything is a
 plugin**. A minimal kernel owns plugin lifecycle, typed services, hooks, events,
 scoped resources and configuration. Model providers, the agent loop, tools,
