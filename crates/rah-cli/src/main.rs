@@ -14,7 +14,7 @@ use rah_api::{
 };
 use rah_cli::{
     Distribution, Permissions, boot,
-    cli::{GlobalArgs, NO_MODEL, absolute},
+    cli::{GlobalArgs, absolute},
     doctor, is_model_kind, setup, user_file_text,
 };
 use serde_json::Value;
@@ -528,7 +528,7 @@ async fn run(cli: Cli) -> i32 {
         _ => {}
     }
     let reads_sessions = matches!(cli.command, Some(Command::Sessions { .. }));
-    // A first start: nothing names a model. Ask on a terminal, else explain.
+    // Offer setup on a terminal; unattended starts use local llama.cpp.
     match global.unconfigured() {
         Ok(true) if !reads_sessions && on_terminal() => {
             eprintln!("rah: no configuration yet; a few questions write one.");
@@ -537,7 +537,6 @@ async fn run(cli: Cli) -> i32 {
                 Err(message) => return fail(message),
             }
         }
-        Ok(true) if !reads_sessions => return fail(NO_MODEL),
         Ok(_) => {}
         Err(message) => return fail(message),
     }

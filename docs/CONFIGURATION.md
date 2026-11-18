@@ -68,12 +68,16 @@ rah-desktop            # the same Web UI in a native window
 ```
 
 `rah` without a configuration asks the same questions on a terminal before
-it starts, and elsewhere exits with a message saying how to choose a model.
+it starts, with local llama.cpp preselected. Noninteractive starts use local
+llama.cpp directly at `http://127.0.0.1:8080`.
 `rah-desktop` without one shows them as a form in its window and starts once
-it is answered. Neither guesses a model. To write the file without questions:
+it is answered, also with llama.cpp preselected. Omitting `model` from a
+user configuration uses this same default. Explicit file models and `--model`
+override it; an unavailable local server does not trigger a cloud or mock
+fallback. To write the file without questions:
 
 ```powershell
-rah config init --model anthropic/claude-sonnet-5-5 --permissions auto-edit --with web-search
+rah config init --model llamacpp --permissions auto-edit --with web-search
 ```
 
 To install RAH, or update it after pulling changes, run `.\scripts\update.ps1`

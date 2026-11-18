@@ -20,12 +20,13 @@ rah-desktop                    # the same Web UI in a native window
 ```
 
 The updater creates a profile when missing and enables LSP and Graphify without
-choosing a model. Use Desktop setup or `rah config edit` to select your model.
+choosing a model. RAH defaults to local llama.cpp at `http://127.0.0.1:8080`.
+Use Desktop setup or `rah config edit` to select another model.
 For installations made without the updater, `rah config init` asks a few
 questions and creates `rah.toml`. A small profile looks like this:
 
 ```toml
-model       = "anthropic/claude-sonnet-5-5"   # anthropic, openai, deepseek, openai-compatible, llamacpp, mock
+model       = "llamacpp"                    # local llama.cpp; discovers the server's sole model
 permissions = "ask"                            # read-only | ask | auto-edit | full
 features    = ["web-search"]                   # `rah features` lists them
 ```

@@ -13,7 +13,7 @@ use crate::{Distribution, Permissions, USER_CONFIG, default_data_home, select_di
 pub struct GlobalArgs {
     /// Model to run, as `<provider>/<model id>` or `<provider>` for its
     /// default model. Providers: anthropic, openai, deepseek,
-    /// openai-compatible, llamacpp, mock.
+    /// openai-compatible, llamacpp, mock. Default: local llamacpp.
     #[arg(long, global = true, value_name = "PROVIDER/ID")]
     pub model: Option<String>,
     /// What tools may do without asking: read-only, ask, auto-edit (writes
@@ -99,15 +99,15 @@ impl GlobalArgs {
         }
     }
 
-    /// Whether nothing names a model yet: no `--config`, no `rah.toml` in
-    /// the data directory and no `--model`. A start then needs
-    /// `rah config init` first.
+    /// Whether no `--config`, `rah.toml` or `--model` was supplied. Interactive
+    /// frontends offer setup; unattended starts use the local model default.
     pub fn unconfigured(&self) -> Result<bool, String> {
         Ok(self.config.is_none() && self.model.is_none() && !self.config_path()?.exists())
     }
 
     /// The distribution these options select, with the flags applied in
-    /// order: features, root, permissions, model. Without `require_model`,
+    /// order: features, root, permissions, model. User configurations without
+    /// a model default to local llama.cpp. Without `require_model`,
     /// a configuration that names no model is accepted (for commands that
     /// run none).
     pub fn prepare(&self, require_model: bool) -> Result<Prepared, String> {
@@ -121,6 +121,10 @@ impl GlobalArgs {
             from_file(user.permissions.is_some()),
             from_file(user.root.is_some()),
         );
+        if distribution.user.is_some() && !distribution.has_model() {
+            distribution.set_model("llamacpp", &serde_json::Map::new())?;
+            origins.0 = Origin::Default;
+        }
         for request in &self.with {
             distribution.enable(request)?;
         }

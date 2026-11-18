@@ -53,24 +53,12 @@ impl Environment<'_> {
         }
     }
 
-    /// The provider offered first: one whose key is set, else a running
-    /// llama.cpp, else the mock model. An index into [`PROVIDERS`].
+    /// Local llama.cpp is always the default, regardless of API keys or
+    /// server readiness. An index into [`PROVIDERS`].
     pub fn suggested(&self) -> usize {
-        let ready = |provider: &Provider| match provider.name {
-            "llamacpp" => self.llama_cpp_answers,
-            "openai-compatible" | "mock" => false,
-            _ => provider
-                .key_env
-                .is_some_and(|variable| (self.is_set)(variable)),
-        };
         PROVIDERS
             .iter()
-            .position(ready)
-            .or_else(|| {
-                PROVIDERS
-                    .iter()
-                    .position(|provider| provider.name == "mock")
-            })
+            .position(|provider| provider.name == "llamacpp")
             .unwrap_or(0)
     }
 }
@@ -326,18 +314,19 @@ mod tests {
     }
 
     #[test]
-    fn defaults_follow_what_is_ready_and_the_file_parses() {
+    fn defaults_use_local_llamacpp_regardless_of_readiness_and_the_file_parses() {
         let anthropic_key = |name: &str| name == "ANTHROPIC_API_KEY";
         let (text, shown) = run("\n\n\n\n", &environment(&anthropic_key, false));
         let text = text.unwrap();
         assert!(shown.contains("ANTHROPIC_API_KEY is set"), "{shown}");
         assert!(shown.contains("OPENAI_API_KEY is not set"), "{shown}");
-        assert!(shown.contains("Provider [1]"), "{shown}");
+        let llama = PROVIDERS.iter().position(|p| p.name == "llamacpp").unwrap() + 1;
+        assert!(shown.contains(&format!("Provider [{llama}]")), "{shown}");
         let distribution = Distribution::parse(&text).unwrap();
         assert_eq!(
             distribution.user,
             Some(UserSettings {
-                model: Some("anthropic".into()),
+                model: Some("llamacpp".into()),
                 permissions: Some(Permissions::Ask),
                 root: None,
             })
@@ -349,9 +338,9 @@ mod tests {
         let llama = PROVIDERS.iter().position(|p| p.name == "llamacpp").unwrap() + 1;
         assert!(shown.contains(&format!("Provider [{llama}]")), "{shown}");
         assert!(shown.contains("a server answers at"), "{shown}");
-        // Nothing at all: the mock model.
-        let (text, _) = run("\n\n\n", &environment(&nothing, false));
-        assert!(text.unwrap().contains("model = \"mock\""));
+        // An offline server remains the default; never fall back to mock.
+        let (text, _) = run("\n\n\n\n", &environment(&nothing, false));
+        assert!(text.unwrap().contains("model = \"llamacpp\""));
     }
 
     #[test]

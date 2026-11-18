@@ -470,8 +470,8 @@ pub fn read_distribution(path: &Path) -> Result<Distribution, String> {
 /// The distribution to run, with `data_home` set to `home`: the file
 /// `config` when given, else [`USER_CONFIG`] in `home` when it exists, else
 /// the guarded base without a model, as a file with only user keys would be
-/// (ADR 0067 §6: a model is never guessed). Also returns the file that was
-/// read.
+/// (command preparation supplies the local llama.cpp default). Also returns
+/// the file that was read.
 pub fn select_distribution(
     config: Option<&Path>,
     home: &Path,

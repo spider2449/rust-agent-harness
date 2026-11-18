@@ -648,13 +648,18 @@ fn a_file_with_user_keys_runs_the_model_and_permissions_it_names() {
 }
 
 #[test]
-fn a_file_with_user_keys_but_no_model_asks_for_one() {
+fn a_file_with_user_keys_but_no_model_defaults_to_llamacpp() {
     let dir = TempDir::new("bin-user-no-model");
     write_home_config(&dir, "permissions = \"ask\"\n");
-    let output = rah(&dir).args(["run", "hello"]).output().unwrap();
-    let stderr = text(&output.stderr);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("no model is configured"), "{stderr}");
+    let output = rah(&dir).args(["config", "show"]).output().unwrap();
+    let shown = text(&output.stdout);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(shown.contains("model:       llamacpp"), "{shown}");
+    assert!(
+        shown
+            .lines()
+            .any(|line| line.starts_with("model:") && line.contains("(default)"))
+    );
 
     // `--model` supplies it.
     let output = run_mock(&dir, "hello", &[]);
@@ -678,19 +683,8 @@ fn a_file_with_user_keys_but_no_model_asks_for_one() {
 }
 
 #[test]
-fn a_first_start_without_a_terminal_explains_how_to_choose_a_model() {
+fn a_first_start_without_a_terminal_uses_local_llamacpp() {
     let dir = TempDir::new("bin-first-start");
-    for args in [&["run", "hello"][..], &[], &["web"]] {
-        let output = rah(&dir).args(args).output().unwrap();
-        let stderr = text(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
-        assert!(stderr.contains("rah config init"), "{stderr}");
-        assert!(stderr.contains("--model"), "{stderr}");
-        // No model was guessed, so none was started.
-        assert!(!stderr.contains("llama"), "{stderr}");
-    }
-    assert!(!dir.home().join("rah.toml").exists());
-
     // Nothing to answer with: init asks for --model instead.
     let output = rah(&dir).args(["config", "init"]).output().unwrap();
     let stderr = text(&output.stderr);
@@ -704,10 +698,16 @@ fn a_first_start_without_a_terminal_explains_how_to_choose_a_model() {
     let output = rah(&dir).args(["config", "show"]).output().unwrap();
     let shown = text(&output.stdout);
     assert!(output.status.success(), "{shown}");
-    assert!(shown.contains("model:       none"), "{shown}");
+    assert!(shown.contains("model:       llamacpp"), "{shown}");
     let output = rah(&dir).args(["sessions", "list"]).output().unwrap();
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert!(text(&output.stdout).contains("no sessions"));
+
+    // EOF ends the REPL without sending any inference request. Starting it
+    // creates an empty session, so check the fresh session list first.
+    let output = rah(&dir).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(!dir.home().join("rah.toml").exists());
 }
 
 #[test]

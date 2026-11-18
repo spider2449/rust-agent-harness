@@ -138,13 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn the_form_offers_every_provider_and_the_ready_one_first() {
+    fn the_form_defaults_to_local_llamacpp_even_with_a_cloud_key() {
         let key = |name: &str| name == "OPENAI_API_KEY";
         let page = page("RAH 1", &environment(&key), "C:\\Users\\a <b>");
         for provider in &PROVIDERS {
             assert!(page.contains(&format!("value=\"{}\"", provider.name)));
         }
-        assert!(page.contains("value=\"openai\" checked"), "{page}");
+        assert!(page.contains("value=\"llamacpp\" checked"), "{page}");
         assert!(page.contains("OPENAI_API_KEY is set"));
         assert!(page.contains("<option selected>auto-edit</option>"));
         assert!(page.contains("value=\"C:\\Users\\a &lt;b&gt;\""));

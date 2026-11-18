@@ -178,18 +178,24 @@ folds them into `rah.toml` and removes them. UI state (preferences, layout,
 recent workspaces and the connected API group) stays in `storage`.
 ### 6. First start
 
-Without `rah.toml`, `--config` and `--model`, `rah` does not start a model it
-guessed:
+Amended 2026-11-18: local llama.cpp is the default model. When a user-key
+configuration omits `model`, or no configuration exists, command preparation
+mounts `model-llamacpp` with its loopback endpoint `http://127.0.0.1:8080`.
+Explicit file models and `--model` still take precedence. Advanced plugin-only
+distributions are preserved. No kernel, service or plugin protocol changes.
+
+Without `rah.toml`, `--config` and `--model`:
 
 - on a terminal, it runs `rah config init` interactively: it lists the
   providers, marks the ones whose key variable is set and whether a local
   llama.cpp answers, asks for the model id, permissions and root, and writes
-  `rah.toml`;
+  `rah.toml`; llama.cpp is preselected regardless of API keys or readiness;
 - `rah-desktop` shows the same questions as a form in its window, writes
   `rah.toml` from the answers and then starts (amended in 0.45.7; before, it
   showed only the error);
-- otherwise it exits with status 2 and a message naming `--model` and
-  `rah config init`.
+- otherwise it starts with local llama.cpp without writing a configuration.
+  An unavailable server is reported when used; there is no cloud or mock
+  fallback. Explicit noninteractive `config init` still requires `--model`.
 
 ## Consequences
 
