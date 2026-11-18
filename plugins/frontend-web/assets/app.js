@@ -528,6 +528,7 @@ function awaitTitle() {
 
 async function openSession(id) {
   if (state.current !== id) {
+    collapsedEntries.clear();
     messageNavigationEntries = [];
     $("message-anchors").replaceChildren();
     $("message-nav").hidden = true;
@@ -612,6 +613,7 @@ async function resend(seq, input) {
 }
 
 function editMessage(node, seq, input) {
+  setEntryCollapsed(node, false);
   const body = node.querySelector("pre");
   const editor = el("div", "edit");
   const area = el("textarea");
@@ -644,6 +646,17 @@ function metaButton(label, title, handler) {
       .catch(report);
   });
   return button;
+}
+
+const collapsedEntries = new Map();
+
+function setEntryCollapsed(node, collapsed) {
+  node.classList.toggle("collapsed", collapsed);
+  const toggle = node.querySelector(".entry-toggle");
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.textContent = collapsed ? "Expand" : "Collapse";
+  collapsedEntries.set(node.dataset.seq, collapsed);
+  if (node.isConnected) updateMessageNavigation();
 }
 
 function entryNode(record) {
@@ -695,11 +708,17 @@ function entryNode(record) {
   }
   meta.append(el("span", "spacer"));
   meta.append(el("span", "", `#${record.seq}`));
+  const toggle = el("button", "ghost entry-toggle", "Collapse");
+  toggle.type = "button";
+  toggle.setAttribute("aria-label", `Toggle record ${record.seq}`);
+  toggle.addEventListener("click", () => setEntryCollapsed(node, !node.classList.contains("collapsed")));
+  meta.append(toggle);
   if (entry.kind === "turn_started") {
     meta.append(metaButton("edit", "Edit this message and send it in a new branch", () => editMessage(node, record.seq, entry.input)));
   }
   meta.append(metaButton("fork here", `Start a new session continuing after record ${record.seq}`, () => fork(record.seq)));
   node.append(meta, body, ...images);
+  setEntryCollapsed(node, collapsedEntries.get(node.dataset.seq) ?? entry.kind === "tool_call");
   return node;
 }
 
@@ -1259,7 +1278,19 @@ const PANELS = {
   files: { label: "Workspace", node: () => $("files-view"), button: "toggle-side" },
   plugins: { label: "Plugins", node: () => $("plugins-panel") },
 };
-const layout = { left: [], right: [], rightOpen: null };
+const layout = { left: [], right: [], rightOpen: null, leftOpen: !matchMedia("(max-width: 54.285714rem)").matches };
+
+function setLeftOpen(open) {
+  layout.leftOpen = open;
+  const visible = open && layout.left.length > 0;
+  $("left").hidden = !visible;
+  $("sessions-splitter").hidden = !visible;
+  const toggle = $("toggle-left");
+  toggle.hidden = layout.left.length === 0;
+  toggle.setAttribute("aria-expanded", String(visible));
+  toggle.setAttribute("aria-label", visible ? "Hide left panel" : "Show left panel");
+  toggle.title = toggle.getAttribute("aria-label");
+}
 const REGIONS = {
   left: { box: () => $("left"), tabs: () => $("left-tabs") },
   right: { box: () => $("side"), tabs: () => $("side-tabs") },
@@ -1322,8 +1353,7 @@ function applyLayout(given) {
   side.title = sideLabel;
   // One left panel needs no tabs; an empty left column is not shown.
   $("left-tabs").hidden = layout.left.length < 2;
-  $("left").hidden = layout.left.length === 0;
-  $("sessions-splitter").hidden = layout.left.length === 0;
+  setLeftOpen(layout.leftOpen);
   if (layout.right.length === 0) {
     $("side").hidden = true;
     side.setAttribute("aria-expanded", "false");
@@ -1372,7 +1402,7 @@ async function reloadLayout() {
   const right = regionView("right");
   const left = regionView("left");
   await loadLayout();
-  if (left && layout.left.includes(left)) showPanel(left);
+  if (left && layout.left.includes(left)) selectTab("left", left);
   if (open) {
     const view = layout.right.includes(right) ? right : preferredSideView();
     if (view) showPanel(view);
@@ -1393,6 +1423,7 @@ function preferredSideView() {
 function showPanel(view) {
   const region = panelRegion(view);
   if (!region) return;
+  if (region === "left") setLeftOpen(true);
   if (region === "right") {
     $("side").hidden = false;
     $("toggle-side").setAttribute("aria-expanded", "true");
@@ -3893,6 +3924,7 @@ async function start() {
     if (sessionMenu.open && !sessionMenu.contains(event.target)) sessionMenu.open = false;
   });
   $("toggle-side").addEventListener("click", toggleRight);
+  $("toggle-left").addEventListener("click", () => setLeftOpen(!layout.leftOpen));
   $("status-agent").addEventListener("click", showPlugins);
   $("side-close").addEventListener("click", hideSide);
   $("notice-close").addEventListener("click", () => showNotice(""));

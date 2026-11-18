@@ -3327,6 +3327,77 @@ async fn composer_recovers_focus_and_preserves_ime_confirmation() {
 }
 
 #[tokio::test]
+async fn left_panel_and_transcript_entries_collapse_independently() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-collapse").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-collapse");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("connected", "connected() && layout.left.length > 0")
+        .await;
+    page.eval("window.originalConversationWidth = document.querySelector('.conversation').clientWidth; byId('toggle-left').click(); true").await;
+    assert_eq!(page.eval("byId('left').hidden && byId('sessions-splitter').hidden && byId('toggle-left').getAttribute('aria-expanded') === 'false' && document.querySelector('.conversation').clientWidth > originalConversationWidth").await, true);
+    page.eval("reloadLayout().then(() => true)").await;
+    assert_eq!(page.eval("byId('left').hidden").await, true);
+    page.eval("byId('toggle-left').click(); byId('new-session').click(); true")
+        .await;
+    page.wait("session", "!!state.current && !byId('input').disabled")
+        .await;
+    page.send_message("hello").await;
+    page.wait("completed entries", "idle() && entries().length >= 4")
+        .await;
+    assert_eq!(page.eval("entries().filter(e => e.classList.contains('collapsed')).length === 1 && entries().find(e => e.classList.contains('collapsed')).querySelector('.meta span').textContent.startsWith('tool call')").await, true);
+    page.eval("entries().find(e => e.classList.contains('collapsed')).querySelector('.entry-toggle').click(); true").await;
+    page.eval("loadTranscript().then(() => true)").await;
+    assert_eq!(
+        page.eval("entries().every(e => !e.classList.contains('collapsed'))")
+            .await,
+        true
+    );
+    page.eval("entries()[0].querySelector('.entry-toggle').click(); true")
+        .await;
+    assert_eq!(page.eval("!shown(entries()[0].querySelector('pre')) && entries()[0].querySelector('.entry-toggle').getAttribute('aria-expanded') === 'false' && entries().slice(1).every(e => !e.classList.contains('collapsed'))").await, true);
+    page.eval("loadTranscript().then(() => true)").await;
+    assert_eq!(
+        page.eval("entries()[0].classList.contains('collapsed')")
+            .await,
+        true
+    );
+    page.eval("entries().forEach(e => { if (!e.classList.contains('collapsed')) e.querySelector('.entry-toggle').click(); }); true").await;
+    assert_eq!(page.eval("entries().every(e => [...e.children].filter(c => !c.classList.contains('meta')).every(c => !shown(c)))").await, true);
+    page.eval("entries()[0].querySelector('.entry-toggle').focus(); true")
+        .await;
+    page.call("Input.dispatchKeyEvent", json!({"type":"keyDown", "key":"Enter", "code":"Enter", "windowsVirtualKeyCode":13, "text":"\r"})).await;
+    page.call(
+        "Input.dispatchKeyEvent",
+        json!({"type":"keyUp", "key":"Enter", "code":"Enter", "windowsVirtualKeyCode":13}),
+    )
+    .await;
+    assert_eq!(page.eval("shown(entries()[0].querySelector('pre')) && entries().slice(1).every(e => e.classList.contains('collapsed'))").await, true);
+    page.call(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":500,"height":800,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .await;
+    assert_eq!(
+        page.eval("shown(byId('left')) && document.documentElement.scrollWidth <= innerWidth")
+            .await,
+        true
+    );
+    page.eval("byId('toggle-left').click(); true").await;
+    assert_eq!(
+        page.eval("!shown(byId('left')) && shown(byId('input'))")
+            .await,
+        true
+    );
+    assert!(page.errors().is_empty(), "{:?}", page.errors());
+    web._kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn user_message_navigation_tracks_scroll_and_session_changes() {
     let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
         return;

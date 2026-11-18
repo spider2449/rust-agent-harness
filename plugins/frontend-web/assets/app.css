@@ -441,6 +441,9 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .notice button.icon { border: none; color: inherit; flex: none; }
 .transcript { flex: 1; list-style: none; margin: 0; padding: 1.428571rem var(--conversation-gutter); overflow-y: auto; display: flex; flex-direction: column; gap: 0.857143rem; }
 .entry { padding: 0.857143rem 1rem; border-radius: 0.857143rem; background: var(--panel); border: 1px solid var(--line); position: relative; }
+.entry.collapsed > :not(.meta) { display: none; }
+.entry .entry-toggle::before { content: "▾ "; }
+.entry.collapsed .entry-toggle::before { content: "▸ "; }
 .entry.user {
   align-self: flex-end; width: fit-content; min-width: min(20rem, 100%);
   max-width: max(88%, min(20rem, 100%)); background: var(--user);
@@ -689,7 +692,7 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 .approval .buttons { display: flex; gap: 0.571429rem; justify-content: flex-end; margin-top: 0.571429rem; }
 
 @media (max-width: 54.285714rem) {
-  .sidebar { display: none; }
+  .sidebar { position: fixed; inset: var(--header-height) auto 0 0; max-width: 85vw; z-index: 6; background: var(--panel); }
   .side { position: fixed; inset: var(--header-height) 0 0 0; width: auto; max-width: none; min-width: 0; z-index: 5; }
   .tree-pane { width: 40%; min-width: 0; }
   .resizer, #sessions-splitter, #tree-splitter { display: none; }
