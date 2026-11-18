@@ -34,6 +34,9 @@ enum Mode {
     Silent,
     /// Publishes a stale version first, then two partial results.
     Staged,
+    Indexing,
+    IndexingForever,
+    Streaming,
     /// Ends the connection when it is asked to initialize.
     Crash,
     /// Leaves initialize unanswered so the UI can observe startup/cancellation.
@@ -273,6 +276,22 @@ async fn serve(
                             tokio::time::sleep(Duration::from_millis(60)).await;
                             send(&mut output, publish(version, all)).await;
                         }
+                        Mode::Indexing | Mode::IndexingForever => {
+                            for token in [json!(1), json!("check")] {
+                                send(&mut output, json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":token,"value":{"kind":"begin","title":"Indexing"}}})).await;
+                            }
+                            send(&mut output, publish(version.clone(), vec![])).await;
+                            send(&mut output, json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":1,"value":{"kind":"end"}}})).await;
+                            if seen.mode == Mode::Indexing {
+                                tokio::time::sleep(Duration::from_millis(600)).await;
+                                send(&mut output, publish(version, diagnose(&text))).await;
+                                send(&mut output, json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"check","value":{"kind":"end"}}})).await;
+                            }
+                        }
+                        Mode::Streaming => loop {
+                            send(&mut output, publish(version.clone(), diagnose(&text))).await;
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                        },
                     }
                 }
                 _ => {}
@@ -751,6 +770,27 @@ async fn a_server_that_stays_silent_is_reported_not_waited_on() {
         "{text}"
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn initial_empty_publication_waits_for_all_indexing_tasks() {
+    let fixture = mount(Mode::Indexing, json!({})).await;
+    fixture.write("src/a.rs", "ERROR\n");
+    let text = appended(&fixture.created("src/a.rs").await).unwrap();
+    assert!(text.contains("bad ERROR token"), "{text}");
+}
+
+#[tokio::test]
+async fn busy_or_continuously_publishing_servers_respect_the_deadline() {
+    for mode in [Mode::IndexingForever, Mode::Streaming] {
+        let fixture = mount(mode, json!({"wait_ms": 400})).await;
+        fixture.write("src/a.rs", "ERROR\n");
+        let completion = tokio::time::timeout(Duration::from_secs(2), fixture.created("src/a.rs"))
+            .await
+            .expect("check must remain bounded");
+        let text = appended(&completion).unwrap();
+        assert!(text.contains("did not report within 400 ms"), "{text}");
+    }
 }
 
 #[tokio::test]

@@ -1,10 +1,10 @@
 //! A small Language Server Protocol client: JSON-RPC 2.0 over stdio with
 //! `Content-Length` framing. One actor task, owned by the plugin scope, holds
 //! the pipes and the process handle; dropping it terminates the server. The
-//! client only follows `textDocument/publishDiagnostics`.
+//! client follows diagnostic publications and work-progress notifications.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -110,6 +110,7 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct Shared {
     entries: Mutex<HashMap<String, Entry>>,
+    progress: Mutex<HashSet<String>>,
     /// The version last sent for each open document.
     versions: Mutex<HashMap<String, i64>>,
     publications: watch::Sender<u64>,
@@ -153,6 +154,36 @@ pub(crate) fn uri_key(uri: &str) -> String {
 }
 
 impl Shared {
+    pub fn busy(&self) -> bool {
+        !self
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+
+    fn progress(&self, params: &Value) {
+        let Some(token) = params
+            .get("token")
+            .filter(|token| token.is_string() || token.is_number())
+        else {
+            return;
+        };
+        let token = token.to_string();
+        let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+        match params["value"]["kind"].as_str() {
+            Some("begin") => {
+                progress.insert(token);
+            }
+            Some("end") => {
+                progress.remove(&token);
+            }
+            _ => return,
+        }
+        drop(progress);
+        self.publications.send_modify(|count| *count += 1);
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -416,6 +447,12 @@ fn classify(body: &[u8], shared: &Shared, root_uri: &str) -> Result<Incoming, Ls
                 "error": { "code": -32601, "message": "method not supported by RAH" }
             }),
         })),
+        (Some("$/progress"), None) => {
+            if let Some(params) = params {
+                shared.progress(params);
+            }
+            Ok(Incoming::Handled)
+        }
         (Some("textDocument/publishDiagnostics"), None) => {
             if let Some((uri, version, diagnostics)) = params.and_then(parse_publication) {
                 shared.publish(uri, version, diagnostics);

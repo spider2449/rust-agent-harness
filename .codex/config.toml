@@ -1,0 +1,8 @@
+# Local Rust LSP bridge for this checkout. Adjust paths if the checkout moves.
+[mcp_servers.rah_rust_lsp]
+command = 'C:\Users\spider.tp\.local\bin\python.exe'
+args = ['-B', 'D:\spider\working\rust-agent-harness\scripts\lsp_mcp.py', '--root', 'D:\spider\working\rust-agent-harness', '--server', 'D:\spider\working\rust-agent-harness\.rah\lsp-runtime\rust-analyzer.exe']
+cwd = 'D:\spider\working\rust-agent-harness'
+startup_timeout_sec = 10
+tool_timeout_sec = 90
+enabled_tools = ['rust_lsp']

@@ -24,7 +24,8 @@ use crate::{
 /// How long a server that could not start or ended is left alone.
 const RETRY_AFTER: Duration = Duration::from_secs(300);
 /// After a publication, how long to wait for the next one before the
-/// diagnostics are taken as complete (servers publish in several steps).
+/// diagnostics settle, provided no server work is active. This is a heuristic,
+/// not proof that a server has completed every possible project check.
 const SETTLE: Duration = Duration::from_millis(250);
 
 /// Servers that are tried when installed.
@@ -75,7 +76,7 @@ struct Connection {
 /// The outcome of one check.
 pub(crate) enum Checked {
     Diagnostics(Vec<Diagnostic>),
-    /// The server published nothing for the file in time.
+    /// The server did not produce a settled result before the deadline.
     NoReport,
 }
 
@@ -266,7 +267,7 @@ impl Servers {
                 if diagnostics.is_empty() { Phase::Reported } else { Phase::Issues },
                 &format!("{}: {} diagnostic(s) in the latest publication. This is not a project-wide check.", file.file_name().unwrap_or_default().to_string_lossy(), diagnostics.len()),
             ),
-            Ok(Checked::NoReport) => activity.finish(Phase::Timeout, &format!("No diagnostic publication within {} ms; result unknown.", wait.as_millis())),
+            Ok(Checked::NoReport) => activity.finish(Phase::Timeout, &format!("No settled diagnostic result within {} ms; result unknown.", wait.as_millis())),
             Err(error) => activity.finish(Phase::Failed, error),
         }
         result
@@ -325,21 +326,31 @@ impl Servers {
             .map_err(|error| error.to_string())?;
 
         let deadline = tokio::time::Instant::now() + wait;
-        while shared.generation(&uri) == baseline {
-            if tokio::time::timeout_at(deadline, publications.changed())
-                .await
-                .is_err()
-                || connection.client.is_closed()
-            {
+        loop {
+            if connection.client.is_closed() {
                 return Ok(Checked::NoReport);
             }
+            let reported = shared.generation(&uri) != baseline;
+            let ready = reported && !shared.busy();
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(Checked::NoReport);
+            }
+            let settled = now + SETTLE;
+            let wake = if ready {
+                settled.min(deadline)
+            } else {
+                deadline
+            };
+            match tokio::time::timeout_at(wake, publications.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => return Ok(Checked::NoReport),
+                Err(_) if ready && settled <= deadline && !shared.busy() => {
+                    return Ok(Checked::Diagnostics(shared.diagnostics(&uri)));
+                }
+                Err(_) => return Ok(Checked::NoReport),
+            }
         }
-        // Take the last of a burst of publications.
-        while tokio::time::timeout(SETTLE, publications.changed())
-            .await
-            .is_ok_and(|changed| changed.is_ok())
-        {}
-        Ok(Checked::Diagnostics(shared.diagnostics(&uri)))
     }
 
     async fn connection(&self, server: &Server) -> Result<Arc<Connection>, String> {

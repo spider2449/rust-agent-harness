@@ -72,15 +72,80 @@ activation and project dependency requirements. Official upstream references:
   in direct protocol smoke checks using bundled programs and a PATH without
   host development tools. Rust used a detached syntax-error fixture.
 - The rebuilt RAH binary with a mock model appended TS, Python and C++ errors
-  after actual file writes. Rust through RAH has an unresolved initial-result
-  issue described in [known issues](KNOWN_ISSUES.md); direct protocol success
+  after actual file writes. Rust's initial-result issue at that time is
+  addressed by the 2026-11-18 follow-up below; direct protocol success alone
   must not be presented as full Rust integration verification.
 - No physical network disconnection or OS network-denial test was performed.
   Preparation supports verified cache-only operation; packaging itself is not
   network isolation. No kernel, service contract, protocol, or ADR changed.
 
-Next task: resolve Rust initial diagnostics before relying on this feature as
-a Rust verification gate.
+## Rust first-result follow-up (2026-11-18)
+
+The client now tracks LSP work-progress tokens and waits for all active work
+to finish before settling a publication. Indexing/checking can initially publish
+an empty list; 250 ms of silence while work is active is not completion.
+The total publication wait, including settling, is bounded by `wait_ms`.
+Incomplete work or a disconnected server returns an unknown result.
+
+The opt-in integration test uses the real sandbox-process and LSP plugins,
+a temporary dependency-free Cargo project and the prepared rust-analyzer.
+It verified E0308 on the first write and no errors after correction:
+
+```powershell
+cargo test --offline -p rah-cli --test lsp_runtime -- --ignored --nocapture
+```
+
+This needs a local toolchain and uses a 30-second wait. It does not establish
+arbitrary-project completeness or detached-file support. Use `cargo check`
+when a project compilation result is required. No API, kernel, protocol,
+ADR or crate dependency changed.
+
+## Local Codex Rust LSP queries
+
+`scripts/lsp_mcp.py` exposes `rust_lsp` over MCP stdio with diagnostics, hover,
+definition, references and symbols operations. It uses Python's standard
+library and the prepared rust-analyzer. No additional package installation
+is needed. Paths must resolve to Rust files within the configured workspace;
+positions are zero-based UTF-16 offsets. It does not edit source files.
+Cargo runs offline with build scripts and proc macros disabled; language
+server indexing/cache writes are possible. This is not OS isolation.
+
+The checkout's `.codex/config.toml` registers `rah_rust_lsp` using absolute
+local paths. Adjust them when moving the checkout or using another machine.
+`codex mcp get rah_rust_lsp` verifies that Codex reads the entry. Restart the
+MCP connection in the desktop client's MCP settings, then inspect `/mcp`.
+An existing conversation's tool catalog may still require a new conversation;
+configuration acceptance alone does not prove exposure in that conversation.
+See the [official MCP setup guide](https://learn.chatgpt.com/docs/extend/mcp).
+
+```powershell
+python -B -m unittest discover -s scripts -p test_lsp_mcp.py -v
+$env:RAH_TEST_LSP = (Resolve-Path '.rah/lsp-runtime/rust-analyzer.exe').Path
+python -B -m unittest discover -s scripts -p test_lsp_mcp.py -v
+```
+
+The opt-in test verifies real diagnostics, correction, navigation queries and
+normal shutdown. Requests are serialized and bounded; cancellation or client
+disconnect interrupts server waits and closes the process. Do not treat an
+empty publication as proof of compilation.
+
+Navigation follow-up (2026-11-18): navigation no longer waits for diagnostic
+publications or sends save notifications. Unchanged files keep their current
+document version; changed files are synchronized before the request. Initial
+semantic queries wait for rust-analyzer's
+[server readiness notification](https://rust-analyzer.github.io/book/contributing/lsp-extensions.html#server-status),
+avoiding empty hover results while project metadata is loading. Requests and
+event draining retain their deadlines even under continuous notifications.
+Diagnostics retain their separate publication/progress wait.
+
+All nine bridge tests passed with `RAH_TEST_LSP` set, including a fresh MCP
+stdio connection to this repository: eight consecutive symbols/hover/definition/
+references queries passed, with about 7.2 seconds for initial readiness and
+0–16 ms for subsequent calls in this run. The tests also cover no diagnostic
+publications during navigation, document changes, cancellation and deadlines.
+This closes the local MCP navigation-timeout entry in `KNOWN_ISSUES.md`.
+Restart the existing `rah_rust_lsp` MCP connection to load the changed script;
+testing a fresh subprocess does not update a running desktop connection.
 
 ## Update an installed copy
 
