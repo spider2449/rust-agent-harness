@@ -30,7 +30,6 @@ mod agents;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    str::FromStr,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -74,7 +73,7 @@ struct ConfiguredJob {
     #[serde(default)]
     delay_secs: u64,
     every_secs: Option<u64>,
-    session: Option<String>,
+    session: Option<SessionId>,
 }
 
 #[derive(Default, Deserialize)]
@@ -88,6 +87,32 @@ struct Config {
     jobs: Vec<ConfiguredJob>,
 }
 
+impl ConfiguredJob {
+    fn into_spec(self) -> JobSpec {
+        JobSpec {
+            input: self.input,
+            session: self.session,
+            delay: Duration::from_secs(self.delay_secs),
+            every: self.every_secs.map(Duration::from_secs),
+        }
+    }
+}
+
+fn validate_job(spec: &JobSpec) -> Result<(), SchedulerError> {
+    if spec.input.trim().is_empty() {
+        return Err(SchedulerError::Invalid("the input is empty".into()));
+    }
+    if spec
+        .every
+        .is_some_and(|every| every < Duration::from_secs(1))
+    {
+        return Err(SchedulerError::Invalid(
+            "`every` must be at least one second".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Plugin for SchedulerPlugin {
     fn manifest(&self) -> &PluginManifest {
@@ -95,7 +120,16 @@ impl Plugin for SchedulerPlugin {
     }
 
     fn check_config(&self, config: &serde_json::Value) -> Result<(), PluginError> {
-        rah_api::config::parse::<Config>(config)?;
+        let config: Config = rah_api::config::parse(config)?;
+        if config
+            .max_concurrent
+            .is_some_and(|limit| limit > Semaphore::MAX_PERMITS)
+        {
+            return Err("max_concurrent exceeds the semaphore limit".into());
+        }
+        for job in config.jobs {
+            validate_job(&job.into_spec()).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
@@ -108,19 +142,8 @@ impl Plugin for SchedulerPlugin {
             permits: Arc::new(Semaphore::new(config.max_concurrent.unwrap_or(2).max(1))),
         });
         for job in config.jobs {
-            let session = job
-                .session
-                .map(|id| {
-                    SessionId::from_str(&id).map_err(|_| format!("`{id}` is not a session id"))
-                })
-                .transpose()?;
             scheduler
-                .submit(JobSpec {
-                    input: job.input,
-                    session,
-                    delay: Duration::from_secs(job.delay_secs),
-                    every: job.every_secs.map(Duration::from_secs),
-                })
+                .submit(job.into_spec())
                 .map_err(|error| error.to_string())?;
         }
         scope.provide(SCHEDULER, scheduler as Arc<dyn Scheduler>)?;
@@ -271,17 +294,7 @@ async fn drive(
 
 impl Scheduler for BasicScheduler {
     fn submit(&self, spec: JobSpec) -> Result<JobInfo, SchedulerError> {
-        if spec.input.trim().is_empty() {
-            return Err(SchedulerError::Invalid("the input is empty".into()));
-        }
-        if spec
-            .every
-            .is_some_and(|every| every < Duration::from_secs(1))
-        {
-            return Err(SchedulerError::Invalid(
-                "`every` must be at least one second".into(),
-            ));
-        }
+        validate_job(&spec)?;
         let info = JobInfo {
             id: uuid::Uuid::new_v4().simple().to_string(),
             spec: spec.clone(),
@@ -449,12 +462,9 @@ impl Tool for Delegate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(child.clone(), depth + 1);
-        let run = run_turn(
-            &self.kernel,
-            Some(child.clone()),
-            task,
-            cx.cancel.child_token(),
-        );
+        let cancel = cx.cancel.child_token();
+        let _cancel_on_exit = cancel.clone().drop_guard();
+        let run = run_turn(&self.kernel, Some(child.clone()), task, cancel);
         let result = tokio::time::timeout(self.timeout, run).await.map_err(|_| {
             ToolError::Execution(format!("the subagent in session {child} timed out"))
         })?;

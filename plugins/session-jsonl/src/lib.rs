@@ -107,6 +107,17 @@ struct Parsed {
     torn_at: Option<u64>,
 }
 
+struct History {
+    info: SessionInfo,
+    records: Vec<SessionRecord>,
+    depth: usize,
+}
+
+struct AppendCursor {
+    next: u64,
+    file_len: u64,
+}
+
 /// What `list` last read of one session, and the size and modification
 /// time of its file then.
 struct Listed {
@@ -118,8 +129,8 @@ struct Listed {
 /// them.
 pub struct JsonlSessions {
     dir: PathBuf,
-    /// Next sequence number per session, loaded lazily.
-    next_seq: Arc<Mutex<HashMap<SessionId, u64>>>,
+    /// Cached only while the file length still matches the last local append.
+    next_seq: Arc<Mutex<HashMap<SessionId, AppendCursor>>>,
     /// Sessions as last listed. A log only grows, so a file whose size and
     /// modification time are unchanged lists the same.
     listed: std::sync::Mutex<HashMap<SessionId, Listed>>,
@@ -186,21 +197,51 @@ impl JsonlSessions {
         decode(session, &bytes, modified)
     }
 
+    /// All writers sharing a directory serialize against this permanent sidecar.
+    /// Locking the sidecar leaves session files readable on Windows.
+    async fn writer_lock(&self) -> Result<std::fs::File, SessionError> {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.dir.join(".writer.lock"))
+            .await
+            .map_err(|e| SessionError::Io(e.to_string()))?
+            .into_std()
+            .await;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(SessionError::Io(e.to_string()));
+                }
+            }
+        }
+    }
+
     /// Runs `work` on a blocking thread with the lock held for all of it.
     /// The lock moves into the work, so a caller that is dropped (a
     /// cancelled turn) cannot release it while a line is still being
     /// written: the next operation always sees whole lines.
     async fn exclusive<T: Send + 'static>(
         &self,
-        work: impl FnOnce(&mut HashMap<SessionId, u64>, &Path) -> Result<T, SessionError>
+        work: impl FnOnce(&mut HashMap<SessionId, AppendCursor>, &Path) -> Result<T, SessionError>
         + Send
         + 'static,
     ) -> Result<T, SessionError> {
         let mut next = self.next_seq.clone().lock_owned().await;
         let dir = self.dir.clone();
-        tokio::task::spawn_blocking(move || work(&mut next, &dir))
-            .await
-            .map_err(|error| SessionError::Io(error.to_string()))?
+        let writer = self.writer_lock().await?;
+        tokio::task::spawn_blocking(move || {
+            let _writer = writer;
+            work(&mut next, &dir)
+        })
+        .await
+        .map_err(|error| SessionError::Io(error.to_string()))?
     }
 }
 
@@ -301,7 +342,7 @@ fn repair(dir: &Path, session: &SessionId) -> Result<Parsed, SessionError> {
 /// Appends one line and waits until it is on the disk, so a record that
 /// was acknowledged (a tool call about to run, its result) survives a power
 /// loss. Blocking: run inside [`JsonlSessions::exclusive`].
-fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<(), SessionError> {
+fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<u64, SessionError> {
     let mut text = serde_json::to_string(line).map_err(|e| SessionError::Io(e.to_string()))?;
     text.push('\n');
     let mut file = std::fs::OpenOptions::new()
@@ -310,23 +351,18 @@ fn write_line(dir: &Path, session: &SessionId, line: &Line) -> Result<(), Sessio
         .map_err(|_| SessionError::NotFound(session.clone()))?;
     std::io::Write::write_all(&mut file, text.as_bytes())
         .and_then(|()| file.sync_data())
+        .and_then(|()| file.metadata().map(|meta| meta.len()))
         .map_err(|e| SessionError::Io(e.to_string()))
 }
 
 impl JsonlSessions {
     /// Visible records, following fork parents.
-    async fn visible(&self, session: &SessionId) -> Result<Vec<SessionRecord>, SessionError> {
+    async fn history(&self, session: &SessionId) -> Result<History, SessionError> {
         let mut chain = Vec::new();
-        let mut current = session.clone();
+        let mut parsed = self.parse(session).await?;
+        let info = parsed.info.clone();
         let mut limit = None;
         loop {
-            if chain.len() >= MAX_FORK_DEPTH {
-                return Err(SessionError::Corrupt {
-                    session: session.clone(),
-                    detail: "fork chain is too deep".into(),
-                });
-            }
-            let parsed = self.parse(&current).await?;
             let mut own = parsed.records;
             if let Some(at) = limit {
                 own.retain(|r: &SessionRecord| r.seq <= at);
@@ -336,26 +372,36 @@ impl JsonlSessions {
             match parent {
                 Some(fork) => {
                     limit = Some(limit.map_or(fork.at, |l: u64| l.min(fork.at)));
-                    current = fork.session;
+                    // Older writers could publish one extra child at the limit.
+                    if chain.len() > MAX_FORK_DEPTH {
+                        return Err(SessionError::Corrupt {
+                            session: session.clone(),
+                            detail: "fork chain is too deep".into(),
+                        });
+                    }
+                    parsed = self.parse(&fork.session).await?;
                 }
                 None => break,
             }
         }
-        Ok(chain.into_iter().rev().flatten().collect())
+        let depth = chain.len();
+        Ok(History {
+            records: chain.into_iter().rev().flatten().collect(),
+            depth,
+            info,
+        })
     }
 
     /// Session info with the preview of its first user message.
     async fn described(&self, session: &SessionId) -> Result<SessionInfo, SessionError> {
-        let mut info = self.parse(session).await?.info;
-        info.preview = self
-            .visible(session)
-            .await?
-            .iter()
-            .find_map(|record| match &record.entry {
-                SessionEntry::TurnStarted { input, .. } => normalize_title(input)
-                    .map(|line| line.chars().take(PREVIEW_CHARS).collect::<String>()),
-                _ => None,
-            });
+        let History {
+            mut info, records, ..
+        } = self.history(session).await?;
+        info.preview = records.iter().find_map(|record| match &record.entry {
+            SessionEntry::TurnStarted { input, .. } => normalize_title(input)
+                .map(|line| line.chars().take(PREVIEW_CHARS).collect::<String>()),
+            _ => None,
+        });
         Ok(info)
     }
 
@@ -434,10 +480,10 @@ fn new_info(parent: Option<ForkPoint>, workspace: Option<String>) -> SessionInfo
 #[async_trait]
 impl SessionLog for JsonlSessions {
     async fn create(&self) -> Result<SessionInfo, SessionError> {
-        let mut next = self.next_seq.lock().await;
+        let _guard = self.next_seq.lock().await;
+        let _writer = self.writer_lock().await?;
         let info = new_info(None, self.current_workspace());
         self.write_new(&info).await?;
-        next.insert(info.id.clone(), 1);
         Ok(info)
     }
 
@@ -449,8 +495,11 @@ impl SessionLog for JsonlSessions {
                 // Forgotten until the line is written: after a failed write
                 // the next append reads the log again and removes any torn
                 // tail.
-                let seq = match next.remove(&id) {
-                    Some(seq) => seq,
+                let cached = next.remove(&id).filter(|cursor| {
+                    std::fs::metadata(path_in(dir, &id)).is_ok_and(|m| m.len() == cursor.file_len)
+                });
+                let seq = match cached {
+                    Some(cursor) => cursor.next,
                     None => {
                         let parsed = repair(dir, &id)?;
                         let last = parsed
@@ -462,8 +511,14 @@ impl SessionLog for JsonlSessions {
                         last + 1
                     }
                 };
-                write_line(dir, &id, &Line::Record { seq, entry: record })?;
-                next.insert(id, seq + 1);
+                let length = write_line(dir, &id, &Line::Record { seq, entry: record })?;
+                next.insert(
+                    id,
+                    AppendCursor {
+                        next: seq + 1,
+                        file_len: length,
+                    },
+                );
                 Ok(seq)
             })
             .await?;
@@ -479,16 +534,26 @@ impl SessionLog for JsonlSessions {
 
     async fn read(&self, session: &SessionId) -> Result<Vec<SessionRecord>, SessionError> {
         let _guard = self.next_seq.lock().await;
-        self.visible(session).await
+        Ok(self.history(session).await?.records)
+    }
+
+    async fn turn_history(
+        &self,
+        session: &SessionId,
+    ) -> Result<(Vec<SessionRecord>, Option<String>), SessionError> {
+        let _guard = self.next_seq.lock().await;
+        let history = self.history(session).await?;
+        Ok((history.records, history.info.workspace))
     }
 
     async fn fork(&self, session: &SessionId, at: u64) -> Result<SessionInfo, SessionError> {
-        let mut next = self.next_seq.lock().await;
-        let last = self
-            .visible(session)
-            .await?
-            .last()
-            .map_or(0, |record| record.seq);
+        let _guard = self.next_seq.lock().await;
+        let _writer = self.writer_lock().await?;
+        let history = self.history(session).await?;
+        if history.depth >= MAX_FORK_DEPTH {
+            return Err(SessionError::ForkDepthLimit(MAX_FORK_DEPTH));
+        }
+        let last = history.records.last().map_or(0, |record| record.seq);
         if at > last {
             return Err(SessionError::InvalidFork {
                 session: session.clone(),
@@ -497,16 +562,14 @@ impl SessionLog for JsonlSessions {
             });
         }
         // A fork continues the parent's work, in the parent's workspace.
-        let workspace = self.parse(session).await?.info.workspace;
         let info = new_info(
             Some(ForkPoint {
                 session: session.clone(),
                 at,
             }),
-            workspace.or_else(|| self.current_workspace()),
+            history.info.workspace.or_else(|| self.current_workspace()),
         );
         self.write_new(&info).await?;
-        next.insert(info.id.clone(), at + 1);
         Ok(info)
     }
 
@@ -589,6 +652,7 @@ impl SessionLog for JsonlSessions {
 
     async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
         let mut next = self.next_seq.lock().await;
+        let _writer = self.writer_lock().await?;
         let path = self.path(session);
         if !tokio::fs::try_exists(&path)
             .await
@@ -694,6 +758,57 @@ mod tests {
             (&info.id, Some("a"))
         );
         assert!(listed[0].updated >= info.created);
+    }
+
+    #[tokio::test]
+    async fn independent_writers_preserve_fork_boundaries() {
+        let dir = TempDir::new("writers");
+        let first = JsonlSessions::new(dir.0.clone());
+        let second = JsonlSessions::new(dir.0.clone());
+        let id = first.create().await.unwrap().id;
+        assert_eq!(first.append(&id, started("a")).await.unwrap(), 1);
+        assert_eq!(second.append(&id, started("b")).await.unwrap(), 2);
+        let fork = second.fork(&id, 2).await.unwrap().id;
+        let (left, right) = tokio::join!(
+            first.append(&id, started("c")),
+            second.append(&id, started("d"))
+        );
+        let mut assigned = [left.unwrap(), right.unwrap()];
+        assigned.sort();
+        assert_eq!(assigned, [3, 4]);
+        assert_eq!(
+            inputs(&first.read(&fork).await.unwrap()),
+            [(1, "a".into()), (2, "b".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_depth_is_checked_before_publishing_the_child() {
+        let dir = TempDir::new("depth");
+        let store = JsonlSessions::new(dir.0.clone());
+        let mut id = store.create().await.unwrap().id;
+        for _ in 1..MAX_FORK_DEPTH {
+            id = store.fork(&id, 0).await.unwrap().id;
+        }
+        assert!(store.read(&id).await.unwrap().is_empty());
+        assert_eq!(
+            store.fork(&id, 0).await,
+            Err(SessionError::ForkDepthLimit(MAX_FORK_DEPTH))
+        );
+        assert_eq!(store.ids().await.unwrap().len(), MAX_FORK_DEPTH);
+
+        // An older version accepted this child. Keep its history accessible.
+        let legacy = new_info(Some(ForkPoint { session: id, at: 0 }), None);
+        store.write_new(&legacy).await.unwrap();
+        assert_eq!(store.append(&legacy.id, started("saved")).await.unwrap(), 1);
+        assert_eq!(
+            inputs(&store.read(&legacy.id).await.unwrap()),
+            [(1, "saved".into())]
+        );
+        assert_eq!(
+            store.fork(&legacy.id, 1).await,
+            Err(SessionError::ForkDepthLimit(MAX_FORK_DEPTH))
+        );
     }
 
     #[tokio::test]

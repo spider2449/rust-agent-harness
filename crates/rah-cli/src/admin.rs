@@ -16,6 +16,7 @@ use rah_api::{
         ADMIN, AdminError, ConfigChange, ConfigKeyHelp, FeatureInfo, MountRequest, PluginAdmin,
         PluginInstance, Workspace,
     },
+    agent_loop::{WORKSPACE_TURNS, WorkspaceTurns},
     async_trait,
     tools::{TOOL_GUARD, TOOL_GUARD_SERVICE, ToolGuard},
 };
@@ -143,7 +144,7 @@ impl DistributionPlugin {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
             manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION"))
-                .provides(["admin", TOOL_GUARD_SERVICE]),
+                .provides(["admin", TOOL_GUARD_SERVICE, "workspace-turns"]),
             registry,
             data_home: None,
             file: None,
@@ -171,7 +172,13 @@ impl Plugin for DistributionPlugin {
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        let workspace = Arc::new(tokio::sync::RwLock::new(true));
+        scope.provide(
+            WORKSPACE_TURNS,
+            Arc::new(WorkspaceTurns::new(workspace.clone())),
+        )?;
         let admin = Admin {
+            workspace,
             kernel: scope.kernel(),
             registry: self.registry.clone(),
             own: scope.id().clone(),
@@ -186,6 +193,7 @@ impl Plugin for DistributionPlugin {
 }
 
 struct Admin {
+    workspace: Arc<tokio::sync::RwLock<bool>>,
     kernel: KernelHandle,
     registry: Arc<Registry>,
     own: PluginId,
@@ -466,6 +474,9 @@ impl PluginAdmin for Admin {
         if !canonical.is_dir() {
             return Err(failed(format!("`{}` is not a directory", root.display())));
         }
+        let mut consistent = self.workspace.try_write().map_err(|_| {
+            failed("a turn or workspace switch is running; try again when it finishes")
+        })?;
         let root = plain_path(canonical);
         let value = Value::String(root.display().to_string());
         // Every mounted instance of a workspace kind, sandbox first.
@@ -493,19 +504,31 @@ impl PluginAdmin for Admin {
         };
         // The running plugins move together or not at all: programs must
         // not run in one folder while the file tools work in another.
+        let previous = *consistent;
+        *consistent = false;
         let mut plugins = Vec::new();
         let mut moved: Vec<(&PluginId, &Value)> = Vec::new();
         for (id, record) in targets.iter().filter(|(_, record)| !record.stopped) {
-            match self.configure(id, rooted(&record.config)).await {
+            let configured = self.configure(id, rooted(&record.config)).await;
+            if configured.is_ok() {
+                moved.push((id, &record.config));
+            }
+            match configured.and_then(|status| match status {
+                PluginStatus::Failed { .. } => Err(failed(format!("{status:?}"))),
+                status => Ok(status),
+            }) {
                 Ok(status) => {
                     plugins.push((id.clone(), status));
-                    moved.push((id, &record.config));
                 }
                 Err(error) => {
                     let mut kept = true;
                     for (id, config) in moved.into_iter().rev() {
-                        kept &= self.configure(id, config.clone()).await.is_ok();
+                        kept &= self
+                            .configure(id, config.clone())
+                            .await
+                            .is_ok_and(|status| !matches!(status, PluginStatus::Failed { .. }));
                     }
+                    *consistent = previous && kept;
                     let outcome = if kept {
                         "the workspace was not changed"
                     } else {
@@ -521,6 +544,7 @@ impl PluginAdmin for Admin {
                 stored.config = rooted(&record.config);
             }
         }
+        *consistent = true;
         Ok(Workspace { root, plugins })
     }
 

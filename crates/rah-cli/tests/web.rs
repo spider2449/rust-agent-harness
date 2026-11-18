@@ -1096,9 +1096,10 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
         ["sandbox-process", "tools-builtin", "tools-repo-write"]
     );
 
-    // The same socket and session; tools now work in the other folder.
-    let (_, text) = run_turn(&mut socket, &session, "read note.txt", None).await;
-    assert_eq!(text, "[model-mock] fs.read returned: from the other folder");
+    // The socket stays connected, but the original session belongs to its old root.
+    let (terminal, text) = run_turn(&mut socket, &session, "read note.txt", None).await;
+    assert_eq!(terminal, "failed");
+    assert!(text.is_empty());
 
     // The memory notes are the new folder's own: a new session there sees
     // them (one system item before the message).
@@ -1118,6 +1119,10 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
         .to_owned();
     let (_, text) = run_turn(&mut socket, &fresh, "/notool hi", None).await;
     assert_eq!(text, "[model-mock] you said: hi (3 earlier items)");
+
+    let (terminal, text) = run_turn(&mut socket, &fresh, "read note.txt", None).await;
+    assert_eq!(terminal, "completed");
+    assert_eq!(text, "[model-mock] fs.read returned: from the other folder");
 
     let status_line = web.json(web.get("/api/status")).await;
     assert!(

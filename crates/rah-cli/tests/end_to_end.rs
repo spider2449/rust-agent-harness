@@ -623,3 +623,45 @@ async fn a_workspace_change_that_fails_moves_no_plugin() {
         json!(dir.workspace().display().to_string())
     );
 }
+
+#[tokio::test]
+async fn a_delegate_timeout_withdraws_the_childs_pending_approval() {
+    use std::time::Duration;
+    let dir = TempDir::new("delegate-deadline");
+    let mut distribution = headless(&dir);
+    distribution.set_config("scheduler-basic", "delegate_timeout_secs", json!(2));
+    distribution.set_config(
+        "policy-authority",
+        "decisions",
+        json!({"repo.create-file":"ask","agent.delegate":"allow"}),
+    );
+    let kernel = kernel(&distribution).await;
+    let handle = kernel.handle();
+    let (prompts, mut requests) = tokio::sync::mpsc::channel(1);
+    kernel
+        .mount(
+            Arc::new(Approver {
+                manifest: PluginManifest::new("approver", "1"),
+                prompts,
+            }),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let parent = new_session(&handle).await;
+    let nested = json!({"task": r#"/call repo.create-file {"path":"late.txt","content":"late"}"#});
+    let input = format!("/call agent.delegate {nested}");
+    let run = turn(&handle, &parent, &input);
+    let observe = async {
+        let (_, mut reply) = requests.recv().await.unwrap();
+        reply.closed().await;
+        assert!(reply.send(true).is_err());
+    };
+    let (events, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(run, observe)
+    })
+    .await
+    .unwrap();
+    assert!(reply(&events).contains("timed out"), "{events:?}");
+    assert!(!dir.workspace().join("late.txt").exists());
+}

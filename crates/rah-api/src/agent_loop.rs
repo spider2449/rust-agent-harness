@@ -6,11 +6,72 @@ use std::{
 };
 
 use futures::stream::BoxStream;
-use rah_kernel::ServiceKey;
-use rah_protocol::{AgentEvent, SessionId};
+use rah_kernel::{KernelHandle, ServiceKey};
+use rah_protocol::{AgentEvent, SessionId, SessionRecord};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub const LOOP: ServiceKey<dyn AgentLoop> = ServiceKey::new("loop");
+
+/// The distribution holds the write guard while moving workspace plugins. The
+/// value is true while their roots are consistent. Loops keep a read guard
+/// throughout each turn, including model hooks, approvals and tool calls.
+pub const WORKSPACE_TURNS: ServiceKey<WorkspaceTurns> = ServiceKey::new("workspace-turns");
+
+pub struct WorkspaceTurns(Arc<RwLock<bool>>);
+
+impl WorkspaceTurns {
+    /// The host owns the write side and provides this read side to loops.
+    pub fn new(consistent: Arc<RwLock<bool>>) -> Self {
+        Self(consistent)
+    }
+}
+
+/// Keep this history alive until the turn ends to pin the workspace.
+pub struct TurnHistory {
+    pub records: Vec<SessionRecord>,
+    _lease: Option<OwnedRwLockReadGuard<bool>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenTurnError {
+    #[error(transparent)]
+    Session(#[from] crate::session::SessionError),
+    #[error("the workspace is changing; retry the turn")]
+    Switching,
+    #[error("the workspace switch was incomplete; select the workspace again")]
+    IncompleteSwitch,
+    #[error("select this session's workspace before starting a turn: {0}")]
+    WrongWorkspace(String),
+}
+
+pub async fn open_turn_history(
+    kernel: &KernelHandle,
+    sessions: &dyn crate::session::SessionLog,
+    id: &SessionId,
+) -> Result<TurnHistory, OpenTurnError> {
+    let lease = kernel
+        .get(WORKSPACE_TURNS)
+        .map(|workspace| workspace.0.clone().try_read_owned())
+        .transpose()
+        .map_err(|_| OpenTurnError::Switching)?;
+    if lease.as_deref() == Some(&false) {
+        return Err(OpenTurnError::IncompleteSwitch);
+    }
+    let (records, workspace) = sessions.turn_history(id).await?;
+    if let Some(expected) = workspace {
+        let active = kernel
+            .get(crate::sandbox::SANDBOX)
+            .and_then(|sandbox| sandbox.root());
+        if active.as_deref() != Some(std::path::Path::new(&expected)) {
+            return Err(OpenTurnError::WrongWorkspace(expected));
+        }
+    }
+    Ok(TurnHistory {
+        records,
+        _lease: lease,
+    })
+}
 
 /// Events of one turn. The stream ends after exactly one terminal event:
 /// `Completed`, `Failed` or `Cancelled`.
@@ -26,6 +87,7 @@ pub struct TurnRequest {
 pub trait AgentLoop: Send + Sync {
     /// Starts a turn. Loops must route every tool call through
     /// [`crate::tools::ToolInvoker`] and record the turn in the session log.
+    /// Hold the history from [`open_turn_history`] while running the turn.
     /// A session runs one turn at a time (see [`RunningTurns`]): a second
     /// one ends at once with `Failed` and records nothing.
     fn run_turn(&self, request: TurnRequest) -> TurnStream;

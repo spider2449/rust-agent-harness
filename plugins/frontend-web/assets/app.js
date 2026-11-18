@@ -955,7 +955,8 @@ async function startTurn(input) {
   if (!input || !state.current || state.running || state.starting) return false;
   state.starting = true;
   try {
-    // Another tab may have moved the workspace since the session was opened.
+    // Refresh the active root before comparing it with the session.
+    await loadStatus();
     if (!(await ensureWorkspace(currentInfo()))) return false;
     if (!send({ type: "turn", session: state.current, input })) return false;
     clearInfo();

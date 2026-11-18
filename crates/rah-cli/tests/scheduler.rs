@@ -225,3 +225,37 @@ async fn a_named_subagent_starts_from_its_instructions() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn invalid_job_updates_preserve_the_running_scheduler_and_jobs() {
+    let dir = TempDir::new("scheduler-invalid-update");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let admin = handle.get(rah_api::admin::ADMIN).unwrap();
+    let scheduler = handle.get(SCHEDULER).unwrap();
+    let job = scheduler
+        .submit(JobSpec {
+            input: "later".into(),
+            session: None,
+            delay: Duration::from_secs(3600),
+            every: None,
+        })
+        .unwrap();
+    for invalid in [
+        json!({"input":"  "}),
+        json!({"input":"x","every_secs":0}),
+        json!({"input":"x","session":"invalid"}),
+    ] {
+        assert!(
+            admin
+                .configure(&"scheduler-basic".into(), json!({"jobs":[invalid]}))
+                .await
+                .is_err()
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &scheduler,
+            &handle.get(SCHEDULER).unwrap()
+        ));
+        assert_eq!(scheduler.list().as_slice(), std::slice::from_ref(&job));
+    }
+}

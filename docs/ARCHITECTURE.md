@@ -76,11 +76,22 @@ frontend --TurnRequest--> loop
   every AgentEvent -> EventBus -> session log (append-only), frontend, telemetry
 ```
 
+Both standard loops hold a `workspace-turns` read guard from opening the
+session history through completion. The distribution takes the write guard
+when switching workspace plugins. A switch during a turn is refused. A turn
+for a session with a recorded workspace requires that workspace to be active.
+Older sessions without a recorded workspace use the active workspace.
+
 ### Session log
 
 Sessions are append-only JSONL with `resume`, `fork(at)` and `replay`. Replay
 re-reads entries and never re-executes tool calls. Tool results carry
 `effect: none | completed | uncertain`.
+
+`session-jsonl` serializes writers sharing a directory with an OS file lock
+on `.writer.lock`. Sequence caches are valid only at the file length where
+they were recorded. A new fork can have at most 64 sessions in its ancestry
+including itself. Older logs with one additional level remain readable.
 
 A session also has metadata: a title (`rename`, stored as an appended
 metadata line, last one wins; records are never rewritten), its last change

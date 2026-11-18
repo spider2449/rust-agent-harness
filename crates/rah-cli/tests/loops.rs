@@ -256,7 +256,7 @@ impl rah_api::Plugin for GateTool {
 /// `ToolStarted` arrives while the tool runs, not after it returned: the
 /// gate opens only once the event was seen.
 #[tokio::test]
-async fn tool_started_is_sent_while_the_tool_runs_in_both_loops() {
+async fn both_loops_pin_the_workspace_while_a_tool_runs() {
     use futures::StreamExt;
     use rah_api::agent_loop::{LOOP, TurnRequest};
 
@@ -282,15 +282,21 @@ async fn tool_started_is_sent_while_the_tool_runs_in_both_loops() {
         let handle = kernel.handle();
         let session = new_session(&handle).await;
         let mut events = handle.get(LOOP).unwrap().run_turn(TurnRequest {
-            session,
+            session: session.clone(),
             input: "/call gate {}".into(),
             cancel: rah_api::CancellationToken::new(),
         });
+        let other = dir.0.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let admin = handle.get(ADMIN).unwrap();
         let mut seen = Vec::new();
         let run = async {
             while let Some(event) = events.next().await {
                 match &event {
-                    AgentEvent::ToolStarted { .. } => open.notify_one(),
+                    AgentEvent::ToolStarted { .. } => {
+                        assert!(admin.set_workspace(&other).await.is_err());
+                        open.notify_one();
+                    }
                     AgentEvent::ToolFinished { output, .. } => {
                         assert!(!output.is_error, "{output:?}");
                     }
@@ -305,5 +311,17 @@ async fn tool_started_is_sent_while_the_tool_runs_in_both_loops() {
         let kinds = kinds(&seen);
         assert!(kinds.contains(&"tool-started"), "{loop_kind}: {kinds:?}");
         assert_eq!(kinds.last(), Some(&"completed"), "{loop_kind}: {kinds:?}");
+        admin.set_workspace(&other).await.unwrap();
+        let before = entries(&handle, &session).await;
+        let refused = turn(&handle, &session, "/call fs.read {}").await;
+        assert!(
+            matches!(&refused[..], [AgentEvent::Failed { message, .. }] if message.contains("workspace"))
+        );
+        assert_eq!(entries(&handle, &session).await, before);
+        admin.set_workspace(&dir.workspace()).await.unwrap();
+        assert!(matches!(
+            turn(&handle, &session, "hello").await.last(),
+            Some(AgentEvent::Completed { .. })
+        ));
     }
 }

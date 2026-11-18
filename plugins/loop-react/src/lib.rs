@@ -56,7 +56,7 @@ impl ReactLoopPlugin {
             manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
                 .provides(["loop"])
                 .requires(["session"])
-                .optional(["model"]),
+                .optional(["model", "workspace-turns", "sandbox"]),
         }
     }
 }
@@ -208,11 +208,28 @@ impl Turn {
     }
 
     async fn run(self, input: String) {
+        let history = match rah_api::agent_loop::open_turn_history(
+            &self.kernel,
+            self.session.as_ref(),
+            &self.sid,
+        )
+        .await
+        {
+            Ok(opened) => opened,
+            Err(message) => {
+                self.emit(AgentEvent::Failed {
+                    session_id: self.sid.clone(),
+                    code: AgentErrorCode::Session,
+                    message: message.to_string(),
+                });
+                return;
+            }
+        };
         self.emit(AgentEvent::Started {
             session_id: self.sid.clone(),
             request_id: self.id.clone(),
         });
-        let outcome = self.drive(input).await;
+        let outcome = self.drive(input, &history.records).await;
         let sid = self.sid.clone();
         let terminal = match outcome {
             Ok(Ended::Completed(text)) => {
@@ -264,13 +281,12 @@ impl Turn {
         self.emit(terminal);
     }
 
-    async fn drive(&self, input: String) -> Result<Ended, Failure> {
-        let history = self
-            .session
-            .read(&self.sid)
-            .await
-            .map_err(|error| failure(AgentErrorCode::Session, error.to_string()))?;
-        let mut items = rebuild_context(&history);
+    async fn drive(
+        &self,
+        input: String,
+        history: &[rah_protocol::SessionRecord],
+    ) -> Result<Ended, Failure> {
+        let mut items = rebuild_context(history);
         self.append(SessionEntry::TurnStarted {
             turn: self.id.clone(),
             input: input.clone(),

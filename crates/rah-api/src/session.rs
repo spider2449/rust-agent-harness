@@ -20,6 +20,22 @@ pub trait SessionLog: Send + Sync {
     /// All records visible in a session, including a fork's parent prefix.
     async fn read(&self, session: &SessionId) -> Result<Vec<SessionRecord>, SessionError>;
 
+    /// History and recorded workspace for a turn. Older sessions can have no workspace.
+    async fn turn_history(
+        &self,
+        session: &SessionId,
+    ) -> Result<(Vec<SessionRecord>, Option<String>), SessionError> {
+        let history = self.read(session).await?;
+        let workspace = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|info| info.id == *session)
+            .ok_or_else(|| SessionError::NotFound(session.clone()))?
+            .workspace;
+        Ok((history, workspace))
+    }
+
     /// Creates a session continuing from `session` after record `at`.
     async fn fork(&self, session: &SessionId, at: u64) -> Result<SessionInfo, SessionError>;
 
@@ -83,6 +99,8 @@ pub enum SessionError {
         at: u64,
         last: u64,
     },
+    #[error("a fork chain can contain at most {0} sessions")]
+    ForkDepthLimit(usize),
     #[error("session `{session}` is corrupt: {detail}")]
     Corrupt { session: SessionId, detail: String },
     #[error("session storage failed: {0}")]
