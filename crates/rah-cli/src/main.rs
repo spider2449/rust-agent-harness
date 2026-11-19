@@ -19,6 +19,8 @@ use rah_cli::{
 };
 use serde_json::Value;
 
+mod skills;
+
 /// RAH: a plugin-kernel agent harness.
 ///
 /// Without a command, `rah` opens the terminal REPL. What runs comes from
@@ -70,6 +72,11 @@ enum Command {
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
+    },
+    /// Add or delete skills in the configured skills directory.
+    Skills {
+        #[command(subcommand)]
+        command: skills::SkillsCommand,
     },
     /// Show, check, write or edit the configuration file.
     Config {
@@ -256,7 +263,12 @@ fn frontend(
                 .retain(|spec| !is_model_kind(&spec.kind));
             Ok(true)
         }
-        Some(Command::Config { .. } | Command::Features | Command::Graphify { .. }) => Ok(false),
+        Some(
+            Command::Config { .. }
+            | Command::Features
+            | Command::Graphify { .. }
+            | Command::Skills { .. },
+        ) => Ok(false),
     }
 }
 
@@ -413,6 +425,15 @@ async fn run(cli: Cli) -> i32 {
     }
     let global = &cli.global;
     match &cli.command {
+        Some(Command::Skills { command }) => {
+            return match command.run(global).await {
+                Ok(message) => {
+                    println!("{message}");
+                    0
+                }
+                Err(error) => fail(error),
+            };
+        }
         Some(Command::Graphify {
             command:
                 GraphifyCommand::Install {

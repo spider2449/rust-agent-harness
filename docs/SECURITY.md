@@ -438,6 +438,12 @@ Behind the same token and checks, and likewise unreachable from tools:
   paths under `.rah/` for this reason (see below). A data directory with
   another name inside the workspace is not protected that way, and
   `shell.exec`, when mounted and approved, is not restricted either.
+- The authenticated skill package API downloads from GitHub only on a user's
+  preview or install request. Install pins the selected revision and publishes
+  the selected skill assets together. Package contents can steer the model.
+  Superpowers startup compatibility injects text, grants no permissions, and
+  launches no programs. Packaged assets are read by archive key through the
+  existing policy-checked `skills.load` tool.
 - `PUT /api/workspace` points the workspace plugins (`sandbox-process`,
   `sandbox-os`, `tools-builtin`, `tools-repo-write`) at another existing directory, as
   `rah --root` does at start. It widens what tools can reach to that folder,

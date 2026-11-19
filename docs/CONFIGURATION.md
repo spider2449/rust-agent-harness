@@ -158,6 +158,8 @@ directory `rah` starts in. [Features](#features) turn on opt-in capabilities.
 | `rah run "<prompt>"` | One turn, then exit. `--session <id>` continues a session; `--summary <file>` writes a JSON summary. |
 | `rah web` | Web UI. `--bind 127.0.0.1:0` picks a free port. |
 | `rah sessions list` | Sessions, newest first, with title and workspace. Needs no model. |
+| `rah skills add <name> [--file <file>]` | Create a skill template or import a Markdown file. |
+| `rah skills delete <name>` | Remove the named directory's skill and preserve companion files. |
 | `rah sessions export <id> --format md\|json\|trace` | One session on standard output, without running a turn. |
 | `rah config show [--plugins]` | What would run. |
 | `rah config check` | Checks every plugin's configuration as a start would, then starts only the model plugin: a missing API key variable is reported, and llama.cpp and OpenAI-compatible servers are asked whether they answer (no conversation is sent, no tokens are spent). Also prints which `rah` program runs and warns when another `rah` comes first on PATH. Exit 2 on a problem. Starts no tool, loop or frontend. |
@@ -449,7 +451,46 @@ steer the model ([SECURITY.md](SECURITY.md)).
 
 With the `skills` feature (`skills-fs`), skills live in
 `~/.rah/skills/<name>/SKILL.md`, are listed to the model and loaded on demand
-with `skills.load`. The `scheduler` feature (`scheduler-basic`) runs
+with `skills.load`. Use the directory name to manage a skill:
+
+```powershell
+rah skills add review-rust
+rah skills add release-check --file .\release-check.md
+rah skills delete review-rust
+```
+
+`add` creates an editable template or copies the supplied UTF-8 Markdown
+file. An imported front-matter `name`, when present, must match the directory
+name. Add refuses to overwrite an existing skill. Delete removes `SKILL.md`
+and removes its directory if empty. Both commands use the configured
+`skills-fs.dir` or the data home's `skills` directory. With the `skills`
+feature enabled, changes are visible on the next model request.
+
+In the Web UI or desktop app, open **Settings → Skills** and turn on
+**Enable skills**. Enter a skill name and Markdown instructions, then choose
+**Add skill**. Each installed directory has a **Delete** button that asks
+for confirmation. Turning off Skills keeps the installed files.
+
+Under **Skill packages**, enter a public GitHub repository such as
+`https://github.com/obra/superpowers` and choose **Preview package**. Select
+skills, then **Install selected skills**. The import uses the exact commit
+shown in the preview. Each selected `skills/<name>/` directory and its
+companion files are kept together in one ZIP under the skills directory's
+`.packages` folder. **Remove package** removes that installation. Local skills
+and other repositories can use the same directory names.
+
+Package skills appear as `owner/repo:name`. The model can use `skills.load`
+with a relative `path` to read a UTF-8 companion file. Binary attachments
+are retained in the ZIP. Downloads and selected uncompressed content are
+limited to 16 MiB each. The configured skill text limit also applies.
+
+For `obra/superpowers`, selecting `using-superpowers` offers **Include
+Superpowers startup instructions**. RAH supplies that skill's body in model
+context from the first request onward, including resumed conversations.
+This implements the upstream SessionStart context injection in Rust.
+Imported shell scripts and provider-specific hooks remain inert.
+
+The `scheduler` feature (`scheduler-basic`) runs
 background jobs, and `agent.delegate` hands a task to a subagent in its own
 session.
 

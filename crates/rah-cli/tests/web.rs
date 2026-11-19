@@ -1979,6 +1979,54 @@ async fn the_documentation_is_listed_and_read_with_the_token_only() {
 }
 
 #[tokio::test]
+async fn settings_manage_only_installed_skill_files() {
+    use reqwest::Method;
+    let web = start("web-skills", |_| {}).await;
+    let add = |name: &str, text: &str| {
+        web.post("/api/skills")
+            .json(&json!({ "name": name, "text": text }))
+    };
+    let path = web.dir.0.join("skills/tea");
+    let anonymous = reqwest::Client::new()
+        .post(format!("http://{}/api/skills", web.address))
+        .json(&json!({ "name": "tea", "text": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+    assert_eq!(web.status(add("../tea", "outside")).await.0, 400);
+    assert_eq!(web.status(add("tea", "Boil water.")).await.0, 200);
+    assert_eq!(web.status(add("tea", "overwrite")).await.0, 409);
+    assert_eq!(
+        std::fs::read_to_string(path.join("SKILL.md")).unwrap(),
+        "Boil water."
+    );
+    assert_eq!(web.json(web.get("/api/skills")).await, json!(["tea"]));
+    std::fs::write(path.join("notes.md"), "keep").unwrap();
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/skills/tea"))
+            .await
+            .0,
+        200
+    );
+    assert!(path.join("notes.md").is_file());
+    assert_eq!(web.json(web.get("/api/skills")).await, json!([]));
+    assert_eq!(
+        web.status(web.request(Method::DELETE, "/api/skills/tea"))
+            .await
+            .0,
+        404
+    );
+    web.json(
+        web.request(Method::PUT, "/api/features/skills")
+            .json(&json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(web.status(add("tea", "disabled")).await.0, 503);
+    assert!(!path.join("SKILL.md").exists());
+}
+
+#[tokio::test]
 async fn features_are_switched_at_once_and_kept_in_the_file() {
     use reqwest::Method;
     let web = start("web-features", |_| {}).await;

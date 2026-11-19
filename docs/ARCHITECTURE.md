@@ -226,6 +226,12 @@ Implemented:
   catalog; `frontend-web` exposes it to the local user. `replace` mounts the
   new plugin and unmounts the old one only once the new one is active, so
   consumers that resolve services per use switch without a restart.
+- `skill-manager` service (`rah-api::skills`), provided by `skills-fs`:
+  Settings lists, adds and deletes installed skills through authenticated Web
+  UI requests. The CLI uses the same directory implementation. The model has
+  only the existing `skills.load` tool. The service also previews, installs
+  and removes commit-pinned GitHub packages. The skills plugin supplies the
+  optional Superpowers bootstrap text through its model request hook.
 - `scheduler` service (`rah-api::scheduler`), provided by `scheduler-basic`:
   background and repeating turns run through the `loop` service; the same
   plugin provides `agent.delegate`, which nests a subagent turn inside a tool

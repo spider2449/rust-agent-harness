@@ -31,10 +31,15 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+mod manage;
+mod packages;
+pub use manage::SkillDirectory;
+
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
     hooks::ModelBeforeRequest,
     host::NoticeOnce,
+    skills::{SKILL_MANAGER, SKILL_MANAGER_SERVICE},
     tools::{TOOLS_SERVICE, Tool, ToolContext, ToolError, provide_tools},
 };
 use rah_protocol::{
@@ -44,6 +49,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const MAX_DESCRIPTION_CHARS: usize = 300;
+/// Default byte limit for one SKILL.md, also used by the CLI importer.
+pub const DEFAULT_MAX_SKILL_BYTES: u64 = 64 * 1024;
 
 pub struct SkillsPlugin {
     manifest: PluginManifest,
@@ -52,7 +59,8 @@ pub struct SkillsPlugin {
 impl SkillsPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")).provides([TOOLS_SERVICE]),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .provides([TOOLS_SERVICE, SKILL_MANAGER_SERVICE]),
         }
     }
 }
@@ -81,8 +89,15 @@ impl Plugin for SkillsPlugin {
         let library = Arc::new(Library {
             dir: config.dir.unwrap_or_else(|| PathBuf::from(".rah/skills")),
             max_skills: config.max_skills.unwrap_or(64).max(1),
-            max_bytes: config.max_skill_bytes.unwrap_or(64 * 1024).max(1),
+            max_bytes: config
+                .max_skill_bytes
+                .unwrap_or(DEFAULT_MAX_SKILL_BYTES)
+                .max(1),
         });
+        scope.provide(
+            SKILL_MANAGER,
+            Arc::new(SkillDirectory::new(library.dir.clone(), library.max_bytes)),
+        )?;
         let notices = Arc::new(NoticeOnce::new(scope.kernel(), scope.id().clone()));
         let (checker, reporter) = (library.clone(), notices.clone());
         scope.spawn(async move { report(&reporter, checker.scan().await.problems) });
@@ -90,7 +105,7 @@ impl Plugin for SkillsPlugin {
         scope.hook_waterfall::<ModelBeforeRequest, _, _>(0, move |mut request| {
             let (lister, notices) = (lister.clone(), notices.clone());
             async move {
-                let Scan { skills, problems } = lister.scan().await;
+                let Scan { skills, problems, startup } = lister.scan().await;
                 report(&notices, problems);
                 if !skills.is_empty() {
                     let at = request
@@ -101,7 +116,10 @@ impl Plugin for SkillsPlugin {
                     request.items.insert(
                         at,
                         ContextItem::System {
-                            text: listing(&skills),
+                            text: match startup {
+                                Some(instructions) => format!("{}\nSuperpowers startup instructions (use skills.load for the Skill tool):\n{instructions}", listing(&skills)),
+                                None => listing(&skills),
+                            },
                         },
                     );
                 }
@@ -128,7 +146,7 @@ pub struct Skill {
 }
 
 /// Skill names: 1-64 of `[a-z0-9_-]`.
-fn valid_name(name: &str) -> bool {
+pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -187,6 +205,7 @@ fn unclosed_front_matter(text: &str) -> bool {
 #[derive(Debug, Default)]
 struct Scan {
     skills: Vec<Skill>,
+    startup: Option<String>,
     /// One line each, for the user.
     problems: Vec<String>,
 }
@@ -320,6 +339,36 @@ impl Library {
             }
             scan.skills.push(Skill { name, description });
         }
+        match packages::list(self.dir.clone()).await {
+            Ok(packages) => {
+                for package in packages {
+                    if package.startup && package.repository == "obra/superpowers" {
+                        match packages::read(
+                            &self.dir,
+                            "superpowers:using-superpowers",
+                            "SKILL.md",
+                            self.max_bytes,
+                        )
+                        .await
+                        {
+                            Ok(text) => scan.startup = Some(parse(&text).2.trim().to_owned()),
+                            Err(e) => scan
+                                .problems
+                                .push(format!("Superpowers startup instructions: {e}")),
+                        }
+                    }
+                    for (name, description) in package.skills {
+                        scan.skills.push(Skill {
+                            name: format!("{}:{name}", package.repository),
+                            description,
+                        });
+                    }
+                }
+            }
+            Err(e) => scan
+                .problems
+                .push(format!("Cannot list skill packages: {e}")),
+        }
         scan.skills.sort_by(|a, b| a.name.cmp(&b.name));
         if scan.skills.len() > self.max_skills {
             let left_out: Vec<&str> = scan.skills[self.max_skills..]
@@ -376,10 +425,10 @@ impl Tool for LoadSkill {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ToolName::new("skills.load"),
-            description: "Returns the full instructions of a listed skill.".into(),
+            description: "Read a listed skill. For a package skill, pass path to read a UTF-8 companion file relative to the skill directory.".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64 } },
+                "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 266 }, "path": { "type": "string" } },
                 "required": ["name"],
                 "additionalProperties": false
             }),
@@ -392,11 +441,31 @@ impl Tool for LoadSkill {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("expected a string `name`".into()))?;
-        let body = self
-            .0
-            .load(name)
-            .await
-            .ok_or_else(|| ToolError::InvalidInput(format!("there is no skill `{name}`")))?;
+        let body = if name.contains(':') {
+            let path = match input.get("path") {
+                Some(p) => p
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidInput("expected a string path".into()))?,
+                None => "SKILL.md",
+            };
+            let text = packages::read(&self.0.dir, name, path, self.0.max_bytes)
+                .await
+                .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+            if path == "SKILL.md" {
+                parse(&text).2.trim().to_owned()
+            } else {
+                text
+            }
+        } else if input.get("path").is_some() {
+            return Err(ToolError::InvalidInput(
+                "Asset paths require a package skill.".into(),
+            ));
+        } else {
+            self.0
+                .load(name)
+                .await
+                .ok_or_else(|| ToolError::InvalidInput(format!("there is no skill `{name}`")))?
+        };
         Ok(ToolOutput {
             content: vec![ToolContent::Text(body)],
             is_error: false,

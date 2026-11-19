@@ -565,7 +565,35 @@ function displayForm() {
 
 // Features with a home of their own elsewhere: web search in Permissions,
 // planning under Model > How the assistant works.
-const FEATURES_SHOWN_ELSEWHERE = ["web-search", "plan"];
+const FEATURES_SHOWN_ELSEWHERE = ["web-search", "plan", "skills"];
+
+function featureSwitch(feature, label = feature.name) {
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = Boolean(feature.enabled);
+  box.dataset.feature = feature.name;
+  box.addEventListener("change", async () => {
+    box.disabled = true;
+    settingsMessage("");
+    try {
+      const result = await api(`/features/${encodeURIComponent(feature.name)}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: box.checked }),
+      });
+      await reloadSettings();
+      loadPlugins().catch(() => {});
+      const kept = result.remembered ? "" : ` It holds until rah restarts, but is not kept: ${result.remember_error || "unknown reason"}.`;
+      settingsMessage(`${feature.name} is ${result.enabled ? "on" : "off"}.${kept}`);
+    } catch (error) {
+      box.checked = !box.checked;
+      box.disabled = false;
+      settingsMessage(error.message, true);
+    }
+  });
+  const row = el("label", "field switch");
+  row.append(box, el("span", "label", label), el("small", "", feature.summary));
+  return row;
+}
 
 // One switch per feature; a switch applies at once and is written to rah.toml.
 function featuresForm() {
@@ -577,33 +605,188 @@ function featuresForm() {
   }
   form.append(el("p", "hint", "Extra capabilities. A switch applies at once and is kept in rah.toml."));
   for (const feature of features) {
-    const box = el("input");
-    box.type = "checkbox";
-    box.checked = Boolean(feature.enabled);
-    box.dataset.feature = feature.name;
-    box.addEventListener("change", async () => {
-      box.disabled = true;
-      settingsMessage("");
-      try {
-        const result = await api(`/features/${encodeURIComponent(feature.name)}`, {
-          method: "PUT",
-          body: JSON.stringify({ enabled: box.checked }),
-        });
-        await reloadSettings();
-        loadPlugins().catch(() => {});
-        const kept = result.remembered ? "" : ` It holds until rah restarts, but is not kept: ${result.remember_error || "unknown reason"}.`;
-        settingsMessage(`${feature.name} is ${result.enabled ? "on" : "off"}.${kept}`);
-      } catch (error) {
-        box.checked = !box.checked;
-        box.disabled = false;
-        settingsMessage(error.message, true);
-      }
-    });
-    const row = el("label", "field switch");
-    row.append(box, el("span", "label", feature.name), el("small", "", feature.summary));
-    form.append(row);
+    form.append(featureSwitch(feature));
   }
   return form;
+}
+
+function skillsForm() {
+  const page = el("div", "form");
+  const feature = settings.features.find((item) => item.name === "skills");
+  if (!feature) {
+    page.append(el("p", "hint", "Skills are unavailable in this configuration."));
+    return page;
+  }
+  page.append(featureSwitch(feature, "Enable skills"));
+  if (!feature.enabled) return page;
+
+  const list = el("div", "form");
+  const form = el("form", "form");
+  const name = textInput("", "review-rust");
+  name.name = "name";
+  name.required = true;
+  name.maxLength = 64;
+  name.pattern = "[a-z0-9_\\-]{1,64}";
+  const body = el("textarea");
+  body.name = "text";
+  body.rows = 5;
+  body.required = true;
+  const add = el("button", "", "Add skill");
+  add.type = "submit";
+  form.append(field("Skill name", name, "Use lowercase letters, digits, hyphens or underscores."),
+    field("Instructions (Markdown)", body), add);
+  page.append(el("h3", "section-title", "Installed skills"), list,
+    el("h3", "section-title", "Add skill"), form);
+  page.append(packageSettings());
+
+  let revision = 0;
+  async function refresh() {
+    const current = ++revision;
+    try {
+      const names = await api("/skills");
+      if (current !== revision) return;
+      list.replaceChildren();
+      if (!names.length) list.append(el("p", "hint", "No skills installed."));
+      for (const skill of names) {
+        const row = el("div", "skill-row");
+        const remove = el("button", "ghost", "Delete");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Delete ${skill}`);
+        remove.addEventListener("click", async () => {
+          if (!window.confirm(`Delete skill "${skill}"?`)) return;
+          remove.disabled = true;
+          try {
+            await api(`/skills/${encodeURIComponent(skill)}`, { method: "DELETE" });
+            if (page.isConnected) settingsMessage(`Deleted ${skill}.`);
+            await refresh();
+          } catch (error) {
+            if (page.isConnected) settingsMessage(error.message, true);
+            remove.disabled = false;
+          }
+        });
+        row.append(el("span", "", skill), remove);
+        list.append(row);
+      }
+    } catch (error) {
+      if (current === revision) list.replaceChildren(el("p", "settings-message bad", error.message));
+    }
+  }
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (add.disabled) return;
+    name.disabled = body.disabled = add.disabled = true;
+    try {
+      const skill = await api("/skills", { method: "POST", body: JSON.stringify({ name: name.value, text: body.value }) });
+      form.reset();
+      if (page.isConnected) settingsMessage(`Added ${skill.name}.`);
+      await refresh();
+    } catch (error) {
+      if (page.isConnected) settingsMessage(error.message, true);
+    } finally {
+      name.disabled = body.disabled = add.disabled = false;
+    }
+  });
+  refresh();
+  return page;
+}
+
+function packageSettings() {
+  const panel = el("div", "form");
+  const installed = el("div", "form");
+  const source = textInput("", "https://github.com/obra/superpowers");
+  const preview = el("button", "", "Preview package");
+  preview.type = "button";
+  const selection = el("div", "form");
+  const message = el("p", "hint");
+  message.setAttribute("role", "status");
+  panel.append(el("h3", "section-title", "Skill packages"), installed,
+    field("Public GitHub repository", source), preview, selection, message);
+
+  async function refresh() {
+    try {
+      const packages = await api("/skill-packages");
+      installed.replaceChildren();
+      for (const item of packages) {
+        const row = el("div", "skill-row");
+        const remove = el("button", "ghost", "Remove package");
+        remove.type = "button";
+        remove.addEventListener("click", async () => {
+          if (!window.confirm(`Remove ${item.repository} and its ${Object.keys(item.skills).length} installed skills?`)) return;
+          remove.disabled = true;
+          try {
+            await api("/skill-packages/" + item.repository.split("/").map(encodeURIComponent).join("/"), { method: "DELETE" });
+            message.textContent = `Removed ${item.repository}.`;
+            await refresh();
+          } catch (error) {
+            remove.disabled = false;
+            message.textContent = error.message;
+          }
+        });
+        const details = el("details");
+        details.append(el("summary", "", item.repository), el("p", "hint", item.revision),
+          el("p", "", Object.keys(item.skills).join(", ")));
+        row.append(details, remove);
+        installed.append(row);
+      }
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  }
+  source.addEventListener("input", () => { selection.replaceChildren(); message.textContent = ""; });
+  preview.addEventListener("click", async () => {
+    source.disabled = preview.disabled = true;
+    selection.replaceChildren();
+    message.textContent = "Loading package…";
+    try {
+      const item = await api("/skill-packages/preview", { method: "POST", body: JSON.stringify({ repository: source.value }) });
+      message.textContent = "";
+      selection.append(el("p", "hint", `${item.repository} · ${item.revision.slice(0, 12)}`));
+      const startup = el("input");
+      startup.type = "checkbox";
+      startup.checked = item.startup;
+      const choices = [];
+      for (const [name, description] of Object.entries(item.skills)) {
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = true;
+        box.value = name;
+        choices.push(box);
+        const row = el("label", "field switch");
+        row.append(box, el("span", "label", name), el("small", "", description));
+        selection.append(row);
+        if (item.startup && name === "using-superpowers") box.addEventListener("change", () => {
+          startup.disabled = !box.checked;
+        });
+      }
+      if (item.startup) {
+        const row = el("label", "field switch");
+        row.append(startup, el("span", "label", "Include Superpowers startup instructions"));
+        selection.append(row);
+      }
+      const install = el("button", "", "Install selected skills");
+      install.type = "button";
+      selection.append(install);
+      install.addEventListener("click", async () => {
+        const skills = choices.filter((box) => box.checked).map((box) => box.value);
+        if (!skills.length) { message.textContent = "Select at least one skill."; return; }
+        const useStartup = startup.checked && !startup.disabled;
+        const controls = [install, preview, source, ...choices, ...(useStartup ? [startup] : [])];
+        controls.forEach((control) => { control.disabled = true; });
+        message.textContent = "Installing package…";
+        try {
+          await api("/skill-packages", { method: "POST", body: JSON.stringify({ repository: item.repository,
+            revision: item.revision, skills, startup: useStartup }) });
+          selection.replaceChildren();
+          message.textContent = `Installed ${skills.length} skills from ${item.repository}.`;
+          await refresh();
+        } catch (error) { message.textContent = error.message; }
+        finally { controls.forEach((control) => { control.disabled = false; }); }
+      });
+    } catch (error) { message.textContent = error.message; }
+    finally { source.disabled = preview.disabled = false; }
+  });
+  refresh();
+  return panel;
 }
 
 // ---- Dialog ---------------------------------------------------------------
@@ -626,6 +809,7 @@ const FORMS = {
   },
   model: () => sections(["Model", modelForm], ["How the assistant works", loopForm]),
   assistant: assistantForm,
+  skills: skillsForm,
   tools: toolsForm,
   features: () => sections(["Features", featuresForm], ["Display", displayForm]),
 };

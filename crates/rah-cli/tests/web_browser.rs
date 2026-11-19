@@ -2424,6 +2424,89 @@ fn save(label: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires public GitHub access and RAH_TEST_BROWSER"]
+async fn import_superpowers_from_github_in_settings() {
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-superpowers").await;
+    let browser = Browser::launch(
+        std::env::var_os("RAH_TEST_BROWSER").unwrap().into(),
+        "web-browser-superpowers",
+    );
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('open-settings').click(); true").await;
+    page.wait(
+        "settings loaded",
+        "!!document.querySelector('#settings-body select')",
+    )
+    .await;
+    page.eval(&TAB.replace("{tab}", "skills")).await;
+    page.eval("{ const input = document.querySelector('input[placeholder*=github]'); input.value = input.placeholder; [...byId('settings-body').querySelectorAll('button')].find(b=>b.textContent==='Preview package').click(); true }").await;
+    page.wait(
+        "pinned skill selection",
+        "!!document.querySelector('input[value=\"using-superpowers\"]')",
+    )
+    .await;
+    page.eval("[...byId('settings-body').querySelectorAll('button')].find(b=>b.textContent==='Install selected skills').click(); true").await;
+    page.wait("installed bundle", "!![...byId('settings-body').querySelectorAll('button')].find(b=>b.textContent==='Remove package')").await;
+    let request = web
+        ._kernel
+        .handle()
+        .waterfall::<rah_api::hooks::ModelBeforeRequest>(Default::default())
+        .await
+        .unwrap();
+    assert!(request.items.iter().any(|item| matches!(item, rah_protocol::ContextItem::System {text} if text.contains("Superpowers startup instructions") && text.contains("obra/superpowers:systematic-debugging"))));
+    page.eval("window.confirm=()=>true; [...byId('settings-body').querySelectorAll('button')].find(b=>b.textContent==='Remove package').click(); true").await;
+    page.wait("removed bundle", "byId('settings-body').textContent.includes('Removed obra/superpowers.') && !byId('settings-body').textContent.includes('Remove package')").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_manage_skills_in_the_browser() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start("web-browser-skills").await;
+    let browser = Browser::launch(PathBuf::from(program), "web-browser-skills");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({ "url": web.url })).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('open-settings').click(); true").await;
+    page.wait(
+        "settings loaded",
+        "!!document.querySelector('#settings-body select')",
+    )
+    .await;
+    page.eval(&TAB.replace("{tab}", "skills")).await;
+    page.wait(
+        "skills form",
+        "!!document.querySelector('#settings-body form')",
+    )
+    .await;
+    page.eval("document.querySelector('[data-feature=skills]').click(); true")
+        .await;
+    page.wait("skills disabled", "byId('settings-message').textContent === 'skills is off.' && !document.querySelector('#settings-body form')").await;
+    page.eval("document.querySelector('[data-feature=skills]').click(); true")
+        .await;
+    page.wait("skills enabled", "byId('settings-message').textContent === 'skills is on.' && !!document.querySelector('#settings-body form')").await;
+    page.eval("{ const f = document.querySelector('#settings-body form'); f.elements.name.value = 'tea-time'; f.elements.text.value = 'Boil water.\\nSteep the tea.'; f.requestSubmit(); true }").await;
+    page.wait(
+        "skill listed",
+        "!!document.querySelector('[aria-label=\"Delete tea-time\"]')",
+    )
+    .await;
+    page.eval("window.confirm = () => false; document.querySelector('[aria-label=\"Delete tea-time\"]').click(); true").await;
+    assert_eq!(
+        page.eval("byId('settings-message').textContent").await,
+        "Added tea-time."
+    );
+    page.eval("window.confirm = () => true; document.querySelector('[aria-label=\"Delete tea-time\"]').click(); true").await;
+    page.wait("skill deleted", "byId('settings-message').textContent === 'Deleted tea-time.' && !document.querySelector('[aria-label=\"Delete tea-time\"]')").await;
+    assert!(page.errors().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
         eprintln!("skipped: set RAH_TEST_BROWSER to a Chromium-based browser to run this test");

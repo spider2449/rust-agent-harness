@@ -363,6 +363,9 @@ button.icon { padding: 0 0.428571rem; font-size: 0.857143rem; line-height: 1.285
 .settings-message { margin: 0 0 0.714286rem; padding: 0.428571rem 0.714286rem; border-radius: 0.428571rem; background: var(--user); font-size: 0.928571rem; }
 .settings-message.bad { background: var(--warn-bg); color: var(--warn); }
 .form { display: flex; flex-direction: column; gap: 0.714286rem; }
+#settings-tabs { flex-wrap: wrap; }
+.skill-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.skill-row span { overflow-wrap: anywhere; }
 .field { display: flex; flex-direction: column; gap: 0.214286rem; font-size: 0.928571rem; }
 .field .label { font-weight: 600; }
 .field small { color: var(--muted); }

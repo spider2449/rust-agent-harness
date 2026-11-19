@@ -127,6 +127,7 @@ mod manage;
 mod panel;
 mod session_search;
 mod settings;
+mod skills;
 mod status;
 mod undo;
 mod views;
@@ -345,6 +346,17 @@ fn router(shared: AppState) -> Router {
         .route("/jobs/{id}", axum::routing::delete(jobs::cancel))
         .route("/web-search", get(web_search::get).put(web_search::set))
         .route("/features", get(features::list))
+        .route("/skills", get(skills::list).post(skills::add))
+        .route(
+            "/skill-packages",
+            get(skills::packages).post(skills::install),
+        )
+        .route("/skill-packages/preview", post(skills::preview))
+        .route(
+            "/skill-packages/{owner}/{repo}",
+            axum::routing::delete(skills::remove_package),
+        )
+        .route("/skills/{name}", axum::routing::delete(skills::delete))
         .route("/features/{name}", put(features::set))
         .route("/settings/{slot}", put(settings::save))
         .route(

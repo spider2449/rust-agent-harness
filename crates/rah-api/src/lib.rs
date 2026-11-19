@@ -21,6 +21,7 @@ pub mod retry;
 pub mod sandbox;
 pub mod scheduler;
 pub mod session;
+pub mod skills;
 pub mod storage;
 pub mod tools;
 pub mod ui;
