@@ -16,6 +16,8 @@ Protocol 3 added hooks and events (ADR 0039); protocol 4 adds views
 (ADR 0063). The host still accepts plugins that answer protocol 3 (no views)
 or 2 (tools only).
 
+The [tools-maya process plugin](../plugins/tools-maya/README.md) controls an open Maya 2025 scene through its built-in command port and includes a runnable RAH configuration.
+
 ## Mounting
 
 ```toml

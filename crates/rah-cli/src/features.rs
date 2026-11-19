@@ -31,6 +31,11 @@ pub(crate) enum Place {
 pub(crate) enum Mount {
     /// Mounts `kind` unless it is already mounted.
     Plugin { kind: &'static str, place: Place },
+    /// A bundled process plugin with a stable instance id.
+    Process {
+        id: &'static str,
+        config: fn() -> Value,
+    },
     /// Swaps a mounted plugin for another one.
     Replace {
         from: &'static str,
@@ -57,7 +62,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah features` shows them.
-pub const FEATURES: [Feature; 13] = [
+pub const FEATURES: [Feature; 14] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -83,6 +88,25 @@ pub const FEATURES: [Feature; 13] = [
         argument_key: None,
         tools: &[("web.*", "read")],
         decisions: &[("web.*", "ask")],
+    },
+    Feature {
+        name: "maya",
+        summary: "use the open Maya 2025 scene or launch Maya on the first tool call",
+        argument: None,
+        needs_any: &["policy-authority"],
+        mount: Mount::Process {
+            id: "tools-maya",
+            config: maya_launch,
+        },
+        argument_key: None,
+        tools: &[
+            ("maya.list", "read"),
+            ("maya.help", "read"),
+            ("maya.create", "write"),
+            ("maya.move", "write"),
+            ("maya.eval_mel", "execute"),
+        ],
+        decisions: &[],
     },
     Feature {
         name: "format",
@@ -234,6 +258,17 @@ pub const FEATURES: [Feature; 13] = [
     },
 ];
 
+fn maya_launch() -> Value {
+    serde_json::json!({
+        "program": r"C:\aw\Maya2025\bin\mayapy.exe",
+        "call_timeout_ms": 150000,
+        "inherit_env": ["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+                        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERNAME", "USERDOMAIN",
+                        "MAYA_APP_DIR", "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
+        "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-maya/rah_maya.py")],
+    })
+}
+
 /// The feature called `name`.
 pub fn feature(name: &str) -> Option<&'static Feature> {
     FEATURES.iter().find(|feature| feature.name == name)
@@ -245,6 +280,7 @@ impl Feature {
     pub(crate) fn mounts(&self) -> Option<&'static str> {
         match self.mount {
             Mount::Plugin { kind, .. } => Some(kind),
+            Mount::Process { id, .. } => Some(id),
             Mount::Replace { .. } => None,
         }
     }
@@ -345,6 +381,9 @@ impl Feature {
             Mount::Plugin { kind, place } => {
                 Ok(self.mount_plugin(distribution, kind, place, arguments))
             }
+            Mount::Process { id, .. } => {
+                Ok(self.mount_plugin(distribution, id, Place::BeforeLoop, arguments))
+            }
             Mount::Replace { from, to } => {
                 if distribution.replace(from, to) {
                     Ok(Some(to))
@@ -378,7 +417,12 @@ impl Feature {
         if let Some(spec) = distribution
             .plugin
             .iter_mut()
-            .find(|spec| spec.kind == kind)
+            .find(|spec| match self.mount {
+                Mount::Process { id, .. } => {
+                    spec.kind == crate::PROCESS_PLUGIN && spec.id.as_deref() == Some(id)
+                }
+                _ => spec.kind == kind,
+            })
         {
             if let Some((key, value)) = argument {
                 set_key(&mut spec.config, key, value);
@@ -391,6 +435,11 @@ impl Feature {
             config: Value::Null,
             bind: BTreeMap::new(),
         };
+        if let Mount::Process { id, config } = self.mount {
+            spec.kind = crate::PROCESS_PLUGIN.to_owned();
+            spec.id = Some(id.to_owned());
+            spec.config = config();
+        }
         if let Some((key, value)) = argument {
             set_key(&mut spec.config, key, value);
         }
@@ -504,6 +553,30 @@ mod tests {
             shell.config["allow_programs"],
             serde_json::json!(["git", "cargo"])
         );
+    }
+
+    #[test]
+    fn maya_mounts_one_named_process_alongside_other_process_plugins() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        let other = PluginSpec {
+            kind: crate::PROCESS_PLUGIN.into(),
+            id: Some("other".into()),
+            config: serde_json::json!({}),
+            bind: Default::default(),
+        };
+        distribution.plugin.push(other.clone());
+        distribution.enable("maya").unwrap();
+        let once = distribution.clone();
+        distribution.enable("maya").unwrap();
+        assert_eq!(distribution, once);
+        assert!(distribution.plugin.contains(&other));
+        let maya = distribution
+            .plugin
+            .iter()
+            .find(|p| p.id.as_deref() == Some("tools-maya"))
+            .unwrap();
+        assert_eq!(maya.kind, crate::PROCESS_PLUGIN);
+        assert_eq!(policy(&distribution)["tools"]["maya.eval_mel"], "execute");
     }
 
     #[test]

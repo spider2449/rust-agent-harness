@@ -211,6 +211,7 @@ fn failed(error: impl std::fmt::Display) -> AdminError {
 fn feature_kind(feature: &Feature) -> &'static str {
     match feature.mount {
         Mount::Plugin { kind, .. } => kind,
+        Mount::Process { .. } => PROCESS_PLUGIN,
         Mount::Replace { to, .. } => to,
     }
 }
@@ -225,6 +226,14 @@ impl Admin {
             .filter(|(_, record)| record.kind == kind)
             .map(|(id, record)| (id.clone(), record.stopped))
             .collect()
+    }
+
+    fn feature_instances(&self, feature: &Feature) -> Vec<(PluginId, bool)> {
+        let mut instances = self.instances(feature_kind(feature));
+        if let Mount::Process { id, .. } = feature.mount {
+            instances.retain(|(instance, _)| instance.as_str() == id);
+        }
+        instances
     }
 
     fn unlocked(&self, id: &PluginId) -> Result<(), AdminError> {
@@ -555,7 +564,7 @@ impl PluginAdmin for Admin {
                 name: feature.name.to_owned(),
                 summary: feature.summary.to_owned(),
                 enabled: self
-                    .instances(feature_kind(feature))
+                    .feature_instances(feature)
                     .iter()
                     .any(|(_, stopped)| !stopped),
             })
@@ -567,8 +576,8 @@ impl PluginAdmin for Admin {
             crate::feature(name).ok_or_else(|| failed(format!("unknown feature `{name}`")))?;
         if !enabled {
             match feature.mount {
-                Mount::Plugin { kind, .. } => {
-                    for (id, _) in self.instances(kind) {
+                Mount::Plugin { .. } | Mount::Process { .. } => {
+                    for (id, _) in self.feature_instances(feature) {
                         // A stopped one is forgotten, a running one unmounted.
                         self.unmount(&id).await?;
                     }
@@ -596,7 +605,11 @@ impl PluginAdmin for Admin {
                 feature.needs_any.join(", ")
             )));
         }
-        if running(&[feature_kind(feature)]) {
+        if self
+            .feature_instances(feature)
+            .iter()
+            .any(|(_, stopped)| !stopped)
+        {
             return Ok(());
         }
         // The policy entries first, so the tools never run without them.
@@ -638,16 +651,27 @@ impl PluginAdmin for Admin {
             }
         }
         let status = match feature.mount {
-            Mount::Plugin { kind, .. } => match self.instances(kind).first() {
-                Some((id, _)) => self.start(id).await?,
-                None => {
-                    let request = MountRequest {
-                        kind: kind.to_owned(),
-                        ..MountRequest::default()
-                    };
-                    self.mount(request).await?.1
+            Mount::Plugin { .. } | Mount::Process { .. } => {
+                match self.feature_instances(feature).first() {
+                    Some((id, _)) => self.start(id).await?,
+                    None => {
+                        let request = MountRequest {
+                            kind: feature_kind(feature).to_owned(),
+                            ..MountRequest::default()
+                        };
+                        let request = if let Mount::Process { id, config } = feature.mount {
+                            MountRequest {
+                                id: Some(id.into()),
+                                config: config(),
+                                ..request
+                            }
+                        } else {
+                            request
+                        };
+                        self.mount(request).await?.1
+                    }
                 }
-            },
+            }
             Mount::Replace { from, to } => {
                 let Some((old, _)) = self.instances(from).into_iter().find(|(_, s)| !s) else {
                     return Err(failed(format!(

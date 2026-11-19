@@ -2072,6 +2072,34 @@ async fn features_are_switched_at_once_and_kept_in_the_file() {
     let after = std::fs::read_to_string(config_file(&web.dir)).unwrap();
     assert_eq!(after, text);
 }
+#[cfg(windows)]
+#[tokio::test]
+async fn maya_switch_mounts_and_remembers_the_embedded_plugin() {
+    if !std::path::Path::new(r"C:\aw\Maya2025\bin\mayapy.exe").is_file() {
+        return;
+    }
+    let web = start("web-maya-feature", |_| {}).await;
+    for enabled in [true, false] {
+        let request = web
+            .request(reqwest::Method::PUT, "/api/features/maya")
+            .json(&json!({ "enabled": enabled }));
+        let (status, reply) = web.status(request).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["remembered"], true);
+        assert_eq!(instance(&web.kernel, "tools-maya").is_some(), enabled);
+        let features = web.json(web.get("/api/features")).await;
+        let maya = features
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == "maya")
+            .unwrap();
+        assert_eq!(maya["enabled"], enabled);
+        let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+        assert_eq!(text.contains("\"maya\""), enabled);
+    }
+}
+
 #[tokio::test]
 async fn settings_an_earlier_version_stored_are_reported_not_applied() {
     let dir = TempDir::new("web-legacy");
