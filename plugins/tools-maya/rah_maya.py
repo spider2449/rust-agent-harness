@@ -26,6 +26,10 @@ def tool(tool_name, description, permission, **fields):
 
 
 TOOLS = [
+    tool("plugin_guide", "Start here to write a Maya Python API 2.0 plug-in. Returns a working command "
+         "plug-in and Python testing instructions locally, without connecting to Maya.", "read"),
+    tool("session", "Get the connected Maya executable, Maya/API/Python/Qt versions and scene in one call. "
+         "Use when the task needs the running environment.", "read"),
     tool("list", "List transform paths. Choose scene or selection.", "read",
          scope={"type": "string", "enum": ["scene", "selection"]}),
     tool("create", "Create one polygon primitive. Use the first returned name for later calls.", "write",
@@ -34,7 +38,8 @@ TOOLS = [
          node={"type": "string"}, x={"type": "number"}, y={"type": "number"}, z={"type": "number"}),
     tool("help", "Look up Maya's MEL flags before writing a command, e.g. polyCube.", "read",
          command={"type": "string", "pattern": "^" + IDENT + "$"}),
-    tool("eval_mel", "Execute MEL in the active scene. Prefer create/move/list. Use MEL command syntax, "
+    tool("eval_mel", "Execute MEL only. For Python plug-in development use maya.plugin_guide. "
+         "Prefer create/move/list. Use MEL command syntax, "
          'e.g. xform -q -ws -t "box";. Inspect the scene after errors before trying again.', "execute",
          mel={"type": "string", "minLength": 1, "maxLength": 8192}),
 ]
@@ -46,6 +51,27 @@ class InvalidInput(ValueError):
 
 class NotStarted(Exception):
     pass
+
+
+PLUGIN_SOURCE = '''import maya.api.OpenMaya as om
+
+
+def maya_useNewAPI():
+    pass
+
+
+class RahHello(om.MPxCommand):
+    def doIt(self, args):
+        self.setResult("Hello from Maya")
+
+
+def initializePlugin(plugin):
+    om.MFnPlugin(plugin, "Example", "1.0", "Any").registerCommand("rahHello", RahHello)
+
+
+def uninitializePlugin(plugin):
+    om.MFnPlugin(plugin).deregisterCommand("rahHello")
+'''
 
 
 def compile_mel(name, args):
@@ -76,6 +102,21 @@ def compile_mel(name, args):
         return 'xform -absolute -worldSpace -translation {x} {y} {z} "{node}";'.format(**args)
     if name == "maya.help":
         return f'help "{args["command"]}";'
+    if name == "maya.session":
+        expr = ("__import__('json').dumps(dict(executable=__import__('sys').executable, "
+                "maya=cmds.about(version=True), api=cmds.about(apiVersion=True), "
+                "python=__import__('sys').version.split()[0], "
+                "qt=__import__('PySide6.QtCore', fromlist=['qVersion']).qVersion(), "
+                "scene=cmds.file(query=True, sceneName=True)))")
+        expr = "(lambda cmds: " + expr + ")(__import__('maya.cmds', fromlist=['about']))"
+        return "python(" + json.dumps(expr) + ");"
+    if name == "maya.plugin_guide":
+        return None
+    if re.match(r"\s*(?:import\s|from\s+\w+[.\w]*\s+import\s|puts\s)", args["mel"]):
+        raise InvalidInput("maya.eval_mel accepts MEL. Use maya.plugin_guide for Python plug-ins "
+                           "or maya.session for environment details.")
+    if re.fullmatch(r"\s*about\s+-(?:qtversion|productVersion)\s*;?\s*", args["mel"]):
+        raise InvalidInput("Use maya.session {} for the installed Maya and Qt versions.")
     return args["mel"]
 
 
@@ -143,6 +184,16 @@ def desktop_port():
 
 def call_maya(name, args, port):
     script = compile_mel(name, args)
+    if name == "maya.plugin_guide":
+        return {"content": [{"type": "json", "json": {
+            "filename": "rah_hello.py", "python_source": PLUGIN_SOURCE,
+            "instructions": "Save the source as rah_hello.py. In Maya Script Editor's Python tab, "
+                            "replace path with the saved absolute path and run the example. "
+                            "Unload before editing and loading the plug-in again.",
+            "test_python": "import maya.cmds as cmds\npath = r'C:/work/rah_hello.py'\n"
+                           "plugin = cmds.loadPlugin(path)[0]\nprint(cmds.rahHello())\ncmds.unloadPlugin(plugin)",
+            "expected": ["Hello from Maya"],
+        }}]}
     # Use the built-in MEL endpoint. JSON preserves arrays, scalars and null,
     # and an interpreter error stays distinguishable from a successful value.
     expr = ("__import__('json').dumps({'value': "
@@ -176,6 +227,8 @@ def call_maya(name, args, port):
         value = json.loads(body)["value"]
     except (ValueError, TypeError, KeyError) as exc:
         raise RuntimeError("Maya command port: " + body[:4096]) from exc
+    if name == "maya.session":
+        value = {**json.loads(value), "host": "127.0.0.1", "port": port}
     return {"content": [{"type": "json", "json": {"mel": script, "result": value}}]}
 
 

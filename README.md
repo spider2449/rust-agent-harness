@@ -36,6 +36,9 @@ without a model or key: `rah --model mock`. Options such as `--model`,
 `--permissions` and `--root` override the file for one run, and settings saved
 in the Web UI are written to it. `rah config show` prints what would run.
 
+To control when RAH asks before running CMD or PowerShell, see
+[CMD and PowerShell permissions](docs/CONFIGURATION.md#cmd-and-powershell-permissions).
+
 `.\scripts\update.ps1` installs or updates RAH together with LSP and Graphify,
 backs up changed configuration and enables both integrations. A source build
 uses prepared `.rah/lsp-runtime` and `.rah/graphify-no-uv-runtime` (or

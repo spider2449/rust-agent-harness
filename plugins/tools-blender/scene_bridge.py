@@ -23,6 +23,9 @@ def inspect_object(obj):
 
 def execute(name, args):
     scene = bpy.context.scene
+    if name == "blender.session":
+        return {"connected": True, "executable": bpy.app.binary_path, "blender": bpy.app.version_string,
+                "python": sys.version.split()[0], "file": bpy.data.filepath, "scene": scene.name}
     if name == "blender.list":
         objects = scene.objects if args["scope"] == "scene" else bpy.context.selected_objects
         return sorted(obj.name for obj in objects)
@@ -92,6 +95,7 @@ def connect():
 
     bpy.app.timers.register(tick, persistent=True)
     sys._rah_blender_timer = tick
+    (directory / "session-info").touch()
     (directory / "ready").touch()
     return tick
 

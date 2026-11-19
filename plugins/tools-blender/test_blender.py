@@ -16,6 +16,18 @@ BLENDER = Path(sys.executable).parents[3] / "blender.exe"
 
 
 class BlenderIntegration(unittest.TestCase):
+    def test_authoring_without_desktop(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, LOCALAPPDATA=directory), \
+                patch.object(os, "startfile", side_effect=AssertionError):
+            session = rah_blender.call(BRIDGE, "blender.session", {})["content"][0]["json"]
+            self.assertFalse(session["connected"])
+            guide = rah_blender.call(BRIDGE, "blender.addon_guide", {})["content"][0]["json"]
+            script = Path(directory, guide["filename"])
+            script.write_text(guide["python_source"], encoding="utf-8")
+            check = "import bpy; assert bpy.ops.rah.hello() == {'FINISHED'}; " + guide["cleanup"]
+            subprocess.run([BLENDER, "--background", "--factory-startup", "--python-exit-code", "1",
+                            "--python", str(script), "--python-expr", check], timeout=30, check=True)
+
     def test_rpc_in_a_fresh_scene(self):
         with tempfile.TemporaryDirectory() as directory:
             env = dict(os.environ, LOCALAPPDATA=directory)
@@ -50,7 +62,7 @@ class BlenderIntegration(unittest.TestCase):
                                 call("inspect", name="Cube.001"),
                                 call("move", name="Cube.001", x=True, y=0, z=0),
                                 call("create", shape="unexpected", name="bad"),
-                                call("inspect", name="absent"), ("shutdown", {})]
+                                call("inspect", name="absent"), call("session"), ("shutdown", {})]
                     payload = "".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method,
                                                   "params": params}) + "\n"
                                       for i, (method, params) in enumerate(messages))
@@ -61,7 +73,7 @@ class BlenderIntegration(unittest.TestCase):
                     def result(i):
                         return replies[i]["result"]["content"][0]["json"]
 
-                    self.assertEqual(len(replies[0]["result"]["tools"]), 4)
+                    self.assertIn("blender.addon_guide", [t["name"] for t in replies[0]["result"]["tools"]])
                     self.assertEqual(result(1)["name"], "Cube.001")
                     self.assertEqual(result(2), ["Cube.001"])
                     self.assertEqual(result(3), result(4))
@@ -69,7 +81,11 @@ class BlenderIntegration(unittest.TestCase):
                     for i in (5, 6):
                         self.assertEqual(replies[i]["error"]["data"]["kind"], "invalid_input")
                     self.assertIn("absent", replies[7]["error"]["message"])
-                    self.assertEqual(replies[8]["result"], {})
+                    self.assertTrue(result(8)["connected"])
+                    self.assertEqual(Path(result(8)["executable"]), BLENDER)
+                    self.assertEqual(result(8)["scene"], "Scene")
+                    self.assertEqual(result(8)["file"], "")
+                    self.assertEqual(replies[9]["result"], {})
                 finally:
                     (root / "stop").touch()
                     try:

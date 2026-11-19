@@ -1,6 +1,8 @@
 # tools-maya：RAH 的 Maya 2025 工具外掛
 
-在 **RAH → Settings → Features** 打開 **Maya**，然後在對話輸入指令。第一次使用工具時，RAH 會連到已開啟的 Maya；若 Maya 尚未執行，RAH 會開啟 `C:\aw\Maya2025\bin\maya.exe` 並等待就緒。Maya 顯示指令核准視窗時，確認後即可繼續。
+在 **RAH → Settings → Features** 打開 **Maya**。要寫外掛，可以說「幫我寫一個 Maya Python 指令外掛」。模型可先用 `maya.plugin_guide {}` 取得 Python API 2.0 範本，以及在 Script Editor 的 Python 分頁載入、測試和卸載的步驟。讀取範本全程在 RAH 本機完成。
+
+需要確認執行環境時，使用 `maya.session {}` 一次查詢 Maya 執行檔、連接埠、Maya、API、Python、Qt 版本及場景路徑。連線工具會使用已開啟的 Maya；若 Maya 尚未執行，RAH 會開啟 `C:\aw\Maya2025\bin\maya.exe` 並等待就緒。Maya 顯示指令核准視窗時，確認後即可繼續。
 
 RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場景。若手動關閉過這個入口，可在 Maya 的 Applications 偏好設定恢復預設 command port 並重啟 Maya。關閉 RAH 的 Maya 開關會卸載工具，場景仍由 Maya 管理。
 
@@ -14,7 +16,7 @@ RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場�
 | `maya.help` | `{"command":"xform"}` | 向已安裝的 Maya 查詢 MEL 命令旗標。 |
 | `maya.eval_mel` | `{"mel":"xform -q -ws -t \"box\";"}` | 執行 MEL 並傳回結果，例如查詢物件座標。 |
 
-每個成功回應都含有實際執行的 `mel` 和 `result`。範例設定允許查詢，修改場景和執行自訂 MEL 需經 RAH 確認。本機其他程式也能連線到 command port，Maya 會顯示連線指令的核准視窗。請只允許預期的指令。若執行中斷或 MEL 報錯，先查場景再決定下一步，部分指令可能已生效。
+連線工具的成功回應含有實際執行的 `mel` 和 `result`。範例設定允許查詢，修改場景和執行自訂 MEL 需經 RAH 確認。本機其他程式也能連線到 command port，Maya 會顯示連線指令的核准視窗。請只允許預期的指令。若執行中斷或 MEL 報錯，先查場景再決定下一步，部分指令可能已生效。
 
 整合測試使用獨立的 Maya standalone 場景與臨時連接埠，無需模型：
 

@@ -5,6 +5,7 @@ import socket
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -64,8 +65,9 @@ class MayaIntegration(unittest.TestCase):
         maya.standalone.uninitialize()
 
     def rpc(self, messages):
+        output = tempfile.TemporaryFile()
         proc = subprocess.Popen([sys.executable, "-B", str(PLUGIN)], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                stdout=output, stderr=subprocess.PIPE)
         try:
             for i, (method, params) in enumerate(messages + [("shutdown", {})]):
                 proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": method,
@@ -78,12 +80,13 @@ class MayaIntegration(unittest.TestCase):
                 time.sleep(0.005)
             self.assertIsNotNone(proc.poll(), "Maya client timed out")
             self.assertEqual(proc.returncode, 0, proc.stderr.read())
-            return [json.loads(line) for line in proc.stdout]
+            output.seek(0)
+            return [json.loads(line) for line in output]
         finally:
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
-            proc.stdout.close()
+            output.close()
             proc.stderr.close()
 
     def test_scene_workflow(self):
@@ -103,7 +106,8 @@ class MayaIntegration(unittest.TestCase):
         def result(i):
             return replies[i]["result"]["content"][0]["json"]["result"]
 
-        self.assertEqual(len(replies[0]["result"]["tools"]), 5)
+        self.assertEqual({t["name"] for t in replies[0]["result"]["tools"]},
+                         {t["name"] for t in rah_maya.TOOLS})
         self.assertEqual(result(1)[0], "rahBox")
         self.assertIn("|rahBox", result(2))
         self.assertEqual(result(4), [1, -2, 3.5])
@@ -111,6 +115,32 @@ class MayaIntegration(unittest.TestCase):
         self.assertEqual(replies[6]["error"]["data"]["kind"], "invalid_input")
         self.assertNotIn("data", replies[7]["error"])
         self.assertTrue(cmds.objExists("rahBox"))
+
+    def test_session(self):
+        reply = self.rpc([("initialize", {"config": {"port": self.port}}),
+                          ("tools/call", {"name": "maya.session", "arguments": {}})])[1]
+        info = reply["result"]["content"][0]["json"]["result"]
+        self.assertEqual(info["port"], self.port)
+        self.assertEqual(info["maya"], cmds.about(version=True))
+        self.assertEqual(info["executable"], sys.executable)
+
+    def test_plugin_guide(self):
+        with patch.object(rah_maya, "desktop_port", side_effect=AssertionError):
+            guide = rah_maya.call_maya("maya.plugin_guide", {}, None)["content"][0]["json"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, guide["filename"])
+            path.write_text(guide["python_source"], encoding="utf-8")
+            plugin = cmds.loadPlugin(str(path))[0]
+            try:
+                self.assertEqual(cmds.rahHello(), guide["expected"])
+            finally:
+                cmds.unloadPlugin(plugin)
+
+    def test_invalid_probes_rejected_before_connection(self):
+        for script in ("puts hello", "import sys; print(sys.version);", "from maya import cmds",
+                       "about -qtversion;", "about -productVersion;"):
+            with self.subTest(script=script), self.assertRaises(rah_maya.InvalidInput):
+                rah_maya.call_maya("maya.eval_mel", {"mel": script}, None)
 
 
 if __name__ == "__main__":

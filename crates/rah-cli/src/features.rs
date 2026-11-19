@@ -91,7 +91,7 @@ pub const FEATURES: [Feature; 15] = [
     },
     Feature {
         name: "maya",
-        summary: "use the open Maya 2025 scene or launch Maya on the first tool call",
+        summary: "write Maya 2025 Python plug-ins and work with the desktop scene",
         argument: None,
         needs_any: &["policy-authority"],
         mount: Mount::Process {
@@ -100,6 +100,8 @@ pub const FEATURES: [Feature; 15] = [
         },
         argument_key: None,
         tools: &[
+            ("maya.plugin_guide", "read"),
+            ("maya.session", "read"),
             ("maya.list", "read"),
             ("maya.help", "read"),
             ("maya.create", "write"),
@@ -110,7 +112,7 @@ pub const FEATURES: [Feature; 15] = [
     },
     Feature {
         name: "blender",
-        summary: "use a connected Blender scene or launch Blender on the first tool call",
+        summary: "write Blender add-ons and work with a connected desktop scene",
         argument: None,
         needs_any: &["policy-authority"],
         mount: Mount::Process {
@@ -119,6 +121,8 @@ pub const FEATURES: [Feature; 15] = [
         },
         argument_key: None,
         tools: &[
+            ("blender.addon_guide", "read"),
+            ("blender.session", "read"),
             ("blender.list", "read"),
             ("blender.inspect", "read"),
             ("blender.create", "write"),
@@ -605,6 +609,8 @@ mod tests {
             .find(|p| p.id.as_deref() == Some("tools-maya"))
             .unwrap();
         assert_eq!(maya.kind, crate::PROCESS_PLUGIN);
+        assert_eq!(policy(&distribution)["tools"]["maya.plugin_guide"], "read");
+        assert_eq!(policy(&distribution)["tools"]["maya.session"], "read");
         assert_eq!(policy(&distribution)["tools"]["maya.eval_mel"], "execute");
     }
 

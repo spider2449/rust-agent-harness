@@ -208,10 +208,10 @@ free port, and says so.
   `~/.rah/sessions/deleted/`; `scripts\sessions.ps1` restores them). The last
   answer can be regenerated and an earlier message edited, both in a new
   branch.
-- **Approvals**: tool calls the policy asks about appear in the conversation.
-  "Allow for this session" trusts that tool until the process ends; "Always
-  allow this command", on a `shell.exec` call, adds that exact program and
-  arguments to the policy's `commands` and keeps it in `rah.toml`.
+- **Approvals** appear in the conversation. **Allow** approves the displayed
+  call once. When offered, **Allow for this session** trusts the tool for the
+  rest of that session. For program calls, see
+  [CMD and PowerShell permissions](#cmd-and-powershell-permissions).
 - **Workspace**: the status line shows the workspace, its Git branch and
   changes, the model, and the tool count; it names the loop, or that no
   policy guards tool calls, only when they are not the usual ones. Click
@@ -287,6 +287,27 @@ writes it to `rah.toml` ([ADR 0069](adr/0069-features-through-the-admin-service.
 | `plan` | Plan first, then execute step by step (`loop-plan`). |
 
 ## Programs and sandboxes
+
+### CMD and PowerShell permissions
+
+In RAH Desktop and the Web UI, CMD (`cmd.exe`) and PowerShell
+(`powershell.exe` or `pwsh.exe`) share the **`shell.exec`** tool.
+If the tool is missing from **Settings → Permissions**, enable **shell** in
+**Settings → Features** first.
+
+| What you want | What to select |
+| --- | --- |
+| Run the command shown in the conversation once | On its approval card, select **Allow**. |
+| Remember one command, such as a PowerShell query for the running Maya process | On its approval card, select **Always allow this command**. RAH saves the exact program and arguments in `rah.toml` when the configuration is writable. A change to the PowerShell script or its arguments requires a new approval under the default **Ask** mode. |
+| Ask before every program call, including remembered commands | Open **Settings → Permissions → Advanced: a choice per tool**, set **`shell.exec`** to **Ask first**, then select **Save permissions**. |
+| Run every program permitted by the shell tool without prompting | In the same panel, set **`shell.exec`** to **Allow** and select **Save permissions**. This applies to every permitted program and all its arguments. |
+
+To use remembered commands alongside prompts for new ones, select the **Ask**
+permissions mode, set **`shell.exec`** to **Default**, and select **Save
+permissions**. An explicit per-tool choice takes precedence over remembered
+commands.
+
+### Shell configuration
 
 The base mounts `tools-shell` over `sandbox-process` (process supervision,
 not an OS sandbox), and the policy asks before each `shell.exec`

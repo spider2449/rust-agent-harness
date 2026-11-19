@@ -19,6 +19,10 @@ def tool(tool_name, description, permission, **fields):
 NAME = {"type": "string", "minLength": 1, "maxLength": 128}
 NUMBER = {"type": "number"}
 TOOLS = [
+    tool("addon_guide", "Start here to write a Blender Python add-on. Returns a working operator and "
+         "Text Editor testing instructions without opening Blender or running shell commands.", "read"),
+    tool("session", "Check whether a Blender scene is connected to RAH. Returns its executable, "
+         "versions and scene when connected, or connection instructions. Never launches Blender.", "read"),
     tool("list", "List object names in the current scene or selection.", "read",
          scope={"type": "string", "enum": ["scene", "selection"]}),
     tool("inspect", "Read an object's type and world position.", "read", name=NAME),
@@ -27,6 +31,37 @@ TOOLS = [
     tool("move", "Set an object's absolute world position in scene units.", "write",
          name=NAME, x=NUMBER, y=NUMBER, z=NUMBER),
 ]
+
+
+ADDON_SOURCE = '''bl_info = {
+    "name": "RAH Hello",
+    "blender": (5, 3, 0),
+    "category": "Object",
+}
+
+import bpy
+
+
+class RAH_OT_hello(bpy.types.Operator):
+    bl_idname = "rah.hello"
+    bl_label = "RAH Hello"
+
+    def execute(self, context):
+        self.report({"INFO"}, "Hello from Blender")
+        return {"FINISHED"}
+
+
+def register():
+    bpy.utils.register_class(RAH_OT_hello)
+
+
+def unregister():
+    bpy.utils.unregister_class(RAH_OT_hello)
+
+
+if __name__ == "__main__":
+    register()
+'''
 
 
 class InvalidInput(ValueError):
@@ -103,8 +138,27 @@ def desktop_scene(bridge):
 
 def call(bridge, name, arguments):
     validate(name, arguments)
+    if name == "blender.addon_guide":
+        return {"content": [{"type": "json", "json": {
+            "filename": "rah_hello.py", "python_source": ADDON_SOURCE,
+            "instructions": "In Blender's Text Editor open the saved file and click Run Script once. "
+                            "In the Python Console run bpy.ops.rah.hello(). Before running the script "
+                            "again, unregister the operator with the cleanup command.",
+            "cleanup": "bpy.utils.unregister_class(bpy.types.RAH_OT_hello)",
+        }}]}
     try:
-        directory = desktop_scene(bridge)
+        if name == "blender.session":
+            directory = active_scene(Path(os.environ["LOCALAPPDATA"]) / "rah" / "blender")
+            if directory is None:
+                return {"content": [{"type": "json", "json": {
+                    "connected": False, "instructions": "In the existing Blender window open "
+                    "plugins/tools-blender/scene_bridge.py in the Text Editor and click Run Script.",
+                }}]}
+            if not (directory / "session-info").exists():
+                raise NotStarted("The connected window uses an older bridge. Restart Blender and "
+                                 "run the updated scene_bridge.py in the desired window.")
+        else:
+            directory = desktop_scene(bridge)
     except OSError as exc:
         raise NotStarted(str(exc)) from exc
     base = directory / uuid.uuid4().hex
