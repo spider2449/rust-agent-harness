@@ -2074,29 +2074,40 @@ async fn features_are_switched_at_once_and_kept_in_the_file() {
 }
 #[cfg(windows)]
 #[tokio::test]
-async fn maya_switch_mounts_and_remembers_the_embedded_plugin() {
-    if !std::path::Path::new(r"C:\aw\Maya2025\bin\mayapy.exe").is_file() {
-        return;
-    }
-    let web = start("web-maya-feature", |_| {}).await;
-    for enabled in [true, false] {
-        let request = web
-            .request(reqwest::Method::PUT, "/api/features/maya")
-            .json(&json!({ "enabled": enabled }));
-        let (status, reply) = web.status(request).await;
-        assert_eq!(status, 200, "{reply}");
-        assert_eq!(reply["remembered"], true);
-        assert_eq!(instance(&web.kernel, "tools-maya").is_some(), enabled);
-        let features = web.json(web.get("/api/features")).await;
-        let maya = features
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["name"] == "maya")
-            .unwrap();
-        assert_eq!(maya["enabled"], enabled);
-        let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
-        assert_eq!(text.contains("\"maya\""), enabled);
+async fn dcc_switch_mounts_and_remembers_the_embedded_plugin() {
+    for (feature, program) in [
+        ("maya", r"C:\aw\Maya2025\bin\mayapy.exe"),
+        (
+            "blender",
+            r"D:\spider\blender-5.3.0-windows-x64\5.3\python\bin\python.exe",
+        ),
+    ] {
+        if !std::path::Path::new(program).is_file() {
+            continue;
+        }
+        let web = start("web-dcc-feature", |_| {}).await;
+        for enabled in [true, false] {
+            let request = web
+                .request(reqwest::Method::PUT, &format!("/api/features/{feature}"))
+                .json(&json!({ "enabled": enabled }));
+            let (status, reply) = web.status(request).await;
+            assert_eq!(status, 200, "{reply}");
+            assert_eq!(reply["remembered"], true);
+            assert_eq!(
+                instance(&web.kernel, &format!("tools-{feature}")).is_some(),
+                enabled
+            );
+            let features = web.json(web.get("/api/features")).await;
+            let item = features
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == feature)
+                .unwrap();
+            assert_eq!(item["enabled"], enabled);
+            let text = std::fs::read_to_string(config_file(&web.dir)).unwrap();
+            assert_eq!(text.contains(&format!("\"{feature}\"")), enabled);
+        }
     }
 }
 

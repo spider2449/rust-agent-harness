@@ -605,7 +605,7 @@ function featuresForm() {
   }
   form.append(el("p", "hint", "Extra capabilities. A switch applies at once and is kept in rah.toml."));
   for (const feature of features) {
-    form.append(featureSwitch(feature, feature.name === "maya" ? "Maya" : feature.name));
+    form.append(featureSwitch(feature, ({ maya: "Maya", blender: "Blender" })[feature.name] ?? feature.name));
   }
   return form;
 }

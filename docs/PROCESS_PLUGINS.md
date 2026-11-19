@@ -18,6 +18,8 @@ or 2 (tools only).
 
 The [tools-maya process plugin](../plugins/tools-maya/README.md) controls an open Maya 2025 scene through its built-in command port and includes a runnable RAH configuration.
 
+The [tools-blender process plugin](../plugins/tools-blender/README.md) connects to Blender 5.3 on Windows and provides scene queries and editing tools.
+
 ## Mounting
 
 ```toml

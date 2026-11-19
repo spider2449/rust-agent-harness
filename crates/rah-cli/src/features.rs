@@ -62,7 +62,7 @@ pub struct Feature {
 }
 
 /// Every feature, in the order `rah features` shows them.
-pub const FEATURES: [Feature; 14] = [
+pub const FEATURES: [Feature; 15] = [
     Feature {
         name: "shell",
         summary: "run programs (`shell.exec`); the policy asks before each call",
@@ -105,6 +105,24 @@ pub const FEATURES: [Feature; 14] = [
             ("maya.create", "write"),
             ("maya.move", "write"),
             ("maya.eval_mel", "execute"),
+        ],
+        decisions: &[],
+    },
+    Feature {
+        name: "blender",
+        summary: "use a connected Blender scene or launch Blender on the first tool call",
+        argument: None,
+        needs_any: &["policy-authority"],
+        mount: Mount::Process {
+            id: "tools-blender",
+            config: blender_launch,
+        },
+        argument_key: None,
+        tools: &[
+            ("blender.list", "read"),
+            ("blender.inspect", "read"),
+            ("blender.create", "write"),
+            ("blender.move", "write"),
         ],
         decisions: &[],
     },
@@ -266,6 +284,17 @@ fn maya_launch() -> Value {
                         "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERNAME", "USERDOMAIN",
                         "MAYA_APP_DIR", "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
         "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-maya/rah_maya.py")],
+    })
+}
+
+fn blender_launch() -> Value {
+    serde_json::json!({
+        "program": r"D:\spider\blender-5.3.0-windows-x64\5.3\python\bin\python.exe",
+        "call_timeout_ms": 150000,
+        "inherit_env": ["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+                        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA"],
+        "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-blender/rah_blender.py")],
+        "plugin": {"bridge": include_str!("../../../plugins/tools-blender/scene_bridge.py")},
     })
 }
 
@@ -577,6 +606,35 @@ mod tests {
             .unwrap();
         assert_eq!(maya.kind, crate::PROCESS_PLUGIN);
         assert_eq!(policy(&distribution)["tools"]["maya.eval_mel"], "execute");
+    }
+
+    #[test]
+    fn blender_mounts_once_alongside_maya_and_assigns_scene_permissions() {
+        let mut distribution = Distribution::preset("dev").unwrap();
+        distribution.enable("maya").unwrap();
+        distribution.enable("blender").unwrap();
+        let once = distribution.clone();
+        distribution.enable("blender").unwrap();
+        assert_eq!(distribution, once);
+        for id in ["tools-maya", "tools-blender"] {
+            assert!(
+                distribution
+                    .plugin
+                    .iter()
+                    .any(|p| { p.kind == crate::PROCESS_PLUGIN && p.id.as_deref() == Some(id) })
+            );
+        }
+        let tools = &policy(&distribution)["tools"];
+        assert_eq!(tools["blender.inspect"], "read");
+        assert_eq!(tools["blender.list"], "read");
+        assert_eq!(tools["blender.create"], "write");
+        assert_eq!(tools["blender.move"], "write");
+        let mut bare = Distribution::parse("[[plugin]]\nuse = \"loop-react\"\n").unwrap();
+        assert!(
+            bare.enable("blender")
+                .unwrap_err()
+                .contains("policy-authority")
+        );
     }
 
     #[test]

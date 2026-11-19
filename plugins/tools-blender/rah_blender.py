@@ -1,0 +1,163 @@
+"""RAH protocol 2 adapter for the Blender desktop scene bridge (Windows)."""
+import errno
+import json
+import msvcrt
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import uuid
+
+
+def tool(tool_name, description, permission, **fields):
+    return {"name": "blender." + tool_name, "description": description, "permission": permission,
+            "input_schema": {"type": "object", "properties": fields, "required": list(fields),
+                             "additionalProperties": False}}
+
+
+NAME = {"type": "string", "minLength": 1, "maxLength": 128}
+NUMBER = {"type": "number"}
+TOOLS = [
+    tool("list", "List object names in the current scene or selection.", "read",
+         scope={"type": "string", "enum": ["scene", "selection"]}),
+    tool("inspect", "Read an object's type and world position.", "read", name=NAME),
+    tool("create", "Create a mesh in Object Mode. Use the returned object name.", "write",
+         shape={"type": "string", "enum": ["cube", "sphere", "cylinder", "plane", "cone"]}, name=NAME),
+    tool("move", "Set an object's absolute world position in scene units.", "write",
+         name=NAME, x=NUMBER, y=NUMBER, z=NUMBER),
+]
+
+
+class InvalidInput(ValueError):
+    pass
+
+
+class NotStarted(Exception):
+    pass
+
+
+def validate(name, arguments):
+    spec = next((tool for tool in TOOLS if tool["name"] == name), None)
+    if spec is None:
+        raise InvalidInput("Unknown Blender tool")
+    fields = spec["input_schema"]["properties"]
+    if not isinstance(arguments, dict) or arguments.keys() != fields.keys():
+        raise InvalidInput("Expected fields: " + ", ".join(fields))
+    for key, schema in fields.items():
+        value = arguments[key]
+        if schema["type"] == "number":
+            if type(value) not in (int, float) or not abs(value) <= 3.4028234e38:
+                raise InvalidInput(key + " must be a finite Blender coordinate")
+        elif not isinstance(value, str) or not value.strip() or len(value) > 128 or "\0" in value:
+            raise InvalidInput(key + " must be a nonempty string of at most 128 characters")
+        elif "enum" in schema and value not in schema["enum"]:
+            raise InvalidInput(key + " must be one of: " + ", ".join(schema["enum"]))
+
+
+def try_lock(file):
+    try:
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        if exc.errno != errno.EACCES:
+            raise
+        return False
+    return True
+
+
+def active_scene(root):
+    scenes = []
+    for marker in root.glob("scene-*/ready"):
+        try:
+            with marker.with_name("active").open("r+b") as lease:
+                if not try_lock(lease):
+                    scenes.append(marker.parent)
+        except FileNotFoundError:
+            continue
+    if len(scenes) > 1:
+        raise NotStarted("Multiple RAH-connected Blender scenes. Close the extra connected windows.")
+    return next(iter(scenes), None)
+
+
+def desktop_scene(bridge):
+    root = Path(os.environ["LOCALAPPDATA"]) / "rah" / "blender"
+    root.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 90
+    with (root / "startup.lock").open("a+b") as startup:
+        while not try_lock(startup):
+            if time.monotonic() >= deadline:
+                raise NotStarted("Timed out waiting for Blender startup")
+            time.sleep(0.1)
+        scene = active_scene(root)
+        if scene is None:
+            blender = Path(sys.executable).parents[3] / "blender.exe"
+            arguments = subprocess.list2cmdline(["--python-expr", "exec(" + ascii(bridge) + ")"])
+            os.startfile(str(blender), arguments=arguments)
+        while scene is None:
+            if time.monotonic() >= deadline:
+                raise NotStarted("Blender did not connect. Check its window and startup dialogs.")
+            time.sleep(0.2)
+            scene = active_scene(root)
+        return scene
+
+
+def call(bridge, name, arguments):
+    validate(name, arguments)
+    try:
+        directory = desktop_scene(bridge)
+    except OSError as exc:
+        raise NotStarted(str(exc)) from exc
+    base = directory / uuid.uuid4().hex
+    pending, request, reply = (base.with_suffix(ext) for ext in (".in", ".request", ".reply"))
+    deadline = time.monotonic() + 45
+    try:
+        pending.write_text(json.dumps({"name": name, "arguments": arguments, "deadline": deadline}),
+                           encoding="ascii")
+        pending.replace(request)
+        while not reply.is_file():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Blender timed out; inspect the scene before retrying")
+            time.sleep(0.05)
+        response = json.loads(reply.read_bytes())
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return {"content": [{"type": "json", "json": response["result"]}]}
+    finally:
+        for path in (pending, request, reply):
+            path.unlink(missing_ok=True)
+
+
+def run():
+    bridge = None
+    for line in sys.stdin.buffer:
+        msg = json.loads(line)
+        if "id" not in msg:
+            continue
+        method = msg.get("method")
+        params = msg.get("params", {})
+        response = {"id": msg["id"], "jsonrpc": "2.0"}
+        try:
+            if method == "initialize":
+                bridge = (params.get("config") or {}).get("bridge")
+                if not isinstance(bridge, str) or not bridge:
+                    raise InvalidInput("Expected the bundled Blender bridge")
+                response["result"] = {"protocol": 2, "version": "0.1.0", "provides": ["tools"],
+                                      "requires": [], "tools": TOOLS}
+            elif method == "tools/call":
+                response["result"] = call(bridge, params["name"], params.get("arguments", {}))
+            elif method == "shutdown":
+                response["result"] = {}
+            else:
+                response["error"] = {"code": -32601, "message": "Unknown method"}
+        except (InvalidInput, NotStarted) as exc:
+            kind = "not_started" if isinstance(exc, NotStarted) else "invalid_input"
+            response["error"] = {"code": -32602, "message": str(exc), "data": {"kind": kind}}
+        except Exception as exc:
+            response["error"] = {"code": -32000, "message": str(exc)}
+        print(json.dumps(response, allow_nan=False), flush=True)
+        if method == "shutdown":
+            break
+
+
+if __name__ == "__main__":
+    run()
