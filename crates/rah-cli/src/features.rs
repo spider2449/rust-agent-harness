@@ -101,6 +101,7 @@ pub const FEATURES: [Feature; 15] = [
         argument_key: None,
         tools: &[
             ("maya.plugin_guide", "read"),
+            ("maya.locate", "read"),
             ("maya.session", "read"),
             ("maya.list", "read"),
             ("maya.help", "read"),
@@ -122,6 +123,7 @@ pub const FEATURES: [Feature; 15] = [
         argument_key: None,
         tools: &[
             ("blender.addon_guide", "read"),
+            ("blender.locate", "read"),
             ("blender.session", "read"),
             ("blender.list", "read"),
             ("blender.inspect", "read"),
@@ -280,23 +282,31 @@ pub const FEATURES: [Feature; 15] = [
     },
 ];
 
+fn dcc_python() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("runtime/bin/python.exe")))
+        .filter(|python| python.is_file())
+        .unwrap_or_else(|| "python.exe".into())
+}
+
 fn maya_launch() -> Value {
     serde_json::json!({
-        "program": r"C:\aw\Maya2025\bin\mayapy.exe",
+        "program": dcc_python(),
         "call_timeout_ms": 150000,
         "inherit_env": ["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
                         "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERNAME", "USERDOMAIN",
-                        "MAYA_APP_DIR", "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
+                        "RAH_MAYA_EXE", "MAYA_LOCATION", "MAYA_APP_DIR", "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
         "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-maya/rah_maya.py")],
     })
 }
 
 fn blender_launch() -> Value {
     serde_json::json!({
-        "program": r"D:\spider\blender-5.3.0-windows-x64\5.3\python\bin\python.exe",
+        "program": dcc_python(),
         "call_timeout_ms": 150000,
         "inherit_env": ["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
-                        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA"],
+                        "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ProgramFiles", "RAH_BLENDER_EXE"],
         "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-blender/rah_blender.py")],
         "plugin": {"bridge": include_str!("../../../plugins/tools-blender/scene_bridge.py")},
     })

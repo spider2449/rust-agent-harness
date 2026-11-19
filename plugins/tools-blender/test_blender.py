@@ -1,4 +1,4 @@
-﻿"""Run with the Blender installation's bundled python.exe, from any directory."""
+﻿"""Run with Windows Python and a discoverable Blender installation."""
 import json
 import os
 from pathlib import Path
@@ -12,10 +12,20 @@ from unittest.mock import patch
 import rah_blender
 
 BRIDGE = Path(__file__).with_name("scene_bridge.py").read_text(encoding="utf-8")
-BLENDER = Path(sys.executable).parents[3] / "blender.exe"
+BLENDER = rah_blender.locate()["executable"]
 
 
 class BlenderIntegration(unittest.TestCase):
+    def test_locate_uses_machine_path_without_launching(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, clear=True, PATH=directory), \
+                patch.object(os, "startfile", side_effect=AssertionError):
+            executable = Path(directory, "blender.exe")
+            executable.touch()
+            result = rah_blender.call(BRIDGE, "blender.locate", {})
+            self.assertEqual(result["content"][0]["json"]["executable"], str(executable))
+            os.environ["RAH_BLENDER_EXE"] = str(Path(directory, "missing.exe"))
+            self.assertIsNone(rah_blender.locate()["executable"])
+
     def test_authoring_without_desktop(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, LOCALAPPDATA=directory), \
                 patch.object(os, "startfile", side_effect=AssertionError):
@@ -82,7 +92,7 @@ class BlenderIntegration(unittest.TestCase):
                         self.assertEqual(replies[i]["error"]["data"]["kind"], "invalid_input")
                     self.assertIn("absent", replies[7]["error"]["message"])
                     self.assertTrue(result(8)["connected"])
-                    self.assertEqual(Path(result(8)["executable"]), BLENDER)
+                    self.assertEqual(Path(result(8)["executable"]), Path(BLENDER))
                     self.assertEqual(result(8)["scene"], "Scene")
                     self.assertEqual(result(8)["file"], "")
                     self.assertEqual(replies[9]["result"], {})

@@ -220,6 +220,13 @@ async fn graphify_bundled_python_works_without_uv_or_system_runtimes() {
     let dir = TempDir::new("graphify-no-uv");
     let copied_runtime = dir.0.join("graphify-runtime");
     copy_tree(&source, &copied_runtime);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(source.join("runtime.json")).unwrap()).unwrap();
+    if manifest["python"] == "../runtime/bin/python.exe"
+        || manifest["node"] == "../runtime/bin/node.exe"
+    {
+        copy_tree(&source.join("../runtime"), &dir.0.join("runtime"));
+    }
     let binary = dir.0.join(if cfg!(windows) { "rah.exe" } else { "rah" });
     std::fs::copy(env!("CARGO_BIN_EXE_rah"), &binary).unwrap();
     let config = dir.0.join("rah.toml");

@@ -26,6 +26,7 @@ def tool(tool_name, description, permission, **fields):
 
 
 TOOLS = [
+    tool("locate", "Find the installed Maya executable on this Windows machine before launch.", "read"),
     tool("plugin_guide", "Start here to write a Maya Python API 2.0 plug-in. Returns a working command "
          "plug-in and Python testing instructions locally, without connecting to Maya.", "read"),
     tool("session", "Get the connected Maya executable, Maya/API/Python/Qt versions and scene in one call. "
@@ -110,7 +111,7 @@ def compile_mel(name, args):
                 "scene=cmds.file(query=True, sceneName=True)))")
         expr = "(lambda cmds: " + expr + ")(__import__('maya.cmds', fromlist=['about']))"
         return "python(" + json.dumps(expr) + ");"
-    if name == "maya.plugin_guide":
+    if name in ("maya.locate", "maya.plugin_guide"):
         return None
     if re.match(r"\s*(?:import\s|from\s+\w+[.\w]*\s+import\s|puts\s)", args["mel"]):
         raise InvalidInput("maya.eval_mel accepts MEL. Use maya.plugin_guide for Python plug-ins "
@@ -161,6 +162,42 @@ def maya_running():
         wts.WTSFreeMemory(processes)
 
 
+def executable_candidates():
+    override = os.environ.get("RAH_MAYA_EXE")
+    if override:
+        yield Path(override)
+        return
+    for directory in os.get_exec_path():
+        if Path(directory).is_absolute():
+            yield Path(directory) / "maya.exe"
+    location = os.environ.get("MAYA_LOCATION")
+    if location:
+        yield Path(location) / "bin" / "maya.exe"
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Autodesk\Maya",
+                            access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            versions = [winreg.EnumKey(key, i) for i in range(winreg.QueryInfoKey(key)[0])]
+            for version in sorted((v for v in versions if v.isdecimal() and int(v) >= 2025),
+                                  key=int, reverse=True):
+                try:
+                    with winreg.OpenKey(key, version + r"\Setup\InstallPath") as install:
+                        location, _ = winreg.QueryValueEx(install, "MAYA_INSTALL_LOCATION")
+                        yield Path(location) / "bin" / "maya.exe"
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+
+def locate():
+    for candidate in executable_candidates():
+        if candidate.is_absolute() and candidate.is_file():
+            return {"executable": str(candidate)}
+    return {"executable": None, "instructions": "Open Maya manually or set RAH_MAYA_EXE "
+            "to its absolute executable path before starting RAH."}
+
+
 def desktop_port():
     port = registered_port()
     if port is not None:
@@ -169,7 +206,10 @@ def desktop_port():
         # Open a user-owned GUI document application. Leaving RAH must not
         # terminate Maya or discard its unsaved scene.
         try:
-            os.startfile(str(Path(sys.executable).with_name("maya.exe")))
+            installation = locate()
+            if not installation["executable"]:
+                raise NotStarted(installation["instructions"])
+            os.startfile(installation["executable"])
         except OSError as exc:
             raise NotStarted(f"Could not open Maya 2025: {exc}") from exc
     deadline = time.monotonic() + 90
@@ -184,6 +224,8 @@ def desktop_port():
 
 def call_maya(name, args, port):
     script = compile_mel(name, args)
+    if name == "maya.locate":
+        return {"content": [{"type": "json", "json": locate()}]}
     if name == "maya.plugin_guide":
         return {"content": [{"type": "json", "json": {
             "filename": "rah_hello.py", "python_source": PLUGIN_SOURCE,

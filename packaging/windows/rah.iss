@@ -47,7 +47,7 @@ Source: "{#StageDir}\graphify-runtime\*"; DestDir: "{app}\graphify-runtime"; Fla
 Source: "{#StageDir}\lsp-runtime\*"; DestDir: "{app}\lsp-runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 
-#if FileExists(AddBackslash(StageDir) + "runtime\bin\node.exe")
+#if FileExists(AddBackslash(StageDir) + "runtime\bin\python.exe") || FileExists(AddBackslash(StageDir) + "runtime\bin\node.exe")
 Source: "{#StageDir}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 

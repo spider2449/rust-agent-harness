@@ -49,6 +49,15 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 
+function Get-BundlePython([string]$Graph) {
+    $name = (Get-Content -LiteralPath (Join-Path $Graph 'runtime.json') -Raw | ConvertFrom-Json).python
+    switch -CaseSensitive ($name) {
+        'python/python.exe' { return Join-Path $Graph 'python/python.exe' }
+        '../runtime/bin/python.exe' { return Join-Path (Split-Path -Parent $Graph) 'runtime/bin/python.exe' }
+        default { throw "Unsupported bundled Python location: $name" }
+    }
+}
+
 function Resolve-PackageRuntimes([string]$Root, [string]$Graphify, [string]$Lsp, [bool]$Minimal) {
     if ($Minimal) {
         if ($Graphify -or $Lsp) { throw '-Lightweight cannot be combined with runtime paths.' }
@@ -76,6 +85,7 @@ function Resolve-PackageRuntimes([string]$Root, [string]$Graphify, [string]$Lsp,
 $runtimes = Resolve-PackageRuntimes $repo $GraphifyRuntime $LspRuntime ([bool]$Lightweight)
 $GraphifyRuntime = $runtimes.Graphify
 $LspRuntime = $runtimes.Lsp
+if ($GraphifyRuntime) { $runtimePython = Get-BundlePython $GraphifyRuntime }
 
 $manifest = Get-Content -LiteralPath (Join-Path $repo "Cargo.toml") -Raw
 if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "No workspace version in Cargo.toml." }
@@ -84,12 +94,11 @@ $suffix = if ($GraphifyRuntime) { '-graphify-bundled' } else { '' }
 if ($LspRuntime) {
     $suffix += '-lsp-bundled'
     $LspRuntime = (Resolve-Path -LiteralPath $LspRuntime).Path
-    & (Join-Path $GraphifyRuntime 'python/python.exe') -I (Join-Path $repo 'scripts/prepare-lsp-runtime.py') --check $LspRuntime
+    & $runtimePython -I (Join-Path $repo 'scripts/prepare-lsp-runtime.py') --check $LspRuntime
     if ($LASTEXITCODE -ne 0) { throw 'LSP runtime validation failed' }
 }
 if ($GraphifyRuntime) {
     $GraphifyRuntime = (Resolve-Path -LiteralPath $GraphifyRuntime).Path
-    $runtimePython = Join-Path $GraphifyRuntime 'python/python.exe'
     & $runtimePython -I (Join-Path $repo 'scripts/prepare-graphify-runtime.py') --check $GraphifyRuntime
     if ($LASTEXITCODE -ne 0) { throw 'Graphify runtime validation failed' }
 }
@@ -121,7 +130,7 @@ foreach ($exe in "rah.exe", "rah-desktop.exe") {
 if ($GraphifyRuntime) {
     $runtimeHelp = & (Join-Path $release 'rah.exe') graphify install --help
     if ($LASTEXITCODE -ne 0 -or ($runtimeHelp -join "`n") -notmatch '--runtime-dir') { throw 'Rebuild RAH with bundled-runtime support before packaging' }
-    if (($runtimeHelp -join "`n") -notmatch 'runtime/bin/node.exe') { throw 'Rebuild RAH with shared Node support before packaging' }
+    if (($runtimeHelp -join "`n") -notmatch 'runtime/bin/python.exe') { throw 'Rebuild RAH with shared Python support before packaging' }
 }
 
 # Keep other package variants; only replace this generated staging directory.
@@ -142,7 +151,12 @@ Copy-Item (Join-Path $repo "packaging\windows\rah.ico") -Destination $stage
 Copy-Item (Join-Path $repo "README.md") -Destination $stage
 if ($GraphifyRuntime) {
     Copy-Item -LiteralPath (Join-Path $repo 'packaging/windows/README-graphify-bundled.md') -Destination (Join-Path $stage 'README.md') -Force
-    Copy-Item -LiteralPath $GraphifyRuntime -Destination (Join-Path $stage 'graphify-runtime') -Recurse
+    $graphStage = New-Item -ItemType Directory -Path (Join-Path $stage 'graphify-runtime')
+    Get-ChildItem -LiteralPath $GraphifyRuntime -Force | Where-Object Name -ne 'python' |
+        Copy-Item -Destination $graphStage.FullName -Recurse
+    $bin = New-Item -ItemType Directory -Force -Path (Join-Path $stage 'runtime/bin')
+    Get-ChildItem -LiteralPath (Split-Path -Parent $runtimePython) -Force | Where-Object Name -ne 'node.exe' |
+        Copy-Item -Destination $bin.FullName -Recurse
     Copy-Item -LiteralPath (Join-Path $stage 'README.md') -Destination (Join-Path $dist "rah-$version$suffix-README.md") -Force
 }
 
@@ -154,6 +168,15 @@ if ($LspRuntime) {
     $existingReadme = Get-Content -LiteralPath (Join-Path $stage 'README.md') -Raw
     [IO.File]::WriteAllText((Join-Path $stage 'README.md'), $lspReadme + "`r`n`r`n" + $existingReadme, [Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $stage 'README.md') -Destination (Join-Path $dist "rah-$version$suffix-README.md") -Force
+}
+
+if ($GraphifyRuntime) {
+    $metadataFile = Join-Path $graphStage.FullName 'runtime.json'
+    $metadata = Get-Content -LiteralPath $metadataFile -Raw | ConvertFrom-Json
+    $metadata.python = '../runtime/bin/python.exe'
+    [IO.File]::WriteAllText($metadataFile, ($metadata | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+    & (Get-BundlePython $graphStage.FullName) -I (Join-Path $repo 'scripts/prepare-graphify-runtime.py') --check $graphStage.FullName
+    if ($LASTEXITCODE -ne 0) { throw 'Shared Python staging validation failed' }
 }
 
 $zip = Join-Path $dist "rah-$version$suffix-portable.zip"

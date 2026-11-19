@@ -1,5 +1,9 @@
 # Graphify packages without uv
 
+Combined Windows distributions put the complete portable Python distribution in
+`runtime/bin`. Graphify, Maya and Blender use `runtime/bin/python.exe` beside
+RAH. Graphify's manifest also supports older bundles with a private interpreter.
+
 Combined Windows distributions put Node in `runtime/bin/node.exe` when LSP and
 Graphify's binary SHA-256 hashes match. Both explicitly reference this neutral
 location; see [the shared layout](LSP_PACKAGING.md). Keep the shared runtime and

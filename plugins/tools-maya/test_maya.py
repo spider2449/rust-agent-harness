@@ -21,6 +21,16 @@ PLUGIN = Path(__file__).with_name("rah_maya.py").resolve()
 
 
 class DesktopRouting(unittest.TestCase):
+    def test_locate_uses_machine_path_without_launching(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, clear=True, PATH=directory), \
+                patch.object(os, "startfile", side_effect=AssertionError):
+            executable = Path(directory, "maya.exe")
+            executable.touch()
+            result = rah_maya.call_maya("maya.locate", {}, None)
+            self.assertEqual(result["content"][0]["json"]["executable"], str(executable))
+            os.environ["RAH_MAYA_EXE"] = str(Path(directory, "missing.exe"))
+            self.assertIsNone(rah_maya.locate()["executable"])
+
     def test_reuses_registered_port(self):
         with patch.object(rah_maya, "registered_port", return_value=50010), patch.object(os, "startfile") as launch:
             self.assertEqual(rah_maya.desktop_port(), 50010)

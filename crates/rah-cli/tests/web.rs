@@ -2075,16 +2075,7 @@ async fn features_are_switched_at_once_and_kept_in_the_file() {
 #[cfg(windows)]
 #[tokio::test]
 async fn dcc_switch_mounts_and_remembers_the_embedded_plugin() {
-    for (feature, program) in [
-        ("maya", r"C:\aw\Maya2025\bin\mayapy.exe"),
-        (
-            "blender",
-            r"D:\spider\blender-5.3.0-windows-x64\5.3\python\bin\python.exe",
-        ),
-    ] {
-        if !std::path::Path::new(program).is_file() {
-            continue;
-        }
+    for feature in ["maya", "blender"] {
         let web = start("web-dcc-feature", |_| {}).await;
         for enabled in [true, false] {
             let request = web

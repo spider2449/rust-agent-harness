@@ -19,6 +19,7 @@ def tool(tool_name, description, permission, **fields):
 NAME = {"type": "string", "minLength": 1, "maxLength": 128}
 NUMBER = {"type": "number"}
 TOOLS = [
+    tool("locate", "Find the installed Blender executable on this Windows machine before launch.", "read"),
     tool("addon_guide", "Start here to write a Blender Python add-on. Returns a working operator and "
          "Text Editor testing instructions without opening Blender or running shell commands.", "read"),
     tool("session", "Check whether a Blender scene is connected to RAH. Returns its executable, "
@@ -114,6 +115,45 @@ def active_scene(root):
     return next(iter(scenes), None)
 
 
+def executable_candidates():
+    override = os.environ.get("RAH_BLENDER_EXE")
+    if override:
+        yield Path(override)
+        return
+    for directory in os.get_exec_path():
+        if Path(directory).is_absolute():
+            yield Path(directory) / "blender.exe"
+    import winreg
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\App Paths\blender.exe") as key:
+                executable, _ = winreg.QueryValueEx(key, None)
+                yield Path(os.path.expandvars(executable.strip('"')))
+        except OSError:
+            pass
+    programs = os.environ.get("ProgramFiles")
+    if programs:
+        yield from sorted(Path(programs).glob("Blender Foundation/Blender */blender.exe"), reverse=True)
+    # Portable installs may only appear in the current user's launch history.
+    store = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, store) as key:
+            for index in range(winreg.QueryInfoKey(key)[1]):
+                path = Path(winreg.EnumValue(key, index)[0])
+                if path.name.lower() == "blender.exe":
+                    yield path
+    except OSError:
+        pass
+
+
+def locate():
+    for candidate in executable_candidates():
+        if candidate.is_absolute() and candidate.is_file():
+            return {"executable": str(candidate)}
+    return {"executable": None, "instructions": "Open Blender manually or set RAH_BLENDER_EXE "
+            "to its absolute executable path before starting RAH."}
+
+
 def desktop_scene(bridge):
     root = Path(os.environ["LOCALAPPDATA"]) / "rah" / "blender"
     root.mkdir(parents=True, exist_ok=True)
@@ -125,9 +165,11 @@ def desktop_scene(bridge):
             time.sleep(0.1)
         scene = active_scene(root)
         if scene is None:
-            blender = Path(sys.executable).parents[3] / "blender.exe"
+            installation = locate()
+            if not installation["executable"]:
+                raise NotStarted(installation["instructions"])
             arguments = subprocess.list2cmdline(["--python-expr", "exec(" + ascii(bridge) + ")"])
-            os.startfile(str(blender), arguments=arguments)
+            os.startfile(installation["executable"], arguments=arguments)
         while scene is None:
             if time.monotonic() >= deadline:
                 raise NotStarted("Blender did not connect. Check its window and startup dialogs.")
@@ -138,6 +180,8 @@ def desktop_scene(bridge):
 
 def call(bridge, name, arguments):
     validate(name, arguments)
+    if name == "blender.locate":
+        return {"content": [{"type": "json", "json": locate()}]}
     if name == "blender.addon_guide":
         return {"content": [{"type": "json", "json": {
             "filename": "rah_hello.py", "python_source": ADDON_SOURCE,

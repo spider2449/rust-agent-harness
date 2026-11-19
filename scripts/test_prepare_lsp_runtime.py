@@ -22,7 +22,7 @@ class RuntimeTests(unittest.TestCase):
             root = package / "lsp-runtime"
             graph = package / "graphify-runtime"
             graph.mkdir(parents=True)
-            (graph / "runtime.json").write_text(json.dumps({"node": "node.exe"}))
+            (graph / "runtime.json").write_text(json.dumps({"node": "node.exe", "python": "python/python.exe"}))
             names = {arg for argv in lsp.PROGRAMS.values() for arg in argv if not arg.startswith("--")}
             names.add("node_modules/typescript/lib/tsserver.js")
             for name in names:
@@ -41,15 +41,21 @@ class RuntimeTests(unittest.TestCase):
             code = "manifest = json.loads((lsp / 'runtime.json')" + code
             context = {"lsp": root, "graph": graph, "json": json, "hashlib": hashlib, "shutil": shutil, "pathlib": __import__("pathlib"),
                        "sys": SimpleNamespace(argv=["-", str(graph), str(root), "--share-node"])}
-            exec(code, context)
+            def run_staging():
+                context["graph_manifest"] = json.loads((graph / "runtime.json").read_text())
+                context["python_name"] = context["graph_manifest"]["python"]
+                context["python_root"] = graph / "python"
+                exec(code, context)
+
+            run_staging()
             self.assertFalse((root / "node.exe").exists())
             self.assertFalse((graph / "node.exe").exists())
-            exec(code, context)  # updater accepts an already shared release
+            run_staging()  # updater accepts an already shared release
             lsp.check(root)
             # Restore the standalone fixture to exercise package deduplication too.
             (root / "node.exe").write_bytes(b"fixture")
             (root / "runtime.json").write_text(json.dumps(manifest))
-            (graph / "runtime.json").write_text(json.dumps({"node": "node.exe"}))
+            (graph / "runtime.json").write_text(json.dumps({"node": "node.exe", "python": "python/python.exe"}))
             (graph / "node.exe").write_bytes(b"fixture")
             (package / "runtime/bin/node.exe").unlink()
             lsp.share_node(root)
@@ -58,11 +64,17 @@ class RuntimeTests(unittest.TestCase):
             lsp.share_node(root)  # idempotent
             # The updater stages already shared input without changing it.
             stage = Path(tmp) / "staged"
-            context["sys"].argv = ["-", str(graph), str(root), "--stage", str(stage), "--share-node"]
-            exec(code, context)
+            (graph / "python").mkdir()
+            (graph / "python/python.exe").write_bytes(b"interpreter")
+            context["sys"].argv = ["-", str(graph), str(root), "--stage", str(stage), "--share-node", "--share-python"]
+            run_staging()
             lsp.check(stage / "lsp-runtime")
             self.assertEqual((stage / "runtime/bin/node.exe").read_bytes(), b"fixture")
             self.assertFalse((stage / "graphify-runtime/node.exe").exists())
+            self.assertFalse((stage / "graphify-runtime/python").exists())
+            self.assertEqual((stage / "runtime/bin/python.exe").read_bytes(), b"interpreter")
+            self.assertEqual(json.loads((stage / "graphify-runtime/runtime.json").read_text())["python"],
+                             "../runtime/bin/python.exe")
             # Packaging likewise accepts a previously shared distribution.
             lsp.materialize_node(root, stage / "lsp-runtime", True)
             lsp.materialize_node(graph, stage / "graphify-runtime", False)

@@ -107,7 +107,7 @@ enum GraphifyCommand {
         #[arg(long, value_name = "EXE")]
         node: Option<PathBuf>,
         /// Use this prepared graphify-runtime bundle instead of the one beside RAH.
-        /// Supports shared Node at runtime/bin/node.exe beside the bundle.
+        /// Supports shared Node at runtime/bin/node.exe and Python at runtime/bin/python.exe beside the bundle.
         #[arg(long, value_name = "DIR", conflicts_with = "python")]
         runtime_dir: Option<PathBuf>,
     },

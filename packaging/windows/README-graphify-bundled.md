@@ -29,9 +29,9 @@ beside `rah.exe`; the **RAH README** Start menu shortcut opens it.
 
 ## Portable ZIP
 
-Extract the entire ZIP into a writable folder. If present, keep the shared
-`runtime` directory beside the executables; it supplies Node to both Graphify
-and LSP. Keep `graphify-runtime` beside
+Extract the entire ZIP into a writable folder. Keep the shared
+`runtime` directory beside the executables. It supplies Python to Graphify,
+Maya and Blender, and can also supply Node to Graphify and LSP. Keep `graphify-runtime` beside
 `rah.exe` and `rah-desktop.exe`; copying the executables alone is insufficient.
 Run `.\rah-desktop.exe` once to configure RAH, close it, then run
 `.\rah.exe graphify install --offline` from that folder and reopen Desktop.

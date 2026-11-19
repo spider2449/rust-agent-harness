@@ -1,6 +1,8 @@
 ﻿# tools-blender · Blender 5.3 场景工具
 
-在 RAH 的 **Settings → Features** 启用 **Blender**，或启动时加上 `--with blender`。示例配置见 [blender.toml](blender.toml)。插件使用 `D:\spider\blender-5.3.0-windows-x64` 中的 Blender 和自带的 Python。
+在 RAH 的 **Settings → Features** 启用 **Blender**，或启动时加上 `--with blender`。示例配置见 [blender.toml](blender.toml)。Windows 完整版使用随附的 `runtime\bin\python.exe`。精简版使用 PATH 上的 Python 3.10 以上版本。
+
+模型可调用 `blender.locate {}` 查找本机的 Blender。工具依次检查 PATH、Windows 应用注册信息、Program Files 下的 Blender 安装目录及当前用户的程序启动记录。对于尚无启动记录的便携版，可在启动 RAH 前用 `RAH_BLENDER_EXE` 指定执行文件的绝对路径。
 
 编写 Python 插件时，先让模型调用 `blender.addon_guide {}`，离线取得可执行的 Operator 范本和测试步骤。要确认当前项目，调用 `blender.session {}`；如果尚未连接，请在目标 Blender 窗口的 **Text Editor → Open** 打开 [scene_bridge.py](scene_bridge.py)，点击 **Run Script**，再查询一次。这两个工具都不需要启动桌面程序或调用 PowerShell。
 
@@ -22,5 +24,5 @@
 在仓库根目录运行集成测试。测试使用独立的临时目录和 Blender 后台场景。
 
 ```powershell
-& 'D:\spider\blender-5.3.0-windows-x64\5.3\python\bin\python.exe' -B plugins/tools-blender/test_blender.py
+python -B plugins/tools-blender/test_blender.py
 ```

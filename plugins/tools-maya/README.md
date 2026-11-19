@@ -2,7 +2,9 @@
 
 在 **RAH → Settings → Features** 打開 **Maya**。要寫外掛，可以說「幫我寫一個 Maya Python 指令外掛」。模型可先用 `maya.plugin_guide {}` 取得 Python API 2.0 範本，以及在 Script Editor 的 Python 分頁載入、測試和卸載的步驟。讀取範本全程在 RAH 本機完成。
 
-需要確認執行環境時，使用 `maya.session {}` 一次查詢 Maya 執行檔、連接埠、Maya、API、Python、Qt 版本及場景路徑。連線工具會使用已開啟的 Maya；若 Maya 尚未執行，RAH 會開啟 `C:\aw\Maya2025\bin\maya.exe` 並等待就緒。Maya 顯示指令核准視窗時，確認後即可繼續。
+Windows 完整版使用隨附的 `runtime\bin\python.exe`。精簡版使用 PATH 上的 Python 3.10 以上版本。模型可呼叫 `maya.locate {}` 查找本機的 Maya。工具依序檢查 PATH、`MAYA_LOCATION` 及 Maya 2025 以上版本的安裝登錄資料。也可在啟動 RAH 前用 `RAH_MAYA_EXE` 指定要使用的執行檔絕對路徑。
+
+使用 `maya.session {}` 可查詢實際連線的 Maya 執行檔、連接埠、Maya、API、Python、Qt 版本及場景路徑。連線工具會使用已開啟的 Maya。若 Maya 尚未執行，RAH 會啟動查到的程式並等待就緒。Maya 顯示指令核准視窗時，確認後即可繼續。
 
 RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場景。若手動關閉過這個入口，可在 Maya 的 Applications 偏好設定恢復預設 command port 並重啟 Maya。關閉 RAH 的 Maya 開關會卸載工具，場景仍由 Maya 管理。
 
@@ -21,5 +23,5 @@ RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場�
 整合測試使用獨立的 Maya standalone 場景與臨時連接埠，無需模型：
 
 ```powershell
-& 'C:\aw\Maya2025\bin\mayapy.exe' -B plugins/tools-maya/test_maya.py
+mayapy -B plugins/tools-maya/test_maya.py
 ```

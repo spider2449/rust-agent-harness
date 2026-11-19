@@ -51,7 +51,14 @@ def check(root):
     if (manifest.get("format"), manifest.get("graphify_version"), manifest.get("platform"), manifest.get("arch")) != (1, VERSION, system, arch):
         raise ValueError("Runtime format, Graphify version or platform does not match")
     node = node_path(root, manifest)
-    python = contained(root, manifest["python"])
+    if manifest["python"] == "../runtime/bin/python.exe":
+        python_root = root.parent / "runtime/bin"
+        python = (python_root / "python.exe").resolve(strict=True)
+        if python.parent != python_root or not python.is_file():
+            raise ValueError("Shared Python escapes installation or is missing")
+    else:
+        python = contained(root, manifest["python"])
+        python_root = root
     node_version = run([node, "--version"], 10)
     if int(node_version.lstrip("v").split(".")[0]) < 20:
         raise ValueError("Node.js 20+ is required")
@@ -66,7 +73,7 @@ def check(root):
         "print(json.dumps({'python_version':sys.version.split()[0],"
         "'packages':sorted([{'name':d.metadata['Name'],'version':d.version} for d in m.distributions()],key=lambda p:p['name'].lower())}))"
     )
-    details = json.loads(run([python, "-I", "-c", code, root]))
+    details = json.loads(run([python, "-I", "-c", code, python_root]))
     return {**manifest, **details, "node_version": node_version}
 
 

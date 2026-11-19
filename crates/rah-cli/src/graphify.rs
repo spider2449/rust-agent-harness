@@ -87,8 +87,9 @@ fn bundle_programs(root: &Path) -> Result<Programs, String> {
                 .as_str()
                 .ok_or("Runtime program path must be text")?,
         );
-        let shared_node = key == "node" && path == Path::new("../runtime/bin/node.exe");
-        if !shared_node
+        let shared = (key == "node" && path == Path::new("../runtime/bin/node.exe"))
+            || (key == "python" && path == Path::new("../runtime/bin/python.exe"));
+        if !shared
             && (path.is_absolute()
                 || path
                     .components()
@@ -97,7 +98,7 @@ fn bundle_programs(root: &Path) -> Result<Programs, String> {
             return Err("Runtime program path escapes its bundle".into());
         }
         let program = fs::canonicalize(root.join(path)).map_err(|error| error.to_string())?;
-        let boundary = if shared_node {
+        let boundary = if shared {
             root.parent()
                 .ok_or("Runtime has no installation directory")?
                 .join("runtime")
@@ -803,6 +804,12 @@ config = { server = "graphify", program = "old-node", args = ["old/managed-mcp.m
         fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
         assert!(bundle_programs(&root).is_err());
         fs::write(&common, "fixture").unwrap();
+        let python = common.with_file_name("python.exe");
+        fs::write(&python, "fixture").unwrap();
+        manifest["python"] = "../runtime/bin/python.exe".into();
+        fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
+        assert!(matches!(bundle_programs(&root).unwrap().backend,
+            Backend::Python(path) if path.canonicalize().unwrap() == python.canonicalize().unwrap()));
         manifest["python"] = "../outside".into();
         fs::write(root.join("runtime.json"), manifest.to_string()).unwrap();
         assert!(bundle_programs(&root).is_err());
