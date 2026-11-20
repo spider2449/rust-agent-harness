@@ -579,6 +579,9 @@ async fn run(cli: Cli) -> i32 {
         Ok(quiet) => quiet,
         Err(message) => return fail(message),
     };
+    if global.root.is_some() {
+        distribution.set_config("frontend-web", "restore_workspace", Value::Bool(false));
+    }
     serve(&distribution, quiet).await
 }
 

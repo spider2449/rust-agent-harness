@@ -216,7 +216,10 @@ free port, and says so.
   changes, the model, and the tool count; it names the loop, or that no
   policy guards tool calls, only when they are not the usual ones. Click
   the path to open another folder or add one; like a multi-root workspace in
-  VS Code, tools and Git work in the active folder. The right-hand panel shows
+  VS Code, tools and Git work in the active folder. Desktop and `rah web` reopen
+  the last active folder and its workspace on the next launch. An explicit
+  `--root` takes precedence. If the saved folder is unavailable, RAH opens
+  the normal startup folder. The right-hand panel shows
   the files read-only, Git changes and diffs per repository, and an activity
   log of the session, folded until opened.
 - **Settings** sets the model, the system prompt, the **Permissions** (the

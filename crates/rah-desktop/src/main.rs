@@ -62,6 +62,9 @@ fn distribution(args: &Args) -> Result<Distribution, String> {
         return Err("the distribution needs a `frontend-cli` or `frontend-web` plugin".into());
     }
     distribution.set_config("frontend-web", "bind", Value::from("127.0.0.1:0"));
+    if args.global.root.is_some() {
+        distribution.set_config("frontend-web", "restore_workspace", Value::Bool(false));
+    }
     Ok(distribution)
 }
 

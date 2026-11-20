@@ -4,6 +4,13 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Web API group startup test intermittently times out
+
+On Windows on 2026-11-20, `tools_http_instances_are_api_groups_and_only_one_is_connected`
+timed out waiting for groups to disconnect during the full `rah-cli --test web`
+suite. An immediate isolated run passed. The test mounts its HTTP plugins
+after the frontend. The cause of the timing difference is unconfirmed.
+
 ## Bundled Rust diagnostics: detached files without a toolchain
 
 - **Seen:** 2026-11-17, Windows x64, bundled rust-analyzer 2026-11-16.

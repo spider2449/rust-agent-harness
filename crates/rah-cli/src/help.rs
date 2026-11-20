@@ -100,6 +100,10 @@ pub fn fallback(kind: &str) -> Help {
                 "Address of the Web UI; loopback only, port 0 or a busy port picks a free one (127.0.0.1:18765).",
             ),
             (
+                "restore_workspace",
+                "Reopen the last active workspace folder on startup (true).",
+            ),
+            (
                 "approval_timeout_secs",
                 "How long an approval waits for your answer before it is denied (300).",
             ),

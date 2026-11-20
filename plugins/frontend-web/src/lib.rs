@@ -201,6 +201,7 @@ impl WebFrontendPlugin {
 struct Config {
     bind: Option<String>,
     approval_timeout_secs: Option<u64>,
+    restore_workspace: Option<bool>,
 }
 
 pub(crate) struct Shared {
@@ -215,6 +216,8 @@ pub(crate) struct Shared {
     /// Notices about changes that hold only until the next start, once per
     /// reason.
     pub notices: rah_api::host::NoticeOnce,
+    /// Orders workspace switches and their storage writes across clients.
+    pub workspace_switch: tokio::sync::Mutex<()>,
     /// The workspace's folders, once read from `storage` (see [`workspace`]).
     pub folders: std::sync::Mutex<Option<workspace::Folders>>,
 }
@@ -277,6 +280,7 @@ impl Plugin for WebFrontendPlugin {
             approvals: Approvals::new(timeout),
             stop: scope.spawner().cancellation(),
             notices: rah_api::host::NoticeOnce::new(scope.kernel(), scope.id().clone()),
+            workspace_switch: tokio::sync::Mutex::new(()),
             folders: std::sync::Mutex::new(None),
         });
         // What a plugin skips quietly but the user can act on (ADR 0057).
@@ -308,7 +312,9 @@ impl Plugin for WebFrontendPlugin {
         });
         let app = router(shared.clone());
         let stop = shared.stop.clone();
+        let workspace = shared.clone();
         let started = scope.spawn(async move {
+            workspace::open_last(&workspace, config.restore_workspace.unwrap_or(true)).await;
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(stop.cancelled_owned())
                 .await;
@@ -724,7 +730,8 @@ impl WebFrontendPlugin {
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
   "bind": "127.0.0.1:18765",
-  "approval_timeout_secs": 300
+  "approval_timeout_secs": 300,
+  "restore_workspace": true
 }"#;
 }
 

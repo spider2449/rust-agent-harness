@@ -48,6 +48,8 @@ pub(crate) struct Folders {
     pub name: Option<String>,
     #[serde(default)]
     pub folders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
 }
 
 impl Folders {
@@ -64,6 +66,7 @@ pub(crate) fn effective(stored: &Folders, root: Option<&str>) -> Folders {
         Some(root) => Folders {
             name: None,
             folders: vec![root.to_owned()],
+            root: None,
         },
         None => Folders::default(),
     }
@@ -112,6 +115,37 @@ async fn stored(shared: &Shared) -> Folders {
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert(loaded)
         .clone()
+}
+
+/// Select the saved active folder before serving the first request. Older
+/// records with one folder also identify the active project unambiguously.
+pub(crate) async fn open_last(shared: &Shared, use_saved: bool) {
+    let Some(active) = active_root(shared).await else {
+        return;
+    };
+    let saved = stored(shared).await;
+    let previous = saved
+        .root
+        .as_deref()
+        .or_else(|| match saved.folders.as_slice() {
+            [only] => Some(only.as_str()),
+            _ => None,
+        });
+    if use_saved
+        && let Some(path) = previous
+        && saved.contains(path)
+        && !same(path, &active)
+        && Path::new(path).is_absolute()
+        && let Some(admin) = shared.kernel.get(ADMIN)
+        && admin.set_workspace(Path::new(path)).await.is_ok()
+    {
+        return;
+    }
+    let mut next = effective(&saved, Some(&active));
+    next.root = Some(active);
+    if next != saved {
+        remember(shared, &next).await;
+    }
 }
 
 /// The workspace as it is now, and the active root.
@@ -201,6 +235,7 @@ pub(crate) async fn set(
         return Err(bad_request("the folder is empty".into()));
     }
     let root = folder(root).await?;
+    let _switch = shared.workspace_switch.lock().await;
     let (active, workspace) = current(&shared).await;
     let mut next = match request.folders {
         Some(paths) => {
@@ -215,6 +250,7 @@ pub(crate) async fn set(
                     .map(|name| name.trim().to_owned())
                     .filter(|name| !name.is_empty()),
                 folders: Vec::new(),
+                root: None,
             };
             if next
                 .name
@@ -262,6 +298,7 @@ pub(crate) async fn set(
     if let Some(entry) = next.folders.iter_mut().find(|folder| same(folder, &root)) {
         entry.clone_from(&root);
     }
+    next.root = Some(root.clone());
     let remembered = remember(&shared, &next).await;
     Ok(Json(json!({
         "root": root,
@@ -409,6 +446,7 @@ mod tests {
         Folders {
             name: name.map(str::to_owned),
             folders: paths.iter().map(|path| (*path).to_owned()).collect(),
+            root: None,
         }
     }
 

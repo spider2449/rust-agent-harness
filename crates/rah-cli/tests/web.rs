@@ -37,7 +37,10 @@ config = { bind = "127.0.0.1:0" }
 /// Starts the Web UI over a configuration file with user keys, where the
 /// settings it saves are kept (ADR 0067).
 async fn start(name: &str, adjust: impl FnOnce(&mut Distribution)) -> Web {
-    let dir = TempDir::new(name);
+    start_in(TempDir::new(name), adjust).await
+}
+
+async fn start_in(dir: TempDir, adjust: impl FnOnce(&mut Distribution)) -> Web {
     let mut distribution = with_web(from_file(&dir));
     adjust(&mut distribution);
     let kernel = Kernel::new();
@@ -1146,6 +1149,54 @@ async fn the_workspace_is_browsed_and_switched_without_a_restart() {
             "{bad}"
         );
     }
+}
+
+#[tokio::test]
+async fn restarting_reopens_the_last_active_project() {
+    let web = start("web-reopen", |_| {}).await;
+    let other = web.dir.0.join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("project.txt"), "reopened").unwrap();
+    let opened = web
+        .json(
+            web.request(reqwest::Method::PUT, "/api/workspace")
+                .json(&json!({
+                    "name": "product", "folders": [web.dir.workspace(), other], "root": other,
+                })),
+        )
+        .await;
+    assert_eq!(opened["remembered"], true);
+    web.kernel.shutdown().await.unwrap();
+
+    let web = start_in(web.dir, |_| {}).await;
+    let file = web
+        .json(web.get("/api/files/content?path=project.txt"))
+        .await;
+    assert_eq!(file["text"], "reopened");
+    assert_eq!(
+        web.json(web.get("/api/workspace")).await,
+        opened["workspace"]
+    );
+    web.kernel.shutdown().await.unwrap();
+
+    let web = start_in(web.dir, |distribution| {
+        distribution.set_config("frontend-web", "restore_workspace", json!(false));
+    })
+    .await;
+    let workspace = web.json(web.get("/api/workspace")).await;
+    assert!(workspace["root"].as_str().unwrap().ends_with("workspace"));
+    web.json(
+        web.request(reqwest::Method::PUT, "/api/workspace")
+            .json(&json!({ "root": other })),
+    )
+    .await;
+    web.kernel.shutdown().await.unwrap();
+
+    std::fs::remove_dir_all(other).unwrap();
+    let web = start_in(web.dir, |_| {}).await;
+    let workspace = web.json(web.get("/api/workspace")).await;
+    assert!(workspace["root"].as_str().unwrap().ends_with("workspace"));
+    web.kernel.shutdown().await.unwrap();
 }
 
 #[tokio::test]
