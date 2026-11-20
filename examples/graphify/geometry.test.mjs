@@ -3,7 +3,15 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const { routes } = vm.runInNewContext(fs.readFileSync(new URL('../../plugins/frontend-web/assets/graph.js', import.meta.url), 'utf8') + '\nRelationshipGraph');
+const { routes, positions } = vm.runInNewContext(fs.readFileSync(new URL('../../plugins/frontend-web/assets/graph.js', import.meta.url), 'utf8') + '\nRelationshipGraph');
+
+test('an isolated node stays in the initial overview beside a connected cluster', () => {
+  const vertices = Array.from({ length: 100 }, (_, i) => ({ id: String(i), group: String(i % 4) }));
+  const edges = vertices.slice(1, -1).map(v => ({ source: '0', target: v.id }));
+  const { points } = positions(vertices, edges);
+  const isolated = points.at(-1);
+  assert.ok(Math.hypot(isolated.x - 500, isolated.y - 325) < 325);
+});
 test('bounded routes distinguish reciprocal, parallel, self and coincident edges', () => {
   const a = { x: 200, y: 300, degree: 3 }, b = { x: 400, y: 300, degree: 3 };
   const edges = [ { source: 'a', target: 'b', a, b }, { source: 'b', target: 'a', a: b, b: a },

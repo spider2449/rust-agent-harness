@@ -25,10 +25,12 @@ const RelationshipGraph = (() => {
     for (const e of links) { e.a.degree++; e.b.degree++; }
     // A fixed iteration budget gives deterministic layout without background tasks.
     for (let step = 0; step < 90; step++) {
-      for (const p of points) { p.dx = (500 - p.x) * 0.006; p.dy = (325 - p.y) * 0.006; }
+      for (const p of points) { p.dx = (500 - p.x) * 0.022; p.dy = (325 - p.y) * 0.022; }
       for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) {
         const a = points[i], b = points[j], dx = a.x - b.x || 0.1, dy = a.y - b.y || 0.1;
-        const distance = Math.max(25, dx * dx + dy * dy), force = Math.min(2, 240 / distance);
+        const distanceSquared = Math.max(25, dx * dx + dy * dy);
+        // Preserve spacing nearby while fading repulsion beyond the preferred edge length.
+        const force = Math.min(2, 240 / distanceSquared) / (1 + distanceSquared / (65 * 65));
         a.dx += dx * force; a.dy += dy * force; b.dx -= dx * force; b.dy -= dy * force;
       }
       for (const e of links) {
@@ -37,8 +39,8 @@ const RelationshipGraph = (() => {
         e.a.dx += dx * force; e.a.dy += dy * force; e.b.dx -= dx * force; e.b.dy -= dy * force;
       }
       for (const p of points) {
-        p.x = Math.max(140, Math.min(860, p.x + Math.max(-12, Math.min(12, p.dx))));
-        p.y = Math.max(140, Math.min(510, p.y + Math.max(-12, Math.min(12, p.dy))));
+        p.x += Math.max(-12, Math.min(12, p.dx));
+        p.y += Math.max(-12, Math.min(12, p.dy));
       }
     }
     return { points, links, groups };
@@ -100,7 +102,7 @@ const RelationshipGraph = (() => {
     const { points, links, groups } = positions((data.vertices || []).slice(0, 250), (data.edges || []).slice(0, 750));
     const visibleGroups = new Set(groups), vertexElements = new Map(), edgeElements = [];
     const colors = new Map(groups.map((group, i) => [group, palette[i % palette.length]]));
-    let zoom = 1, panX = 0, panY = 0, drag, selected;
+    let zoom = 1, minZoom = 0.3, panX = 0, panY = 0, drag, selected;
     const history = [];
     let direction = 'all', relation = 'all';
     const original = new Map(points.map(p => [p.id, { x: p.x, y: p.y }]));
@@ -138,16 +140,38 @@ const RelationshipGraph = (() => {
       redraw();
     };
     button('Back selection', () => { const id=history.pop(); if(id) select(points.find(p=>p.id===id), false); });
-    button('Reset selection', () => { selected=undefined; history.length=0; direction='all'; relation='all'; directionSelect.value='all'; relationSelect.value='all'; focusLayout(); update(); detail.textContent='Select a node to inspect its source and relationships.'; });
+    const clearSelection = () => {
+      selected = undefined;
+      history.length = 0;
+      for (const [, node] of edgeElements) node.classList.remove('graph-edge-selected');
+      focusLayout();
+      update();
+      list.selectedIndex = -1;
+      detail.textContent = 'Select a node to inspect its source and relationships.';
+    };
+    button('Reset selection', () => {
+      direction = relation = directionSelect.value = relationSelect.value = 'all';
+      clearSelection();
+    });
     const transform = () => viewport.setAttribute('transform', `translate(${panX} ${panY}) scale(${zoom})`);
     const changeZoom = factor => {
-      const next = Math.max(0.3, Math.min(6, zoom * factor));
+      const next = Math.max(minZoom, Math.min(6, zoom * factor));
       panX = 500 - (500 - panX) * next / zoom; panY = 325 - (325 - panY) * next / zoom;
       zoom = next; transform();
     };
     button('Zoom in', () => changeZoom(1.25));
     button('Zoom out', () => changeZoom(0.8));
-    button('Reset view', () => { zoom = 1; panX = 0; panY = 0; transform(); });
+    const fitView = () => {
+      const extentX = Math.max(450, ...points.map(p => Math.abs(p.x - 500)));
+      const extentY = Math.max(275, ...points.map(p => Math.abs(p.y - 325)));
+      zoom = Math.min(450 / extentX, 275 / extentY);
+      minZoom = zoom * 0.3;
+      panX = 500 * (1 - zoom);
+      panY = 325 * (1 - zoom);
+      transform();
+    };
+    fitView();
+    button('Reset view', fitView);
     button('Reset positions', () => { pinned.clear(); focusLayout(); });
     const maximize = button('Expand view', () => {
       const expanded = box.classList.toggle('graph-expanded');
@@ -160,18 +184,26 @@ const RelationshipGraph = (() => {
     });
     svg.addEventListener('wheel', event => { event.preventDefault(); changeZoom(event.deltaY < 0 ? 1.1 : 1 / 1.1); }, { passive: false });
     svg.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || drag) return;
       const rect = svg.getBoundingClientRect();
-      drag = { x: event.clientX, y: event.clientY, px: panX, py: panY, scale: Math.min(rect.width / 1000, rect.height / 650) };
+      drag = { id: event.pointerId, moved: false, x: event.clientX, y: event.clientY, px: panX, py: panY, scale: Math.min(rect.width / 1000, rect.height / 650) };
       svg.setPointerCapture(event.pointerId);
     });
     svg.addEventListener('pointermove', event => {
-      if (!drag) return;
+      if (drag?.id !== event.pointerId) return;
+      if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) return;
+      drag.moved = true;
       panX = drag.px + (event.clientX - drag.x) / Math.max(0.1, drag.scale);
       panY = drag.py + (event.clientY - drag.y) / Math.max(0.1, drag.scale); transform();
     });
-    svg.addEventListener('pointerup', () => { drag = null; });
-    svg.addEventListener('pointercancel', () => { drag = null; });
+    svg.addEventListener('pointerup', event => {
+      if (drag?.id !== event.pointerId) return;
+      if (!drag.moved && event.button === 0) clearSelection();
+      drag = null;
+    });
+    svg.addEventListener('lostpointercapture', event => {
+      if (drag?.id === event.pointerId) drag = null;
+    });
     const detail = element('div', 'graph-detail', 'Select a node to inspect its source and relationships.');
     detail.setAttribute('aria-live', 'polite');
     const searchLabel = element('label', '', 'Find visible nodes');
@@ -314,9 +346,8 @@ const RelationshipGraph = (() => {
         if (!local) return;
         moving.moved = true;
         g.classList.add('graph-dragging');
-        // Keep space for the bounded self-loop and arrow geometry.
-        point.x = Math.max(140, Math.min(860, local.x + moving.offsetX));
-        point.y = Math.max(140, Math.min(510, local.y + moving.offsetY));
+        point.x = local.x + moving.offsetX;
+        point.y = local.y + moving.offsetY;
         pinned.set(point.id, { x: point.x, y: point.y });
         redraw();
       });
@@ -354,5 +385,5 @@ const RelationshipGraph = (() => {
     body.append(stage, aside); box.append(toolbar, body); update();
     return box;
   }
-  return { render, routes };
+  return { render, routes, positions };
 })();

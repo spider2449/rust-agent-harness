@@ -641,12 +641,15 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
       window.dragBefore={node:vertex.getAttribute('transform'),
         path:root.querySelector('.graph-edge > path').getAttribute('d'),
         pan:root.querySelector('svg > g').getAttribute('transform')};
-      return {x:rect.x+rect.width/2,y:rect.y+rect.height/2};
+      const target = new DOMPoint(100, 325).matrixTransform(vertex.parentNode.getScreenCTM());
+      return {x:rect.x+rect.width/2,y:rect.y+rect.height/2,targetX:target.x,targetY:target.y};
     })()"#,
         )
         .await;
     let dx = drag_start["x"].as_f64().unwrap();
     let dy = drag_start["y"].as_f64().unwrap();
+    let target_x = drag_start["targetX"].as_f64().unwrap();
+    let target_y = drag_start["targetY"].as_f64().unwrap();
     page.call(
         "Input.dispatchMouseEvent",
         json!({"type":"mousePressed","x":dx,"y":dy,"button":"left","clickCount":1}),
@@ -654,18 +657,19 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
     .await;
     page.call(
         "Input.dispatchMouseEvent",
-        json!({"type":"mouseMoved","x":dx-60.0,"y":dy+35.0,"button":"left","buttons":1}),
+        json!({"type":"mouseMoved","x":target_x,"y":target_y,"button":"left","buttons":1}),
     )
     .await;
     page.call(
         "Input.dispatchMouseEvent",
-        json!({"type":"mouseReleased","x":dx-60.0,"y":dy+35.0,"button":"left","clickCount":1}),
+        json!({"type":"mouseReleased","x":target_x,"y":target_y,"button":"left","clickCount":1}),
     )
     .await;
     assert_eq!(page.eval(r#"(() => {
       const root=document.querySelector('#graph-test'), vertex=root.querySelector('[data-node-id=b]');
       const moved=vertex.getAttribute('transform');
-      const changed=moved!==dragBefore.node && root.querySelector('.graph-edge > path').getAttribute('d')!==dragBefore.path
+      const changed=Math.abs(vertex.transform.baseVal.getItem(0).matrix.e-100)<3
+        && moved!==dragBefore.node && root.querySelector('.graph-edge > path').getAttribute('d')!==dragBefore.path
         && root.querySelector('svg > g').getAttribute('transform')===dragBefore.pan
         && root.querySelector('[data-node-id=a]').classList.contains('graph-selected');
       vertex.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
@@ -676,6 +680,25 @@ async fn relationship_graph_supports_inspection_filter_zoom_pan_and_expansion() 
       return changed && retained && reset && !root.querySelector('.graph-dragging');
     })()"#).await, true);
     page.screenshot("graphify-node-drag").await;
+    for event_type in ["mousePressed", "mouseReleased"] {
+        page.call(
+            "Input.dispatchMouseEvent",
+            json!({"type":event_type,"x":x,"y":y,"button":"left","clickCount":1}),
+        )
+        .await;
+    }
+    assert_eq!(
+        page.eval(
+            r#"(() => {
+      const root = document.querySelector('#graph-test');
+      return !root.querySelector('.graph-selected, .graph-dim, .graph-connected')
+        && root.querySelector('.graph-node-list').selectedIndex === -1
+        && root.querySelector('.graph-detail').textContent.startsWith('Select a node');
+    })()"#
+        )
+        .await,
+        true
+    );
     page.eval("document.querySelector('#graph-test .graph-legend input').click(); true")
         .await;
     assert_eq!(
