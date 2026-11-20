@@ -1,5 +1,6 @@
 """RAH process plugin for the built-in Maya 2025 command port."""
 
+import base64
 import ctypes
 import json
 import math
@@ -11,6 +12,7 @@ import socket
 import struct
 import sys
 import time
+import zlib
 
 LIMIT = 128 * 1024
 PRIMITIVES = {"cube": "polyCube", "sphere": "polySphere", "cylinder": "polyCylinder",
@@ -19,9 +21,10 @@ IDENT = r"[A-Za-z_][A-Za-z_0-9]*"
 NODE = rf"\|?(?::?{IDENT}(?::{IDENT})*)(?:\|:?{IDENT}(?::{IDENT})*)*"
 
 
-def tool(tool_name, description, permission, **fields):
+def tool(tool_name, description, permission, *, required=None, **fields):
     return {"name": "maya." + tool_name, "description": description, "permission": permission,
-            "input_schema": {"type": "object", "properties": fields, "required": list(fields),
+            "input_schema": {"type": "object", "properties": fields,
+                             "required": list(fields) if required is None else required,
                              "additionalProperties": False}}
 
 
@@ -39,9 +42,17 @@ TOOLS = [
          node={"type": "string"}, x={"type": "number"}, y={"type": "number"}, z={"type": "number"}),
     tool("help", "Look up Maya's MEL flags before writing a command, e.g. polyCube.", "read",
          command={"type": "string", "pattern": "^" + IDENT + "$"}),
-    tool("eval_mel", "Execute MEL only. For Python plug-in development use maya.plugin_guide. "
-         "Prefer create/move/list. Use MEL command syntax, "
-         'e.g. xform -q -ws -t "box";. Inspect the scene after errors before trying again.', "execute",
+    tool("python_paths", "Return Maya's sys.path and __file__ for an already imported module. "
+         "Omit module to list only sys.path.", "read", required=[], module={"type": "string"}),
+    tool("eval_python", "Use for Python imports and scripts in Maya. Prefer maya.list/create/move for "
+         "basic scene tasks. Pass plain Python in the python field, with normal newlines and indentation. "
+         "Example: import maya.cmds as cmds\nprint(cmds.ls(selection=True))\n"
+         "Read stdout for print output, result for a single expression. Skip Markdown fences.", "execute",
+         python={"type": "string", "minLength": 1, "maxLength": 8192}),
+    tool("eval_mel", "Use for MEL commands. Prefer maya.list/create/move for basic scene tasks. "
+         "Check flags with maya.help. Pass plain MEL in the mel field. Example: ls -selection; "
+         "Read result for the command value, stdout for print output. Send Python imports to "
+         "maya.eval_python. Inspect the scene after execution errors before trying again.", "execute",
          mel={"type": "string", "minLength": 1, "maxLength": 8192}),
 ]
 
@@ -80,10 +91,11 @@ def compile_mel(name, args):
     if not spec:
         raise InvalidInput("Unknown Maya tool")
     fields = spec["input_schema"]["properties"]
-    if not isinstance(args, dict) or args.keys() != fields.keys():
+    if (not isinstance(args, dict) or not args.keys() <= fields.keys()
+            or not set(spec["input_schema"]["required"]) <= args.keys()):
         raise InvalidInput("Expected exactly these fields: " + ", ".join(fields))
-    for key, schema in fields.items():
-        value = args[key]
+    for key, value in args.items():
+        schema = fields[key]
         if schema["type"] == "number":
             if type(value) not in (float, int) or abs(value) > sys.float_info.max or not math.isfinite(value):
                 raise InvalidInput(key + " must be a finite number")
@@ -93,6 +105,10 @@ def compile_mel(name, args):
             raise InvalidInput(key + " must be an identifier, e.g. box1")
         if "enum" in schema and value not in schema["enum"]:
             raise InvalidInput(key + " must be one of: " + ", ".join(schema["enum"]))
+    if name in ("maya.eval_mel", "maya.eval_python"):
+        language = name.removeprefix("maya.eval_")
+        if args[language].lstrip().startswith("```"):
+            raise InvalidInput(f"Remove the Markdown fences and send the code in the {language} field.")
     if name == "maya.list":
         return "ls -long -transforms" + (" -selection" if args["scope"] == "selection" else "") + ";"
     if name == "maya.create":
@@ -107,15 +123,17 @@ def compile_mel(name, args):
         expr = ("__import__('json').dumps(dict(executable=__import__('sys').executable, "
                 "maya=cmds.about(version=True), api=cmds.about(apiVersion=True), "
                 "python=__import__('sys').version.split()[0], "
-                "qt=__import__('PySide6.QtCore', fromlist=['qVersion']).qVersion(), "
+                "qt=cmds.about(qtVersion=True), "
                 "scene=cmds.file(query=True, sceneName=True)))")
         expr = "(lambda cmds: " + expr + ")(__import__('maya.cmds', fromlist=['about']))"
         return "python(" + json.dumps(expr) + ");"
-    if name in ("maya.locate", "maya.plugin_guide"):
+    if name in ("maya.locate", "maya.plugin_guide", "maya.eval_python", "maya.python_paths"):
         return None
-    if re.match(r"\s*(?:import\s|from\s+\w+[.\w]*\s+import\s|puts\s)", args["mel"]):
-        raise InvalidInput("maya.eval_mel accepts MEL. Use maya.plugin_guide for Python plug-ins "
+    if re.match(r"\s*(?:import\s|from\s+\w+[.\w]*\s+import\s|cmds\.\w+\s*\()", args["mel"]):
+        raise InvalidInput("maya.eval_mel accepts MEL. Use maya.eval_python for Python code "
                            "or maya.session for environment details.")
+    if re.match(r"\s*puts\s", args["mel"]):
+        raise InvalidInput('Use MEL print("hello"); to write to stdout.')
     if re.fullmatch(r"\s*about\s+-(?:qtversion|productVersion)\s*;?\s*", args["mel"]):
         raise InvalidInput("Use maya.session {} for the installed Maya and Qt versions.")
     return args["mel"]
@@ -222,6 +240,40 @@ def desktop_port():
                      "preferences for its default command port, then restart Maya.")
 
 
+# This function runs inside Maya. Its source travels with the request because
+# the desktop interpreter need not share the plugin's filesystem or sys.path.
+EVALUATE = '''def evaluate(language, source):
+    import __main__, contextlib, io, json, traceback
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if language == "python":
+                try:
+                    code = compile(source, "<maya.eval_python>", "eval")
+                except SyntaxError:
+                    code = compile(source, "<maya.eval_python>", "exec")
+                value = eval(code, vars(__main__))
+            else:
+                import maya.mel as mel
+                import maya.api.OpenMaya as om
+                messages = om.MCommandMessage
+                def capture(text, kind, *_):
+                    if kind in (messages.kError, messages.kWarning):
+                        err.write(text)
+                    elif kind in (messages.kDisplay, messages.kInfo):
+                        out.write(text)
+                callback = messages.addCommandOutputCallback(capture)
+                try:
+                    value = mel.eval(source)
+                finally:
+                    om.MMessage.removeCallback(callback)
+        return json.dumps(dict(value=value, stdout=out.getvalue(), stderr=err.getvalue()),
+                          default=repr, allow_nan=False)
+    except BaseException:
+        return json.dumps(dict(error=traceback.format_exc(), stdout=out.getvalue(), stderr=err.getvalue()))
+'''
+
+
 def call_maya(name, args, port):
     script = compile_mel(name, args)
     if name == "maya.locate":
@@ -238,11 +290,25 @@ def call_maya(name, args, port):
         }}]}
     # Use the built-in MEL endpoint. JSON preserves arrays, scalars and null,
     # and an interpreter error stays distinguishable from a successful value.
-    expr = ("__import__('json').dumps({'value': "
-            "__import__('maya.mel', fromlist=['eval']).eval(" + ascii(script) + ")}, allow_nan=False)")
+    if name in ("maya.eval_python", "maya.eval_mel"):
+        language = "python" if name == "maya.eval_python" else "mel"
+        expr = ("(lambda g: (exec(" + ascii(EVALUATE) + ",g),g['evaluate']("
+                + repr(language) + "," + ascii(args[language]) + "))[1])({})")
+    elif name == "maya.python_paths":
+        expr = ("(lambda s,m: __import__('json').dumps({'value':dict(sys_path=s.path, "
+                "module=m, loaded=m in s.modules, file=vars(s.modules[m]).get('__file__') "
+                "if s.modules.get(m) is not None else None)}))(__import__('sys'),"
+                + ascii(args.get("module")) + ")")
+    else:
+        expr = ("__import__('json').dumps({'value': "
+                "__import__('maya.mel', fromlist=['eval']).eval(" + ascii(script) + ")}, allow_nan=False)")
     request = "python(" + json.dumps(expr) + ");\n"
-    if len(request) > 4095:
-        raise InvalidInput("MEL exceeds Maya's command port buffer; split it into smaller commands")
+    # Preserve room for source that fit the port before output capture added
+    # a wrapper. Decide the encoding before sending the command exactly once.
+    if len(request) > 4095 and name in ("maya.eval_python", "maya.eval_mel"):
+        encoded = base64.b64encode(zlib.compress(expr.encode("ascii"))).decode("ascii")
+        expr = "eval(__import__('zlib').decompress(__import__('base64').b64decode('" + encoded + "')))"
+        request = "python(" + json.dumps(expr) + ");\n"
     if port is None:
         port = desktop_port()
     try:
@@ -251,6 +317,9 @@ def call_maya(name, args, port):
         raise NotStarted(f"Maya is unavailable on 127.0.0.1:{port}: {exc}") from exc
     with conn:
         conn.sendall(request.encode("ascii"))
+        # Maya accumulates full receive buffers until a short read. EOF also
+        # completes a request that occupies an exact multiple of its buffer.
+        conn.shutdown(socket.SHUT_WR)
         deadline = time.monotonic() + 45
         data = bytearray()
         while not data.endswith(b"\n\0"):
@@ -266,12 +335,33 @@ def call_maya(name, args, port):
                 raise RuntimeError("Maya result too large; narrow the query")
     body = data[:-2].decode("utf-8")
     try:
-        value = json.loads(body)["value"]
+        reply = json.loads(body)
+        if "error" in reply:
+            details = [reply["error"]]
+            if name == "maya.eval_python" and re.match(r"\s*\w+\s+-[a-zA-Z]", args["python"]):
+                details.append("If this is MEL command syntax, use maya.eval_mel. "
+                               "For Python, use maya.cmds functions with keyword arguments.")
+            if (name == "maya.eval_python" and "\\n" in args["python"]
+                    and "SyntaxError: unexpected character after line continuation character" in reply["error"]):
+                details.append("Separate Python statements with actual newlines in the decoded python field. "
+                               "Encode each newline once in JSON.")
+            for stream in ("stdout", "stderr"):
+                if reply[stream]:
+                    details.append(stream + ":\n" + reply[stream])
+            raise RuntimeError("\n".join(details))
+        value = reply["value"]
     except (ValueError, TypeError, KeyError) as exc:
         raise RuntimeError("Maya command port: " + body[:4096]) from exc
     if name == "maya.session":
         value = {**json.loads(value), "host": "127.0.0.1", "port": port}
-    return {"content": [{"type": "json", "json": {"mel": script, "result": value}}]}
+    payload = {"result": value}
+    if name == "maya.eval_python":
+        payload["python"] = args["python"]
+    elif script is not None:
+        payload["mel"] = script
+    if name in ("maya.eval_python", "maya.eval_mel"):
+        payload.update(stdout=reply["stdout"], stderr=reply["stderr"])
+    return {"content": [{"type": "json", "json": payload}]}
 
 
 def run():

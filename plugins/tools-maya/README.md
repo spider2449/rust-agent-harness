@@ -16,9 +16,13 @@ RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場�
 | `maya.move` | `{"node":"box","x":3,"y":2,"z":0}` | 設定世界座標的絕對位置。若有同名物件，使用完整路徑。 |
 | `maya.list` | `{"scope":"selection"}` | 列出選取的 transform 完整路徑；用 `scene` 查整個場景。 |
 | `maya.help` | `{"command":"xform"}` | 向已安裝的 Maya 查詢 MEL 命令旗標。 |
-| `maya.eval_mel` | `{"mel":"xform -q -ws -t \"box\";"}` | 執行 MEL 並傳回結果，例如查詢物件座標。 |
+| `maya.eval_mel` | ``{"mel":"string $v = `about -version`; print($v);"}`` | 直接傳入 Script Editor 的 MEL 原始碼。變數與反引號沿用 MEL 語法，字串只需按 JSON 規則轉義。 |
+| `maya.eval_python` | `{"python":"import MetalFkikSwitch\nprint(MetalFkikSwitch.__file__)"}` | 在 Maya 的 Python 環境執行程式碼。匯入的模組與變數可在同一個 Maya 工作階段繼續使用。 |
+| `maya.python_paths` | `{"module":"MetalFkikSwitch"}` | 查詢 Maya 的 `sys.path`、模組載入狀態及 `__file__`。傳入 `{}` 可單查搜尋路徑。 |
 
-連線工具的成功回應含有實際執行的 `mel` 和 `result`。範例設定允許查詢，修改場景和執行自訂 MEL 需經 RAH 確認。本機其他程式也能連線到 command port，Maya 會顯示連線指令的核准視窗。請只允許預期的指令。若執行中斷或 MEL 報錯，先查場景再決定下一步，部分指令可能已生效。
+`maya.eval_mel` 和 `maya.eval_python` 回傳原始碼、`result`、`stdout` 和 `stderr`。例如 MEL 的 `about -version;` 會把版本放在 `result`，上表的 `print` 範例則把版本放在 `stdout`。Python 單一運算式會回傳其值，多行陳述式回傳 `null`，可用 `print` 輸出所需資料。執行失敗時，工具錯誤訊息包含 traceback 及已擷取的輸出。`maya.python_paths` 只查已載入的模組，尚未載入時會回傳 `loaded: false` 和 `file: null`。
+
+範例設定允許查詢，修改場景和執行自訂 MEL 或 Python 需經 RAH 確認。本機其他程式也能連線到 command port，Maya 會顯示連線指令的核准視窗。請只允許預期的指令。若執行中斷或報錯，先查場景再決定下一步，部分指令可能已生效。
 
 整合測試使用獨立的 Maya standalone 場景與臨時連接埠，無需模型：
 

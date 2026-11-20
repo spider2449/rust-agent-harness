@@ -1,6 +1,7 @@
-"""Run with Maya 2025 mayapy. Uses a fresh scene and a loopback port."""
+"""Run with Maya 2023 or 2025 mayapy. Uses a fresh scene and a loopback port."""
 import json
 import os
+import random
 import socket
 from pathlib import Path
 import subprocess
@@ -15,7 +16,10 @@ import maya.utils
 
 import maya.standalone
 from maya import cmds
-from PySide6.QtCore import QCoreApplication
+try:
+    from PySide2.QtCore import QCoreApplication
+except ImportError:
+    from PySide6.QtCore import QCoreApplication
 
 PLUGIN = Path(__file__).with_name("rah_maya.py").resolve()
 
@@ -133,6 +137,80 @@ class MayaIntegration(unittest.TestCase):
         self.assertEqual(info["port"], self.port)
         self.assertEqual(info["maya"], cmds.about(version=True))
         self.assertEqual(info["executable"], sys.executable)
+        self.assertTrue(info["qt"])
+
+    def test_evaluators_and_module_paths(self):
+        def call(name, **arguments):
+            return ("tools/call", {"name": "maya." + name, "arguments": arguments})
+
+        replies = self.rpc([
+            ("initialize", {"config": {"port": self.port}}),
+            call("eval_python", python="import sys, json\nprint('中文')\nprint('warning', file=sys.stderr)"),
+            call("eval_python", python="json.loads('[1,2]')"),
+            call("python_paths", module="json"),
+            call("python_paths", module="rah_missing_module"),
+            call("python_paths"),
+            call("eval_mel", mel='string $rahVersion = `about -version`; print($rahVersion);'),
+            call("eval_mel", mel='about -version;'),
+            call("eval_python", python="print('before failure')\nraise ValueError('test error')"),
+            call("eval_mel", mel='string $rahText = "' + 'a' * 3000 + '"; size($rahText);'),
+        ])
+        payloads = [reply["result"]["content"][0]["json"] for reply in replies[1:8]]
+        streams, expression, paths, missing, all_paths, printed, version = payloads
+        self.assertEqual(streams["stdout"], "中文\n")
+        self.assertEqual(streams["stderr"], "warning\n")
+        self.assertEqual(expression["result"], [1, 2])
+        self.assertEqual(paths["result"]["file"], json.__file__)
+        self.assertFalse(missing["result"]["loaded"])
+        self.assertEqual(all_paths["result"]["sys_path"], sys.path)
+        self.assertIn(cmds.about(version=True), printed["stdout"])
+        self.assertEqual(version["result"], cmds.about(version=True))
+        self.assertIn("before failure", replies[8]["error"]["message"])
+        self.assertIn("ValueError: test error", replies[8]["error"]["message"])
+        self.assertEqual(replies[9]["result"]["content"][0]["json"]["result"], 3000)
+
+    def test_multiline_python(self):
+        # Include poorly compressible data so this valid program crosses the
+        # port's 4096-byte receive buffer even after compression.
+        rng = random.Random(42)
+        token = "".join(chr(rng.randrange(0x4e00, 0x9fff)) for _ in range(3500))
+        source = "\r\n".join([
+            "def rah_multiline():",
+            "    path = r'C:\\assets\\rig'",
+            "    return path, " + repr(token),
+            "",
+            "for item in rah_multiline():",
+            "    print(item)",
+        ])
+        for program, expected in [('print("hello test")', "hello test\n"),
+                                  (source.replace(repr(token), repr("中文")), "C:\\assets\\rig\n中文\n"),
+                                  (source, "C:\\assets\\rig\n" + token + "\n")]:
+            with self.subTest(length=len(program)):
+                reply = self.rpc([
+                    ("initialize", {"config": {"port": self.port}}),
+                    ("tools/call", {"name": "maya.eval_python", "arguments": {"python": program}}),
+                ])[1]
+                self.assertNotIn("error", reply)
+                self.assertEqual(reply["result"]["content"][0]["json"]["stdout"], expected)
+
+    def test_language_hints(self):
+        for name, field, source, hint in [
+            ("eval_python", "python", "```python\nprint(1)\n```", "Remove the Markdown fences"),
+            ("eval_mel", "mel", "```mel\nls;\n```", "Remove the Markdown fences"),
+            ("eval_mel", "mel", "cmds.ls(selection=True)", "maya.eval_python"),
+            ("eval_mel", "mel", "puts hello", "print"),
+        ]:
+            with self.subTest(source=source), self.assertRaisesRegex(rah_maya.InvalidInput, hint):
+                rah_maya.call_maya("maya." + name, {field: source}, None)
+
+        for source, hint in [("ls -selection;", "maya.eval_mel"),
+                             (r"import sys\nprint(sys.version)", "actual newlines")]:
+            reply = self.rpc([
+                ("initialize", {"config": {"port": self.port}}),
+                ("tools/call", {"name": "maya.eval_python", "arguments": {"python": source}}),
+            ])[1]
+            self.assertIn(hint, reply["error"]["message"])
+            self.assertIn("Traceback", reply["error"]["message"])
 
     def test_plugin_guide(self):
         with patch.object(rah_maya, "desktop_port", side_effect=AssertionError):

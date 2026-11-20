@@ -108,6 +108,8 @@ pub const FEATURES: [Feature; 15] = [
             ("maya.create", "write"),
             ("maya.move", "write"),
             ("maya.eval_mel", "execute"),
+            ("maya.eval_python", "execute"),
+            ("maya.python_paths", "read"),
         ],
         decisions: &[],
     },
@@ -622,6 +624,11 @@ mod tests {
         assert_eq!(policy(&distribution)["tools"]["maya.plugin_guide"], "read");
         assert_eq!(policy(&distribution)["tools"]["maya.session"], "read");
         assert_eq!(policy(&distribution)["tools"]["maya.eval_mel"], "execute");
+        assert_eq!(
+            policy(&distribution)["tools"]["maya.eval_python"],
+            "execute"
+        );
+        assert_eq!(policy(&distribution)["tools"]["maya.python_paths"], "read");
     }
 
     #[test]
