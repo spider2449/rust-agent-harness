@@ -274,6 +274,8 @@ pre { margin: 0.285714rem 0 0; white-space: pre-wrap; word-break: break-word; fo
 .sessions li.current, .sessions li.current:hover { background: var(--user); box-shadow: inset 0.214286rem 0 var(--accent); font-weight: 600; }
 .sessions .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 3.142857rem; }
 .sessions small { display: block; color: var(--muted); font-weight: normal; }
+.sessions .session-running { color: var(--accent); font-weight: 650; margin-right: 0.45em; }
+.sessions .session-running::before { content: ""; display: inline-block; width: 0.55em; height: 0.55em; margin-right: 0.3em; border-radius: 50%; background: currentColor; }
 .sessions .item-actions { position: absolute; top: 0.285714rem; right: 0.285714rem; display: none; gap: 0.142857rem; }
 .sessions li.session:hover .item-actions, .sessions li.session:focus-within .item-actions,
 .sessions li.folder:hover .item-actions, .sessions li.folder:focus-within .item-actions { display: flex; }

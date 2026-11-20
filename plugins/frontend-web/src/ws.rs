@@ -122,10 +122,13 @@ async fn serve(mut socket: WebSocket, shared: AppState) {
                 }
             },
         };
-        if let Some(reply) = reply
-            && !send(&mut socket, &reply).await
-        {
-            break;
+        if let Some(mut reply) = reply {
+            if reply["type"] == "error" {
+                reply["running"] = json!(running.is_some());
+            }
+            if !send(&mut socket, &reply).await {
+                break;
+            }
         }
     }
 }

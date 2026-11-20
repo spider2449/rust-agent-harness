@@ -1219,14 +1219,16 @@ async fn the_web_ui_works_in_a_real_browser() {
     assert_eq!(page.eval("entries().length").await, 6);
     assert_eq!(page.eval("byId('input').value").await, "");
 
-    // Fork after the first record: a second, current session with only it.
+    // Fork the first question: answer it once, without a follow-up message.
     let original = page
         .eval("document.querySelector('#sessions li.current').title")
         .await;
     page.eval("metaAction('fork here')[0].click(); true").await;
     page.wait(
         "the fork",
-        "document.querySelectorAll('#sessions li.session').length === 2 && entries().length === 1",
+        "document.querySelectorAll('#sessions li.session').length === 2 && idle() && \
+         entries().length === 4 && document.querySelectorAll('.entry.user').length === 1 && \
+         transcript().includes('[model-mock] echo returned: hello')",
     )
     .await;
     let current = page
@@ -1345,15 +1347,35 @@ async fn the_web_ui_works_in_a_real_browser() {
     )
     .await;
 
-    page.send_message("cancelled call").await;
+    page.eval("metaAction('fork here')[0].click(); true").await;
     page.wait("the third approval card", "shown(approval())")
         .await;
+    let fork_id = page.eval("state.current").await;
+    let marked_sessions = "sessionItems().filter(item => shown(item.querySelector('.session-running'))).map(item => item.dataset.id)";
+    assert_eq!(page.eval(marked_sessions).await, json!([fork_id]));
+    page.eval(&format!("openSession({original_text})")).await;
+    assert_eq!(page.eval(marked_sessions).await, json!([fork_id]));
+    assert_eq!(
+        page.eval(
+            "!shown(byId('busy')) && !shown(byId('cancel')) && shown(byId('send')) && \
+             byId('send').disabled && !document.title.includes('working')"
+        )
+        .await,
+        true
+    );
+    page.eval(&format!("openSession({fork_id})")).await;
+    assert_eq!(
+        page.eval("shown(byId('busy')) && shown(byId('cancel')) && !shown(byId('send'))")
+            .await,
+        true
+    );
     page.eval("byId('cancel').click(); true").await;
     page.wait(
         "the cancelled turn",
         "idle() && !approval() && transcript().includes('cancelled before the tool started')",
     )
     .await;
+    assert_eq!(page.eval(marked_sessions).await, json!([]));
     assert_eq!(page.eval("shown(byId('notice'))").await, false);
 
     // Replace the model through the editor; the next turn uses it.
@@ -1527,7 +1549,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     assert_eq!(
         page.eval("document.querySelectorAll('#sessions li.session').length")
             .await,
-        2
+        3
     );
     assert_eq!(page.eval("notices").await, json!([]));
 

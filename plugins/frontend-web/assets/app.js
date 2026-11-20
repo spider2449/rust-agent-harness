@@ -12,7 +12,8 @@ const state = {
   socket: null,
   sessions: [],
   current: null,
-  running: false,
+  runningSession: null,
+  get running() { return this.runningSession !== null; },
   // Preferences kept by the server (`/api/preferences`): display, the
   // folders opened in the session list, recent workspaces, the side panel.
   prefs: { raw_markdown: false },
@@ -359,8 +360,9 @@ function renderSessions() {
       continue;
     }
     const all = query || expanded.has(group.key);
-    // Keep the open session visible even past the first page.
-    const shown = all ? group.sessions : group.sessions.filter((info, index) => index < FOLDER_PAGE || info.id === state.current);
+    // Keep both the open session and the running turn on the first page.
+    const shown = all ? group.sessions : group.sessions.filter((info, index) =>
+      index < FOLDER_PAGE || info.id === state.current || info.id === state.runningSession);
     for (const info of shown) list.append(sessionItem(info));
     if (shown.length < group.sessions.length) {
       const more = el("li", "more");
@@ -421,7 +423,11 @@ function sessionItem(info) {
     });
     actions.append(button);
   }
-  item.append(name, actions, el("small", "", meta.join(" · ")));
+  const details = el("small");
+  const marker = el("span", "session-running", "Running");
+  marker.hidden = info.id !== state.runningSession;
+  details.append(marker, meta.join(" · "));
+  item.append(name, actions, details);
   const hit = $("session-search").value.trim().toLowerCase() === historySearchQuery ? historySearchHits.get(info.id) : null;
   if (hit?.snippet) item.append(el("small", "search-snippet", hit.snippet));
   item.addEventListener("click", async () => {
@@ -479,6 +485,7 @@ function editTitle(host, info) {
 
 function closeSession() {
   state.current = null;
+  renderTurnControls();
   renderUsage();
   refreshViews();
   $("transcript").replaceChildren();
@@ -565,22 +572,23 @@ function awaitTitle() {
 
 async function openSession(id) {
   if (state.current !== id) {
+    $("live").replaceChildren();
+    $("live").hidden = true;
     collapsedEntries.clear();
     messageNavigationEntries = [];
     $("message-anchors").replaceChildren();
     $("message-nav").hidden = true;
   }
   state.current = id;
+  renderTurnControls();
   renderUsage();
   // Views are rendered for the open session.
   refreshViews();
-  setRunning(false);
   await ensureWorkspace(state.sessions.find((info) => info.id === id));
   await loadSessions();
   await loadTranscript();
   loadChanges().catch(report);
   $("input").disabled = false;
-  $("send").disabled = false;
   $("input").focus();
 }
 
@@ -639,14 +647,25 @@ async function fork(at) {
 // Sends `input` again in a fork that ends before the turn at `seq`. The
 // original session is kept; the fork takes over its title.
 async function resend(seq, input) {
-  if (state.running) return;
-  const title = currentInfo()?.title;
-  const info = await api(`/sessions/${state.current}/fork`, { method: "POST", body: JSON.stringify({ at: seq - 1 }) });
-  if (title) {
-    await api(`/sessions/${info.id}/title`, { method: "PUT", body: JSON.stringify({ title }) }).catch(() => {});
+  if (state.running || state.starting) {
+    showNotice("Stop the current response before starting another one.");
+    return;
   }
-  await openSession(info.id);
-  startTurn(input);
+  if (state.branching) return;
+  state.branching = true;
+  const parent = state.current;
+  const title = currentInfo()?.title;
+  try {
+    const info = await api(`/sessions/${parent}/fork`, { method: "POST", body: JSON.stringify({ at: seq - 1 }) });
+    if (title) {
+      await api(`/sessions/${info.id}/title`, { method: "PUT", body: JSON.stringify({ title }) }).catch(() => {});
+    }
+    if (state.current !== parent) return;
+    await openSession(info.id);
+    if (state.current === info.id) await startTurn(input);
+  } finally {
+    state.branching = false;
+  }
 }
 
 function editMessage(node, seq, input) {
@@ -754,8 +773,10 @@ function entryNode(record) {
   meta.append(toggle);
   if (entry.kind === "turn_started") {
     meta.append(metaButton("edit", "Edit this message and send it in a new branch", () => editMessage(node, record.seq, entry.input)));
+    meta.append(metaButton("fork here", "Answer this message in a new session", () => resend(record.seq, entry.input)));
+  } else {
+    meta.append(metaButton("fork here", `Start a new session continuing after record ${record.seq}`, () => fork(record.seq)));
   }
-  meta.append(metaButton("fork here", `Start a new session continuing after record ${record.seq}`, () => fork(record.seq)));
   node.append(meta, body, ...images);
   setEntryCollapsed(node, collapsedEntries.get(node.dataset.seq) ?? entry.kind === "tool_call");
   return node;
@@ -843,12 +864,26 @@ async function loadTranscript() {
 
 // ---- Turns ----------------------------------------------------------------
 
+function renderTurnControls() {
+  const here = state.running && state.runningSession === state.current;
+  $("send").hidden = here;
+  $("send").disabled = state.running || !state.current;
+  $("send").title = state.running && !here ? "Another session is running on this connection" : "Send";
+  $("session-undo").disabled = state.running;
+  $("cancel").hidden = !here;
+  $("busy").hidden = !here;
+  document.title = here ? `● ${PAGE_TITLE} — working` : PAGE_TITLE;
+}
+
 function setRunning(running) {
   const was = state.running;
-  state.running = running;
-  $("send").disabled = running || !state.current;
-  $("session-undo").disabled = running;
-  $("cancel").hidden = !running;
+  state.runningSession = running ? (state.runningSession ?? state.current) : null;
+  if (was !== state.running) {
+    for (const marker of $("sessions").querySelectorAll(".session-running")) {
+      marker.hidden = marker.closest("li").dataset.id !== state.runningSession;
+    }
+  }
+  renderTurnControls();
   if (running && !was) startBusy();
   if (!running) {
     stopBusy();
@@ -865,18 +900,14 @@ const busy = { started: 0, timer: null, tool: "" };
 function startBusy() {
   busy.started = Date.now();
   setBusyPhase("Sending…");
-  $("busy").hidden = false;
   tickBusy();
   clearInterval(busy.timer);
   busy.timer = setInterval(tickBusy, 1000);
-  document.title = `● ${PAGE_TITLE} — working`;
 }
 
 function stopBusy() {
   clearInterval(busy.timer);
   busy.timer = null;
-  $("busy").hidden = true;
-  document.title = PAGE_TITLE;
 }
 
 function tickBusy() {
@@ -953,12 +984,13 @@ function send(message) {
 
 async function startTurn(input) {
   if (!input || !state.current || state.running || state.starting) return false;
+  const session = state.current;
   state.starting = true;
   try {
     // Refresh the active root before comparing it with the session.
     await loadStatus();
-    if (!(await ensureWorkspace(currentInfo()))) return false;
-    if (!send({ type: "turn", session: state.current, input })) return false;
+    if (session !== state.current || !(await ensureWorkspace(currentInfo()))) return false;
+    if (session !== state.current || !send({ type: "turn", session, input })) return false;
     clearInfo();
     setRunning(true);
     showLive(`you: ${input}\n`);
@@ -1147,8 +1179,8 @@ async function runSlash(input) {
         break;
       }
       case "/cancel":
-        if (state.running) send({ type: "cancel" });
-        else showNotice("No turn is running.");
+        if (state.running && state.runningSession === state.current) send({ type: "cancel" });
+        else showNotice("No turn is running in this session.");
         break;
       case "/undo":
         await undoLast();
@@ -1166,6 +1198,7 @@ async function runSlash(input) {
 
 async function submit(event) {
   event.preventDefault();
+  if (state.branching) return;
   const input = $("input").value.trim();
   const local = await runSlash(input);
   if (local) {
@@ -1205,9 +1238,13 @@ function onEvent(session, event) {
     if (session === state.current) renderUsage();
     return;
   }
-  if (session !== state.current) return;
+  if (session === state.runningSession) busyEvent(event);
+  if (session !== state.current) {
+    // The socket owns one turn even when a different session is on screen.
+    if (["completed", "failed", "cancelled"].includes(event.type)) setRunning(false);
+    return;
+  }
   eventActivity(event);
-  busyEvent(event);
   switch (event.type) {
     case "model_delta":
       showLive(event.delta);
@@ -2722,7 +2759,7 @@ function connect() {
     }
     else if (data.type === "error") {
       showNotice(data.message);
-      setRunning(false);
+      setRunning(data.running === true);
     }
   });
   socket.addEventListener("close", () => {
