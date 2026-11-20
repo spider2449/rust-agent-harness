@@ -60,6 +60,36 @@ fn tool(env: &Arc<FakeEnv>, config: Value) -> ShellExec {
     ShellExec::new(env.clone(), serde_json::from_value(config).unwrap()).unwrap()
 }
 
+#[test]
+fn tool_advertises_installed_and_allowed_bundled_programs() {
+    let install = std::env::temp_dir().join(format!("rah shell {}", SessionId::new()));
+    let shared = install.join("runtime").join("bin");
+    let older = install.join("graphify-runtime").join("python");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(&older).unwrap();
+    assert!(bundled_runtime_hint(&install, None).is_empty());
+    let node = shared.join("node.exe");
+    let python = older.join("python.exe");
+    std::fs::write(&node, []).unwrap();
+    std::fs::write(&python, []).unwrap();
+    let mut shell = tool(&FakeEnv::new(exited(0)), json!({}));
+    shell.runtime_hint = bundled_runtime_hint(&install, None);
+    let description = shell.definition().description;
+    assert!(description.contains(node.to_str().unwrap()));
+    assert!(description.contains(python.to_str().unwrap()));
+
+    let shared_python = shared.join("python.exe");
+    std::fs::write(&shared_python, []).unwrap();
+    let hint = bundled_runtime_hint(&install, None);
+    assert!(hint.contains(shared_python.to_str().unwrap()));
+    assert!(!hint.contains(python.to_str().unwrap()));
+    let allowed = vec![node.to_str().unwrap().to_owned()];
+    let hint = bundled_runtime_hint(&install, Some(&allowed));
+    assert!(hint.contains(node.to_str().unwrap()));
+    assert!(!hint.contains("Python"));
+    std::fs::remove_dir_all(install).unwrap();
+}
+
 #[tokio::test]
 async fn passes_a_validated_spec_and_reports_the_exit_code() {
     let env = FakeEnv::new(exited(0));

@@ -18,7 +18,11 @@
 //! (timeout, output limit, cancellation) or whose supervision failed is
 //! reported as an error, which the `ToolInvoker` records as `uncertain`.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use rah_api::{
     Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
@@ -81,6 +85,7 @@ impl Plugin for ShellToolsPlugin {
 pub struct ShellExec {
     sandbox: Arc<dyn ExecEnv>,
     allow_programs: Option<Vec<String>>,
+    runtime_hint: String,
     default_timeout: Duration,
     max_timeout: Duration,
     max_output_bytes: usize,
@@ -97,9 +102,23 @@ impl ShellExec {
         if max_output_bytes == 0 {
             return Err("max_output_bytes must be greater than zero".into());
         }
+        let runtime_hint = if cfg!(windows) {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    Some(bundled_runtime_hint(
+                        exe.parent()?,
+                        config.allow_programs.as_deref(),
+                    ))
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Ok(Self {
             sandbox,
             allow_programs: config.allow_programs,
+            runtime_hint,
             default_timeout: Duration::from_millis(default_ms),
             max_timeout: Duration::from_millis(max_ms),
             max_output_bytes,
@@ -121,8 +140,9 @@ impl ShellExec {
             "Runs a command-line program in the workspace and returns its exit code, \
              stdout and stderr. Use it whenever the user asks to run a command, for \
              example `git pull` as {{\"program\": \"git\", \"args\": [\"pull\"]}}. \
-             {programs}There is no shell: pipes, redirection, globbing and `&&` are not \
-             interpreted, so run one program per call."
+             {programs}{runtime_hint}There is no shell: pipes, redirection, globbing and `&&` are not \
+             interpreted, so run one program per call.",
+            runtime_hint = self.runtime_hint
         )
     }
 
@@ -166,6 +186,42 @@ impl ShellExec {
         };
         Ok(spec)
     }
+}
+
+/// Advertise installed Windows package paths that this tool accepts verbatim.
+fn bundled_runtime_hint(install: &Path, allowed: Option<&[String]>) -> String {
+    let mut hint = String::new();
+    for (runtime, candidates) in [
+        (
+            "Node.js",
+            &[
+                "runtime/bin/node.exe",
+                "lsp-runtime/node.exe",
+                "graphify-runtime/node.exe",
+            ][..],
+        ),
+        (
+            "Python",
+            &[
+                "runtime/bin/python.exe",
+                "graphify-runtime/python/python.exe",
+            ][..],
+        ),
+    ] {
+        for candidate in candidates {
+            let path: PathBuf = install.join(candidate).components().collect();
+            if let Some(program) = path.to_str()
+                && allowed.is_none_or(|names| names.iter().any(|name| name == program))
+                && path.is_file()
+            {
+                hint.push_str(&format!(
+                    "For {runtime}, use the bundled executable directly as `program`: `{program}`. "
+                ));
+                break;
+            }
+        }
+    }
+    hint
 }
 
 #[async_trait]
