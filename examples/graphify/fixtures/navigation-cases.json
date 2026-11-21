@@ -1,0 +1,16 @@
+{
+  "window.py": {
+    "18": ["calls", "self.ik2fk", "window.Window.convert"],
+    "21": ["calls", "move", null],
+    "24": ["reads", "self.isSetKey", "window.Window.isSetKey"],
+    "27": ["writes", "self.isSetKey", "window.Window.isSetKey"],
+    "33": ["callback", "self.infoI.selSwCtl_trd", "models.Info.selSwCtl_trd", "qt"],
+    "36": ["callback", "self.menuHelp_triggered", "window.Window.menuHelp_triggered", "qt"],
+    "37": ["callback", "self.menuHelp_triggered", "window.Window.menuHelp_triggered", "qt"],
+    "41": ["property", "switchValue", "window.Window.switchValue"],
+    "45": ["reads", "self.switchValue", "window.Window.switchValue"],
+    "50": ["callback", "self.menuHelp_triggered", "window.Window.menuHelp_triggered", "qt"],
+    "65": ["calls", "self.handler", null],
+    "78": ["callback", "self.receive", "window.Listener.receive", "event"]
+  }
+}

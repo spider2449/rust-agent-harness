@@ -4,6 +4,14 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
+## Workspace Clippy rejects an existing Web workspace fallback
+
+On Windows on 2026-11-21, strict workspace Clippy failed on
+`clippy::unnecessary_lazy_evaluations` in
+`plugins/frontend-web/src/workspace.rs:127`. The fallback uses
+`Option::or_else` to inspect the saved folder list. The same expression is
+present at the starting revision `9910eef`.
+
 ## Web API group startup test intermittently times out
 
 On Windows on 2026-11-20, `tools_http_instances_are_api_groups_and_only_one_is_connected`
@@ -66,8 +74,15 @@ after the frontend. The cause of the timing difference is unconfirmed.
 
 ## Graphify: incomplete Python and Qt relationships
 
-- **Reported:** 2026-11-17 in user practical evaluation; these observations
-  were supplied by the user and were not independently reproduced in RAH.
+- **Reproduced on 2026-11-21:** the managed extractor missed all five
+  connection targets in the checked-in synthetic baseline and all 330
+  scored napari call sites. The synthetic aliased call and property
+  declaration/read were found. CBM 0.12.1 returned four correct synthetic
+  callback pairs without line numbers and misresolved the aliased call via
+  `unique_name`. See the [reproducible baseline](../examples/graphify/README.md#python-and-qt-navigation-baseline).
+
+- **Reported:** 2026-11-17 in user practical evaluation. The original project
+  still awaits a run of the baseline.
 - **Missing member access:** the evaluated graph has no reads/writes/attribute
   edges. `mainPage.py:139` reads `switchValue` but has no corresponding edge;
   accesses such as `self.isSetKey` and `partI.swCtl` are also absent.

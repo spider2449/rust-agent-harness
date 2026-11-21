@@ -64,6 +64,42 @@ reliable code navigation capability has been withdrawn. Use source search and
 source inspection as the primary workflow; graph relationships are incomplete.
 See [known limitations](../../docs/KNOWN_ISSUES.md#graphify-incomplete-python-and-qt-relationships).
 
+## Python and Qt navigation baseline
+
+Run the source and scoring tests with `python examples/graphify/navigation-baseline.test.py`.
+They only need Python 3.11+ and its standard library. To produce the source manifest, run
+`python examples/graphify/navigation-baseline.py`. The checked-in fixture contains
+five connection sites and seven other cases. Position columns are zero-based
+UTF-8 offsets from Python's AST.
+
+For the real tools, set `$cbm` to the absolute path of the verified Windows CBM
+0.12.1 executable and `$napari` to a clean checkout at commit
+`3ce2a1cb12d40fdaffc3dcf9fb6575320ad834ba`. Run from the repository root.
+
+```powershell
+uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm
+uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm --napari $napari
+```
+
+The report goes to stdout as JSON. The runner uses the managed extractor and
+CBM's fast index in a fresh temporary cache. Extraction, artifact reading,
+CBM indexing and CLI query each have separate wall-clock timings. Graphify also
+times one `query_graph` call through its stdio MCP server after initialization.
+The napari source manifest selects tracked Python files under `src/napari/_qt/`.
+Each syntactic `.connect()` call is a candidate. The target denominator uses
+positional `self.method` callbacks with a unique undecorated method declared
+in the enclosing top-level class. Inherited, nested and other callback forms
+are listed with reasons when outside that rule. The fixture separately asserts
+selected inherited and nested targets.
+
+For CBM callback scoring, `CALL_REFERENCE` and `USAGE` are candidate evidence
+from the caller. The runner reports both relation counts and per-site resolution.
+A positionless edge can match the expected symbol at multiple sites. The
+report lists those sites together and counts no position hits for that edge.
+Graphify property flags and `property_read` context are measured separately
+from generic references. A target plus an explicit matching source line is
+required for a position hit.
+
 ## Reading and using workspace artifacts
 
 The managed output is `.rah/graphify-out/graph.json` in the selected workspace.
