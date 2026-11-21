@@ -4,14 +4,6 @@ Open problems that are not fixed yet, with what is known about them, so work
 can continue on another machine. Remove an entry when it is fixed, and say
 in the commit which entry it closes.
 
-## Workspace Clippy rejects an existing Web workspace fallback
-
-On Windows on 2026-11-21, strict workspace Clippy failed on
-`clippy::unnecessary_lazy_evaluations` in
-`plugins/frontend-web/src/workspace.rs:127`. The fallback uses
-`Option::or_else` to inspect the saved folder list. The same expression is
-present at the starting revision `9910eef`.
-
 ## Web DCC feature test needs Python on Windows
 
 On 2026-11-21, `dcc_switch_mounts_and_remembers_the_embedded_plugin`
@@ -25,6 +17,13 @@ On Windows on 2026-11-20, `tools_http_instances_are_api_groups_and_only_one_is_c
 timed out waiting for groups to disconnect during the full `rah-cli --test web`
 suite. An immediate isolated run passed. The test mounts its HTTP plugins
 after the frontend. The cause of the timing difference is unconfirmed.
+
+## Windows scheduler integration tests can miss expected state transitions
+
+On 2026-11-21, `jobs_run_in_the_background_and_can_be_cancelled` timed out
+waiting for a job state in both the workspace suite and an isolated run.
+`a_delegate_timeout_withdraws_the_childs_pending_approval` timed out during
+the workspace suite and passed in isolation. The causes are unconfirmed.
 
 ## Bundled Rust diagnostics: detached files without a toolchain
 

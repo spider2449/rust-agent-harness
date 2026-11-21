@@ -91,6 +91,6 @@ P3 的 [Windows 設定範例](../../examples/mcp/CBM.md) 使用既有的 MCP、�
 
 每個數字為同機單次 wall-clock 觀測，量測期間也執行倉庫驗證。單次查詢分別以 `menuHelp_triggered` 和 `QtViewer` 為搜尋詞。Graphify MCP 在初始化完成後計時。CBM CLI 和 ripgrep 計入程序啟動。三者的回傳內容不同，表中耗時反映各自的操作流程。
 
-**發行決策**：維持 Graphify 的可選試驗定位，CBM 以 Windows x64 設定範例供手動啟用。此次暫緩 CBM 安裝命令、離線套件、自動索引及預設啟用。原始使用者專案與其他平台仍待驗證。41 項 Node 測試、9 項 Python 測試、mock 模型工作區切換、Rust 格式與全工作區檢查及測試通過。嚴格 Clippy 仍有已記錄的 Web workspace fallback 錯誤。 [已知問題](../KNOWN_ISSUES.md#workspace-clippy-rejects-an-existing-web-workspace-fallback)
+**發行決策**：維持 Graphify 的可選試驗定位，CBM 以 Windows x64 設定範例供手動啟用。此次暫緩 CBM 安裝命令、離線套件、自動索引及預設啟用。原始使用者專案與其他平台仍待驗證。41 項 Node 測試、9 項 Python 測試、mock 模型工作區切換、Rust 格式與全工作區檢查及測試通過。後續修正 Web 工作區 fallback 的 lint 後，Windows 全工作區嚴格 Clippy 通過。
 
 本計畫使用既有插件與檢視契約。若實作需要改動 kernel、服務契約或協議，先依倉庫規則審查 ADR 0036 和 pivot plan，再另行決定變更範圍。

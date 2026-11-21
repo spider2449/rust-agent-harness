@@ -124,13 +124,10 @@ pub(crate) async fn open_last(shared: &Shared, use_saved: bool) {
         return;
     };
     let saved = stored(shared).await;
-    let previous = saved
-        .root
-        .as_deref()
-        .or_else(|| match saved.folders.as_slice() {
-            [only] => Some(only.as_str()),
-            _ => None,
-        });
+    let previous = saved.root.as_deref().or(match saved.folders.as_slice() {
+        [only] => Some(only.as_str()),
+        _ => None,
+    });
     if use_saved
         && let Some(path) = previous
         && saved.contains(path)
